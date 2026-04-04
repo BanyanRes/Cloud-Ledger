@@ -1,0 +1,5 @@
+# Copy this to .env and change values
+PORT=3000
+JWT_SECRET=change-this-to-a-random-64-char-string
+NODE_ENV=production
+DB_PATH=./data/cloudledger.db
