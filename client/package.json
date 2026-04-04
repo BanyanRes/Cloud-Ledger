@@ -1,5 +1,5 @@
 {
-  "name": "cloudledger-client",
+  "name": "cloudledger-client-v2",
   "private": true,
   "type": "module",
   "scripts": {
