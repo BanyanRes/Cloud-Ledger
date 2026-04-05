@@ -1,26 +1,19 @@
 {
-  "name": "cloudledger",
-  "version": "1.0.0",
-  "description": "Multi-entity cloud accounting software with bank reconciliation",
+  "name": "cloudledger-client",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
   "scripts": {
-    "dev:server": "node server/index.js",
-    "dev:client": "cd client && npx vite --port 5173",
-    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
-    "build": "cd client && npx vite build",
-    "start": "NODE_ENV=production node server/index.js",
-    "setup": "npm install && cd client && npm install && cd .. && npm run build"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "better-sqlite3": "^9.4.3",
-    "bcryptjs": "^2.4.3",
-    "jsonwebtoken": "^9.0.2",
-    "cors": "^2.8.5",
-    "helmet": "^7.1.0",
-    "morgan": "^1.10.0",
-    "dotenv": "^16.3.1",
-    "concurrently": "^8.2.2",
-    "multer": "^1.4.5-lts.1",
-    "xlsx": "^0.18.5"
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.0.0",
+    "vite": "^5.0.0"
   }
 }
