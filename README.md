@@ -1,6 +1,6 @@
 # CloudLedger - Multi-Entity Cloud Accounting
 
-A full-stack accounting application supporting 40+ entities with double-entry bookkeeping, financial reporting, and bank reconciliation.   Built for small teams who need real multi-user access.
+A full-stack accounting application supporting 40+ entities with double-entry bookkeeping, financial reporting, and bank reconciliation.  Built for small teams who need real multi-user access.
 
 ## Features
 
