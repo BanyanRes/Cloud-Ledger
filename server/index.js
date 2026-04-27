@@ -141,6 +141,37 @@ const jeCols = db.prepare("PRAGMA table_info(journal_entries)").all().map(c => c
 if (!jeCols.includes('updated_by')) db.exec("ALTER TABLE journal_entries ADD COLUMN updated_by TEXT");
 if (!jeCols.includes('updated_at')) db.exec("ALTER TABLE journal_entries ADD COLUMN updated_at TEXT");
 
+// One-time recovery: earlier versions of the replace endpoint accidentally saved files
+// to WORKPAPERS_DIR root (or to an "undefined" subdir) instead of WORKPAPERS_DIR/<entity_id>/.
+// Walk those locations, match files to DB rows by stored_filename, and move them home.
+try {
+  const recoverFromDir = dir => {
+    if (!fs.existsSync(dir)) return 0;
+    let moved = 0;
+    for (const fname of fs.readdirSync(dir)) {
+      const src = path.join(dir, fname);
+      try { if (!fs.statSync(src).isFile()) continue; } catch { continue; }
+      const row = db.prepare('SELECT entity_id FROM entity_files WHERE stored_filename = ?').get(fname);
+      if (!row) continue;
+      const targetDir = path.join(WORKPAPERS_DIR, String(row.entity_id));
+      try { fs.mkdirSync(targetDir, { recursive: true }); } catch {}
+      const dst = path.join(targetDir, fname);
+      if (fs.existsSync(dst)) continue;
+      try { fs.renameSync(src, dst); moved++; }
+      catch (e) { console.error('Recovery move failed for', fname, e.message); }
+    }
+    return moved;
+  };
+  const a = recoverFromDir(WORKPAPERS_DIR);
+  const b = recoverFromDir(path.join(WORKPAPERS_DIR, 'undefined'));
+  if (a + b > 0) console.log('[workpapers recovery] Moved ' + (a + b) + ' orphaned file(s) to correct entity directories');
+  // Best-effort: remove the empty "undefined" dir if it's now empty
+  try {
+    const undefDir = path.join(WORKPAPERS_DIR, 'undefined');
+    if (fs.existsSync(undefDir) && fs.readdirSync(undefDir).length === 0) fs.rmdirSync(undefDir);
+  } catch {}
+} catch (e) { console.error('Workpapers recovery routine failed:', e); }
+
 const DEFAULT_COA = [
   {code:"10000",name:"Cash",type:"Asset",subtype:"Current Asset",bank:1},
   {code:"10100",name:"Operating Checking",type:"Asset",subtype:"Current Asset",bank:1},
@@ -867,7 +898,10 @@ app.get('/api/entities/:eid/balances', auth, (req, res) => {
 // Disk-based uploader that routes files into per-entity directories
 const workpaperStorage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const eid = String(req.params.eid).replace(/[^0-9]/g, '');
+    // Support both /entities/:eid/files (upload) and /entity-files/:id (replace, where req.entityId is stashed)
+    const rawEid = req.params.eid != null ? req.params.eid : req.entityId;
+    const eid = String(rawEid != null ? rawEid : '').replace(/[^0-9]/g, '');
+    if (!eid) { cb(new Error('Missing entity_id for upload destination')); return; }
     const entityDir = path.join(WORKPAPERS_DIR, eid);
     try { fs.mkdirSync(entityDir, { recursive: true }); cb(null, entityDir); }
     catch (e) { console.error('workpapers mkdir failed:', entityDir, e); cb(e); }
@@ -952,6 +986,8 @@ app.delete('/api/entity-files/:id', auth, requireRole('Admin','Accountant'), (re
 app.put('/api/entity-files/:id', auth, requireRole('Admin','Accountant'), (req, res, next) => {
   const f = db.prepare('SELECT * FROM entity_files WHERE id=?').get(req.params.id);
   if (!f) return res.status(404).json({ error: 'Not found' });
+  // Stash entity_id so workpaperStorage.destination can route the file to the right entity dir
+  req.entityId = f.entity_id;
   // Re-use workpaperStorage so the new file lands in the correct entity dir
   workpaperUpload.single('file')(req, res, err => {
     if (err) return res.status(400).json({ error: err.message });
