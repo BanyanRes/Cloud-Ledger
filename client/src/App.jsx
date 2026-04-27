@@ -825,16 +825,22 @@ function WorkpapersModal({entity, user, onClose}){
               </tr>)}
               {currentFiles.map(f => <tr key={'f-' + f.id}>
                 <td style={S.td}>
-                  <a href={api.downloadEntityFile(f.id)} target="_blank" rel="noreferrer" style={{color: T.textBright, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 8}} onMouseEnter={e => e.currentTarget.style.color = T.accent} onMouseLeave={e => e.currentTarget.style.color = T.textBright}>
-                    <span style={{fontSize: 14}}>📄</span> {f.original_name}
-                  </a>
+                  {canEdit && isEditable(f)
+                    ? <button onClick={() => setEditingFile(f)} title="Click to edit in browser"
+                        style={{background: 'none', border: 0, padding: 0, color: T.textBright, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 8}}
+                        onMouseEnter={e => e.currentTarget.style.color = T.accent}
+                        onMouseLeave={e => e.currentTarget.style.color = T.textBright}>
+                        <span style={{fontSize: 14}}>📄</span> {f.original_name}
+                      </button>
+                    : <a href={api.downloadEntityFile(f.id)} target="_blank" rel="noreferrer" style={{color: T.textBright, textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 8}} onMouseEnter={e => e.currentTarget.style.color = T.accent} onMouseLeave={e => e.currentTarget.style.color = T.textBright}>
+                        <span style={{fontSize: 14}}>📄</span> {f.original_name}
+                      </a>}
                 </td>
                 <td style={{...S.tdR, color: T.textMuted, fontSize: 12}}>{fmtSize(f.size)}</td>
                 <td style={{...S.td, color: T.textMuted, fontSize: 12}}>{f.uploaded_by}</td>
                 <td style={{...S.td, color: T.textMuted, fontSize: 12}}>{fmtPstDate(f.created_at)}</td>
                 <td style={S.td}><div style={{display: 'flex', gap: 6}}>
                   <a href={api.downloadEntityFile(f.id)} target="_blank" rel="noreferrer" style={{...S.btnGhost, color: T.accent, fontSize: 11, textDecoration: 'none'}}>Download</a>
-                  {canEdit && isEditable(f) && <button style={{...S.btnGhost, color: T.green, fontSize: 11, fontWeight: 600}} onClick={() => setEditingFile(f)}>✎ Edit</button>}
                   {canEdit && <button style={{...S.btnGhost, color: T.textMuted, fontSize: 11}} disabled={uploading} onClick={() => { setReplacingFileId(f.id); replaceInputRef.current && replaceInputRef.current.click(); }}>Replace</button>}
                   {canEdit && <button style={{...S.btnGhost, color: T.red, fontSize: 11}} onClick={() => deleteFile(f)}>Delete</button>}
                 </div></td>
