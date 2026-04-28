@@ -142,13 +142,15 @@ const NI = { dashboard:'\u25a3', journal:'\u270e', coa:'\u2630', ledger:'\u2261'
 
 // ─── Autocomplete ───
 function AccountAutocomplete({accounts,value,onChange,placeholder,exclude}){
-  const[q,setQ]=useState('');const[open,setOpen]=useState(false);const ref=useRef(null);
+  const[q,setQ]=useState('');const[open,setOpen]=useState(false);const[placement,setPlacement]=useState('down');const ref=useRef(null);const inputRef=useRef(null);
   const sel=accounts.find(a=>a.code===value);
   const filtered=useMemo(()=>{const s=q.toLowerCase();return accounts.filter(a=>(!exclude||a.code!==exclude)&&(a.code.toLowerCase().includes(s)||a.name.toLowerCase().includes(s))).sort((a,b)=>a.code.localeCompare(b.code));},[accounts,q,exclude]);
   useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h);},[]);
-  return(<div ref={ref} style={{position:'relative'}}><input style={S.inputSm} placeholder={placeholder||'Search account...'} value={open?q:(sel?acctLabel(sel.code,sel.name):'')}
-    onFocus={()=>{setOpen(true);setQ('');}} onChange={e=>{setQ(e.target.value);setOpen(true);}} onKeyDown={e=>{if(e.key==='Escape')setOpen(false);if(e.key==='Enter'&&filtered.length>0){onChange(filtered[0].code);setOpen(false);}}}/>
-    {open&&filtered.length>0&&<div style={{position:'absolute',top:'100%',left:0,right:0,background:'#fff',border:'1px solid '+T.border,borderRadius:T.radiusSm,maxHeight:340,overflowY:'auto',zIndex:50,boxShadow:T.shadowLg,marginTop:4}}>
+  // Decide whether to open the dropdown upward or downward based on available space
+  const computePlacement=()=>{if(!inputRef.current)return;const r=inputRef.current.getBoundingClientRect();const below=window.innerHeight-r.bottom;const above=r.top;const desired=340;setPlacement(below<desired&&above>below?'up':'down');};
+  return(<div ref={ref} style={{position:'relative'}}><input ref={inputRef} style={S.inputSm} placeholder={placeholder||'Search account...'} value={open?q:(sel?acctLabel(sel.code,sel.name):'')}
+    onFocus={()=>{computePlacement();setOpen(true);setQ('');}} onChange={e=>{setQ(e.target.value);setOpen(true);}} onKeyDown={e=>{if(e.key==='Escape')setOpen(false);if(e.key==='Enter'&&filtered.length>0){onChange(filtered[0].code);setOpen(false);}}}/>
+    {open&&filtered.length>0&&<div style={{position:'absolute',...(placement==='up'?{bottom:'100%',marginBottom:4}:{top:'100%',marginTop:4}),left:0,right:0,background:'#fff',border:'1px solid '+T.border,borderRadius:T.radiusSm,maxHeight:340,overflowY:'auto',zIndex:50,boxShadow:T.shadowLg}}>
       {filtered.map(a=><div key={a.code} style={{padding:'8px 12px',cursor:'pointer',fontSize:12,display:'flex',justifyContent:'space-between',background:a.code===value?T.accentDim:'transparent'}}
         onClick={()=>{onChange(a.code);setOpen(false);}} onMouseEnter={e=>e.currentTarget.style.background=T.bgHover} onMouseLeave={e=>e.currentTarget.style.background=a.code===value?T.accentDim:'transparent'}>
         <span><b style={{color:T.textBright}}>{a.code}</b> <span style={{color:T.textMuted}}>{a.name}</span></span><span style={S.tag(a.type)}>{a.type}</span></div>)}</div>}</div>);}
