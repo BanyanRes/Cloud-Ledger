@@ -877,8 +877,15 @@ app.get('/api/entities/:eid/balances', auth, (req, res) => {
     const priorPL = db.prepare(`SELECT a.type, SUM(jl.debit) as td, SUM(jl.credit) as tc FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=? AND je.date<? AND a.type IN ('Revenue','Expense') GROUP BY a.type`).all(req.params.eid, close_pl_before);
     let priorNI = 0; priorPL.forEach(r => { if (r.type==='Revenue') priorNI+=(r.tc-r.td); if (r.type==='Expense') priorNI-=(r.td-r.tc); });
     // Find the retained earnings account for this entity: code 31000, or any Equity account named "Retained Earnings"
-    const reAcct = db.prepare("SELECT * FROM accounts WHERE entity_id=? AND code='31000'").get(req.params.eid)
+    let reAcct = db.prepare("SELECT * FROM accounts WHERE entity_id=? AND code='31000'").get(req.params.eid)
       || db.prepare("SELECT * FROM accounts WHERE entity_id=? AND type='Equity' AND LOWER(name) LIKE '%retained earning%' ORDER BY code LIMIT 1").get(req.params.eid);
+    // Auto-create 39000 Retained Earnings if no RE account exists and there is prior-period P&L to close
+    if (!reAcct && Math.abs(priorNI) > 0.005) {
+      try {
+        db.prepare("INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct) VALUES (?, '39000', 'Retained Earnings', 'Equity', '', 0)").run(req.params.eid);
+        reAcct = db.prepare("SELECT * FROM accounts WHERE entity_id=? AND code='39000'").get(req.params.eid);
+      } catch (e) { console.error('Auto-create RE 39000 failed:', e.message); }
+    }
     const reCode = reAcct ? reAcct.code : null;
     const bsRows = db.prepare(`SELECT jl.account_code, a.type, a.name, a.subtype, a.bank_acct, SUM(jl.debit) as total_debit, SUM(jl.credit) as total_credit FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=? AND je.date<=? AND (a.type NOT IN ('Revenue','Expense') OR je.date>=?) GROUP BY jl.account_code`).all(req.params.eid, as_of, close_pl_before);
     const results = bsRows.map(r => { const isDr=r.type==='Asset'||r.type==='Expense'; let bal=isDr?(r.total_debit-r.total_credit):(r.total_credit-r.total_debit);
