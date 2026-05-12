@@ -1217,10 +1217,13 @@ function BankTransactions({entityId,bankSelAcct:selAcct,setBankSelAcct:setSelAcc
 function TrialBalance({entityId,entityName,asOf,setAsOf}){
   const[balances,setBalances]=useState([]);
   const[drillAcct,setDrillAcct]=useState(null);
-  const fyS=asOf.slice(0,4)+'-01-01';
+  // Guard: while the user is editing the date input, asOf can briefly be '' or a partial string like '2026-'.
+  // Avoid crashing the page on Invalid Date — fall back to today() until a complete YYYY-MM-DD is entered.
+  const validAsOf=/^\d{4}-\d{2}-\d{2}$/.test(asOf)&&!isNaN(new Date(asOf+'T00:00:00').getTime())?asOf:today();
+  const fyS=validAsOf.slice(0,4)+'-01-01';
   // 12-month window ending at asOf. If asOf is 2026-04-10, window is 2025-04-11 → 2026-04-10.
-  const drillFrom=useMemo(()=>{const d=new Date(asOf+'T00:00:00');d.setFullYear(d.getFullYear()-1);d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);},[asOf]);
-  useEffect(()=>{api.getBalances(entityId,{as_of:asOf,close_pl_before:fyS}).then(setBalances);},[entityId,asOf,fyS]);
+  const drillFrom=useMemo(()=>{const d=new Date(validAsOf+'T00:00:00');d.setFullYear(d.getFullYear()-1);d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);},[validAsOf]);
+  useEffect(()=>{api.getBalances(entityId,{as_of:validAsOf,close_pl_before:fyS}).then(setBalances);},[entityId,validAsOf,fyS]);
   let tDr=0,tCr=0;const rows=balances.filter(b=>Math.abs(b.balance)>0.005).map(b=>{const isDr=b.type==='Asset'||b.type==='Expense';const dr=(isDr&&b.balance>0)||(!isDr&&b.balance<0)?Math.abs(b.balance):0;const cr=(isDr&&b.balance<0)||(!isDr&&b.balance>0)?Math.abs(b.balance):0;tDr+=dr;tCr+=cr;return{...b,dr,cr};});
   const doExport=()=>{const d=[[entityName||'Trial Balance'],['Trial Balance'],['As of '+asOf],[],['Code','Account','Type','Debit','Credit']];rows.forEach(r=>d.push([r.code,r.name,r.type,r.dr||'',r.cr||'']));d.push([]);d.push(['','','Total',tDr,tCr]);exportToExcel(d,'TB_'+asOf+'.xlsx');};
   const amtStyle={...S.tdR,cursor:'pointer'};
@@ -1318,9 +1321,12 @@ function AccountDrillDownModal({entityId,entityName,acct,from,to,onClose}){
   </div></div>);
 }
 
-function BalanceSheet({entityId,entityName,asOf,setAsOf}){const[balances,setBalances]=useState([]);const[drillAcct,setDrillAcct]=useState(null);const fyS=asOf.slice(0,4)+'-01-01';
-  const drillFrom=useMemo(()=>{const d=new Date(asOf+'T00:00:00');d.setFullYear(d.getFullYear()-1);d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);},[asOf]);
-  useEffect(()=>{api.getBalances(entityId,{as_of:asOf,close_pl_before:fyS}).then(setBalances);},[entityId,asOf,fyS]);
+function BalanceSheet({entityId,entityName,asOf,setAsOf}){const[balances,setBalances]=useState([]);const[drillAcct,setDrillAcct]=useState(null);
+  // Guard: while the user is editing the date input, asOf can briefly be '' or a partial string like '2026-'.
+  const validAsOf=/^\d{4}-\d{2}-\d{2}$/.test(asOf)&&!isNaN(new Date(asOf+'T00:00:00').getTime())?asOf:today();
+  const fyS=validAsOf.slice(0,4)+'-01-01';
+  const drillFrom=useMemo(()=>{const d=new Date(validAsOf+'T00:00:00');d.setFullYear(d.getFullYear()-1);d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);},[validAsOf]);
+  useEffect(()=>{api.getBalances(entityId,{as_of:validAsOf,close_pl_before:fyS}).then(setBalances);},[entityId,validAsOf,fyS]);
   const get=t=>balances.filter(b=>b.type===t&&Math.abs(b.balance)>0.005);const sum=t=>get(t).reduce((s,b)=>s+b.balance,0);
   const ni=sum('Revenue')-sum('Expense');const tA=sum('Asset');const tLE=sum('Liability')+sum('Equity')+ni;
   const doExport=()=>{const d=[[entityName||'Balance Sheet'],['Balance Sheet'],['As of '+asOf],[]];[['Assets','Asset'],['Liabilities','Liability'],['Equity','Equity']].forEach(([t,ty])=>{d.push([t,'']);get(ty).forEach(b=>d.push(['  '+b.name,b.balance]));if(ty==='Equity'&&Math.abs(ni)>0.005)d.push(['  Net Income (current period)',ni]);d.push(['Total '+t,ty==='Equity'?sum(ty)+ni:sum(ty)]);d.push([]);});d.push(['Total L+E',tLE]);exportToExcel(d,'BS_'+asOf+'.xlsx');};
