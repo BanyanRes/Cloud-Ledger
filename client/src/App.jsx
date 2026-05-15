@@ -308,51 +308,39 @@ function EntityPicker({entities,activeId,onSelect,onManage}){const[open,setOpen]
 export default function App(){
   const[user,setUser]=useState(null);const[entities,setEntities]=useState([]);const[activeEntity,setActiveEntity]=useState(null);
   const[page,setPage]=useState('dashboard');const[loading,setLoading]=useState(true);
-  // Back-button trap: keep the user inside CloudLedger. (Diagnostic build with console logging.)
+  // Back-button trap: keep the user inside CloudLedger.
+  // Why TWO sentinels: pushState() after popstate doesn't fully restore the "depth" of history
+  // relative to the previous site. By pre-loading 2 sentinels, we always have buffer.
   useEffect(()=>{
-    console.log('[CL Back-trap] useEffect ran. user=', user ? user.email || 'logged-in' : 'null');
-    if (!user) { console.log('[CL Back-trap] Not arming — no user'); return; }
+    if (!user) return;
     let leavingApp = false;
+    // Push TWO sentinels so Back has buffer to pop through repeatedly
     try {
-      window.history.pushState({cl_app: true}, '');
-      console.log('[CL Back-trap] Sentinel pushed. state=', window.history.state, 'length=', window.history.length);
-    } catch (e) { console.error('[CL Back-trap] pushState failed:', e); }
+      window.history.pushState({cl_app: 1}, '');
+      window.history.pushState({cl_app: 2}, '');
+    } catch {}
 
     const onPop = (e) => {
-      console.log('[CL Back-trap] POPSTATE fired! event.state=', e.state, 'history.state=', window.history.state);
-      if (leavingApp) { console.log('[CL Back-trap] leavingApp=true, allowing exit'); return; }
+      if (leavingApp) return;
+      // ALWAYS push two new sentinels after any popstate to maintain a 2-deep buffer
       try {
-        window.history.pushState({cl_app: true}, '');
-        console.log('[CL Back-trap] Re-pushed sentinel after popstate');
-      } catch (err) { console.error('[CL Back-trap] re-push failed:', err); }
+        window.history.pushState({cl_app: 1}, '');
+        window.history.pushState({cl_app: 2}, '');
+      } catch {}
       setPage(curPage => {
-        console.log('[CL Back-trap] curPage=', curPage);
-        if (curPage !== 'dashboard') {
-          console.log('[CL Back-trap] Switching to dashboard');
-          return 'dashboard';
-        }
+        if (curPage !== 'dashboard') return 'dashboard';
         setTimeout(() => {
-          console.log('[CL Back-trap] On dashboard — showing confirm');
           if (window.confirm('Leave CloudLedger?')) {
-            console.log('[CL Back-trap] User confirmed exit');
             leavingApp = true;
-            window.history.go(-2);
-          } else {
-            console.log('[CL Back-trap] User cancelled exit');
+            // Need to go back past 3 entries: current + 2 sentinels just pushed
+            window.history.go(-3);
           }
         }, 0);
         return curPage;
       });
     };
     window.addEventListener('popstate', onPop);
-    console.log('[CL Back-trap] popstate listener attached');
-    // Expose for debugging
-    window.__clBackTrap = { active: true, popHandler: onPop };
-    return () => {
-      console.log('[CL Back-trap] CLEANUP — removing popstate listener');
-      window.removeEventListener('popstate', onPop);
-      window.__clBackTrap = { active: false };
-    };
+    return () => window.removeEventListener('popstate', onPop);
   }, [user]);
   const[showJE,setShowJE]=useState(false);const[showChangePw,setShowChangePw]=useState(false);const[rk,setRk]=useState(0);
   const[sidebarCol,setSidebarCol]=useState(()=>{try{return localStorage.getItem(SIDEBAR_KEY)==='true';}catch{return false;}});
