@@ -309,29 +309,23 @@ export default function App(){
   const[user,setUser]=useState(null);const[entities,setEntities]=useState([]);const[activeEntity,setActiveEntity]=useState(null);
   const[page,setPage]=useState('dashboard');const[loading,setLoading]=useState(true);
   // Back-button trap: keep the user inside CloudLedger.
-  // Mechanism:
-  //   1. On mount, push one sentinel entry so there's something between the previous site and our app.
-  //   2. On every popstate (Back press), immediately push another sentinel to re-anchor — this prevents
-  //      the browser from continuing to navigate back past our app on subsequent presses.
-  //   3. If the user wasn't on Dashboard, switch to Dashboard.
-  //   4. If the user WAS on Dashboard, prompt with confirm(). If they say yes, history.go(-2) to exit.
+  // Re-arms whenever `user` changes (login/logout) so the trap survives auth transitions.
   useEffect(()=>{
+    if (!user) return; // No trap on the login screen — Back should exit normally
     let leavingApp = false;
-    // One-time mount: push initial sentinel
+    // Push initial sentinel (so the trap has something to grab onto on first Back press)
     try { window.history.pushState({cl_app: true}, ''); } catch {}
 
     const onPop = () => {
-      if (leavingApp) return; // Allow the actual exit
-      // Always re-push immediately to maintain the trap
+      if (leavingApp) return;
+      // Always re-push immediately to maintain the trap before doing anything else
       try { window.history.pushState({cl_app: true}, ''); } catch {}
-      // Use a microtask-deferred read of current page via setPage callback so we get the freshest value
       setPage(curPage => {
         if (curPage !== 'dashboard') return 'dashboard';
         // On dashboard: ask before leaving. Defer the confirm so the pushState above settles first.
         setTimeout(() => {
           if (window.confirm('Leave CloudLedger?')) {
             leavingApp = true;
-            // Go back past our two sentinels (initial + the one just pushed)
             window.history.go(-2);
           }
         }, 0);
@@ -340,7 +334,7 @@ export default function App(){
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
-  }, []); // Mount only — single listener for entire app lifecycle
+  }, [user]); // Re-arm on login/logout
   const[showJE,setShowJE]=useState(false);const[showChangePw,setShowChangePw]=useState(false);const[rk,setRk]=useState(0);
   const[sidebarCol,setSidebarCol]=useState(()=>{try{return localStorage.getItem(SIDEBAR_KEY)==='true';}catch{return false;}});
   // JE form state lives in App — survives modal close, cleared only on post/discard
