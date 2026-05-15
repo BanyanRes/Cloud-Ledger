@@ -206,7 +206,16 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
 app.use(morgan('short'));
 app.use(express.json({ limit: '10mb' }));
-if (process.env.NODE_ENV === 'production') app.use(express.static(path.join(__dirname, '..', 'client', 'dist')));
+if (process.env.NODE_ENV === 'production') app.use(express.static(path.join(__dirname, '..', 'client', 'dist'), {
+  setHeaders: (res, filePath) => {
+    // Never cache index.html — forces browsers to always re-fetch it (and pick up new asset URLs)
+    if (filePath.endsWith('index.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
 
 function auth(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
@@ -1104,5 +1113,10 @@ app.get('/api/summary', auth, (req, res) => {
   }));
 });
 
-if (process.env.NODE_ENV === 'production') app.get('*', (req, res) => res.sendFile(path.join(__dirname, '..', 'client', 'dist', 'index.html')));
+if (process.env.NODE_ENV === 'production') app.get('*', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.sendFile(path.join(__dirname, '..', 'client', 'dist', 'index.html'));
+});
 app.listen(PORT, '0.0.0.0', () => console.log(`CloudLedger on port ${PORT}`));
