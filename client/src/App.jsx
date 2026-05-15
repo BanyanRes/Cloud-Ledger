@@ -308,33 +308,52 @@ function EntityPicker({entities,activeId,onSelect,onManage}){const[open,setOpen]
 export default function App(){
   const[user,setUser]=useState(null);const[entities,setEntities]=useState([]);const[activeEntity,setActiveEntity]=useState(null);
   const[page,setPage]=useState('dashboard');const[loading,setLoading]=useState(true);
-  // Back-button trap: keep the user inside CloudLedger.
-  // Re-arms whenever `user` changes (login/logout) so the trap survives auth transitions.
+  // Back-button trap: keep the user inside CloudLedger. (Diagnostic build with console logging.)
   useEffect(()=>{
-    if (!user) return; // No trap on the login screen — Back should exit normally
+    console.log('[CL Back-trap] useEffect ran. user=', user ? user.email || 'logged-in' : 'null');
+    if (!user) { console.log('[CL Back-trap] Not arming — no user'); return; }
     let leavingApp = false;
-    // Push initial sentinel (so the trap has something to grab onto on first Back press)
-    try { window.history.pushState({cl_app: true}, ''); } catch {}
+    try {
+      window.history.pushState({cl_app: true}, '');
+      console.log('[CL Back-trap] Sentinel pushed. state=', window.history.state, 'length=', window.history.length);
+    } catch (e) { console.error('[CL Back-trap] pushState failed:', e); }
 
-    const onPop = () => {
-      if (leavingApp) return;
-      // Always re-push immediately to maintain the trap before doing anything else
-      try { window.history.pushState({cl_app: true}, ''); } catch {}
+    const onPop = (e) => {
+      console.log('[CL Back-trap] POPSTATE fired! event.state=', e.state, 'history.state=', window.history.state);
+      if (leavingApp) { console.log('[CL Back-trap] leavingApp=true, allowing exit'); return; }
+      try {
+        window.history.pushState({cl_app: true}, '');
+        console.log('[CL Back-trap] Re-pushed sentinel after popstate');
+      } catch (err) { console.error('[CL Back-trap] re-push failed:', err); }
       setPage(curPage => {
-        if (curPage !== 'dashboard') return 'dashboard';
-        // On dashboard: ask before leaving. Defer the confirm so the pushState above settles first.
+        console.log('[CL Back-trap] curPage=', curPage);
+        if (curPage !== 'dashboard') {
+          console.log('[CL Back-trap] Switching to dashboard');
+          return 'dashboard';
+        }
         setTimeout(() => {
+          console.log('[CL Back-trap] On dashboard — showing confirm');
           if (window.confirm('Leave CloudLedger?')) {
+            console.log('[CL Back-trap] User confirmed exit');
             leavingApp = true;
             window.history.go(-2);
+          } else {
+            console.log('[CL Back-trap] User cancelled exit');
           }
         }, 0);
         return curPage;
       });
     };
     window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
-  }, [user]); // Re-arm on login/logout
+    console.log('[CL Back-trap] popstate listener attached');
+    // Expose for debugging
+    window.__clBackTrap = { active: true, popHandler: onPop };
+    return () => {
+      console.log('[CL Back-trap] CLEANUP — removing popstate listener');
+      window.removeEventListener('popstate', onPop);
+      window.__clBackTrap = { active: false };
+    };
+  }, [user]);
   const[showJE,setShowJE]=useState(false);const[showChangePw,setShowChangePw]=useState(false);const[rk,setRk]=useState(0);
   const[sidebarCol,setSidebarCol]=useState(()=>{try{return localStorage.getItem(SIDEBAR_KEY)==='true';}catch{return false;}});
   // JE form state lives in App — survives modal close, cleared only on post/discard
