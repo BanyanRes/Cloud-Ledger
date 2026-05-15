@@ -308,6 +308,33 @@ function EntityPicker({entities,activeId,onSelect,onManage}){const[open,setOpen]
 export default function App(){
   const[user,setUser]=useState(null);const[entities,setEntities]=useState([]);const[activeEntity,setActiveEntity]=useState(null);
   const[page,setPage]=useState('dashboard');const[loading,setLoading]=useState(true);
+  // Trap browser Back button:
+  //  - Inside CloudLedger (not on dashboard): Back returns to Dashboard instead of leaving the app.
+  //  - On Dashboard: Back prompts a confirmation before actually leaving CloudLedger.
+  useEffect(()=>{
+    // Push a sentinel history entry tagged with the current page each time it changes
+    try { window.history.pushState({cl_page: page}, ''); } catch {}
+    const onPop = e => {
+      if (page !== 'dashboard') {
+        // Re-route Back to the Dashboard and re-arm the trap
+        setPage('dashboard');
+        try { window.history.pushState({cl_page: 'dashboard'}, ''); } catch {}
+      } else {
+        // On the dashboard: confirm before letting the user leave the app
+        const leave = window.confirm('Leave CloudLedger?');
+        if (leave) {
+          // Allow the next Back to navigate away by NOT re-pushing a sentinel
+          window.removeEventListener('popstate', onPop);
+          window.history.back();
+        } else {
+          // Re-arm the trap so the next Back press also prompts
+          try { window.history.pushState({cl_page: 'dashboard'}, ''); } catch {}
+        }
+      }
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [page]);
   const[showJE,setShowJE]=useState(false);const[showChangePw,setShowChangePw]=useState(false);const[rk,setRk]=useState(0);
   const[sidebarCol,setSidebarCol]=useState(()=>{try{return localStorage.getItem(SIDEBAR_KEY)==='true';}catch{return false;}});
   // JE form state lives in App — survives modal close, cleared only on post/discard
