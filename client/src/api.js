@@ -120,5 +120,11 @@ export const api = {
   renameEntityFolder: (eid, oldPath, newPath) => request('/entities/' + eid + '/folders/rename', { method: 'PUT', body: { old_path: oldPath, new_path: newPath } }),
   moveEntityFile: (id, folderPath) => request('/entity-files/' + id + '/move', { method: 'PUT', body: { folder_path: folderPath } }),
 
+  // Bill.com integration
+  getBillcomConfig: (entityId) => request('/billcom/config/' + entityId),
+  saveBillcomConfig: (entityId, body) => request('/billcom/config/' + entityId, { method: 'PUT', body }),
+  deleteBillcomConfig: (entityId) => request('/billcom/config/' + entityId, { method: 'DELETE' }),
+  testBillcomConnection: (entityId) => request('/billcom/config/' + entityId + '/test', { method: 'POST' }),
+
   setToken, getToken, clearToken,
 };

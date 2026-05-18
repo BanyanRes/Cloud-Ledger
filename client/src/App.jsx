@@ -387,6 +387,7 @@ export default function App(){
     {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
     {id:'d3',divider:1,label:'REPORTS'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
     {id:'d4',divider:1,label:'ADMIN'},{id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},{id:'users',label:'Users',icon:NI.users,section:'all'},
+    {id:'d5',divider:1,label:'INTEGRATIONS'},{id:'billcom',label:'Bill.com Setup',icon:'💳',section:'all'},
   ];
 
   return(<div style={S.app}>
@@ -415,6 +416,7 @@ export default function App(){
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo}/>}
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='users'&&<UserManagement currentUser={user}/>}
+        {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
       </>})()}</div></div>
     {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
@@ -669,6 +671,158 @@ function SpreadsheetEditorModal({ file, onClose, onSaved }) {
     </div>
   );
 }
+
+
+function BillcomSetup({entities,activeEntity,setActiveEntity}) {
+  const[selectedEntity,setSelectedEntity]=useState(activeEntity||(entities[0]?entities[0].id:null));
+  const[cfg,setCfg]=useState(null);
+  const[loading,setLoading]=useState(false);
+  const[saving,setSaving]=useState(false);
+  const[testing,setTesting]=useState(false);
+  const[msg,setMsg]=useState('');const[err,setErr]=useState('');
+  const[env,setEnv]=useState('sandbox');
+  const[username,setUsername]=useState('');
+  const[password,setPassword]=useState('');
+  const[orgId,setOrgId]=useState('');
+  const[devKey,setDevKey]=useState('');
+  const[defaultApAcct,setDefaultApAcct]=useState('');
+
+  const load=useCallback(async()=>{
+    if(!selectedEntity)return;
+    setLoading(true);setMsg('');setErr('');
+    try{
+      const r=await api.getBillcomConfig(selectedEntity);
+      setCfg(r);
+      if(r.configured){
+        setEnv(r.environment||'sandbox');
+        setUsername(r.username||'');
+        setOrgId(r.org_id||'');
+        setDefaultApAcct(r.default_ap_account||'');
+        setPassword('');setDevKey('');
+      }else{
+        setEnv('sandbox');setUsername('');setOrgId('');setDefaultApAcct('');
+        setPassword('');setDevKey('');
+      }
+    }catch(e){setErr(e.message);}
+    setLoading(false);
+  },[selectedEntity]);
+  useEffect(()=>{load();},[load]);
+
+  const save=async()=>{
+    if(!selectedEntity){setErr('Select an entity first');return;}
+    setSaving(true);setMsg('');setErr('');
+    try{
+      const body={environment:env,username,org_id:orgId,default_ap_account:defaultApAcct||null};
+      if(password)body.password=password;
+      if(devKey)body.dev_key=devKey;
+      await api.saveBillcomConfig(selectedEntity,body);
+      setMsg('Configuration saved.');
+      setPassword('');setDevKey('');
+      load();
+    }catch(e){setErr(e.message);}
+    setSaving(false);
+  };
+
+  const test=async()=>{
+    if(!selectedEntity){setErr('Select an entity first');return;}
+    setTesting(true);setMsg('');setErr('');
+    try{
+      const r=await api.testBillcomConnection(selectedEntity);
+      setMsg('Connection successful. '+(r.message||''));
+      load();
+    }catch(e){setErr('Connection failed: '+e.message);load();}
+    setTesting(false);
+  };
+
+  const remove=async()=>{
+    if(!selectedEntity)return;
+    if(!confirm('Delete Bill.com configuration for this entity?'))return;
+    setMsg('');setErr('');
+    try{await api.deleteBillcomConfig(selectedEntity);setMsg('Configuration deleted.');load();}
+    catch(e){setErr(e.message);}
+  };
+
+  const en=entities.find(e=>e.id===selectedEntity);
+
+  return(<div>
+    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
+      <div>
+        <div style={{fontSize:22,fontWeight:700,color:T.textBright}}>Bill.com Setup</div>
+        <div style={{fontSize:13,color:T.textMuted,marginTop:4}}>Connect a CloudLedger entity to a Bill.com Organization for AP integration.</div>
+      </div>
+    </div>
+
+    <div style={{...S.card,padding:20,marginBottom:20}}>
+      <div style={{fontSize:12,fontWeight:600,color:T.textMuted,marginBottom:6}}>ENTITY</div>
+      <select value={selectedEntity||''} onChange={e=>setSelectedEntity(parseInt(e.target.value)||null)} style={{...S.input,maxWidth:400}}>
+        <option value="">-- Select entity --</option>
+        {entities.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+      </select>
+    </div>
+
+    {selectedEntity&&(loading?<div style={{color:T.textMuted}}>Loading...</div>:<>
+      {cfg&&cfg.configured&&<div style={{...S.card,padding:16,marginBottom:16,background:'#f0fdf4',border:'1px solid #86efac'}}>
+        <div style={{fontSize:13,fontWeight:600,color:'#15803d'}}>Configured</div>
+        <div style={{fontSize:12,color:T.textMuted,marginTop:6}}>
+          Last tested: {cfg.last_tested_at?new Date(cfg.last_tested_at).toLocaleString():'never'}
+          {cfg.last_test_status&&<> · Status: <b style={{color:cfg.last_test_status==='success'?'#15803d':T.red}}>{cfg.last_test_status}</b></>}
+        </div>
+        {cfg.last_test_message&&<div style={{fontSize:11,color:T.textMuted,marginTop:4,fontFamily:'monospace'}}>{cfg.last_test_message}</div>}
+      </div>}
+
+      <div style={{...S.card,padding:20}}>
+        <div style={{fontSize:14,fontWeight:600,color:T.textBright,marginBottom:16}}>Credentials</div>
+
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14}}>
+          <div>
+            <label style={S.label}>Environment</label>
+            <select value={env} onChange={e=>setEnv(e.target.value)} style={S.input}>
+              <option value="sandbox">Sandbox (testing)</option>
+              <option value="production">Production (live)</option>
+            </select>
+          </div>
+          <div>
+            <label style={S.label}>Bill.com Username (email)</label>
+            <input type="text" value={username} onChange={e=>setUsername(e.target.value)} style={S.input} placeholder="user@example.com"/>
+          </div>
+          <div>
+            <label style={S.label}>Password {cfg&&cfg.configured&&<span style={{fontWeight:400,color:T.textMuted}}>(stored: {cfg.password_masked||'***'} — leave blank to keep)</span>}</label>
+            <input type="password" value={password} onChange={e=>setPassword(e.target.value)} style={S.input} placeholder={cfg&&cfg.configured?'(unchanged)':'Bill.com password'}/>
+          </div>
+          <div>
+            <label style={S.label}>Organization ID</label>
+            <input type="text" value={orgId} onChange={e=>setOrgId(e.target.value)} style={S.input} placeholder="008..."/>
+          </div>
+          <div>
+            <label style={S.label}>Developer Key {cfg&&cfg.configured&&<span style={{fontWeight:400,color:T.textMuted}}>(stored: {cfg.dev_key_masked||'***'} — leave blank to keep)</span>}</label>
+            <input type="password" value={devKey} onChange={e=>setDevKey(e.target.value)} style={S.input} placeholder={cfg&&cfg.configured?'(unchanged)':'Developer key'}/>
+          </div>
+          <div>
+            <label style={S.label}>Default AP Account (optional)</label>
+            <input type="text" value={defaultApAcct} onChange={e=>setDefaultApAcct(e.target.value)} style={S.input} placeholder="e.g. 21000"/>
+          </div>
+        </div>
+
+        <div style={{display:'flex',gap:10,marginTop:20,alignItems:'center'}}>
+          <button style={S.btnP} onClick={save} disabled={saving}>{saving?'Saving...':'Save'}</button>
+          {cfg&&cfg.configured&&<button style={S.btnS} onClick={test} disabled={testing}>{testing?'Testing...':'Test Connection'}</button>}
+          {cfg&&cfg.configured&&<button style={{...S.btnS,color:T.red}} onClick={remove}>Delete Config</button>}
+          {msg&&<span style={{color:'#15803d',fontSize:13}}>{msg}</span>}
+          {err&&<span style={{color:T.red,fontSize:13}}>{err}</span>}
+        </div>
+
+        <div style={{fontSize:11,color:T.textMuted,marginTop:16,padding:12,background:T.bgElevated,borderRadius:T.radiusSm}}>
+          <b>Where to find these:</b><br/>
+          Username: your Bill.com login email<br/>
+          Organization ID: Bill.com → Settings → Sync and Integrations → Manage Developer Keys (starts with 008)<br/>
+          Developer Key: same page; click "Generate developer key" (Admin role required)<br/>
+          Default AP Account: GL code where bills should post (e.g. 21000 Accounts Payable)
+        </div>
+      </div>
+    </>)}
+  </div>);
+}
+
 
 // ═══ Workpapers Modal (entity file storage with folders) ═══
 function WorkpapersModal({entity, user, onClose}){

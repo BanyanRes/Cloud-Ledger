@@ -125,6 +125,46 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_bts_txn ON bank_transaction_splits(txn_id);
   CREATE INDEX IF NOT EXISTS idx_ja_entry ON journal_attachments(entry_id);
   CREATE INDEX IF NOT EXISTS idx_ef_entity ON entity_files(entity_id, folder_path);
+  CREATE TABLE IF NOT EXISTS billcom_config (
+    entity_id INTEGER PRIMARY KEY,
+    environment TEXT NOT NULL DEFAULT 'sandbox',
+    api_base_url TEXT NOT NULL,
+    username TEXT NOT NULL,
+    password_enc TEXT NOT NULL,
+    org_id TEXT NOT NULL,
+    dev_key_enc TEXT NOT NULL,
+    default_ap_account TEXT,
+    last_tested_at TEXT,
+    last_test_status TEXT,
+    last_test_message TEXT,
+    updated_by TEXT,
+    updated_at TEXT,
+    FOREIGN KEY (entity_id) REFERENCES entities(id)
+  );
+  CREATE TABLE IF NOT EXISTS billcom_account_map (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL,
+    billcom_account_id TEXT NOT NULL,
+    billcom_account_name TEXT,
+    cl_account_code TEXT NOT NULL,
+    created_at TEXT,
+    UNIQUE(entity_id, billcom_account_id),
+    FOREIGN KEY (entity_id) REFERENCES entities(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_bam_entity ON billcom_account_map(entity_id);
+  CREATE TABLE IF NOT EXISTS billcom_sync_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL,
+    sync_type TEXT NOT NULL,
+    billcom_id TEXT,
+    cl_entry_id INTEGER,
+    status TEXT NOT NULL,
+    message TEXT,
+    created_at TEXT,
+    FOREIGN KEY (entity_id) REFERENCES entities(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_bsl_entity ON billcom_sync_log(entity_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_bsl_billcom_id ON billcom_sync_log(billcom_id);
 `);
 
 const userCount = db.prepare('SELECT COUNT(*) as c FROM users').get();
@@ -140,6 +180,56 @@ if (userCount.c === 0) {
 const jeCols = db.prepare("PRAGMA table_info(journal_entries)").all().map(c => c.name);
 if (!jeCols.includes('updated_by')) db.exec("ALTER TABLE journal_entries ADD COLUMN updated_by TEXT");
 if (!jeCols.includes('updated_at')) db.exec("ALTER TABLE journal_entries ADD COLUMN updated_at TEXT");
+
+// === Bill.com integration helpers ===
+const cryptoMod = require('crypto');
+const BILLCOM_ENC_KEY = process.env.BILLCOM_ENCRYPTION_KEY || '';
+function billcomEncrypt(plaintext) {
+  if (!BILLCOM_ENC_KEY || BILLCOM_ENC_KEY.length !== 64) throw new Error('BILLCOM_ENCRYPTION_KEY missing or invalid');
+  const key = Buffer.from(BILLCOM_ENC_KEY, 'hex');
+  const iv = cryptoMod.randomBytes(12);
+  const cipher = cryptoMod.createCipheriv('aes-256-gcm', key, iv);
+  const ct = Buffer.concat([cipher.update(String(plaintext), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return iv.toString('hex') + ':' + tag.toString('hex') + ':' + ct.toString('hex');
+}
+function billcomDecrypt(enc) {
+  if (!BILLCOM_ENC_KEY || BILLCOM_ENC_KEY.length !== 64) throw new Error('BILLCOM_ENCRYPTION_KEY missing or invalid');
+  if (!enc) return '';
+  const parts = enc.split(':');
+  if (parts.length !== 3) throw new Error('Malformed encrypted blob');
+  const key = Buffer.from(BILLCOM_ENC_KEY, 'hex');
+  const iv = Buffer.from(parts[0], 'hex');
+  const tag = Buffer.from(parts[1], 'hex');
+  const ct = Buffer.from(parts[2], 'hex');
+  const decipher = cryptoMod.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8');
+}
+function maskSecret(s) {
+  if (!s) return '';
+  return s.length <= 4 ? '****' : '****' + s.slice(-4);
+}
+const BILLCOM_BASE_URLS = {
+  sandbox: 'https://gateway.stage.bill.com/connect/v3',
+  production: 'https://gateway.prod.bill.com/connect/v3'
+};
+async function billcomLogin({ username, password, orgId, devKey, baseUrl }) {
+  const url = (baseUrl || BILLCOM_BASE_URLS.sandbox) + '/login';
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password, organizationId: orgId, devKey })
+  });
+  const text = await resp.text();
+  let data; try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  if (!resp.ok) {
+    const errMsg = Array.isArray(data) ? data.map(e => e.message).join('; ') : (data.message || text);
+    throw new Error('HTTP ' + resp.status + ': ' + errMsg);
+  }
+  return data;
+}
+
 
 // One-time recovery: earlier versions of the replace endpoint accidentally saved files
 // to WORKPAPERS_DIR root (or to an "undefined" subdir) instead of WORKPAPERS_DIR/<entity_id>/.
@@ -1111,6 +1201,86 @@ app.get('/api/summary', auth, (req, res) => {
     const bt={}; rows.forEach(r=>{const isDr=r.type==='Asset'||r.type==='Expense'; bt[r.type]=isDr?(r.td-r.tc):(r.tc-r.td);});
     return { ...e, assets:bt.Asset||0, liabilities:bt.Liability||0, revenue:bt.Revenue||0, expenses:bt.Expense||0, net_income:(bt.Revenue||0)-(bt.Expense||0), entry_count: db.prepare('SELECT COUNT(*) as c FROM journal_entries WHERE entity_id=?').get(e.id).c };
   }));
+});
+
+// === Bill.com integration routes ===
+app.get('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'), (req, res) => {
+  const row = db.prepare('SELECT entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, last_tested_at, last_test_status, last_test_message, updated_by, updated_at FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
+  if (!row) return res.json({ configured: false });
+  let pwLast4 = '', keyLast4 = '';
+  try { pwLast4 = maskSecret(billcomDecrypt(row.password_enc)); } catch {}
+  try { keyLast4 = maskSecret(billcomDecrypt(row.dev_key_enc)); } catch {}
+  res.json({
+    configured: true,
+    entity_id: row.entity_id,
+    environment: row.environment,
+    api_base_url: row.api_base_url,
+    username: row.username,
+    password_masked: pwLast4,
+    org_id: row.org_id,
+    dev_key_masked: keyLast4,
+    default_ap_account: row.default_ap_account,
+    last_tested_at: row.last_tested_at,
+    last_test_status: row.last_test_status,
+    last_test_message: row.last_test_message,
+    updated_by: row.updated_by,
+    updated_at: row.updated_at
+  });
+});
+
+app.put('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'), (req, res) => {
+  const { environment, username, password, org_id, dev_key, default_ap_account } = req.body || {};
+  if (!environment || !username || !org_id) return res.status(400).json({ error: 'environment, username, org_id required' });
+  if (!['sandbox','production'].includes(environment)) return res.status(400).json({ error: 'environment must be sandbox or production' });
+  const baseUrl = BILLCOM_BASE_URLS[environment];
+  const existing = db.prepare('SELECT password_enc, dev_key_enc FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
+  let pwEnc, keyEnc;
+  try {
+    pwEnc = password ? billcomEncrypt(password) : (existing ? existing.password_enc : null);
+    keyEnc = dev_key ? billcomEncrypt(dev_key) : (existing ? existing.dev_key_enc : null);
+  } catch (e) { return res.status(500).json({ error: 'Encryption failed: ' + e.message }); }
+  if (!pwEnc || !keyEnc) return res.status(400).json({ error: 'password and dev_key required for first save' });
+  const now = new Date().toISOString();
+  const updater = req.user.name || req.user.email;
+  if (existing) {
+    db.prepare('UPDATE billcom_config SET environment=?, api_base_url=?, username=?, password_enc=?, org_id=?, dev_key_enc=?, default_ap_account=?, updated_by=?, updated_at=? WHERE entity_id=?')
+      .run(environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, updater, now, req.params.entity_id);
+  } else {
+    db.prepare('INSERT INTO billcom_config (entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, updated_by, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+      .run(req.params.entity_id, environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, updater, now);
+  }
+  res.json({ success: true });
+});
+
+app.delete('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'), (req, res) => {
+  db.prepare('DELETE FROM billcom_config WHERE entity_id = ?').run(req.params.entity_id);
+  res.json({ success: true });
+});
+
+app.post('/api/billcom/config/:entity_id/test', auth, requireRole('Admin','Accountant'), async (req, res) => {
+  const row = db.prepare('SELECT environment, api_base_url, username, password_enc, org_id, dev_key_enc FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
+  if (!row) return res.status(404).json({ error: 'No config found for this entity' });
+  let password, devKey;
+  try {
+    password = billcomDecrypt(row.password_enc);
+    devKey   = billcomDecrypt(row.dev_key_enc);
+  } catch (e) { return res.status(500).json({ error: 'Decryption failed: ' + e.message }); }
+  const now = new Date().toISOString();
+  try {
+    const result = await billcomLogin({
+      username: row.username, password, orgId: row.org_id, devKey, baseUrl: row.api_base_url
+    });
+    const sessionLen = (result.sessionId || '').length;
+    const msg = 'Login OK. sessionId received (' + sessionLen + ' chars), userId=' + (result.userId || 'n/a');
+    db.prepare('UPDATE billcom_config SET last_tested_at=?, last_test_status=?, last_test_message=? WHERE entity_id=?')
+      .run(now, 'success', msg, req.params.entity_id);
+    res.json({ success: true, message: msg, organizationId: result.organizationId, userId: result.userId });
+  } catch (e) {
+    const msg = e.message || 'Unknown error';
+    db.prepare('UPDATE billcom_config SET last_tested_at=?, last_test_status=?, last_test_message=? WHERE entity_id=?')
+      .run(now, 'failed', msg, req.params.entity_id);
+    res.status(400).json({ success: false, error: msg });
+  }
 });
 
 if (process.env.NODE_ENV === 'production') app.get('*', (req, res) => {
