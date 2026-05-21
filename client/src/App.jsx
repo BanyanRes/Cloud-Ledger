@@ -215,7 +215,7 @@ function SettingsModal({onClose,user,onUserUpdate}){
     try{const updated=await api.updateProfile(name.trim(),email.trim().toLowerCase());onUserUpdate(updated);setProfileOk(true);setTimeout(()=>setProfileOk(false),3000);}catch(e){setProfileErr(e.message);}finally{setSaving(false);}};
   const changePw=async()=>{if(nw.length<3){setPwErr('Min 3 chars');return;}if(nw!==cf){setPwErr("Passwords don't match");return;}
     try{await api.changePassword(cur,nw);setPwOk(true);setCur('');setNw('');setCf('');setTimeout(()=>setPwOk(false),3000);}catch(e){setPwErr(e.message);}};
-  return(<div style={S.modal} onClick={onClose}><div style={{...S.modalBox,maxWidth:500}} onClick={e=>e.stopPropagation()}>
+  return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:500}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:20}}>Settings</div>
     <div style={{display:'flex',gap:0,marginBottom:24,borderBottom:'2px solid '+T.border}}>
@@ -235,7 +235,7 @@ function SettingsModal({onClose,user,onUserUpdate}){
   </div></div>);}
 
 function QuickAddAccountModal({entityId,onClose,onCreated}){const[form,setForm]=useState({code:'',name:'',type:'Asset',subtype:'',bank_acct:false});const[err,setErr]=useState('');
-  return(<div style={S.modal} onClick={onClose}><div style={{...S.modalBox,maxWidth:640}} onClick={e=>e.stopPropagation()}>
+  return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:640}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button><div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:20}}>Add New Account</div>
     <div style={S.row}><div style={S.col}><label style={S.label}>Code</label><input style={S.input} placeholder="e.g. 61500" value={form.code} onChange={e=>setForm(f=>({...f,code:e.target.value}))}/></div>
       <div style={{...S.col,flex:2}}><label style={S.label}>Name</label><input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/></div>
@@ -262,7 +262,7 @@ function JournalEntryModal({entityId,user,onClose,onPosted,form,setForm,pendingF
     catch(e){setErr(e.message);}finally{setPosting(false);}};
   const hasContent=form.memo||form.lines.some(l=>l.account_code||l.debit||l.credit)||pendingFiles.length>0;
 
-  return(<div style={S.modal}><div style={{...S.modalBox,maxWidth:980}} onClick={e=>e.stopPropagation()}>
+  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:980}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
       <div style={{fontSize:18,fontWeight:700,color:T.textBright}}>New Journal Entry</div>
@@ -361,6 +361,30 @@ export default function App(){
       window.removeEventListener('popstate', onPop);
     };
   }, [user]);
+  // Make all modal windows draggable by their top header strip
+  useEffect(() => {
+    const styleEl = document.createElement('style');
+    styleEl.textContent = '.cl-modal-box::before{content:"";position:absolute;top:0;left:0;right:56px;height:44px;cursor:move;border-top-left-radius:14px;border-top-right-radius:14px;z-index:1;}';
+    document.head.appendChild(styleEl);
+    const onDown = (e) => {
+      const box = e.target.closest && e.target.closest('.cl-modal-box');
+      if (!box) return;
+      const rect = box.getBoundingClientRect();
+      if (e.clientY > rect.top + 44) return;
+      if (e.target.closest('input,textarea,select,button,a,[contenteditable]')) return;
+      e.preventDefault();
+      const m = (box.style.transform || '').match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
+      const ox = m ? parseFloat(m[1]) : 0;
+      const oy = m ? parseFloat(m[2]) : 0;
+      const sx = e.clientX, sy = e.clientY;
+      const onMove = (ev) => { box.style.transform = 'translate(' + (ox + ev.clientX - sx) + 'px,' + (oy + ev.clientY - sy) + 'px)'; };
+      const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => { document.removeEventListener('mousedown', onDown); if (styleEl.parentNode) styleEl.parentNode.removeChild(styleEl); };
+  }, []);
   const[showJE,setShowJE]=useState(false);const[showChangePw,setShowChangePw]=useState(false);const[rk,setRk]=useState(0);
   const[sidebarCol,setSidebarCol]=useState(()=>{try{return localStorage.getItem(SIDEBAR_KEY)==='true';}catch{return false;}});
   // JE form state lives in App — survives modal close, cleared only on post/discard
@@ -966,7 +990,7 @@ function WorkpapersModal({entity, user, onClose}){
     return new Date(ts + (ts.includes('Z') || ts.includes('+') ? '' : 'Z')).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
   };
 
-  return (<div style={S.modal} onClick={onClose}><div style={{...S.modalBox, maxWidth: 900, maxHeight: '90vh', display: 'flex', flexDirection: 'column'}} onClick={e => e.stopPropagation()}>
+  return (<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox, maxWidth: 900, maxHeight: '90vh', display: 'flex', flexDirection: 'column'}} onClick={e => e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{marginBottom: 16}}>
       <div style={{fontSize: 18, fontWeight: 700, color: T.textBright, display: 'flex', alignItems: 'center', gap: 10}}>
@@ -1098,7 +1122,7 @@ function EditJEModal({entityId,entry,accounts:initAccounts,onClose,onSaved}){
     catch(ex){setErr(ex.message);}finally{setAttUploading(false);if(attInputRef.current)attInputRef.current.value='';}};
   const deleteAtt=async a=>{if(!confirm('Delete '+a.original_name+'?'))return;try{await api.deleteAttachment(a.id);setAttachments(p=>p.filter(x=>x.id!==a.id));}catch(ex){setErr(ex.message);}};
   const fmtPst=ts=>ts?new Date(ts+(ts.includes('Z')||ts.includes('+')?'':'Z')).toLocaleString('en-US',{timeZone:'America/Los_Angeles',year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true,timeZoneName:'short'}):'';
-  return(<div style={S.modal}><div style={{...S.modalBox,maxWidth:960}} onClick={e=>e.stopPropagation()}>
+  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:960}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Edit JE-{String(entry.entry_num).padStart(4,'0')}</div>
     {(entry.created_by||entry.created_at)&&<div style={{fontSize:11,color:T.textMuted,marginBottom:2}}>
@@ -1276,7 +1300,7 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClos
     catch (e) { setErr(e.message); } finally { setSaving(false); }
   };
 
-  return (<div style={S.modal} onClick={onClose}><div style={{...S.modalBox, maxWidth: 820}} onClick={e => e.stopPropagation()}>
+  return (<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox, maxWidth: 820}} onClick={e => e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Split Transaction</div>
     <div style={{fontSize:12,color:T.textMuted,marginBottom:16}}>{txn.date} &middot; {txn.description}</div>
@@ -1487,7 +1511,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from,to,onClose}){
     let r=begBal;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),l.memo,l.debit||'',l.credit||'',r]);});
     d.push(['','','Totals',totalDr,totalCr,r]);
     exportToExcel(d,'GL_'+acct.code+'_'+to+'.xlsx');};
-  return(<div style={S.modal} onClick={onClose}><div style={{...S.modalBox,maxWidth:1100,maxHeight:'90vh',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
+  return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:1100,maxHeight:'90vh',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14,gap:16}}>
       <div><div style={{fontSize:18,fontWeight:700,color:T.textBright}}>{acct.code} &mdash; {acct.name}</div>
@@ -1646,7 +1670,7 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11,color:T.accent,borderColor:T.accent+'40'}} onClick={()=>{setImporting(e.id);setImportMsg('');setImportErr('');}}>Import Trial Balance</button>
           <button style={{...S.btnD,padding:'5px 12px',fontSize:11}} onClick={async()=>{if(!confirm('Delete entity '+e.name+' and all its data?'))return;await api.deleteEntity(e.id);const r=await refresh();if(activeEntity===e.id)setActiveEntity(r[0]?.id||null);}}>Delete</button>
         </div></td></tr>)}</tbody></table></div>
-    {importing&&<div style={S.modal} onClick={()=>{if(!importBusy)setImporting(null);}}><div style={{...S.modalBox,maxWidth:560}} onClick={ev=>ev.stopPropagation()}>
+    {importing&&<div style={S.modal} onClick={()=>{if(!importBusy)setImporting(null);}}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:560}} onClick={ev=>ev.stopPropagation()}>
       <button style={S.modalClose} onClick={()=>setImporting(null)}>&times;</button>
       <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:6}}>Import Trial Balance</div>
       <div style={{fontSize:13,color:T.textMuted,marginBottom:18}}>Entity: <strong style={{color:T.textBright}}>{entities.find(en=>en.id===importing)?.name}</strong></div>
@@ -1714,7 +1738,7 @@ function UserManagement({currentUser}){
             {u.id!==currentUser.id&&<button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>{setResetId(u.id);setResetPw('');setResetMsg('');}}>Reset PW</button>}
             {u.id!==currentUser.id&&<button style={{...S.btnD,padding:'5px 12px',fontSize:11}} onClick={async()=>{if(!confirm('Delete user '+u.name+'?'))return;await api.deleteUser(u.id);loadUsers();}}>Delete</button>}</div></td>
         </tr>)}</tbody></table></div>
-    {resetId&&<div style={S.modal} onClick={()=>setResetId(null)}><div style={{...S.modalBox,maxWidth:400,textAlign:'center'}} onClick={e=>e.stopPropagation()}>
+    {resetId&&<div style={S.modal} onClick={()=>setResetId(null)}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:400,textAlign:'center'}} onClick={e=>e.stopPropagation()}>
       <button style={S.modalClose} onClick={()=>setResetId(null)}>&times;</button><div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:20}}>Reset Password</div>
       <div style={{fontSize:13,color:T.textMuted,marginBottom:6}}>User: <strong style={{color:T.textBright}}>{users.find(u=>u.id===resetId)?.name}</strong></div>
       <div style={{fontSize:12,color:T.textMuted,marginBottom:16,fontFamily:'monospace'}}>{users.find(u=>u.id===resetId)?.email}</div>
