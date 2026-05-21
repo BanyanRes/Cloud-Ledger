@@ -134,7 +134,7 @@ const S = {
   link: { color: T.accent, cursor: 'pointer', fontSize: 12, background: 'none', border: 'none', padding: 0, textDecoration: 'none' },
   checkbox: { width: 16, height: 16, cursor: 'pointer', accentColor: T.green },
   logoIcon: { width: 32, height: 32, background: 'linear-gradient(135deg,'+T.accent+','+T.green+')', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 14, color: '#fff' },
-  modal: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(4px)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' },
+  modal: { position: 'fixed', inset: 0, zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' },
   modalBox: { background: '#fff', border: '1px solid '+T.border, borderRadius: '14px', width: '94%', maxWidth: 960, maxHeight: '92vh', overflowY: 'auto', padding: 28, position: 'relative', boxShadow: T.shadowLg },
   modalClose: { position: 'absolute', top: 16, right: 20, cursor: 'pointer', color: T.textMuted, fontSize: 18, background: T.bgElevated, border: '1px solid '+T.border, borderRadius: 6, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center' },
   filterBar: { display: 'flex', alignItems: 'flex-end', gap: 14, flexWrap: 'wrap', marginBottom: 20 },
