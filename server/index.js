@@ -596,7 +596,7 @@ app.put('/api/entities/:eid/accounts/:code', auth, requireRole('Admin','Accounta
 app.get('/api/entities/:eid/entries', auth, (req, res) => {
   const { from, to } = req.query; let sql = 'SELECT * FROM journal_entries WHERE entity_id = ?'; const params = [req.params.eid];
   if (from) { sql += ' AND date >= ?'; params.push(from); } if (to) { sql += ' AND date <= ?'; params.push(to); }
-  sql += ' ORDER BY date DESC, id DESC';
+  sql += ' ORDER BY entry_num ASC';
   const entries = db.prepare(sql).all(...params);
   const lineStmt = db.prepare('SELECT * FROM journal_lines WHERE entry_id = ?');
   const attachStmt = db.prepare('SELECT id, original_name, mime_type, size FROM journal_attachments WHERE entry_id = ?');
