@@ -230,6 +230,39 @@ async function billcomLogin({ username, password, orgId, devKey, baseUrl }) {
   return data;
 }
 
+async function billcomListAccounts({ sessionId, devKey, baseUrl }) {
+  // Bill.com v2 API: POST form-encoded to /Crud/List.ChartOfAccount.json
+  const url = (baseUrl || BILLCOM_BASE_URLS.sandbox) + '/Crud/List.ChartOfAccount.json';
+  const out = [];
+  let start = 0;
+  const max = 999;
+  // Paginate in case the org has more than 999 accounts
+  while (true) {
+    const body = new URLSearchParams({
+      devKey,
+      sessionId,
+      data: JSON.stringify({ start, max, filters: [], sort: [{ field: 'accountNumber', asc: '1' }] })
+    });
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString()
+    });
+    const text = await resp.text();
+    let json; try { json = JSON.parse(text); } catch { throw new Error('Non-JSON response: ' + text.slice(0, 200)); }
+    if (json.response_status !== 0) {
+      const msg = (json.response_message || (json.response_data && json.response_data.error_message) || 'Unknown error');
+      throw new Error('Bill.com error: ' + msg);
+    }
+    const items = (json.response_data || []);
+    out.push(...items);
+    if (items.length < max) break;
+    start += max;
+    if (start > 10000) break; // safety
+  }
+  return out;
+}
+
 
 // One-time recovery: earlier versions of the replace endpoint accidentally saved files
 // to WORKPAPERS_DIR root (or to an "undefined" subdir) instead of WORKPAPERS_DIR/<entity_id>/.
@@ -1280,6 +1313,67 @@ app.post('/api/billcom/config/:entity_id/test', auth, requireRole('Admin','Accou
     db.prepare('UPDATE billcom_config SET last_tested_at=?, last_test_status=?, last_test_message=? WHERE entity_id=?')
       .run(now, 'failed', msg, req.params.entity_id);
     res.status(400).json({ success: false, error: msg });
+  }
+});
+
+// ── Bill.com Phase 2: Chart of Accounts + Mappings ──
+
+app.get('/api/billcom/accounts/:entity_id', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
+  const row = db.prepare('SELECT environment, api_base_url, username, password_enc, org_id, dev_key_enc FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
+  if (!row) return res.status(404).json({ error: 'No Bill.com config for this entity. Save credentials first.' });
+  let password, devKey;
+  try {
+    password = billcomDecrypt(row.password_enc);
+    devKey   = billcomDecrypt(row.dev_key_enc);
+  } catch (e) { return res.status(500).json({ error: 'Decryption failed: ' + e.message }); }
+  try {
+    const login = await billcomLogin({ username: row.username, password, orgId: row.org_id, devKey, baseUrl: row.api_base_url });
+    if (!login.sessionId) return res.status(502).json({ error: 'Bill.com login returned no sessionId' });
+    const accounts = await billcomListAccounts({ sessionId: login.sessionId, devKey, baseUrl: row.api_base_url });
+    // Return a slim shape — only fields the UI needs
+    const slim = accounts.map(a => ({
+      id: a.id,
+      name: a.name,
+      accountNumber: a.accountNumber || '',
+      accountType: a.accountType,   // numeric code in Bill.com
+      description: a.description || '',
+      isActive: a.isActive === '1'
+    }));
+    res.json({ accounts: slim, count: slim.length });
+  } catch (e) {
+    res.status(400).json({ error: e.message || 'Failed to list Bill.com accounts' });
+  }
+});
+
+app.get('/api/billcom/mappings/:entity_id', auth, requireRole('Admin', 'Accountant'), (req, res) => {
+  const rows = db.prepare('SELECT id, billcom_account_id, billcom_account_name, cl_account_code, created_at FROM billcom_account_map WHERE entity_id = ? ORDER BY id').all(req.params.entity_id);
+  res.json({ mappings: rows });
+});
+
+app.put('/api/billcom/mappings/:entity_id', auth, requireRole('Admin', 'Accountant'), (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const mappings = Array.isArray(req.body && req.body.mappings) ? req.body.mappings : null;
+  if (!mappings) return res.status(400).json({ error: 'Body must include mappings: array' });
+  // Validate each row
+  for (const m of mappings) {
+    if (!m.billcom_account_id || !m.cl_account_code) {
+      return res.status(400).json({ error: 'Each mapping needs billcom_account_id and cl_account_code' });
+    }
+  }
+  const now = new Date().toISOString();
+  const tx = db.transaction((rows) => {
+    db.prepare('DELETE FROM billcom_account_map WHERE entity_id = ?').run(entityId);
+    const ins = db.prepare('INSERT INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)');
+    for (const m of rows) {
+      ins.run(entityId, String(m.billcom_account_id), m.billcom_account_name || null, String(m.cl_account_code), now);
+    }
+  });
+  try {
+    tx(mappings);
+    res.json({ saved: mappings.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 

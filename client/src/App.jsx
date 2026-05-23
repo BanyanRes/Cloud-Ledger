@@ -722,6 +722,50 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
   const[devKey,setDevKey]=useState('');
   const[defaultApAcct,setDefaultApAcct]=useState('');
 
+  // Phase 2: account mapping state
+  const[tab,setTab]=useState('config'); // 'config' | 'mapping'
+  const[bcAccounts,setBcAccounts]=useState([]);
+  const[clAccounts,setClAccounts]=useState([]);
+  const[mappings,setMappings]=useState({}); // keyed by billcom_account_id
+  const[bcMeta,setBcMeta]=useState(null);
+  const[mapLoading,setMapLoading]=useState(false);
+  const[mapSaving,setMapSaving]=useState(false);
+  const[mapMsg,setMapMsg]=useState('');const[mapErr,setMapErr]=useState('');
+
+  const loadMapping=useCallback(async()=>{
+    if(!selectedEntity)return;
+    setMapLoading(true);setMapMsg('');setMapErr('');setBcMeta(null);
+    try{
+      const [cl,saved]=await Promise.all([
+        api.getAccounts(selectedEntity),
+        api.getBillcomMappings(selectedEntity),
+      ]);
+      setClAccounts(Array.isArray(cl)?cl:[]);
+      const m={};
+      (Array.isArray(saved)?saved:[]).forEach(r=>{m[r.billcom_account_id]=r.cl_account_code;});
+      setMappings(m);
+      try{
+        const r=await api.getBillcomAccounts(selectedEntity);
+        setBcAccounts(Array.isArray(r.accounts)?r.accounts:[]);
+        setBcMeta({count:r.count});
+      }catch(e){setMapErr('Bill.com fetch failed: '+e.message);setBcAccounts([]);}
+    }catch(e){setMapErr(e.message);}
+    setMapLoading(false);
+  },[selectedEntity]);
+
+  const saveMappings=async()=>{
+    if(!selectedEntity)return;
+    setMapSaving(true);setMapMsg('');setMapErr('');
+    try{
+      const payload=bcAccounts
+        .filter(a=>mappings[a.id])
+        .map(a=>({billcom_account_id:a.id,billcom_account_name:a.name,cl_account_code:mappings[a.id]}));
+      await api.saveBillcomMappings(selectedEntity,payload);
+      setMapMsg('Saved '+payload.length+' mapping(s).');
+    }catch(e){setMapErr(e.message);}
+    setMapSaving(false);
+  };
+
   const load=useCallback(async()=>{
     if(!selectedEntity)return;
     setLoading(true);setMsg('');setErr('');
@@ -742,6 +786,13 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
     setLoading(false);
   },[selectedEntity]);
   useEffect(()=>{load();},[load]);
+
+  // Phase 2: reset mapping tab when entity changes
+  useEffect(()=>{
+    setTab('config');
+    setBcAccounts([]);setClAccounts([]);setMappings({});setBcMeta(null);
+    setMapMsg('');setMapErr('');
+  },[selectedEntity]);
 
   const save=async()=>{
     if(!selectedEntity){setErr('Select an entity first');return;}
@@ -805,6 +856,13 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
         {cfg.last_test_message&&<div style={{fontSize:11,color:T.textMuted,marginTop:4,fontFamily:'monospace'}}>{cfg.last_test_message}</div>}
       </div>}
 
+      {/* Phase 2: Tab bar */}
+      <div style={{display:'flex',gap:0,borderBottom:'1px solid '+T.border,marginBottom:16}}>
+        <button onClick={()=>setTab('config')} style={{padding:'10px 18px',fontSize:13,fontWeight:600,background:'transparent',border:'none',borderBottom:tab==='config'?'2px solid '+T.accent:'2px solid transparent',color:tab==='config'?T.textBright:T.textMuted,cursor:'pointer'}}>Config</button>
+        <button onClick={()=>{setTab('mapping');if(cfg&&cfg.configured)loadMapping();}} disabled={!cfg||!cfg.configured} style={{padding:'10px 18px',fontSize:13,fontWeight:600,background:'transparent',border:'none',borderBottom:tab==='mapping'?'2px solid '+T.accent:'2px solid transparent',color:tab==='mapping'?T.textBright:T.textMuted,cursor:cfg&&cfg.configured?'pointer':'not-allowed',opacity:cfg&&cfg.configured?1:0.5}}>Account Mapping</button>
+      </div>
+
+      {tab==='config'?<>
       <div style={{...S.card,padding:20}}>
         <div style={{fontSize:14,fontWeight:600,color:T.textBright,marginBottom:16}}>Credentials</div>
 
@@ -854,6 +912,54 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
           Default AP Account: GL code where bills should post (e.g. 21000 Accounts Payable)
         </div>
       </div>
+      </>:<>
+      {/* Phase 2: Account Mapping branch */}
+      <div style={{...S.card,padding:20}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
+          <div>
+            <div style={{fontSize:14,fontWeight:600,color:T.textBright}}>Account Mapping</div>
+            <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Map Bill.com chart of accounts to CloudLedger GL accounts.{bcMeta?' '+bcMeta.count+' Bill.com account(s) loaded.':''}</div>
+          </div>
+          <div style={{display:'flex',gap:8}}>
+            <button style={S.btnS} onClick={loadMapping} disabled={mapLoading}>{mapLoading?'Loading...':'Refresh from Bill.com'}</button>
+            <button style={S.btnP} onClick={saveMappings} disabled={mapSaving||mapLoading}>{mapSaving?'Saving...':'Save Mappings'}</button>
+          </div>
+        </div>
+
+        {mapErr&&<div style={{padding:10,marginBottom:12,background:'#fef2f2',border:'1px solid #fecaca',borderRadius:T.radiusSm,color:T.red,fontSize:12}}>{mapErr}</div>}
+        {mapMsg&&<div style={{padding:10,marginBottom:12,background:'#f0fdf4',border:'1px solid #86efac',borderRadius:T.radiusSm,color:'#15803d',fontSize:12}}>{mapMsg}</div>}
+
+        {mapLoading?<div style={{color:T.textMuted,padding:20,textAlign:'center'}}>Loading accounts...</div>:
+         bcAccounts.length===0?<div style={{color:T.textMuted,padding:20,textAlign:'center',fontSize:13}}>No Bill.com accounts loaded. Click "Refresh from Bill.com" to fetch.</div>:
+         <div style={{border:'1px solid '+T.border,borderRadius:T.radiusSm,overflow:'hidden'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+            <thead>
+              <tr style={{background:T.bgElevated}}>
+                <th style={{textAlign:'left',padding:'10px 12px',fontWeight:600,color:T.textMuted,fontSize:11,textTransform:'uppercase'}}>Bill.com Account</th>
+                <th style={{textAlign:'left',padding:'10px 12px',fontWeight:600,color:T.textMuted,fontSize:11,textTransform:'uppercase',width:'40%'}}>CloudLedger GL Account</th>
+              </tr>
+            </thead>
+            <tbody>
+              {bcAccounts.map(a=>(
+                <tr key={a.id} style={{borderTop:'1px solid '+T.border}}>
+                  <td style={{padding:'10px 12px',verticalAlign:'top'}}>
+                    <div style={{fontWeight:600,color:T.textBright}}>{a.accountNumber?a.accountNumber+' — ':''}{a.name}</div>
+                    {a.description&&<div style={{fontSize:11,color:T.textMuted,marginTop:2}}>{a.description}</div>}
+                  </td>
+                  <td style={{padding:'10px 12px'}}>
+                    <select value={mappings[a.id]||''} onChange={e=>setMappings({...mappings,[a.id]:e.target.value})} style={{...S.input,fontSize:13}}>
+                      <option value="">-- Not mapped --</option>
+                      {clAccounts.map(c=><option key={c.code} value={c.code}>{c.code} — {c.name}</option>)}
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+         </div>
+        }
+      </div>
+      </>}
     </>)}
   </div>);
 }

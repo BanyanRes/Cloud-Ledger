@@ -125,6 +125,9 @@ export const api = {
   saveBillcomConfig: (entityId, body) => request('/billcom/config/' + entityId, { method: 'PUT', body }),
   deleteBillcomConfig: (entityId) => request('/billcom/config/' + entityId, { method: 'DELETE' }),
   testBillcomConnection: (entityId) => request('/billcom/config/' + entityId + '/test', { method: 'POST' }),
+  getBillcomAccounts: (entityId) => request('/billcom/accounts/' + entityId),
+  getBillcomMappings: (entityId) => request('/billcom/mappings/' + entityId),
+  saveBillcomMappings: (entityId, mappings) => request('/billcom/mappings/' + entityId, { method: 'PUT', body: { mappings } }),
 
   setToken, getToken, clearToken,
 };
