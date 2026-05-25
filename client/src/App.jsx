@@ -741,8 +741,9 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
         api.getBillcomMappings(selectedEntity),
       ]);
       setClAccounts(Array.isArray(cl)?cl:[]);
+      const savedList = (saved && Array.isArray(saved.mappings)) ? saved.mappings : (Array.isArray(saved) ? saved : []);
       const m={};
-      (Array.isArray(saved)?saved:[]).forEach(r=>{m[r.billcom_account_id]=r.cl_account_code;});
+      savedList.forEach(r=>{m[r.billcom_account_id]=r.cl_account_code;});
       setMappings(m);
       try{
         const r=await api.getBillcomAccounts(selectedEntity);
