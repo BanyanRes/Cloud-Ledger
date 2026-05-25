@@ -1517,7 +1517,7 @@ app.post('/api/billcom/push-coa/:entity_id', auth, requireRole('Admin'), async (
       }
       const payload = {
         name: row.name,
-        account: { accountNumber: row.code, accountType: mapType(row.type, row.subtype) }
+        account: { accountNumber: row.code, type: mapType(row.type, row.subtype) }
       };
       const r = await fetch(base + '/classifications/chart-of-accounts', { method: 'POST', headers, body: JSON.stringify(payload) });
       const txt = await r.text();
