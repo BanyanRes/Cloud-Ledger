@@ -1441,6 +1441,18 @@ app.put('/api/billcom/mappings/:entity_id', auth, requireRole('Admin', 'Accounta
 
 // TEMP: Phase 3 sandbox seeding. Creates a vendor (if missing) + one bill referencing a known chartOfAccountId.
 // Remove after E2E verification.
+app.get('/api/billcom/_debug/bill/:entity_id/:bill_id', auth, requireRole('Admin'), async (req, res) => {
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
+  if (!cfg) return res.status(400).json({ error: 'not configured' });
+  try {
+    const pw = billcomDecrypt(cfg.password_enc);
+    const devKey = billcomDecrypt(cfg.dev_key_enc);
+    const session = await billcomLogin({ username: cfg.username, password: pw, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+    const detail = await billcomGetById({ sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url, resourcePath: '/bills', id: req.params.bill_id });
+    res.json(detail);
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
 app.post('/api/billcom/_seed/:entity_id', auth, requireRole('Admin'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
