@@ -249,9 +249,11 @@ async function billcomListAccounts({ sessionId, devKey, baseUrl }) {
       body: body.toString()
     });
     const text = await resp.text();
-    let json; try { json = JSON.parse(text); } catch { throw new Error('Non-JSON response: ' + text.slice(0, 200)); }
+    console.log('[billcom COA] HTTP ' + resp.status + ' from ' + url + ' :: ' + text.slice(0, 500));
+    let json; try { json = JSON.parse(text); } catch { throw new Error('Non-JSON response (HTTP ' + resp.status + '): ' + text.slice(0, 200)); }
     if (json.response_status !== 0) {
-      const msg = (json.response_message || (json.response_data && json.response_data.error_message) || 'Unknown error');
+      const rd = json.response_data || {};
+      const msg = (json.response_message || rd.error_message || rd.error_code || ('status=' + json.response_status + ' body=' + text.slice(0, 200)));
       throw new Error('Bill.com error: ' + msg);
     }
     const items = (json.response_data || []);
