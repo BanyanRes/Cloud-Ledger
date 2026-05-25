@@ -1438,6 +1438,69 @@ app.put('/api/billcom/mappings/:entity_id', auth, requireRole('Admin', 'Accounta
   }
 });
 
+// TEMP: Phase 3 payment verification. Creates a payment against an existing unpaid bill.
+// Remove after payment sync E2E verification.
+app.post('/api/billcom/_seed_payment/:entity_id', auth, requireRole('Admin'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
+  let session, devKey;
+  try {
+    const pw = billcomDecrypt(cfg.password_enc);
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password: pw, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
+  const headers = { 'Content-Type': 'application/json', 'sessionId': session.sessionId, 'devKey': devKey, 'Accept': 'application/json' };
+  const base = cfg.api_base_url;
+
+  // 1. Find an unpaid bill to pay against.
+  let billId = req.body && req.body.billId;
+  let billAmount, vendorId;
+  try {
+    const lr = await fetch(base + '/bills?max=100', { headers });
+    const lt = await lr.text(); let lj; try { lj = JSON.parse(lt); } catch { lj = null; }
+    const bills = lj && (Array.isArray(lj.results) ? lj.results : (Array.isArray(lj) ? lj : []));
+    if (!bills || bills.length === 0) return res.status(502).json({ error: "no bills found in sandbox" });
+    // Pick the requested bill or the first unpaid one with a positive amount.
+    let chosen = null;
+    if (billId) {
+      chosen = bills.find(function(b){ return b.id === billId; });
+    } else {
+      chosen = bills.find(function(b){
+        var ps = String(b.paymentStatus || '').toUpperCase();
+        return (ps === 'UNPAID' || ps === '') && Number(b.amount || 0) > 0;
+      });
+    }
+    if (!chosen) return res.status(502).json({ error: 'no eligible unpaid bill', bills: bills.map(function(b){ return { id: b.id, amount: b.amount, paymentStatus: b.paymentStatus }; }) });
+    billId = chosen.id;
+    billAmount = Number(chosen.amount || 0);
+    vendorId = chosen.vendorId;
+    console.log('[seed_payment] chosen bill ' + billId + ' amount=' + billAmount + ' vendor=' + vendorId);
+  } catch (e) {
+    return res.status(502).json({ error: 'bill lookup failed: ' + e.message });
+  }
+
+  // 2. Create a payment for that bill. Bill.com v3 sandbox: POST /payments
+  const today = new Date().toISOString().slice(0, 10);
+  const body = {
+    vendorId: vendorId,
+    processDate: today,
+    amount: billAmount,
+    paymentMethod: 'CHECK',
+    billPays: [{ billId: billId, amount: billAmount }]
+  };
+  try {
+    const pr = await fetch(base + '/payments', { method: 'POST', headers, body: JSON.stringify(body) });
+    const pt = await pr.text();
+    let pj; try { pj = JSON.parse(pt); } catch { pj = null; }
+    if (!pr.ok) return res.status(502).json({ error: 'payment create failed: HTTP ' + pr.status + ' :: ' + pt.slice(0, 800), payload: body });
+    res.json({ success: true, billId: billId, amount: billAmount, payment: pj });
+  } catch (e) {
+    return res.status(502).json({ error: 'payment create exception: ' + e.message });
+  }
+});
+
 // Phase 3: Bill.com sync (bills + payments -> JEs)
 app.get('/api/billcom/sync-log/:entity_id', auth, requireRole('Admin', 'Accountant'), (req, res) => {
   const entityId = parseInt(req.params.entity_id);
