@@ -731,6 +731,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
   const[bcMeta,setBcMeta]=useState(null);
   const[mapLoading,setMapLoading]=useState(false);
   const[mapSaving,setMapSaving]=useState(false);
+  const[mapPushing,setMapPushing]=useState(false);
   const[mapMsg,setMapMsg]=useState('');const[mapErr,setMapErr]=useState('');
   // Phase 3: sync state
   const[syncing,setSyncing]=useState(false);
@@ -772,6 +773,28 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
       setMapMsg('Saved '+payload.length+' mapping(s).');
     }catch(e){setMapErr(e.message);}
     setMapSaving(false);
+  };
+
+  const pushCoaToBillcom=async()=>{
+    if(!selectedEntity)return;
+    if(!window.confirm('Push all CloudLedger Expense accounts to Bill.com and auto-create mappings? Accounts already in Bill.com (by number or name) will be skipped.'))return;
+    setMapPushing(true);setMapMsg('');setMapErr('');
+    try{
+      const r=await api.pushBillcomCoa(selectedEntity,{all_expenses:true});
+      const pushed=(r.pushed||[]).length;
+      const mappedOnly=(r.mapped_only||[]).length;
+      const skipped=(r.skipped_existing||[]).length;
+      const errs=(r.errors||[]).length;
+      const parts=[];
+      if(pushed>0)parts.push('Created '+pushed+' in Bill.com');
+      if(mappedOnly>0)parts.push('Mapped '+mappedOnly+' existing');
+      if(skipped>0)parts.push('Skipped '+skipped+' already mapped');
+      if(errs>0)parts.push(errs+' error(s)');
+      setMapMsg(parts.join(' | ')||'No changes.');
+      if(errs>0)setMapErr('Errors: '+r.errors.map(e=>e.code+' '+e.name+': '+(e.error||e.status)).join('; '));
+      await loadMapping();
+    }catch(e){setMapErr('Push failed: '+e.message);}
+    setMapPushing(false);
   };
 
   const loadSyncLogs=useCallback(async()=>{
@@ -960,7 +983,8 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
             <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Map Bill.com chart of accounts to CloudLedger GL accounts.{bcMeta?' '+bcMeta.count+' Bill.com account(s) loaded.':''}</div>
           </div>
           <div style={{display:'flex',gap:8}}>
-            <button style={S.btnS} onClick={loadMapping} disabled={mapLoading}>{mapLoading?'Loading...':'Refresh from Bill.com'}</button>
+            <button style={S.btnS} onClick={loadMapping} disabled={mapLoading||mapPushing}>{mapLoading?'Loading...':'Refresh from Bill.com'}</button>
+            <button style={S.btnS} onClick={pushCoaToBillcom} disabled={mapPushing||mapLoading||mapSaving} title="Create every CloudLedger Expense account in Bill.com and auto-map them">{mapPushing?'Pushing...':'Push CL COA to Bill.com'}</button>
             <button style={S.btnP} onClick={saveMappings} disabled={mapSaving||mapLoading}>{mapSaving?'Saving...':'Save Mappings'}</button>
           </div>
         </div>

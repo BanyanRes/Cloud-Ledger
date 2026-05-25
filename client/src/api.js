@@ -129,6 +129,7 @@ export const api = {
   getBillcomMappings: (entityId) => request('/billcom/mappings/' + entityId),
   saveBillcomMappings: (entityId, mappings) => request('/billcom/mappings/' + entityId, { method: 'PUT', body: { mappings } }),
   syncBillcom: (entityId) => request('/billcom/sync/' + entityId, { method: 'POST' }),
+  pushBillcomCoa: (entityId, body) => request('/billcom/push-coa/' + entityId, { method: 'POST', body }),
   getBillcomSyncLog: (entityId, limit) => request('/billcom/sync-log/' + entityId + (limit ? '?limit=' + limit : '')),
 
   setToken, getToken, clearToken,
