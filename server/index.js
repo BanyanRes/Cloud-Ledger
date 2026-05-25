@@ -1424,6 +1424,82 @@ app.put('/api/billcom/mappings/:entity_id', auth, requireRole('Admin', 'Accounta
   }
 });
 
+// TEMP: Phase 3 sandbox seeding. Creates a vendor (if missing) + one bill referencing a known chartOfAccountId.
+// Remove after E2E verification.
+app.post('/api/billcom/_seed/:entity_id', auth, requireRole('Admin'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
+  const { chartOfAccountId, amount, description } = req.body || {};
+  if (!chartOfAccountId) return res.status(400).json({ error: 'chartOfAccountId required in body' });
+  const amt = Number(amount) > 0 ? Number(amount) : 100.0;
+  const desc = description || 'Phase 3 sync test line';
+
+  let session;
+  try {
+    const pw = billcomDecrypt(cfg.password_enc);
+    const devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password: pw, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) {
+    return res.status(502).json({ error: 'login: ' + e.message });
+  }
+  const devKey = billcomDecrypt(cfg.dev_key_enc);
+  const headers = { 'Content-Type': 'application/json', 'sessionId': session.sessionId, 'devKey': devKey, 'Accept': 'application/json' };
+  const base = cfg.api_base_url;
+
+  // 1. Reuse first existing vendor or create one.
+  let vendorId = null;
+  try {
+    const vr = await fetch(base + '/vendors?max=1', { method: 'GET', headers });
+    const vt = await vr.text();
+    let vj; try { vj = JSON.parse(vt); } catch { vj = null; }
+    const results = vj && (Array.isArray(vj.results) ? vj.results : (Array.isArray(vj) ? vj : []));
+    if (results && results.length > 0) vendorId = results[0].id;
+    console.log('[seed] vendor list HTTP ' + vr.status + ' got ' + (results ? results.length : 0) + ' vendor(s); first id=' + vendorId);
+  } catch (e) {
+    return res.status(502).json({ error: 'vendor list failed: ' + e.message });
+  }
+
+  if (!vendorId) {
+    const vbody = { name: 'CL Test Vendor ' + Date.now(), accountType: 'BUSINESS', email: 'test+cl@example.com' };
+    try {
+      const cr = await fetch(base + '/vendors', { method: 'POST', headers, body: JSON.stringify(vbody) });
+      const ct = await cr.text();
+      let cj; try { cj = JSON.parse(ct); } catch { cj = null; }
+      if (!cr.ok || !cj || !cj.id) return res.status(502).json({ error: 'vendor create failed: HTTP ' + cr.status + ' :: ' + ct.slice(0, 400) });
+      vendorId = cj.id;
+      console.log('[seed] created vendor ' + vendorId);
+    } catch (e) {
+      return res.status(502).json({ error: 'vendor create exception: ' + e.message });
+    }
+  }
+
+  // 2. Create the bill.
+  const today = new Date().toISOString().slice(0, 10);
+  const due = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+  const invoiceNumber = 'CLTEST-' + Date.now();
+  const bbody = {
+    vendorId,
+    dueDate: due,
+    invoice: { invoiceNumber, invoiceDate: today },
+    billLineItems: [{ amount: amt, description: desc, chartOfAccountId }]
+  };
+  let bill;
+  try {
+    const br = await fetch(base + '/bills', { method: 'POST', headers, body: JSON.stringify(bbody) });
+    const bt = await br.text();
+    let bj; try { bj = JSON.parse(bt); } catch { bj = null; }
+    if (!br.ok) return res.status(502).json({ error: 'bill create failed: HTTP ' + br.status + ' :: ' + bt.slice(0, 600), payload: bbody });
+    bill = bj;
+    console.log('[seed] created bill ' + (bj && bj.id) + ' approvalStatus=' + (bj && bj.approvalStatus));
+  } catch (e) {
+    return res.status(502).json({ error: 'bill create exception: ' + e.message });
+  }
+
+  res.json({ success: true, vendorId, bill });
+});
+
 // Phase 3: Bill.com sync (bills + payments -> JEs)
 app.get('/api/billcom/sync-log/:entity_id', auth, requireRole('Admin', 'Accountant'), (req, res) => {
   const entityId = parseInt(req.params.entity_id);
@@ -1479,9 +1555,20 @@ app.post('/api/billcom/sync/:entity_id', auth, requireRole('Admin', 'Accountant'
   }
 
   const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
-  const isApproved = (item) => {
-    const s = String(pick(item, 'approvalStatus', 'paymentStatus', 'status') || '').toUpperCase();
-    return s === 'APPROVED' || s === 'PAID' || s === 'PARTIAL_PAID' || s === 'PARTIALLY_PAID';
+  // Bills: process when approval is complete (APPROVED) or not gated (UNASSIGNED, no policy),
+  // or when already paid; skip while waiting on approvers (ASSIGNED) or denied (DENIED).
+  const isBillEligible = (bill) => {
+    const a = String(pick(bill, 'approvalStatus', 'status') || '').toUpperCase();
+    const p = String(pick(bill, 'paymentStatus') || '').toUpperCase();
+    if (a === 'DENIED' || a === 'ASSIGNED') return false;
+    if (a === 'APPROVED' || a === 'UNASSIGNED' || a === '') return true;
+    if (p === 'PAID' || p === 'PARTIAL_PAID' || p === 'PARTIALLY_PAID') return true;
+    return false;
+  };
+  // Payments: only process if actually disbursed (or scheduled to be).
+  const isPaymentEligible = (pay) => {
+    const s = String(pick(pay, 'paymentStatus', 'status') || '').toUpperCase();
+    return s === 'PAID' || s === 'SCHEDULED' || s === 'PROCESSING' || s === 'SENT';
   };
 
   const result = {
@@ -1503,7 +1590,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireRole('Admin', 'Accountant'
   for (const bill of bills) {
     const billId = String(pick(bill, 'id') || '');
     if (!billId) continue;
-    if (!isApproved(bill)) {
+    if (!isBillEligible(bill)) {
       result.bills.skipped++;
       result.bills.details.push({ id: billId, status: 'skip', reason: 'not approved' });
       continue;
@@ -1592,7 +1679,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireRole('Admin', 'Accountant'
   for (const pay of payments) {
     const payId = String(pick(pay, 'id') || '');
     if (!payId) continue;
-    if (!isApproved(pay)) {
+    if (!isPaymentEligible(pay)) {
       result.payments.skipped++;
       result.payments.details.push({ id: payId, status: 'skip', reason: 'not approved' });
       continue;
