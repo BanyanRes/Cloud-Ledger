@@ -231,36 +231,34 @@ async function billcomLogin({ username, password, orgId, devKey, baseUrl }) {
 }
 
 async function billcomListAccounts({ sessionId, devKey, baseUrl }) {
-  // Bill.com v2 API: POST form-encoded to /Crud/List.ChartOfAccount.json
-  const url = (baseUrl || BILLCOM_BASE_URLS.sandbox) + '/Crud/List.ChartOfAccount.json';
+  // Bill.com v3 API: GET /v3/classifications/chart-of-accounts
+  // base already includes /connect/v3, so we append the resource path
+  const base = (baseUrl || BILLCOM_BASE_URLS.sandbox);
   const out = [];
-  let start = 0;
-  const max = 999;
-  // Paginate in case the org has more than 999 accounts
+  let nextPage = null;
+  const max = 100; // v3 default cap
+  // Paginate via nextPage token if present in the response
   while (true) {
-    const body = new URLSearchParams({
-      devKey,
-      sessionId,
-      data: JSON.stringify({ start, max, filters: [], sort: [{ field: 'accountNumber', asc: '1' }] })
-    });
+    const params = new URLSearchParams({ max: String(max) });
+    if (nextPage) params.set('nextPage', nextPage);
+    const url = base + '/classifications/chart-of-accounts?' + params.toString();
     const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString()
+      method: 'GET',
+      headers: { 'sessionId': sessionId, 'devKey': devKey, 'Accept': 'application/json' }
     });
     const text = await resp.text();
     console.log('[billcom COA] HTTP ' + resp.status + ' from ' + url + ' :: ' + text.slice(0, 500));
     let json; try { json = JSON.parse(text); } catch { throw new Error('Non-JSON response (HTTP ' + resp.status + '): ' + text.slice(0, 200)); }
-    if (json.response_status !== 0) {
-      const rd = json.response_data || {};
-      const msg = (json.response_message || rd.error_message || rd.error_code || ('status=' + json.response_status + ' body=' + text.slice(0, 200)));
+    if (!resp.ok) {
+      const msg = (Array.isArray(json) ? json.map(e => e.message || JSON.stringify(e)).join('; ') : (json.message || json.error_message || ('HTTP ' + resp.status + ' body=' + text.slice(0, 200))));
       throw new Error('Bill.com error: ' + msg);
     }
-    const items = (json.response_data || []);
+    // v3 typically returns { results: [...], nextPage: "..." }
+    const items = Array.isArray(json.results) ? json.results : (Array.isArray(json) ? json : []);
     out.push(...items);
-    if (items.length < max) break;
-    start += max;
-    if (start > 10000) break; // safety
+    nextPage = json.nextPage || null;
+    if (!nextPage) break;
+    if (out.length > 10000) break; // safety
   }
   return out;
 }
@@ -1332,14 +1330,15 @@ app.get('/api/billcom/accounts/:entity_id', auth, requireRole('Admin', 'Accounta
     const login = await billcomLogin({ username: row.username, password, orgId: row.org_id, devKey, baseUrl: row.api_base_url });
     if (!login.sessionId) return res.status(502).json({ error: 'Bill.com login returned no sessionId' });
     const accounts = await billcomListAccounts({ sessionId: login.sessionId, devKey, baseUrl: row.api_base_url });
-    // Return a slim shape — only fields the UI needs
+    if (accounts.length > 0) console.log('[billcom COA] sample shape: ' + JSON.stringify(accounts[0]).slice(0, 600));
+    // Return a slim shape - tolerate both v2 and v3 field naming
     const slim = accounts.map(a => ({
       id: a.id,
       name: a.name,
-      accountNumber: a.accountNumber || '',
-      accountType: a.accountType,   // numeric code in Bill.com
+      accountNumber: a.accountNumber || a.number || '',
+      accountType: a.accountType || a.type || '',
       description: a.description || '',
-      isActive: a.isActive === '1'
+      isActive: (a.isActive === '1' || a.isActive === true || a.active === true || a.status === 'ACTIVE')
     }));
     res.json({ accounts: slim, count: slim.length });
   } catch (e) {
