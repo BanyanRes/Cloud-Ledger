@@ -181,6 +181,10 @@ const jeCols = db.prepare("PRAGMA table_info(journal_entries)").all().map(c => c
 if (!jeCols.includes('updated_by')) db.exec("ALTER TABLE journal_entries ADD COLUMN updated_by TEXT");
 if (!jeCols.includes('updated_at')) db.exec("ALTER TABLE journal_entries ADD COLUMN updated_at TEXT");
 
+// Phase 3: default_cash_account on billcom_config (for payment JEs)
+const bcCfgCols = db.prepare("PRAGMA table_info(billcom_config)").all().map(c => c.name);
+if (!bcCfgCols.includes('default_cash_account')) db.exec("ALTER TABLE billcom_config ADD COLUMN default_cash_account TEXT");
+
 // === Bill.com integration helpers ===
 const cryptoMod = require('crypto');
 const BILLCOM_ENC_KEY = process.env.BILLCOM_ENCRYPTION_KEY || '';
@@ -261,6 +265,47 @@ async function billcomListAccounts({ sessionId, devKey, baseUrl }) {
     if (out.length > 10000) break; // safety
   }
   return out;
+}
+
+// Generic paginated GET for v3 list endpoints. Used for bills + payments.
+async function billcomListV3({ sessionId, devKey, baseUrl, resourcePath, extraParams }) {
+  const base = (baseUrl || BILLCOM_BASE_URLS.sandbox);
+  const out = [];
+  let nextPage = null;
+  const max = 100;
+  let pageCount = 0;
+  while (true) {
+    const params = new URLSearchParams({ max: String(max), ...(extraParams || {}) });
+    if (nextPage) params.set('nextPage', nextPage);
+    const url = base + resourcePath + '?' + params.toString();
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { 'sessionId': sessionId, 'devKey': devKey, 'Accept': 'application/json' }
+    });
+    const text = await resp.text();
+    if (pageCount === 0) console.log('[billcom v3 list] ' + resourcePath + ' HTTP ' + resp.status + ' :: ' + text.slice(0, 400));
+    let json; try { json = JSON.parse(text); } catch { throw new Error('Non-JSON response (HTTP ' + resp.status + '): ' + text.slice(0, 200)); }
+    if (!resp.ok) {
+      const msg = (Array.isArray(json) ? json.map(e => e.message || JSON.stringify(e)).join('; ') : (json.message || ('HTTP ' + resp.status + ' body=' + text.slice(0, 200))));
+      throw new Error('Bill.com error: ' + msg);
+    }
+    const items = Array.isArray(json.results) ? json.results : (Array.isArray(json) ? json : []);
+    out.push(...items);
+    nextPage = json.nextPage || null;
+    pageCount++;
+    if (!nextPage) break;
+    if (out.length > 10000) break;
+    if (pageCount > 100) break;
+  }
+  return out;
+}
+
+async function billcomListBills(args) {
+  return billcomListV3({ ...args, resourcePath: '/bills' });
+}
+
+async function billcomListPayments(args) {
+  return billcomListV3({ ...args, resourcePath: '/payments' });
 }
 
 
@@ -1238,7 +1283,7 @@ app.get('/api/summary', auth, (req, res) => {
 
 // === Bill.com integration routes ===
 app.get('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'), (req, res) => {
-  const row = db.prepare('SELECT entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, last_tested_at, last_test_status, last_test_message, updated_by, updated_at FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
+  const row = db.prepare('SELECT entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, default_cash_account, last_tested_at, last_test_status, last_test_message, updated_by, updated_at FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
   if (!row) return res.json({ configured: false });
   let pwLast4 = '', keyLast4 = '';
   try { pwLast4 = maskSecret(billcomDecrypt(row.password_enc)); } catch {}
@@ -1253,6 +1298,7 @@ app.get('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'
     org_id: row.org_id,
     dev_key_masked: keyLast4,
     default_ap_account: row.default_ap_account,
+    default_cash_account: row.default_cash_account,
     last_tested_at: row.last_tested_at,
     last_test_status: row.last_test_status,
     last_test_message: row.last_test_message,
@@ -1262,7 +1308,7 @@ app.get('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'
 });
 
 app.put('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'), (req, res) => {
-  const { environment, username, password, org_id, dev_key, default_ap_account } = req.body || {};
+  const { environment, username, password, org_id, dev_key, default_ap_account, default_cash_account } = req.body || {};
   if (!environment || !username || !org_id) return res.status(400).json({ error: 'environment, username, org_id required' });
   if (!['sandbox','production'].includes(environment)) return res.status(400).json({ error: 'environment must be sandbox or production' });
   const baseUrl = BILLCOM_BASE_URLS[environment];
@@ -1276,11 +1322,11 @@ app.put('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'
   const now = new Date().toISOString();
   const updater = req.user.name || req.user.email;
   if (existing) {
-    db.prepare('UPDATE billcom_config SET environment=?, api_base_url=?, username=?, password_enc=?, org_id=?, dev_key_enc=?, default_ap_account=?, updated_by=?, updated_at=? WHERE entity_id=?')
-      .run(environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, updater, now, req.params.entity_id);
+    db.prepare('UPDATE billcom_config SET environment=?, api_base_url=?, username=?, password_enc=?, org_id=?, dev_key_enc=?, default_ap_account=?, default_cash_account=?, updated_by=?, updated_at=? WHERE entity_id=?')
+      .run(environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, default_cash_account || null, updater, now, req.params.entity_id);
   } else {
-    db.prepare('INSERT INTO billcom_config (entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, updated_by, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
-      .run(req.params.entity_id, environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, updater, now);
+    db.prepare('INSERT INTO billcom_config (entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, default_cash_account, updated_by, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+      .run(req.params.entity_id, environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, default_cash_account || null, updater, now);
   }
   res.json({ success: true });
 });
