@@ -1462,7 +1462,7 @@ app.post('/api/billcom/_seed/:entity_id', auth, requireRole('Admin'), async (req
   }
 
   if (!vendorId) {
-    const vbody = { name: 'CL Test Vendor ' + Date.now(), accountType: 'BUSINESS', email: 'test+cl@example.com' };
+    const vbody = { name: 'CL Test Vendor ' + Date.now(), accountType: 'BUSINESS', email: 'test+cl@example.com', address: { line1: '123 Test St', city: 'San Jose', stateOrProvince: 'CA', zipOrPostalCode: '95002', country: 'US' } };
     try {
       const cr = await fetch(base + '/vendors', { method: 'POST', headers, body: JSON.stringify(vbody) });
       const ct = await cr.text();
