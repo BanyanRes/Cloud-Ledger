@@ -283,7 +283,6 @@ async function billcomListV3({ sessionId, devKey, baseUrl, resourcePath, extraPa
       headers: { 'sessionId': sessionId, 'devKey': devKey, 'Accept': 'application/json' }
     });
     const text = await resp.text();
-    if (pageCount === 0) console.log('[billcom v3 list] ' + resourcePath + ' HTTP ' + resp.status + ' :: ' + text.slice(0, 400));
     let json; try { json = JSON.parse(text); } catch { throw new Error('Non-JSON response (HTTP ' + resp.status + '): ' + text.slice(0, 200)); }
     if (!resp.ok) {
       const msg = (Array.isArray(json) ? json.map(e => e.message || JSON.stringify(e)).join('; ') : (json.message || ('HTTP ' + resp.status + ' body=' + text.slice(0, 200))));
@@ -1437,94 +1436,6 @@ app.put('/api/billcom/mappings/:entity_id', auth, requireRole('Admin', 'Accounta
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
-});
-
-// TEMP: Phase 3 sandbox seeding. Creates a vendor (if missing) + one bill referencing a known chartOfAccountId.
-// Remove after E2E verification.
-app.get('/api/billcom/_debug/bill/:entity_id/:bill_id', auth, requireRole('Admin'), async (req, res) => {
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
-  if (!cfg) return res.status(400).json({ error: 'not configured' });
-  try {
-    const pw = billcomDecrypt(cfg.password_enc);
-    const devKey = billcomDecrypt(cfg.dev_key_enc);
-    const session = await billcomLogin({ username: cfg.username, password: pw, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-    const detail = await billcomGetById({ sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url, resourcePath: '/bills', id: req.params.bill_id });
-    res.json(detail);
-  } catch (e) { res.status(502).json({ error: e.message }); }
-});
-
-app.post('/api/billcom/_seed/:entity_id', auth, requireRole('Admin'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
-  const { chartOfAccountId, amount, description } = req.body || {};
-  if (!chartOfAccountId) return res.status(400).json({ error: 'chartOfAccountId required in body' });
-  const amt = Number(amount) > 0 ? Number(amount) : 100.0;
-  const desc = description || 'Phase 3 sync test line';
-
-  let session;
-  try {
-    const pw = billcomDecrypt(cfg.password_enc);
-    const devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password: pw, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) {
-    return res.status(502).json({ error: 'login: ' + e.message });
-  }
-  const devKey = billcomDecrypt(cfg.dev_key_enc);
-  const headers = { 'Content-Type': 'application/json', 'sessionId': session.sessionId, 'devKey': devKey, 'Accept': 'application/json' };
-  const base = cfg.api_base_url;
-
-  // 1. Reuse first existing vendor or create one.
-  let vendorId = null;
-  try {
-    const vr = await fetch(base + '/vendors?max=1', { method: 'GET', headers });
-    const vt = await vr.text();
-    let vj; try { vj = JSON.parse(vt); } catch { vj = null; }
-    const results = vj && (Array.isArray(vj.results) ? vj.results : (Array.isArray(vj) ? vj : []));
-    if (results && results.length > 0) vendorId = results[0].id;
-    console.log('[seed] vendor list HTTP ' + vr.status + ' got ' + (results ? results.length : 0) + ' vendor(s); first id=' + vendorId);
-  } catch (e) {
-    return res.status(502).json({ error: 'vendor list failed: ' + e.message });
-  }
-
-  if (!vendorId) {
-    const vbody = { name: 'CL Test Vendor ' + Date.now(), accountType: 'BUSINESS', email: 'test+cl@example.com', address: { line1: '123 Test St', city: 'San Jose', stateOrProvince: 'CA', zipOrPostalCode: '95002', country: 'US' } };
-    try {
-      const cr = await fetch(base + '/vendors', { method: 'POST', headers, body: JSON.stringify(vbody) });
-      const ct = await cr.text();
-      let cj; try { cj = JSON.parse(ct); } catch { cj = null; }
-      if (!cr.ok || !cj || !cj.id) return res.status(502).json({ error: 'vendor create failed: HTTP ' + cr.status + ' :: ' + ct.slice(0, 400) });
-      vendorId = cj.id;
-      console.log('[seed] created vendor ' + vendorId);
-    } catch (e) {
-      return res.status(502).json({ error: 'vendor create exception: ' + e.message });
-    }
-  }
-
-  // 2. Create the bill.
-  const today = new Date().toISOString().slice(0, 10);
-  const due = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
-  const invoiceNumber = 'CLTEST-' + Date.now();
-  const bbody = {
-    vendorId,
-    dueDate: due,
-    invoice: { invoiceNumber, invoiceDate: today },
-    billLineItems: [{ amount: amt, description: desc, classifications: { chartOfAccountId } }]
-  };
-  let bill;
-  try {
-    const br = await fetch(base + '/bills', { method: 'POST', headers, body: JSON.stringify(bbody) });
-    const bt = await br.text();
-    let bj; try { bj = JSON.parse(bt); } catch { bj = null; }
-    if (!br.ok) return res.status(502).json({ error: 'bill create failed: HTTP ' + br.status + ' :: ' + bt.slice(0, 600), payload: bbody });
-    bill = bj;
-    console.log('[seed] created bill ' + (bj && bj.id) + ' approvalStatus=' + (bj && bj.approvalStatus));
-  } catch (e) {
-    return res.status(502).json({ error: 'bill create exception: ' + e.message });
-  }
-
-  res.json({ success: true, vendorId, bill });
 });
 
 // Phase 3: Bill.com sync (bills + payments -> JEs)
