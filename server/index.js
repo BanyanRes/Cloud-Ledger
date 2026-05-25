@@ -308,6 +308,21 @@ async function billcomListPayments(args) {
   return billcomListV3({ ...args, resourcePath: '/payments' });
 }
 
+async function billcomGetById({ sessionId, devKey, baseUrl, resourcePath, id }) {
+  const url = (baseUrl || BILLCOM_BASE_URLS.sandbox) + resourcePath + '/' + encodeURIComponent(id);
+  const resp = await fetch(url, {
+    method: 'GET',
+    headers: { 'sessionId': sessionId, 'devKey': devKey, 'Accept': 'application/json' }
+  });
+  const text = await resp.text();
+  let json; try { json = JSON.parse(text); } catch { throw new Error('Non-JSON detail (HTTP ' + resp.status + '): ' + text.slice(0, 200)); }
+  if (!resp.ok) {
+    const msg = (Array.isArray(json) ? json.map(e => e.message || JSON.stringify(e)).join('; ') : (json.message || ('HTTP ' + resp.status)));
+    throw new Error('detail HTTP ' + resp.status + ': ' + msg);
+  }
+  return json;
+}
+
 
 // One-time recovery: earlier versions of the replace endpoint accidentally saved files
 // to WORKPAPERS_DIR root (or to an "undefined" subdir) instead of WORKPAPERS_DIR/<entity_id>/.
@@ -1601,9 +1616,19 @@ app.post('/api/billcom/sync/:entity_id', auth, requireRole('Admin', 'Accountant'
       continue;
     }
 
-    const invoiceDate = pick(bill, 'invoiceDate', 'invoice_date', 'dueDate');
-    const billNumber = pick(bill, 'invoiceNumber', 'invoice_number') || billId;
-    const lineItems = pick(bill, 'lineItems', 'line_items', 'billLineItems') || [];
+    // List endpoint omits some fields (notably chartOfAccountId on line items); hydrate from detail.
+    let detail = bill;
+    try {
+      detail = await billcomGetById({ ...listArgs, resourcePath: '/bills', id: billId });
+    } catch (e) {
+      result.bills.errors++;
+      logSync.run(entityId, 'bill', billId, null, 'error', 'detail fetch failed: ' + e.message, now);
+      result.bills.details.push({ id: billId, status: 'error', reason: 'detail fetch failed: ' + e.message });
+      continue;
+    }
+    const invoiceDate = pick(detail, 'invoiceDate', 'invoice_date') || pick(pick(detail, 'invoice') || {}, 'invoiceDate', 'invoice_date') || pick(detail, 'dueDate');
+    const billNumber = pick(detail, 'invoiceNumber', 'invoice_number') || pick(pick(detail, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || billId;
+    const lineItems = pick(detail, 'lineItems', 'line_items', 'billLineItems') || [];
 
     if (!invoiceDate || !Array.isArray(lineItems) || lineItems.length === 0) {
       result.bills.errors++;
