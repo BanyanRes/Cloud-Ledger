@@ -1510,7 +1510,7 @@ app.post('/api/billcom/_seed/:entity_id', auth, requireRole('Admin'), async (req
     vendorId,
     dueDate: due,
     invoice: { invoiceNumber, invoiceDate: today },
-    billLineItems: [{ amount: amt, description: desc, chartOfAccountId }]
+    billLineItems: [{ amount: amt, description: desc, classifications: { chartOfAccountId } }]
   };
   let bill;
   try {
@@ -1653,7 +1653,8 @@ app.post('/api/billcom/sync/:entity_id', auth, requireRole('Admin', 'Accountant'
     const billMissing = [];
     let totalDr = 0;
     for (const li of lineItems) {
-      const acctId = String(pick(li, 'chartOfAccountId', 'chart_of_account_id', 'accountId', 'account_id') || '');
+      const cls = pick(li, 'classifications') || {};
+      const acctId = String(pick(li, 'chartOfAccountId', 'chart_of_account_id', 'accountId', 'account_id') || pick(cls, 'chartOfAccountId', 'chart_of_account_id', 'accountId', 'account_id') || '');
       const amt = Number(pick(li, 'amount', 'value') || 0);
       if (!acctId) {
         billMissing.push({ id: '(none)', name: '(no chartOfAccount on line)' });
@@ -1661,7 +1662,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireRole('Admin', 'Accountant'
       }
       const mapping = mapById.get(acctId);
       if (!mapping) {
-        const name = pick(li, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || acctId;
+        const name = pick(li, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || pick(cls, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || acctId;
         billMissing.push({ id: acctId, name });
         continue;
       }
