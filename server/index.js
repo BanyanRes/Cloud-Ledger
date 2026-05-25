@@ -1438,7 +1438,7 @@ app.put('/api/billcom/mappings/:entity_id', auth, requireRole('Admin', 'Accounta
   }
 });
 
-// TEMP: Phase 3 payment verification. Creates a payment against an existing unpaid bill.
+// TEMP: Phase 3 payment verification. Creates a payment against an existing paid/unpaid bill.
 // Remove after payment sync E2E verification.
 app.post('/api/billcom/_seed_payment/:entity_id', auth, requireRole('Admin'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
@@ -1450,54 +1450,93 @@ app.post('/api/billcom/_seed_payment/:entity_id', auth, requireRole('Admin'), as
     const pw = billcomDecrypt(cfg.password_enc);
     devKey = billcomDecrypt(cfg.dev_key_enc);
     session = await billcomLogin({ username: cfg.username, password: pw, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
+  } catch (ex) { return res.status(502).json({ error: 'login: ' + ex.message }); }
   const headers = { 'Content-Type': 'application/json', 'sessionId': session.sessionId, 'devKey': devKey, 'Accept': 'application/json' };
   const base = cfg.api_base_url;
 
-  // 1. Find an unpaid bill to pay against.
-  let billId = req.body && req.body.billId;
-  let billAmount, vendorId;
+  // dry_run=1 returns bill list + funding account discovery, no POST.
+  const dryRun = req.body && req.body.dry_run;
+
+  // 1. Bill discovery.
+  let bills = [];
   try {
     const lr = await fetch(base + '/bills?max=100', { headers });
     const lt = await lr.text(); let lj; try { lj = JSON.parse(lt); } catch { lj = null; }
-    const bills = lj && (Array.isArray(lj.results) ? lj.results : (Array.isArray(lj) ? lj : []));
-    if (!bills || bills.length === 0) return res.status(502).json({ error: "no bills found in sandbox" });
-    // Pick the requested bill or the first unpaid one with a positive amount.
-    let chosen = null;
-    if (billId) {
-      chosen = bills.find(function(b){ return b.id === billId; });
-    } else {
-      chosen = bills.find(function(b){
-        var ps = String(b.paymentStatus || '').toUpperCase();
-        return (ps === 'UNPAID' || ps === '') && Number(b.amount || 0) > 0;
-      });
-    }
-    if (!chosen) return res.status(502).json({ error: 'no eligible unpaid bill', bills: bills.map(function(b){ return { id: b.id, amount: b.amount, paymentStatus: b.paymentStatus }; }) });
-    billId = chosen.id;
-    billAmount = Number(chosen.amount || 0);
-    vendorId = chosen.vendorId;
-    console.log('[seed_payment] chosen bill ' + billId + ' amount=' + billAmount + ' vendor=' + vendorId);
-  } catch (e) {
-    return res.status(502).json({ error: 'bill lookup failed: ' + e.message });
+    bills = (lj && (Array.isArray(lj.results) ? lj.results : (Array.isArray(lj) ? lj : []))) || [];
+  } catch (ex) {
+    return res.status(502).json({ error: 'bill lookup failed: ' + ex.message });
   }
 
-  // 2. Create a payment for that bill. Bill.com v3 sandbox: POST /payments
+  // 2. Choose target bill.
+  let chosen = null;
+  const reqBillId = req.body && req.body.billId;
+  if (reqBillId) {
+    chosen = bills.find(function(b){ return b.id === reqBillId; });
+  } else {
+    // Prefer an UNPAID bill with classifications.chartOfAccountId on the first line (so the resulting JE is matchable).
+    chosen = bills.find(function(b){
+      var ps = String(b.paymentStatus || '').toUpperCase();
+      var li = Array.isArray(b.billLineItems) ? b.billLineItems[0] : null;
+      var coa = li && li.classifications && li.classifications.chartOfAccountId;
+      return (ps === 'UNPAID' || ps === '') && Number(b.amount || 0) > 0 && !!coa;
+    });
+    if (!chosen) chosen = bills.find(function(b){
+      var ps = String(b.paymentStatus || '').toUpperCase();
+      return (ps === 'UNPAID' || ps === '') && Number(b.amount || 0) > 0;
+    });
+  }
+
+  // Funding account discovery via /payments/options.
+  let fundingOptions = null;
+  if (chosen) {
+    try {
+      const ur = base + '/payments/options?vendorId=' + encodeURIComponent(chosen.vendorId) + '&amount=' + encodeURIComponent(String(Number(chosen.amount || 0)));
+      const opt = await fetch(ur, { headers });
+      const ot = await opt.text(); let oj; try { oj = JSON.parse(ot); } catch { oj = null; }
+      fundingOptions = oj;
+    } catch (ex) { fundingOptions = { error: ex.message }; }
+  }
+
+  if (dryRun) {
+    return res.json({
+      dry_run: true,
+      bill_count: bills.length,
+      bills: bills.map(function(b){ var li = Array.isArray(b.billLineItems) ? b.billLineItems[0] : null; return { id: b.id, vendorId: b.vendorId, amount: b.amount, paymentStatus: b.paymentStatus, approvalStatus: b.approvalStatus, lineCount: Array.isArray(b.billLineItems) ? b.billLineItems.length : 0, firstLineCoa: li && li.classifications && li.classifications.chartOfAccountId }; }),
+      chosen: chosen && { id: chosen.id, vendorId: chosen.vendorId, amount: chosen.amount },
+      fundingOptions: fundingOptions
+    });
+  }
+
+  if (!chosen) return res.status(502).json({ error: 'no eligible bill found' });
+
+  // 3. Pick a funding account from options.
+  let fundingAccountId = req.body && req.body.fundingAccountId;
+  let fundingAccountType = (req.body && req.body.fundingAccountType) || 'BANK_ACCOUNT';
+  if (!fundingAccountId && fundingOptions) {
+    const opts = Array.isArray(fundingOptions.options) ? fundingOptions.options : (Array.isArray(fundingOptions) ? fundingOptions : []);
+    const avail = opts.find(function(o){ return o && o.available && o.fundingAccount && o.fundingAccount.id; });
+    if (avail) { fundingAccountId = avail.fundingAccount.id; fundingAccountType = avail.fundingAccount.type || fundingAccountType; }
+  }
+  if (!fundingAccountId) return res.status(502).json({ error: 'no funding account found in sandbox; create one via /v3/funding-accounts/banks first', fundingOptions: fundingOptions });
+
+  // 4. Create the payment (single bill).
   const today = new Date().toISOString().slice(0, 10);
   const body = {
-    vendorId: vendorId,
+    vendorId: chosen.vendorId,
+    billId: chosen.id,
     processDate: today,
-    amount: billAmount,
-    paymentMethod: 'CHECK',
-    billPays: [{ billId: billId, amount: billAmount }]
+    amount: Number(chosen.amount || 0),
+    fundingAccount: { type: fundingAccountType, id: fundingAccountId },
+    processingOptions: { requestPayFaster: false, createBill: false }
   };
   try {
     const pr = await fetch(base + '/payments', { method: 'POST', headers, body: JSON.stringify(body) });
     const pt = await pr.text();
     let pj; try { pj = JSON.parse(pt); } catch { pj = null; }
     if (!pr.ok) return res.status(502).json({ error: 'payment create failed: HTTP ' + pr.status + ' :: ' + pt.slice(0, 800), payload: body });
-    res.json({ success: true, billId: billId, amount: billAmount, payment: pj });
-  } catch (e) {
-    return res.status(502).json({ error: 'payment create exception: ' + e.message });
+    res.json({ success: true, chosenBillId: chosen.id, payment: pj });
+  } catch (ex) {
+    return res.status(502).json({ error: 'payment create exception: ' + ex.message });
   }
 });
 
