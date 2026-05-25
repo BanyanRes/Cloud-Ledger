@@ -721,9 +721,10 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
   const[orgId,setOrgId]=useState('');
   const[devKey,setDevKey]=useState('');
   const[defaultApAcct,setDefaultApAcct]=useState('');
+  const[defaultCashAcct,setDefaultCashAcct]=useState('');
 
   // Phase 2: account mapping state
-  const[tab,setTab]=useState('config'); // 'config' | 'mapping'
+  const[tab,setTab]=useState('config'); // 'config' | 'mapping' | 'sync'
   const[bcAccounts,setBcAccounts]=useState([]);
   const[clAccounts,setClAccounts]=useState([]);
   const[mappings,setMappings]=useState({}); // keyed by billcom_account_id
@@ -731,6 +732,12 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
   const[mapLoading,setMapLoading]=useState(false);
   const[mapSaving,setMapSaving]=useState(false);
   const[mapMsg,setMapMsg]=useState('');const[mapErr,setMapErr]=useState('');
+  // Phase 3: sync state
+  const[syncing,setSyncing]=useState(false);
+  const[syncResult,setSyncResult]=useState(null);
+  const[syncLogs,setSyncLogs]=useState([]);
+  const[syncLogsLoading,setSyncLogsLoading]=useState(false);
+  const[syncMsg,setSyncMsg]=useState('');const[syncErr,setSyncErr]=useState('');
 
   const loadMapping=useCallback(async()=>{
     if(!selectedEntity)return;
@@ -767,6 +774,29 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
     setMapSaving(false);
   };
 
+  const loadSyncLogs=useCallback(async()=>{
+    if(!selectedEntity)return;
+    setSyncLogsLoading(true);
+    try{
+      const r=await api.getBillcomSyncLog(selectedEntity,50);
+      setSyncLogs(Array.isArray(r.logs)?r.logs:[]);
+    }catch(e){setSyncErr('Failed to load logs: '+e.message);}
+    setSyncLogsLoading(false);
+  },[selectedEntity]);
+
+  const runSync=async()=>{
+    if(!selectedEntity)return;
+    setSyncing(true);setSyncMsg('');setSyncErr('');setSyncResult(null);
+    try{
+      const r=await api.syncBillcom(selectedEntity);
+      setSyncResult(r);
+      const b=r.bills||{},py=r.payments||{};
+      setSyncMsg('Done. Bills: '+(b.synced||0)+' synced, '+(b.skipped||0)+' skipped, '+(b.errors||0)+' errors. Payments: '+(py.synced||0)+' synced, '+(py.skipped||0)+' skipped, '+(py.errors||0)+' errors.');
+      loadSyncLogs();
+    }catch(e){setSyncErr('Sync failed: '+e.message);}
+    setSyncing(false);
+  };
+
   const load=useCallback(async()=>{
     if(!selectedEntity)return;
     setLoading(true);setMsg('');setErr('');
@@ -778,9 +808,10 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
         setUsername(r.username||'');
         setOrgId(r.org_id||'');
         setDefaultApAcct(r.default_ap_account||'');
+        setDefaultCashAcct(r.default_cash_account||'');
         setPassword('');setDevKey('');
       }else{
-        setEnv('sandbox');setUsername('');setOrgId('');setDefaultApAcct('');
+        setEnv('sandbox');setUsername('');setOrgId('');setDefaultApAcct('');setDefaultCashAcct('');
         setPassword('');setDevKey('');
       }
     }catch(e){setErr(e.message);}
@@ -788,18 +819,19 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
   },[selectedEntity]);
   useEffect(()=>{load();},[load]);
 
-  // Phase 2: reset mapping tab when entity changes
+  // Phase 2+3: reset mapping & sync tab when entity changes
   useEffect(()=>{
     setTab('config');
     setBcAccounts([]);setClAccounts([]);setMappings({});setBcMeta(null);
     setMapMsg('');setMapErr('');
+    setSyncResult(null);setSyncLogs([]);setSyncMsg('');setSyncErr('');
   },[selectedEntity]);
 
   const save=async()=>{
     if(!selectedEntity){setErr('Select an entity first');return;}
     setSaving(true);setMsg('');setErr('');
     try{
-      const body={environment:env,username,org_id:orgId,default_ap_account:defaultApAcct||null};
+      const body={environment:env,username,org_id:orgId,default_ap_account:defaultApAcct||null,default_cash_account:defaultCashAcct||null};
       if(password)body.password=password;
       if(devKey)body.dev_key=devKey;
       await api.saveBillcomConfig(selectedEntity,body);
@@ -861,6 +893,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
       <div style={{display:'flex',gap:0,borderBottom:'1px solid '+T.border,marginBottom:16}}>
         <button onClick={()=>setTab('config')} style={{padding:'10px 18px',fontSize:13,fontWeight:600,background:'transparent',border:'none',borderBottom:tab==='config'?'2px solid '+T.accent:'2px solid transparent',color:tab==='config'?T.textBright:T.textMuted,cursor:'pointer'}}>Config</button>
         <button onClick={()=>{setTab('mapping');if(cfg&&cfg.configured)loadMapping();}} disabled={!cfg||!cfg.configured} style={{padding:'10px 18px',fontSize:13,fontWeight:600,background:'transparent',border:'none',borderBottom:tab==='mapping'?'2px solid '+T.accent:'2px solid transparent',color:tab==='mapping'?T.textBright:T.textMuted,cursor:cfg&&cfg.configured?'pointer':'not-allowed',opacity:cfg&&cfg.configured?1:0.5}}>Account Mapping</button>
+        <button onClick={()=>{setTab('sync');if(cfg&&cfg.configured)loadSyncLogs();}} disabled={!cfg||!cfg.configured} style={{padding:'10px 18px',fontSize:13,fontWeight:600,background:'transparent',border:'none',borderBottom:tab==='sync'?'2px solid '+T.accent:'2px solid transparent',color:tab==='sync'?T.textBright:T.textMuted,cursor:cfg&&cfg.configured?'pointer':'not-allowed',opacity:cfg&&cfg.configured?1:0.5}}>Sync</button>
       </div>
 
       {tab==='config'?<>
@@ -892,8 +925,12 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
             <input type="password" value={devKey} onChange={e=>setDevKey(e.target.value)} style={S.input} placeholder={cfg&&cfg.configured?'(unchanged)':'Developer key'}/>
           </div>
           <div>
-            <label style={S.label}>Default AP Account (optional)</label>
+            <label style={S.label}>Default AP Account</label>
             <input type="text" value={defaultApAcct} onChange={e=>setDefaultApAcct(e.target.value)} style={S.input} placeholder="e.g. 21000"/>
+          </div>
+          <div>
+            <label style={S.label}>Default Cash Account</label>
+            <input type="text" value={defaultCashAcct} onChange={e=>setDefaultCashAcct(e.target.value)} style={S.input} placeholder="e.g. 10000"/>
           </div>
         </div>
 
@@ -910,10 +947,11 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
           Username: your Bill.com login email<br/>
           Organization ID: Bill.com → Settings → Sync and Integrations → Manage Developer Keys (starts with 008)<br/>
           Developer Key: same page; click "Generate developer key" (Admin role required)<br/>
-          Default AP Account: GL code where bills should post (e.g. 21000 Accounts Payable)
+          Default AP Account: GL code where bills post and payments debit (e.g. 21000 Accounts Payable)<br/>
+          Default Cash Account: GL code where payments credit (e.g. 10000 Cash)
         </div>
       </div>
-      </>:<>
+      </>:tab==='mapping'?<>
       {/* Phase 2: Account Mapping branch */}
       <div style={{...S.card,padding:20}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
@@ -959,6 +997,58 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
           </table>
          </div>
         }
+      </div>
+      </>:<>
+      {/* Phase 3: Sync branch */}
+      <div style={{...S.card,padding:20}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
+          <div>
+            <div style={{fontSize:14,fontWeight:600,color:T.textBright}}>Sync</div>
+            <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Pull approved bills and payments from Bill.com and create journal entries. Already-synced items are skipped.</div>
+          </div>
+          <div style={{display:'flex',gap:8}}>
+            <button style={S.btnS} onClick={loadSyncLogs} disabled={syncLogsLoading||syncing}>{syncLogsLoading?'Loading...':'Refresh Log'}</button>
+            <button style={S.btnP} onClick={runSync} disabled={syncing}>{syncing?'Syncing...':'Sync Now'}</button>
+          </div>
+        </div>
+
+        {syncErr&&<div style={{padding:10,marginBottom:12,background:'#fef2f2',border:'1px solid #fecaca',borderRadius:T.radiusSm,color:T.red,fontSize:12}}>{syncErr}</div>}
+        {syncMsg&&<div style={{padding:10,marginBottom:12,background:'#f0fdf4',border:'1px solid #86efac',borderRadius:T.radiusSm,color:'#15803d',fontSize:12}}>{syncMsg}</div>}
+
+        {syncResult&&syncResult.missing_mappings&&syncResult.missing_mappings.length>0&&<div style={{padding:12,marginBottom:14,background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:T.radiusSm}}>
+          <div style={{fontSize:13,fontWeight:600,color:'#92400e',marginBottom:6}}>Missing GL Mappings ({syncResult.missing_mappings.length})</div>
+          <div style={{fontSize:12,color:'#92400e',marginBottom:8}}>These Bill.com accounts appeared in bills but aren't mapped to a CloudLedger GL account. Map them in the Account Mapping tab, then sync again.</div>
+          <ul style={{margin:0,paddingLeft:20,fontSize:12,color:'#78350f'}}>
+            {syncResult.missing_mappings.map(m=><li key={m.billcom_account_id}>{m.name} ({m.affected_bills} bill{m.affected_bills===1?'':'s'})</li>)}
+          </ul>
+        </div>}
+
+        <div style={{fontSize:12,fontWeight:600,color:T.textMuted,textTransform:'uppercase',marginBottom:8}}>Recent Sync Log</div>
+        {syncLogs.length===0?<div style={{color:T.textMuted,padding:20,textAlign:'center',fontSize:13}}>No sync activity yet. Click "Sync Now" to start.</div>:
+         <div style={{border:'1px solid '+T.border,borderRadius:T.radiusSm,overflow:'hidden',maxHeight:400,overflowY:'auto'}}>
+          <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
+            <thead style={{position:'sticky',top:0,background:T.bgElevated}}>
+              <tr>
+                <th style={{textAlign:'left',padding:'8px 10px',fontWeight:600,color:T.textMuted,fontSize:11,textTransform:'uppercase'}}>When</th>
+                <th style={{textAlign:'left',padding:'8px 10px',fontWeight:600,color:T.textMuted,fontSize:11,textTransform:'uppercase'}}>Type</th>
+                <th style={{textAlign:'left',padding:'8px 10px',fontWeight:600,color:T.textMuted,fontSize:11,textTransform:'uppercase'}}>Bill.com ID</th>
+                <th style={{textAlign:'left',padding:'8px 10px',fontWeight:600,color:T.textMuted,fontSize:11,textTransform:'uppercase'}}>Status</th>
+                <th style={{textAlign:'left',padding:'8px 10px',fontWeight:600,color:T.textMuted,fontSize:11,textTransform:'uppercase'}}>Message</th>
+              </tr>
+            </thead>
+            <tbody>
+              {syncLogs.map(l=>(
+                <tr key={l.id} style={{borderTop:'1px solid '+T.border}}>
+                  <td style={{padding:'8px 10px',color:T.textMuted,whiteSpace:'nowrap'}}>{l.created_at?new Date(l.created_at).toLocaleString():''}</td>
+                  <td style={{padding:'8px 10px'}}>{l.sync_type}</td>
+                  <td style={{padding:'8px 10px',fontFamily:'monospace',fontSize:11}}>{l.billcom_id}</td>
+                  <td style={{padding:'8px 10px'}}><span style={{color:l.status==='success'?'#15803d':T.red,fontWeight:600}}>{l.status}</span></td>
+                  <td style={{padding:'8px 10px',color:T.textMuted}}>{l.message}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+         </div>}
       </div>
       </>}
     </>)}

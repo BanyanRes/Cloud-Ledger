@@ -1424,6 +1424,227 @@ app.put('/api/billcom/mappings/:entity_id', auth, requireRole('Admin', 'Accounta
   }
 });
 
+// Phase 3: Bill.com sync (bills + payments -> JEs)
+app.get('/api/billcom/sync-log/:entity_id', auth, requireRole('Admin', 'Accountant'), (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const limit = Math.min(parseInt(req.query.limit) || 50, 500);
+  const rows = db.prepare(
+    'SELECT id, sync_type, billcom_id, cl_entry_id, status, message, created_at FROM billcom_sync_log WHERE entity_id = ? ORDER BY id DESC LIMIT ?'
+  ).all(entityId, limit);
+  res.json({ logs: rows });
+});
+
+app.post('/api/billcom/sync/:entity_id', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+  const entity = db.prepare('SELECT * FROM entities WHERE id = ?').get(entityId);
+  if (!entity) return res.status(404).json({ error: 'Entity not found' });
+
+  const apAccount = cfg.default_ap_account;
+  const cashAccount = cfg.default_cash_account;
+  if (!apAccount) return res.status(400).json({ error: 'default_ap_account not set in Bill.com config' });
+  if (!cashAccount) return res.status(400).json({ error: 'default_cash_account not set in Bill.com config' });
+
+  const apExists = db.prepare('SELECT 1 FROM accounts WHERE entity_id = ? AND code = ?').get(entityId, apAccount);
+  const cashExists = db.prepare('SELECT 1 FROM accounts WHERE entity_id = ? AND code = ?').get(entityId, cashAccount);
+  if (!apExists) return res.status(400).json({ error: 'AP account ' + apAccount + ' does not exist on entity' });
+  if (!cashExists) return res.status(400).json({ error: 'Cash account ' + cashAccount + ' does not exist on entity' });
+
+  const mapRows = db.prepare('SELECT billcom_account_id, billcom_account_name, cl_account_code FROM billcom_account_map WHERE entity_id = ?').all(entityId);
+  const mapById = new Map(mapRows.map(r => [String(r.billcom_account_id), r]));
+
+  let session;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    const devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) {
+    return res.status(502).json({ error: 'Bill.com login failed: ' + e.message });
+  }
+  const listArgs = { sessionId: session.sessionId, devKey: billcomDecrypt(cfg.dev_key_enc), baseUrl: cfg.api_base_url };
+
+  let bills, payments;
+  try {
+    bills = await billcomListBills(listArgs);
+  } catch (e) {
+    return res.status(502).json({ error: 'Failed to fetch bills: ' + e.message });
+  }
+  try {
+    payments = await billcomListPayments(listArgs);
+  } catch (e) {
+    return res.status(502).json({ error: 'Failed to fetch payments: ' + e.message });
+  }
+
+  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
+  const isApproved = (item) => {
+    const s = String(pick(item, 'approvalStatus', 'paymentStatus', 'status') || '').toUpperCase();
+    return s === 'APPROVED' || s === 'PAID' || s === 'PARTIAL_PAID' || s === 'PARTIALLY_PAID';
+  };
+
+  const result = {
+    bills: { synced: 0, skipped: 0, errors: 0, details: [] },
+    payments: { synced: 0, skipped: 0, errors: 0, details: [] },
+    missing_mappings: []
+  };
+  const missingMap = new Map();
+  const now = new Date().toISOString();
+  const actor = req.user.name || req.user.email || 'system';
+
+  const logSync = db.prepare(
+    'INSERT INTO billcom_sync_log (entity_id, sync_type, billcom_id, cl_entry_id, status, message, created_at) VALUES (?,?,?,?,?,?,?)'
+  );
+  const alreadySynced = db.prepare(
+    "SELECT 1 FROM billcom_sync_log WHERE entity_id = ? AND sync_type = ? AND billcom_id = ? AND status = 'success' LIMIT 1"
+  );
+
+  for (const bill of bills) {
+    const billId = String(pick(bill, 'id') || '');
+    if (!billId) continue;
+    if (!isApproved(bill)) {
+      result.bills.skipped++;
+      result.bills.details.push({ id: billId, status: 'skip', reason: 'not approved' });
+      continue;
+    }
+    if (alreadySynced.get(entityId, 'bill', billId)) {
+      result.bills.skipped++;
+      result.bills.details.push({ id: billId, status: 'skip', reason: 'already synced' });
+      continue;
+    }
+
+    const invoiceDate = pick(bill, 'invoiceDate', 'invoice_date', 'dueDate');
+    const billNumber = pick(bill, 'invoiceNumber', 'invoice_number') || billId;
+    const lineItems = pick(bill, 'lineItems', 'line_items', 'billLineItems') || [];
+
+    if (!invoiceDate || !Array.isArray(lineItems) || lineItems.length === 0) {
+      result.bills.errors++;
+      logSync.run(entityId, 'bill', billId, null, 'error', 'missing invoiceDate or lineItems', now);
+      result.bills.details.push({ id: billId, status: 'error', reason: 'missing invoiceDate or lineItems' });
+      continue;
+    }
+
+    const debitLines = [];
+    const billMissing = [];
+    let totalDr = 0;
+    for (const li of lineItems) {
+      const acctId = String(pick(li, 'chartOfAccountId', 'chart_of_account_id', 'accountId', 'account_id') || '');
+      const amt = Number(pick(li, 'amount', 'value') || 0);
+      if (!acctId) {
+        billMissing.push({ id: '(none)', name: '(no chartOfAccount on line)' });
+        continue;
+      }
+      const mapping = mapById.get(acctId);
+      if (!mapping) {
+        const name = pick(li, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || acctId;
+        billMissing.push({ id: acctId, name });
+        continue;
+      }
+      debitLines.push({ account_code: mapping.cl_account_code, debit: amt, credit: 0 });
+      totalDr += amt;
+    }
+
+    if (billMissing.length > 0) {
+      result.bills.errors++;
+      const missingNames = billMissing.map(m => m.name).join(', ');
+      logSync.run(entityId, 'bill', billId, null, 'error', 'missing GL mapping(s) for: ' + missingNames, now);
+      result.bills.details.push({ id: billId, status: 'error', reason: 'missing mappings: ' + missingNames });
+      for (const mm of billMissing) {
+        const existing = missingMap.get(mm.id);
+        if (existing) existing.affected_bills++;
+        else missingMap.set(mm.id, { billcom_account_id: mm.id, name: mm.name, affected_bills: 1 });
+      }
+      continue;
+    }
+
+    if (totalDr <= 0) {
+      result.bills.errors++;
+      logSync.run(entityId, 'bill', billId, null, 'error', 'bill total is zero', now);
+      result.bills.details.push({ id: billId, status: 'error', reason: 'zero total' });
+      continue;
+    }
+
+    const lines = [...debitLines, { account_code: apAccount, debit: 0, credit: totalDr }];
+    const memo = 'Bill.com bill #' + billNumber;
+
+    try {
+      const insertedId = db.transaction(() => {
+        const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
+        const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)')
+          .run(entityId, num, invoiceDate, memo, actor);
+        for (const l of lines) {
+          db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit) VALUES (?,?,?,?)')
+            .run(r.lastInsertRowid, l.account_code, l.debit, l.credit);
+        }
+        logSync.run(entityId, 'bill', billId, r.lastInsertRowid, 'success', 'created JE #' + num, now);
+        return r.lastInsertRowid;
+      })();
+      result.bills.synced++;
+      result.bills.details.push({ id: billId, status: 'success', cl_entry_id: insertedId });
+    } catch (e) {
+      result.bills.errors++;
+      logSync.run(entityId, 'bill', billId, null, 'error', 'JE insert failed: ' + e.message, now);
+      result.bills.details.push({ id: billId, status: 'error', reason: e.message });
+    }
+  }
+
+  for (const pay of payments) {
+    const payId = String(pick(pay, 'id') || '');
+    if (!payId) continue;
+    if (!isApproved(pay)) {
+      result.payments.skipped++;
+      result.payments.details.push({ id: payId, status: 'skip', reason: 'not approved' });
+      continue;
+    }
+    if (alreadySynced.get(entityId, 'payment', payId)) {
+      result.payments.skipped++;
+      result.payments.details.push({ id: payId, status: 'skip', reason: 'already synced' });
+      continue;
+    }
+
+    const processDate = pick(pay, 'processDate', 'process_date', 'paymentDate', 'payment_date');
+    const amount = Number(pick(pay, 'amount', 'paymentAmount', 'totalAmount') || 0);
+    const payNumber = pick(pay, 'paymentNumber', 'payment_number', 'referenceNumber') || payId;
+
+    if (!processDate || amount <= 0) {
+      result.payments.errors++;
+      logSync.run(entityId, 'payment', payId, null, 'error', 'missing processDate or zero amount', now);
+      result.payments.details.push({ id: payId, status: 'error', reason: 'missing processDate or zero amount' });
+      continue;
+    }
+
+    const lines = [
+      { account_code: apAccount, debit: amount, credit: 0 },
+      { account_code: cashAccount, debit: 0, credit: amount }
+    ];
+    const memo = 'Bill.com payment #' + payNumber;
+
+    try {
+      const insertedId = db.transaction(() => {
+        const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
+        const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)')
+          .run(entityId, num, processDate, memo, actor);
+        for (const l of lines) {
+          db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit) VALUES (?,?,?,?)')
+            .run(r.lastInsertRowid, l.account_code, l.debit, l.credit);
+        }
+        logSync.run(entityId, 'payment', payId, r.lastInsertRowid, 'success', 'created JE #' + num, now);
+        return r.lastInsertRowid;
+      })();
+      result.payments.synced++;
+      result.payments.details.push({ id: payId, status: 'success', cl_entry_id: insertedId });
+    } catch (e) {
+      result.payments.errors++;
+      logSync.run(entityId, 'payment', payId, null, 'error', 'JE insert failed: ' + e.message, now);
+      result.payments.details.push({ id: payId, status: 'error', reason: e.message });
+    }
+  }
+
+  result.missing_mappings = Array.from(missingMap.values());
+  res.json(result);
+});
+
 if (process.env.NODE_ENV === 'production') app.get('*', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
