@@ -910,27 +910,27 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
           </div>
           <div>
             <label style={S.label}>Bill.com Username (email)</label>
-            <input type="text" value={username} onChange={e=>setUsername(e.target.value)} style={S.input} placeholder="user@example.com"/>
+            <input type="text" value={username} onChange={e=>setUsername(e.target.value)} style={S.input} placeholder="user@example.com" autoComplete="new-password"/>
           </div>
           <div>
             <label style={S.label}>Password {cfg&&cfg.configured&&<span style={{fontWeight:400,color:T.textMuted}}>(stored: {cfg.password_masked||'***'} — leave blank to keep)</span>}</label>
-            <input type="password" value={password} onChange={e=>setPassword(e.target.value)} style={S.input} placeholder={cfg&&cfg.configured?'(unchanged)':'Bill.com password'}/>
+            <input type="password" value={password} onChange={e=>setPassword(e.target.value)} style={S.input} placeholder={cfg&&cfg.configured?'(unchanged)':'Bill.com password'} autoComplete="new-password"/>
           </div>
           <div>
             <label style={S.label}>Organization ID</label>
-            <input type="text" value={orgId} onChange={e=>setOrgId(e.target.value)} style={S.input} placeholder="008..."/>
+            <input type="text" value={orgId} onChange={e=>setOrgId(e.target.value)} style={S.input} placeholder="008..." autoComplete="new-password"/>
           </div>
           <div>
             <label style={S.label}>Developer Key {cfg&&cfg.configured&&<span style={{fontWeight:400,color:T.textMuted}}>(stored: {cfg.dev_key_masked||'***'} — leave blank to keep)</span>}</label>
-            <input type="password" value={devKey} onChange={e=>setDevKey(e.target.value)} style={S.input} placeholder={cfg&&cfg.configured?'(unchanged)':'Developer key'}/>
+            <input type="password" value={devKey} onChange={e=>setDevKey(e.target.value)} style={S.input} placeholder={cfg&&cfg.configured?'(unchanged)':'Developer key'} autoComplete="new-password"/>
           </div>
           <div>
             <label style={S.label}>Default AP Account</label>
-            <input type="text" value={defaultApAcct} onChange={e=>setDefaultApAcct(e.target.value)} style={S.input} placeholder="e.g. 21000"/>
+            <input type="text" value={defaultApAcct} onChange={e=>setDefaultApAcct(e.target.value)} style={S.input} placeholder="e.g. 21000" autoComplete="new-password"/>
           </div>
           <div>
             <label style={S.label}>Default Cash Account</label>
-            <input type="text" value={defaultCashAcct} onChange={e=>setDefaultCashAcct(e.target.value)} style={S.input} placeholder="e.g. 10000"/>
+            <input type="text" value={defaultCashAcct} onChange={e=>setDefaultCashAcct(e.target.value)} style={S.input} placeholder="e.g. 10000" autoComplete="new-password"/>
           </div>
         </div>
 
