@@ -1438,6 +1438,85 @@ app.put('/api/billcom/mappings/:entity_id', auth, requireRole('Admin', 'Accounta
   }
 });
 
+// TEMP: Phase 5 verification. Creates a test bill with classifications.chartOfAccountId
+// set to the Bill.com account id mapped from a CL account code provided by the caller.
+// Remove after verification.
+app.post('/api/billcom/_seed_bill/:entity_id', auth, requireRole('Admin'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const body = req.body || {};
+  const clCode = body.cl_code;
+  const amount = Number(body.amount || 49.99);
+  const desc = body.description || 'Test bill from CloudLedger seed';
+  if (!clCode) return res.status(400).json({ error: 'Provide cl_code (CL account code) in body' });
+
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
+
+  const mapRow = db.prepare('SELECT billcom_account_id, billcom_account_name FROM billcom_account_map WHERE entity_id = ? AND cl_account_code = ?').get(entityId, clCode);
+  if (!mapRow) return res.status(400).json({ error: 'No mapping found for CL code ' + clCode });
+
+  let session, devKey;
+  try {
+    const pw = billcomDecrypt(cfg.password_enc);
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password: pw, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (ex) { return res.status(502).json({ error: 'login: ' + ex.message }); }
+
+  const headers = { 'Content-Type': 'application/json', 'sessionId': session.sessionId, 'devKey': devKey, 'Accept': 'application/json' };
+  const base = cfg.api_base_url;
+
+  // 1. Find or create a vendor.
+  let vendorId;
+  try {
+    const vr = await fetch(base + '/vendors?max=50', { headers });
+    const vt = await vr.text(); let vj; try { vj = JSON.parse(vt); } catch { vj = null; }
+    const vendors = vj && (Array.isArray(vj.results) ? vj.results : (Array.isArray(vj) ? vj : []));
+    const existing = (vendors || []).find(function(v){ return v && v.name === 'CL Test Vendor'; });
+    if (existing) {
+      vendorId = existing.id;
+    } else {
+      const createBody = {
+        name: 'CL Test Vendor',
+        email: 'testvendor@example.com',
+        address: { line1: '123 Main St', city: 'Anywhere', stateOrProvince: 'CA', zipOrPostalCode: '90001', country: 'US' }
+      };
+      const cr = await fetch(base + '/vendors', { method: 'POST', headers, body: JSON.stringify(createBody) });
+      const ct = await cr.text(); let cj; try { cj = JSON.parse(ct); } catch { cj = null; }
+      if (!cr.ok || !cj || !cj.id) return res.status(502).json({ error: 'vendor create failed: HTTP ' + cr.status + ' :: ' + ct.slice(0, 400) });
+      vendorId = cj.id;
+    }
+  } catch (ex) {
+    return res.status(502).json({ error: 'vendor step: ' + ex.message });
+  }
+
+  // 2. Create the bill with classifications.chartOfAccountId set on the line item.
+  const today = new Date();
+  const invoiceDate = today.toISOString().slice(0, 10);
+  const due = new Date(today.getTime() + 14 * 86400000).toISOString().slice(0, 10);
+  const invoiceNumber = 'CLTEST-' + Date.now();
+  const billBody = {
+    vendorId: vendorId,
+    invoice: { invoiceNumber: invoiceNumber, invoiceDate: invoiceDate },
+    dueDate: due,
+    billLineItems: [
+      {
+        amount: amount,
+        description: desc,
+        classifications: { chartOfAccountId: mapRow.billcom_account_id }
+      }
+    ]
+  };
+  try {
+    const br = await fetch(base + '/bills', { method: 'POST', headers, body: JSON.stringify(billBody) });
+    const bt = await br.text(); let bj; try { bj = JSON.parse(bt); } catch { bj = null; }
+    if (!br.ok || !bj || !bj.id) return res.status(502).json({ error: 'bill create failed: HTTP ' + br.status + ' :: ' + bt.slice(0, 400), payload: billBody });
+    res.json({ success: true, billId: bj.id, vendorId: vendorId, invoiceNumber: invoiceNumber, amount: amount, mapped_to: { cl_code: clCode, billcom_id: mapRow.billcom_account_id, billcom_name: mapRow.billcom_account_name } });
+  } catch (ex) {
+    return res.status(502).json({ error: 'bill create exception: ' + ex.message });
+  }
+});
+
 // Phase 5: Push CloudLedger COA to Bill.com and auto-create mappings.
 app.post('/api/billcom/push-coa/:entity_id', auth, requireRole('Admin'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
