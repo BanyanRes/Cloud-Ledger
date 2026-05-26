@@ -1455,6 +1455,7 @@ app.post('/api/billcom/_seed_payment/:entity_id', auth, requireRole('Admin'), as
   const base = cfg.api_base_url;
   const dryRun = req.body && req.body.dry_run;
   const reqBillId = req.body && req.body.billId;
+  const reqFundingId = req.body && req.body.fundingAccountId;
 
   // 1. List bills.
   let bills = [];
@@ -1480,9 +1481,16 @@ app.post('/api/billcom/_seed_payment/:entity_id', auth, requireRole('Admin'), as
       const opt = await fetch(ur, { headers });
       const ot = await opt.text(); let oj; try { oj = JSON.parse(ot); } catch { oj = null; }
       fundingOptions = oj;
-      const opts = oj && Array.isArray(oj.options) ? oj.options : (Array.isArray(oj) ? oj : []);
-      const avail = opts.find(o => o && o.available && o.fundingAccount && o.fundingAccount.id);
-      if (avail) { fundingAccountId = avail.fundingAccount.id; fundingAccountType = avail.fundingAccount.type || fundingAccountType; }
+      // Bill.com nests bank list under fundingOptions.banks (no fundingAccount wrapper).
+      const nested = oj && oj.fundingOptions && oj.fundingOptions.banks;
+      const flat = oj && Array.isArray(oj.options) ? oj.options : (Array.isArray(oj) ? oj : []);
+      let pickedBank = null;
+      if (Array.isArray(nested)) pickedBank = nested.find(b => b && b.available && b.id);
+      if (!pickedBank && flat.length) {
+        const avail = flat.find(o => o && o.available && o.fundingAccount && o.fundingAccount.id);
+        if (avail) pickedBank = { id: avail.fundingAccount.id, type: avail.fundingAccount.type };
+      }
+      if (pickedBank) { fundingAccountId = pickedBank.id; fundingAccountType = pickedBank.type || fundingAccountType; }
     } catch (ex) { fundingOptions = { error: ex.message }; }
   }
 
@@ -1509,6 +1517,7 @@ app.post('/api/billcom/_seed_payment/:entity_id', auth, requireRole('Admin'), as
       if (verified) { fundingAccountId = verified.id; fundingAccountType = 'BANK_ACCOUNT'; }
     } catch {}
   }
+  if (reqFundingId) { fundingAccountId = reqFundingId; fundingAccountType = (req.body && req.body.fundingAccountType) || fundingAccountType; }
   if (!fundingAccountId) return res.status(502).json({ error: 'no funding account found', fundingOptions: fundingOptions });
 
   // 4. Create payment.
