@@ -1925,6 +1925,26 @@ function UserManagement({currentUser}){
   const[resetId,setResetId]=useState(null);const[resetPw,setResetPw]=useState('');const[resetMsg,setResetMsg]=useState('');
   const[editingRole,setEditingRole]=useState(null);
   const loadUsers=useCallback(()=>{api.getUsers().then(setUsers).catch(e=>setLoadErr(e.message));},[]);
+  const[accessUser,setAccessUser]=useState(null);
+  const[accessEntities,setAccessEntities]=useState([]); // selected ids
+  const[accessAllEntities,setAccessAllEntities]=useState([]); // all entities for picker
+  const[accessSaving,setAccessSaving]=useState(false);
+  const[accessErr,setAccessErr]=useState('');
+  const openAccess=async(u)=>{
+    setAccessUser(u);setAccessErr('');setAccessSaving(false);
+    try{
+      const[ents,acc]=await Promise.all([api.getEntities(),api.getUserEntityAccess(u.id)]);
+      setAccessAllEntities(ents);
+      setAccessEntities(acc.entity_ids||[]);
+    }catch(e){setAccessErr(e.message);}
+  };
+  const toggleAccessEntity=(id)=>setAccessEntities(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);
+  const saveAccess=async()=>{
+    setAccessSaving(true);setAccessErr('');
+    try{await api.setUserEntityAccess(accessUser.id,accessEntities);setAccessUser(null);}
+    catch(e){setAccessErr(e.message);}
+    setAccessSaving(false);
+  };
   useEffect(()=>{loadUsers();},[loadUsers]);
   const changeRole=async(userId,newRole)=>{try{await api.updateUser(userId,{name:users.find(u=>u.id===userId)?.name,role:newRole});setEditingRole(null);loadUsers();}catch(e){alert(e.message);}};
 
@@ -1956,10 +1976,37 @@ function UserManagement({currentUser}){
             :<div style={{display:'flex',alignItems:'center',gap:6}}><span style={S.badge}>{u.role}</span>
               {u.id!==currentUser.id&&<button style={{...S.btnGhost,fontSize:10,color:T.accent}} onClick={()=>setEditingRole(u.id)}>Edit</button>}</div>}</td>
           <td style={S.td}><div style={{display:'flex',gap:8}}>
+            {u.id!==currentUser.id&&u.role!=='Admin'&&<button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>openAccess(u)} title="Limit which entities this user can access">Access</button>}
             {u.id!==currentUser.id&&<button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>{setResetId(u.id);setResetPw('');setResetMsg('');}}>Reset PW</button>}
             {u.id!==currentUser.id&&<button style={{...S.btnD,padding:'5px 12px',fontSize:11}} onClick={async()=>{if(!confirm('Delete user '+u.name+'?'))return;await api.deleteUser(u.id);loadUsers();}}>Delete</button>}</div></td>
         </tr>)}</tbody></table></div>
-    {resetId&&<div style={S.modal} onClick={()=>setResetId(null)}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:400,textAlign:'center'}} onClick={e=>e.stopPropagation()}>
+    {accessUser&&<div style={S.modal} onClick={()=>setAccessUser(null)}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:520}} onClick={e=>e.stopPropagation()}>
+      <button style={S.modalClose} onClick={()=>setAccessUser(null)}>&times;</button>
+      <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:6}}>Entity Access</div>
+      <div style={{fontSize:13,color:T.textMuted,marginBottom:14}}>User: <strong style={{color:T.textBright}}>{accessUser.name}</strong> ({accessUser.role})</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:10,padding:'8px 12px',background:T.bgInset,borderRadius:6}}>
+        {accessEntities.length===0?'No restrictions — user can access ALL entities. Check entities below to restrict access to only those.':'User can access only the '+accessEntities.length+' checked entit'+(accessEntities.length===1?'y':'ies')+' below. Uncheck all to grant access to all entities.'}
+      </div>
+      <div style={{maxHeight:320,overflowY:'auto',border:'1px solid '+T.border,borderRadius:6,marginBottom:12}}>
+        {accessAllEntities.map(e=>(
+          <label key={e.id} style={{display:'flex',alignItems:'center',padding:'8px 12px',borderBottom:'1px solid '+T.border,cursor:'pointer',gap:10}}>
+            <input type="checkbox" checked={accessEntities.includes(e.id)} onChange={()=>toggleAccessEntity(e.id)}/>
+            <span style={{color:T.textBright,fontSize:13}}>{e.name}</span>
+            {e.code&&<span style={{color:T.textMuted,fontSize:11,fontFamily:'monospace'}}>{e.code}</span>}
+          </label>
+        ))}
+        {accessAllEntities.length===0&&<div style={{padding:16,color:T.textMuted,textAlign:'center'}}>No entities</div>}
+      </div>
+      {accessErr&&<div style={S.err}>{accessErr}</div>}
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
+        <button style={S.btnGhost} onClick={()=>setAccessEntities([])} disabled={accessSaving}>Clear (= all access)</button>
+        <div style={{display:'flex',gap:8}}>
+          <button style={S.btnGhost} onClick={()=>setAccessUser(null)} disabled={accessSaving}>Cancel</button>
+          <button style={S.btnP} onClick={saveAccess} disabled={accessSaving}>{accessSaving?'Saving...':'Save'}</button>
+        </div>
+      </div>
+    </div></div>}
+        {resetId&&<div style={S.modal} onClick={()=>setResetId(null)}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:400,textAlign:'center'}} onClick={e=>e.stopPropagation()}>
       <button style={S.modalClose} onClick={()=>setResetId(null)}>&times;</button><div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:20}}>Reset Password</div>
       <div style={{fontSize:13,color:T.textMuted,marginBottom:6}}>User: <strong style={{color:T.textBright}}>{users.find(u=>u.id===resetId)?.name}</strong></div>
       <div style={{fontSize:12,color:T.textMuted,marginBottom:16,fontFamily:'monospace'}}>{users.find(u=>u.id===resetId)?.email}</div>

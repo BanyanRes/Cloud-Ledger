@@ -46,6 +46,12 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE,
     name TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now'))
   );
+  CREATE TABLE IF NOT EXISTS user_entity_access (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, entity_id)
+  );
   CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
     code TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
@@ -404,6 +410,28 @@ function auth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'No token' });
   try { req.user = jwt.verify(token, JWT_SECRET); next(); } catch { return res.status(401).json({ error: 'Invalid token' }); }
 }
+// Entity access control: Admin bypasses; otherwise user must have either no allowlist (full access) or a matching row.
+function userHasEntityAccess(userId, userRole, entityId) {
+  if (userRole === 'Admin') return true;
+  const allow = db.prepare('SELECT entity_id FROM user_entity_access WHERE user_id = ?').all(userId);
+  if (allow.length === 0) return true; // empty allowlist = all entities
+  return allow.some(r => r.entity_id === parseInt(entityId));
+}
+function listAccessibleEntityIds(userId, userRole) {
+  if (userRole === 'Admin') return null; // null = all
+  const allow = db.prepare('SELECT entity_id FROM user_entity_access WHERE user_id = ?').all(userId);
+  if (allow.length === 0) return null; // empty = all
+  return allow.map(r => r.entity_id);
+}
+function requireEntityAccess(paramName) {
+  return (req, res, next) => {
+    const eid = parseInt(req.params[paramName || 'eid']);
+    if (!eid) return res.status(400).json({ error: 'Invalid entity id' });
+    if (!userHasEntityAccess(req.user.id, req.user.role, eid)) return res.status(403).json({ error: 'No access to this entity' });
+    next();
+  };
+}
+
 function requireRole(...roles) { return (req, res, next) => { if (!roles.includes(req.user.role) && req.user.role !== 'Admin') return res.status(403).json({ error: 'Forbidden' }); next(); }; }
 
 // ═══ Auth ═══
@@ -465,8 +493,36 @@ app.get('/api/users', auth, requireRole('Admin'), (req, res) => res.json(db.prep
 app.delete('/api/users/:id', auth, requireRole('Admin'), (req, res) => { if (+req.params.id === req.user.id) return res.status(400).json({ error: 'Cannot delete self' }); db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id); res.json({ success: true }); });
 app.put('/api/users/:id', auth, requireRole('Admin'), (req, res) => { db.prepare('UPDATE users SET name = ?, role = ? WHERE id = ?').run(req.body.name, req.body.role, req.params.id); res.json({ success: true }); });
 
+// Entity access management (Admin only)
+app.get('/api/users/:id/entity-access', auth, requireRole('Admin'), (req, res) => {
+  const rows = db.prepare('SELECT entity_id FROM user_entity_access WHERE user_id = ? ORDER BY entity_id').all(req.params.id);
+  res.json({ user_id: parseInt(req.params.id), entity_ids: rows.map(r => r.entity_id) });
+});
+app.put('/api/users/:id/entity-access', auth, requireRole('Admin'), (req, res) => {
+  const userId = parseInt(req.params.id);
+  const targetUser = db.prepare('SELECT id, role FROM users WHERE id = ?').get(userId);
+  if (!targetUser) return res.status(404).json({ error: 'User not found' });
+  if (targetUser.role === 'Admin') return res.status(400).json({ error: 'Admins always have all-entity access; cannot restrict' });
+  const ids = Array.isArray(req.body.entity_ids) ? req.body.entity_ids.map(n => parseInt(n)).filter(n => Number.isInteger(n)) : [];
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM user_entity_access WHERE user_id = ?').run(userId);
+    const ins = db.prepare('INSERT INTO user_entity_access (user_id, entity_id) VALUES (?, ?)');
+    for (const eid of ids) ins.run(userId, eid);
+  });
+  tx();
+  res.json({ user_id: userId, entity_ids: ids });
+});
+
+
+
 // ═══ Entities ═══
-app.get('/api/entities', auth, (req, res) => res.json(db.prepare('SELECT * FROM entities ORDER BY code').all()));
+app.get('/api/entities', auth, (req, res) => {
+  const ids = listAccessibleEntityIds(req.user.id, req.user.role);
+  if (ids === null) return res.json(db.prepare('SELECT * FROM entities ORDER BY code').all());
+  if (ids.length === 0) return res.json([]);
+  const placeholders = ids.map(() => '?').join(',');
+  res.json(db.prepare('SELECT * FROM entities WHERE id IN (' + placeholders + ') ORDER BY code').all(...ids));
+});
 app.post('/api/entities', auth, requireRole('Admin','Accountant'), (req, res) => {
   const { name } = req.body; if (!name) return res.status(400).json({ error: 'Name required' });
   // Auto-generate a code from the name (used internally for sorting/uniqueness)
@@ -490,7 +546,7 @@ app.delete('/api/entities/:id', auth, requireRole('Admin'), (req, res) => { db.p
 
 // Import trial balance: replaces COA and posts a beginning-balance JE
 // Account type derived from code: <=19999 Asset, <=29999 Liability, <=39999 Equity, <=49999 Revenue, 50000-69999 Expense, >=70000 Revenue
-app.post('/api/entities/:eid/import-tb', auth, requireRole('Admin','Accountant'), memUpload.single('file'), (req, res) => {
+app.post('/api/entities/:eid/import-tb', auth, requireEntityAccess(), requireRole('Admin','Accountant'), memUpload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const eid = +req.params.eid;
   const asOfDate = req.body.as_of_date || '2024-12-31';
@@ -642,20 +698,20 @@ app.post('/api/entities/:eid/import-tb', auth, requireRole('Admin','Accountant')
 });
 
 // ═══ Accounts ═══
-app.get('/api/entities/:eid/accounts', auth, (req, res) => res.json(db.prepare('SELECT * FROM accounts WHERE entity_id = ? ORDER BY code').all(req.params.eid)));
-app.post('/api/entities/:eid/accounts', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.get('/api/entities/:eid/accounts', auth, requireEntityAccess(), (req, res) => res.json(db.prepare('SELECT * FROM accounts WHERE entity_id = ? ORDER BY code').all(req.params.eid)));
+app.post('/api/entities/:eid/accounts', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { code, name, type, subtype, bank_acct } = req.body; if (!code||!name||!type) return res.status(400).json({ error: 'Required' });
   try { const r = db.prepare('INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct) VALUES (?, ?, ?, ?, ?, ?)').run(req.params.eid, code, name, type, subtype||'', bank_acct?1:0);
     res.json({ id: r.lastInsertRowid, code, name, type, subtype: subtype||'', bank_acct: bank_acct?1:0, entity_id: +req.params.eid }); }
   catch(e) { if (e.message.includes('UNIQUE')) return res.status(400).json({ error: 'Code exists' }); throw e; }
 });
-app.delete('/api/entities/:eid/accounts/:code', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.delete('/api/entities/:eid/accounts/:code', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   if (db.prepare('SELECT COUNT(*) as c FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id WHERE je.entity_id=? AND jl.account_code=?').get(req.params.eid, req.params.code).c > 0)
     return res.status(400).json({ error: 'Has transactions' });
   db.prepare('DELETE FROM accounts WHERE entity_id=? AND code=?').run(req.params.eid, req.params.code); res.json({ success: true });
 });
 
-app.put('/api/entities/:eid/accounts/:code', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.put('/api/entities/:eid/accounts/:code', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { new_code, name, type, subtype, bank_acct } = req.body;
   const oldCode = req.params.code;
   const eid = req.params.eid;
@@ -685,7 +741,7 @@ app.put('/api/entities/:eid/accounts/:code', auth, requireRole('Admin','Accounta
 });
 
 // ═══ Journal Entries ═══
-app.get('/api/entities/:eid/entries', auth, (req, res) => {
+app.get('/api/entities/:eid/entries', auth, requireEntityAccess(), (req, res) => {
   const { from, to } = req.query; let sql = 'SELECT * FROM journal_entries WHERE entity_id = ?'; const params = [req.params.eid];
   if (from) { sql += ' AND date >= ?'; params.push(from); } if (to) { sql += ' AND date <= ?'; params.push(to); }
   sql += ' ORDER BY entry_num ASC';
@@ -695,7 +751,7 @@ app.get('/api/entities/:eid/entries', auth, (req, res) => {
   res.json(entries.map(e => ({ ...e, lines: lineStmt.all(e.id), attachments: attachStmt.all(e.id) })));
 });
 
-app.post('/api/entities/:eid/entries', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { date, memo, lines } = req.body; if (!date||!memo||!lines||lines.length<2) return res.status(400).json({ error: 'Invalid' });
   const tDr = lines.reduce((s,l) => s+(l.debit||0), 0); const tCr = lines.reduce((s,l) => s+(l.credit||0), 0);
   if (Math.abs(tDr-tCr) > 0.005) return res.status(400).json({ error: 'Must balance' });
@@ -708,14 +764,14 @@ app.post('/api/entities/:eid/entries', auth, requireRole('Admin','Accountant'), 
   res.json({ id: result, entry_num: num });
 });
 
-app.delete('/api/entities/:eid/entries/:id', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.delete('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const atts = db.prepare('SELECT filename FROM journal_attachments WHERE entry_id=?').all(req.params.id);
   atts.forEach(a => { try { fs.unlinkSync(path.join(UPLOAD_DIR, a.filename)); } catch {} });
   db.prepare('DELETE FROM journal_entries WHERE id=? AND entity_id=?').run(req.params.id, req.params.eid);
   res.json({ success: true });
 });
 
-app.put('/api/entities/:eid/entries/:id', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.put('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { date, memo, lines } = req.body;
   if (!date || !memo || !lines || lines.length < 2) return res.status(400).json({ error: 'Invalid entry' });
   const tDr = lines.reduce((s, l) => s + (l.debit || 0), 0);
@@ -733,7 +789,7 @@ app.put('/api/entities/:eid/entries/:id', auth, requireRole('Admin','Accountant'
 });
 
 // ═══ Journal Attachments ═══
-app.post('/api/entities/:eid/entries/:id/attachments', auth, requireRole('Admin','Accountant'), upload.array('files', 10), (req, res) => {
+app.post('/api/entities/:eid/entries/:id/attachments', auth, requireEntityAccess(), requireRole('Admin','Accountant'), upload.array('files', 10), (req, res) => {
   if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files' });
   const ins = db.prepare('INSERT INTO journal_attachments (entry_id, filename, original_name, mime_type, size) VALUES (?,?,?,?,?)');
   const results = [];
@@ -771,7 +827,7 @@ app.delete('/api/attachments/:id', auth, requireRole('Admin','Accountant'), (req
 });
 
 // ═══ Bank Transaction Upload & Coding ═══
-app.get('/api/entities/:eid/bank-transactions', auth, (req, res) => {
+app.get('/api/entities/:eid/bank-transactions', auth, requireEntityAccess(), (req, res) => {
   const { bank_account, status } = req.query;
   let sql = 'SELECT * FROM bank_transactions WHERE entity_id = ?'; const params = [req.params.eid];
   if (bank_account) { sql += ' AND bank_account_code = ?'; params.push(bank_account); }
@@ -784,7 +840,7 @@ app.get('/api/entities/:eid/bank-transactions', auth, (req, res) => {
   res.json(txns.map(t => ({ ...t, splits: splitMap[t.id] || [] })));
 });
 
-app.post('/api/entities/:eid/bank-transactions/upload', auth, requireRole('Admin','Accountant'), memUpload.single('file'), async (req, res) => {
+app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAccess(), requireRole('Admin','Accountant'), memUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file' });
   const bankAccount = req.body.bank_account;
   if (!bankAccount) return res.status(400).json({ error: 'Bank account required' });
@@ -966,7 +1022,7 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireRole('Admin
   }
 });
 
-app.put('/api/entities/:eid/bank-transactions/:id', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.put('/api/entities/:eid/bank-transactions/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { account_code, memo } = req.body;
   // Setting a single account_code clears any existing splits
   db.transaction(() => {
@@ -979,7 +1035,7 @@ app.put('/api/entities/:eid/bank-transactions/:id', auth, requireRole('Admin','A
 
 // Set multiple splits for a single bank transaction.
 // Splits: [{ account_code, amount, memo }]. Amounts are positive numbers, must sum to abs(txn.amount).
-app.put('/api/entities/:eid/bank-transactions/:id/splits', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.put('/api/entities/:eid/bank-transactions/:id/splits', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { splits } = req.body;
   const txn = db.prepare('SELECT * FROM bank_transactions WHERE id=? AND entity_id=?').get(req.params.id, req.params.eid);
   if (!txn) return res.status(404).json({ error: 'Transaction not found' });
@@ -1003,7 +1059,7 @@ app.put('/api/entities/:eid/bank-transactions/:id/splits', auth, requireRole('Ad
   res.json({ success: true });
 });
 
-app.post('/api/entities/:eid/bank-transactions/post', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.post('/api/entities/:eid/bank-transactions/post', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { transaction_ids } = req.body;
   if (!transaction_ids || transaction_ids.length === 0) return res.status(400).json({ error: 'No transactions' });
 
@@ -1045,18 +1101,18 @@ app.post('/api/entities/:eid/bank-transactions/post', auth, requireRole('Admin',
   res.json({ posted: results.length, results });
 });
 
-app.delete('/api/entities/:eid/bank-transactions/:id', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.delete('/api/entities/:eid/bank-transactions/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   db.prepare('DELETE FROM bank_transactions WHERE id=? AND entity_id=? AND status != ?').run(req.params.id, req.params.eid, 'posted');
   res.json({ success: true });
 });
 
-app.delete('/api/entities/:eid/bank-transactions/batch/:batchId', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.delete('/api/entities/:eid/bank-transactions/batch/:batchId', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const r = db.prepare('DELETE FROM bank_transactions WHERE entity_id=? AND batch_id=? AND status != ?').run(req.params.eid, req.params.batchId, 'posted');
   res.json({ deleted: r.changes });
 });
 
 // ═══ Balances (with soft close) ═══
-app.get('/api/entities/:eid/balances', auth, (req, res) => {
+app.get('/api/entities/:eid/balances', auth, requireEntityAccess(), (req, res) => {
   const { as_of, from, to, close_pl_before } = req.query;
   let dateFilter = ''; const params = [req.params.eid];
   if (as_of) { dateFilter = ' AND je.date <= ?'; params.push(as_of); }
@@ -1118,7 +1174,7 @@ const normFolderPath = p => {
   return parts.join('/');
 };
 
-app.get('/api/entities/:eid/files', auth, (req, res) => {
+app.get('/api/entities/:eid/files', auth, requireEntityAccess(), (req, res) => {
   const files = db.prepare('SELECT id, folder_path, original_name, size, mime_type, uploaded_by, created_at FROM entity_files WHERE entity_id=? ORDER BY folder_path, original_name').all(req.params.eid);
   const folders = db.prepare('SELECT folder_path, created_by, created_at FROM entity_folders WHERE entity_id=? ORDER BY folder_path').all(req.params.eid);
   // Collect every distinct folder path from both tables plus all ancestor paths
@@ -1140,7 +1196,7 @@ const workpaperUploadMw = (req, res, next) => {
   });
 };
 
-app.post('/api/entities/:eid/files', auth, requireRole('Admin','Accountant'), workpaperUploadMw, (req, res) => {
+app.post('/api/entities/:eid/files', auth, requireEntityAccess(), requireRole('Admin','Accountant'), workpaperUploadMw, (req, res) => {
   if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files received by server. Check that the browser attached files to the "files" field.' });
   const folder = normFolderPath(req.body.folder_path);
   const ins = db.prepare('INSERT INTO entity_files (entity_id, folder_path, stored_filename, original_name, size, mime_type, uploaded_by) VALUES (?,?,?,?,?,?,?)');
@@ -1201,7 +1257,7 @@ app.put('/api/entity-files/:id', auth, requireRole('Admin','Accountant'), (req, 
   });
 });
 
-app.post('/api/entities/:eid/folders', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.post('/api/entities/:eid/folders', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const folder = normFolderPath(req.body.folder_path);
   if (!folder) return res.status(400).json({ error: 'Folder path required' });
   try {
@@ -1213,7 +1269,7 @@ app.post('/api/entities/:eid/folders', auth, requireRole('Admin','Accountant'), 
   }
 });
 
-app.delete('/api/entities/:eid/folders', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.delete('/api/entities/:eid/folders', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const folder = normFolderPath(req.query.folder_path);
   if (!folder) return res.status(400).json({ error: 'Folder path required' });
   // Safety: only allow deleting a folder when it has no files or subfolders underneath it
@@ -1233,7 +1289,7 @@ app.put('/api/entity-files/:id/move', auth, requireRole('Admin','Accountant'), (
 });
 
 // Rename a folder — updates every file under it, every nested folder row, and the folder row itself.
-app.put('/api/entities/:eid/folders/rename', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.put('/api/entities/:eid/folders/rename', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const oldPath = normFolderPath(req.body.old_path);
   const newPath = normFolderPath(req.body.new_path);
   if (!oldPath || !newPath) return res.status(400).json({ error: 'Both old_path and new_path are required' });
@@ -1272,11 +1328,11 @@ app.put('/api/entities/:eid/folders/rename', auth, requireRole('Admin','Accounta
 });
 
 // ═══ Bank Rec ═══
-app.get('/api/entities/:eid/reconciliations', auth, (req, res) => res.json(db.prepare('SELECT * FROM reconciliations WHERE entity_id=? ORDER BY completed_at DESC').all(req.params.eid)));
-app.get('/api/entities/:eid/cleared/:accountCode', auth, (req, res) => {
+app.get('/api/entities/:eid/reconciliations', auth, requireEntityAccess(), (req, res) => res.json(db.prepare('SELECT * FROM reconciliations WHERE entity_id=? ORDER BY completed_at DESC').all(req.params.eid)));
+app.get('/api/entities/:eid/cleared/:accountCode', auth, requireEntityAccess(), (req, res) => {
   const m={}; db.prepare('SELECT entry_id, line_index FROM cleared_items WHERE entity_id=? AND account_code=?').all(req.params.eid, req.params.accountCode).forEach(c=>{m[c.entry_id+'-'+c.line_index]=true;}); res.json(m);
 });
-app.post('/api/entities/:eid/reconciliations', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.post('/api/entities/:eid/reconciliations', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { account_code, statement_date, statement_balance, book_balance, cleared_keys } = req.body;
   if (!account_code||!statement_date||statement_balance==null) return res.status(400).json({ error: 'Missing fields' });
   const result = db.transaction(() => {
@@ -1296,7 +1352,7 @@ app.get('/api/summary', auth, (req, res) => {
 });
 
 // === Bill.com integration routes ===
-app.get('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.get('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
   const row = db.prepare('SELECT entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, default_cash_account, last_tested_at, last_test_status, last_test_message, updated_by, updated_at FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
   if (!row) return res.json({ configured: false });
   let pwLast4 = '', keyLast4 = '';
@@ -1321,7 +1377,7 @@ app.get('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'
   });
 });
 
-app.put('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.put('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
   const { environment, username, password, org_id, dev_key, default_ap_account, default_cash_account } = req.body || {};
   if (!environment || !username || !org_id) return res.status(400).json({ error: 'environment, username, org_id required' });
   if (!['sandbox','production'].includes(environment)) return res.status(400).json({ error: 'environment must be sandbox or production' });
@@ -1345,12 +1401,12 @@ app.put('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'
   res.json({ success: true });
 });
 
-app.delete('/api/billcom/config/:entity_id', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.delete('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
   db.prepare('DELETE FROM billcom_config WHERE entity_id = ?').run(req.params.entity_id);
   res.json({ success: true });
 });
 
-app.post('/api/billcom/config/:entity_id/test', auth, requireRole('Admin','Accountant'), async (req, res) => {
+app.post('/api/billcom/config/:entity_id/test', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), async (req, res) => {
   const row = db.prepare('SELECT environment, api_base_url, username, password_enc, org_id, dev_key_enc FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
   if (!row) return res.status(404).json({ error: 'No config found for this entity' });
   let password, devKey;
@@ -1378,7 +1434,7 @@ app.post('/api/billcom/config/:entity_id/test', auth, requireRole('Admin','Accou
 
 // ── Bill.com Phase 2: Chart of Accounts + Mappings ──
 
-app.get('/api/billcom/accounts/:entity_id', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
+app.get('/api/billcom/accounts/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const row = db.prepare('SELECT environment, api_base_url, username, password_enc, org_id, dev_key_enc FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
   if (!row) return res.status(404).json({ error: 'No Bill.com config for this entity. Save credentials first.' });
   let password, devKey;
@@ -1406,12 +1462,12 @@ app.get('/api/billcom/accounts/:entity_id', auth, requireRole('Admin', 'Accounta
   }
 });
 
-app.get('/api/billcom/mappings/:entity_id', auth, requireRole('Admin', 'Accountant'), (req, res) => {
+app.get('/api/billcom/mappings/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   const rows = db.prepare('SELECT id, billcom_account_id, billcom_account_name, cl_account_code, created_at FROM billcom_account_map WHERE entity_id = ? ORDER BY id').all(req.params.entity_id);
   res.json({ mappings: rows });
 });
 
-app.put('/api/billcom/mappings/:entity_id', auth, requireRole('Admin', 'Accountant'), (req, res) => {
+app.put('/api/billcom/mappings/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
   const mappings = Array.isArray(req.body && req.body.mappings) ? req.body.mappings : null;
@@ -1439,7 +1495,7 @@ app.put('/api/billcom/mappings/:entity_id', auth, requireRole('Admin', 'Accounta
 });
 
 // Phase 5: Push CloudLedger COA to Bill.com and auto-create mappings.
-app.post('/api/billcom/push-coa/:entity_id', auth, requireRole('Admin'), async (req, res) => {
+app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
   const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
@@ -1537,7 +1593,7 @@ app.post('/api/billcom/push-coa/:entity_id', auth, requireRole('Admin'), async (
 });
 
 // Phase 3: Bill.com sync (bills + payments -> JEs)
-app.get('/api/billcom/sync-log/:entity_id', auth, requireRole('Admin', 'Accountant'), (req, res) => {
+app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   const limit = Math.min(parseInt(req.query.limit) || 50, 500);
   const rows = db.prepare(
@@ -1546,7 +1602,7 @@ app.get('/api/billcom/sync-log/:entity_id', auth, requireRole('Admin', 'Accounta
   res.json({ logs: rows });
 });
 
-app.post('/api/billcom/sync/:entity_id', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
+app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
 

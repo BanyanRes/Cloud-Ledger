@@ -31,6 +31,8 @@ export const api = {
   getUsers: () => request('/users'),
   deleteUser: (id) => request('/users/' + id, { method: 'DELETE' }),
   updateUser: (id, data) => request('/users/' + id, { method: 'PUT', body: data }),
+  getUserEntityAccess: (id) => request('/users/' + id + '/entity-access'),
+  setUserEntityAccess: (id, entity_ids) => request('/users/' + id + '/entity-access', { method: 'PUT', body: { entity_ids } }),
 
   // Entities
   getEntities: () => request('/entities'),
