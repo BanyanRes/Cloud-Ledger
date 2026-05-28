@@ -1344,7 +1344,15 @@ app.post('/api/entities/:eid/reconciliations', auth, requireEntityAccess(), requ
 
 // ═══ Summary ═══
 app.get('/api/summary', auth, (req, res) => {
-  res.json(db.prepare('SELECT * FROM entities ORDER BY code').all().map(e => {
+  const ids = listAccessibleEntityIds(req.user.id, req.user.role);
+  let entities;
+  if (ids === null) entities = db.prepare('SELECT * FROM entities ORDER BY code').all();
+  else if (ids.length === 0) entities = [];
+  else {
+    const placeholders = ids.map(() => '?').join(',');
+    entities = db.prepare('SELECT * FROM entities WHERE id IN (' + placeholders + ') ORDER BY code').all(...ids);
+  }
+  res.json(entities.map(e => {
     const rows = db.prepare(`SELECT a.type, SUM(jl.debit) as td, SUM(jl.credit) as tc FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=? GROUP BY a.type`).all(e.id);
     const bt={}; rows.forEach(r=>{const isDr=r.type==='Asset'||r.type==='Expense'; bt[r.type]=isDr?(r.td-r.tc):(r.tc-r.td);});
     return { ...e, assets:bt.Asset||0, liabilities:bt.Liability||0, revenue:bt.Revenue||0, expenses:bt.Expense||0, net_income:(bt.Revenue||0)-(bt.Expense||0), entry_count: db.prepare('SELECT COUNT(*) as c FROM journal_entries WHERE entity_id=?').get(e.id).c };
