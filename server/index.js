@@ -964,7 +964,7 @@ app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole(
   const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id=?').get(req.params.eid).m||0)+1;
   const result = db.transaction(() => {
     const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)').run(req.params.eid, num, date, memo, req.user.name);
-    for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit) VALUES (?,?,?,?)').run(r.lastInsertRowid, l.account_code, l.debit||0, l.credit||0);
+    for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, project_id) VALUES (?,?,?,?,?)').run(r.lastInsertRowid, l.account_code, l.debit||0, l.credit||0, l.project_id||null);
     return r.lastInsertRowid;
   })();
   res.json({ id: result, entry_num: num });
@@ -989,7 +989,7 @@ app.put('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requireRo
     db.prepare("UPDATE journal_entries SET date=?, memo=?, updated_by=?, updated_at=datetime('now') WHERE id=?")
       .run(date, memo, req.user.name || req.user.email, req.params.id);
     db.prepare('DELETE FROM journal_lines WHERE entry_id=?').run(req.params.id);
-    for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit) VALUES (?,?,?,?)').run(req.params.id, l.account_code, l.debit || 0, l.credit || 0);
+    for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, project_id) VALUES (?,?,?,?,?)').run(req.params.id, l.account_code, l.debit || 0, l.credit || 0, l.project_id || null);
   })();
   res.json({ success: true, entry_num: entry.entry_num });
 });
@@ -1618,6 +1618,16 @@ app.get('/api/turnkey/wip-schedule', turnkeyAuth, turnkey.requireScope('turnkey:
     res.json(schedule);
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// List linked Turnkey projects (for the manual journal-entry project tagger).
+app.get('/api/admin/turnkey/projects', auth, requireRole('Admin','Accountant'), (req, res) => {
+  try {
+    const rows = db.prepare('SELECT turnkey_project_id, project_code, project_name FROM turnkey_project_map ORDER BY project_code').all();
+    res.json(rows);
+  } catch (e) {
+    res.json([]); // table may not exist if integration unconfigured
   }
 });
 

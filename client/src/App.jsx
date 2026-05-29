@@ -248,7 +248,9 @@ function QuickAddAccountModal({entityId,onClose,onCreated}){const[form,setForm]=
 // ─── JE Modal — form state received from App (persists across open/close) ───
 function JournalEntryModal({entityId,user,onClose,onPosted,form,setForm,pendingFiles,setPendingFiles}){
   const[accounts,setAccounts]=useState([]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[posting,setPosting]=useState(false);const[posted,setPosted]=useState('');
-  useEffect(()=>{api.getAccounts(entityId).then(setAccounts);},[entityId]);
+  const[projects,setProjects]=useState([]);
+  useEffect(()=>{api.getAccounts(entityId).then(setAccounts);api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));},[entityId]);
+  const showProject=projects.length>0;
   const addLine=()=>setForm(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:''}]}));
   const removeLine=i=>setForm(f=>({...f,lines:f.lines.filter((_,j)=>j!==i)}));
   const updateLine=(i,k,v)=>setForm(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,[k]:v}:l)}));
@@ -256,7 +258,7 @@ function JournalEntryModal({entityId,user,onClose,onPosted,form,setForm,pendingF
   const discard=()=>{setForm(BLANK_JE());setPendingFiles([]);};
   const onFilesSelected=e=>{const files=Array.from(e.target.files);if(files.length>0)setPendingFiles(p=>[...p,...files]);e.target.value='';};
   const post=async()=>{if(!form.date||!form.memo.trim()){setErr('Date and memo required');return;}if(form.lines.some(l=>!l.account_code)){setErr('All lines need an account');return;}if(!bal){setErr('Entry must balance');return;}
-    setPosting(true);setErr('');try{const r=await api.createEntry(entityId,{date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit)}))});
+    setPosting(true);setErr('');try{const r=await api.createEntry(entityId,{date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),project_id:l.project_id||null}))});
       let msg='JE-'+String(r.entry_num).padStart(4,'0')+' posted';
       if(pendingFiles.length>0){try{const u=await api.uploadAttachments(entityId,r.id,pendingFiles);msg+=' with '+u.length+' attachment(s)';}catch(ue){msg+=' (attachments failed: '+ue.message+')';}}
       setForm(BLANK_JE());setPendingFiles([]);setPosted(msg+'!');setTimeout(()=>setPosted(''),5000);if(onPosted)onPosted();}
@@ -274,14 +276,15 @@ function JournalEntryModal({entityId,user,onClose,onPosted,form,setForm,pendingF
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo / Description</label><input style={S.input} placeholder="What is this entry for?" value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
-    <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
+    <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th>{showProject&&<th style={{...S.th,width:170}}>Project</th>}<th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select account...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></td>
+        {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>updateLine(i,'project_id',e.target.value)}><option value="">— none —</option>{projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'debit',f);}} onBlur={e=>updateLine(i,'debit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.credit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'credit',f);}} onBlur={e=>updateLine(i,'credit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px',borderBottom:'1px solid '+T.borderLight,textAlign:'center'}}>{form.lines.length>2&&<button style={S.btnGhost} onClick={()=>removeLine(i)}>&times;</button>}</td></tr>)}
-      <tr style={{background:T.bgElevated}}><td style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
+      <tr style={{background:T.bgElevated}}><td colSpan={showProject?2:1} style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
     <div style={{border:'1px solid '+(pendingFiles.length>0?T.teal+'40':T.border),borderRadius:T.radiusSm,padding:16,marginBottom:16,background:pendingFiles.length>0?T.tealDim:'#fff'}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:pendingFiles.length>0?12:0}}>
         <span style={{fontSize:12,fontWeight:600,color:pendingFiles.length>0?T.teal:T.textMuted}}>{pendingFiles.length>0?pendingFiles.length+' file(s) attached':'No attachments'}</span>
@@ -1361,7 +1364,8 @@ function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSum
 // ═══ Edit JE Modal ═══
 function EditJEModal({entityId,entry,accounts:initAccounts,onClose,onSaved}){
   const[accounts,setAccounts]=useState(initAccounts||[]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[saving,setSaving]=useState(false);
-  const[form,setForm]=useState({date:entry.date,memo:entry.memo,lines:entry.lines.map(l=>({account_code:l.account_code,debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
+  const[projects,setProjects]=useState([]);useEffect(()=>{api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));},[entityId]);const showProject=projects.length>0;
+  const[form,setForm]=useState({date:entry.date,memo:entry.memo,lines:entry.lines.map(l=>({account_code:l.account_code,project_id:l.project_id||'',debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
   const[attachments,setAttachments]=useState(entry.attachments||[]);
   const[attUploading,setAttUploading]=useState(false);
   const attInputRef=useRef(null);
@@ -1371,7 +1375,7 @@ function EditJEModal({entityId,entry,accounts:initAccounts,onClose,onSaved}){
   const updateLine=(i,k,v)=>setForm(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,[k]:v}:l)}));
   const tDr=form.lines.reduce((s,l)=>s+parseAmt(l.debit),0);const tCr=form.lines.reduce((s,l)=>s+parseAmt(l.credit),0);const bal=Math.abs(tDr-tCr)<0.005&&tDr>0;
   const save=async()=>{if(!form.date||!form.memo.trim()){setErr('Date and memo required');return;}if(form.lines.some(l=>!l.account_code)){setErr('All lines need an account');return;}if(!bal){setErr('Must balance');return;}
-    setSaving(true);setErr('');try{await api.updateEntry(entityId,entry.id,{date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit)}))});
+    setSaving(true);setErr('');try{await api.updateEntry(entityId,entry.id,{date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),project_id:l.project_id||null}))});
       onSaved();onClose();}catch(e){setErr(e.message);}finally{setSaving(false);}};
   const uploadAtt=async e=>{const fl=e.target.files;if(!fl||fl.length===0)return;setErr('');setAttUploading(true);
     try{const r=await api.uploadAttachments(entityId,entry.id,fl);setAttachments(p=>[...p,...(r.attachments||r.files||r||[])]);}
@@ -1391,14 +1395,15 @@ function EditJEModal({entityId,entry,accounts:initAccounts,onClose,onSaved}){
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo</label><input style={S.input} value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
-    <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
+    <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th>{showProject&&<th style={{...S.th,width:170}}>Project</th>}<th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></td>
+        {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>updateLine(i,'project_id',e.target.value)}><option value="">— none —</option>{projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'debit',f);}} onBlur={e=>updateLine(i,'debit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} value={l.credit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'credit',f);}} onBlur={e=>updateLine(i,'credit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px',borderBottom:'1px solid '+T.borderLight,textAlign:'center'}}>{form.lines.length>2&&<button style={S.btnGhost} onClick={()=>removeLine(i)}>&times;</button>}</td></tr>)}
-      <tr style={{background:T.bgElevated}}><td style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
+      <tr style={{background:T.bgElevated}}><td colSpan={showProject?2:1} style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
     {/* Attachments */}
     <div style={{marginBottom:16}}>
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
