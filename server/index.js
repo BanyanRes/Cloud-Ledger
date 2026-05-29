@@ -17,6 +17,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret';
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'cloudledger.db');
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const RESET_FROM_EMAIL = process.env.RESET_FROM_EMAIL || 'CloudLedger <onboarding@resend.dev>';
+const APP_URL = process.env.APP_URL || '';
 const UPLOAD_DIR = path.resolve(path.dirname(DB_PATH), 'attachments');
 const WORKPAPERS_DIR = path.resolve(path.dirname(DB_PATH), 'entity_files');
 
@@ -47,6 +50,15 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE,
     name TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now'))
   );
+  CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_prt_token_hash ON password_reset_tokens(token_hash);
   CREATE TABLE IF NOT EXISTS user_entity_access (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
@@ -584,12 +596,70 @@ app.post('/api/auth/change-password', auth, (req, res) => {
   db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(new_password, 10), req.user.id);
   res.json({ success: true });
 });
-app.post('/api/auth/forgot-password', (req, res) => {
-  const user = db.prepare('SELECT id FROM users WHERE email = ?').get(req.body.email?.toLowerCase());
-  if (!user) return res.status(404).json({ error: 'No account with that email' });
-  const temp = 'Reset' + Math.random().toString(36).slice(2, 8);
-  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(temp, 10), user.id);
-  res.json({ temp_password: temp });
+// Send a password-reset email via Resend's HTTP API (no extra dependency).
+async function sendResetEmail(toEmail, resetUrl) {
+  if (!RESEND_API_KEY) {
+    console.warn('[reset] RESEND_API_KEY not set — cannot send email. Reset URL was: ' + resetUrl);
+    return { ok: false, skipped: true };
+  }
+  try {
+    const r = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: RESET_FROM_EMAIL,
+        to: [toEmail],
+        subject: 'Reset your CloudLedger password',
+        html: '<div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px">'
+          + '<h2 style="color:#1d4ed8;margin:0 0 16px">Reset your CloudLedger password</h2>'
+          + '<p style="color:#334155;font-size:14px;line-height:1.5">We received a request to reset your password. Click the button below to choose a new one. This link expires in 1 hour.</p>'
+          + '<p style="margin:24px 0"><a href="' + resetUrl + '" style="background:#2563eb;color:#fff;text-decoration:none;padding:11px 22px;border-radius:6px;font-size:14px;font-weight:600;display:inline-block">Reset password</a></p>'
+          + '<p style="color:#64748b;font-size:12px;line-height:1.5">If the button does not work, copy and paste this link:<br>' + resetUrl + '</p>'
+          + '<p style="color:#94a3b8;font-size:12px;margin-top:24px">Did not request this? You can safely ignore this email; your password will not change.</p>'
+          + '</div>',
+      }),
+    });
+    if (!r.ok) { const t = await r.text(); console.error('[reset] Resend error ' + r.status + ': ' + t); return { ok: false, status: r.status, body: t }; }
+    return { ok: true };
+  } catch (e) {
+    console.error('[reset] send failed: ' + e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// Request a password reset. Always returns a neutral response (never reveals
+// whether an account exists). Generates a single-use token (1h expiry) and emails a link.
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const email = (req.body.email || '').toLowerCase().trim();
+  const neutral = { ok: true, message: 'If an account exists for that email, a reset link has been sent.' };
+  if (!email) return res.json(neutral);
+  const user = db.prepare('SELECT id, email FROM users WHERE email = ?').get(email);
+  if (!user) return res.json(neutral); // do not disclose non-existence
+  const rawToken = require('crypto').randomBytes(32).toString('hex');
+  const tokenHash = require('crypto').createHash('sha256').update(rawToken).digest('hex');
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+  // Invalidate any prior unused tokens for this user, then store the new one.
+  db.prepare('UPDATE password_reset_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL').run(new Date().toISOString(), user.id);
+  db.prepare('INSERT INTO password_reset_tokens (user_id, token_hash, expires_at) VALUES (?, ?, ?)').run(user.id, tokenHash, expiresAt);
+  const base = APP_URL || (req.protocol + '://' + req.get('host'));
+  const resetUrl = base.replace(/\/$/, '') + '/?reset_token=' + rawToken;
+  await sendResetEmail(user.email, resetUrl);
+  res.json(neutral);
+});
+
+// Complete a password reset using the emailed token. Validates token, sets new password, burns token.
+app.post('/api/auth/reset-password', (req, res) => {
+  const { token, new_password } = req.body || {};
+  if (!token || !new_password) return res.status(400).json({ error: 'Token and new password required' });
+  if (String(new_password).length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+  const tokenHash = require('crypto').createHash('sha256').update(String(token)).digest('hex');
+  const row = db.prepare('SELECT * FROM password_reset_tokens WHERE token_hash = ?').get(tokenHash);
+  if (!row) return res.status(400).json({ error: 'Invalid or expired reset link' });
+  if (row.used_at) return res.status(400).json({ error: 'This reset link has already been used' });
+  if (new Date(row.expires_at).getTime() < Date.now()) return res.status(400).json({ error: 'This reset link has expired' });
+  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(String(new_password), 10), row.user_id);
+  db.prepare('UPDATE password_reset_tokens SET used_at = ? WHERE id = ?').run(new Date().toISOString(), row.id);
+  res.json({ ok: true, message: 'Password updated. You can now sign in.' });
 });
 app.post('/api/auth/admin-reset-password', auth, requireRole('Admin'), (req, res) => {
   const { user_id, new_password } = req.body;

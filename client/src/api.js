@@ -25,6 +25,7 @@ export const api = {
   updateProfile: (name, email) => request('/auth/profile', { method: 'PUT', body: { name, email } }),
   changePassword: (cur, nw) => request('/auth/change-password', { method: 'POST', body: { current_password: cur, new_password: nw } }),
   forgotPassword: (email) => request('/auth/forgot-password', { method: 'POST', body: { email } }),
+  resetPassword: (token, new_password) => request('/auth/reset-password', { method: 'POST', body: { token, new_password } }),
   adminResetPassword: (uid, pw) => request('/auth/admin-reset-password', { method: 'POST', body: { user_id: uid, new_password: pw } }),
 
   // Users

@@ -171,7 +171,7 @@ function AuthScreen({onLogin}){const[mode,setMode]=useState('login');const[email
   const[err,setErr]=useState('');const[success,setSuccess]=useState('');const[loading,setLoading]=useState(false);const[tempPw,setTempPw]=useState('');
   const doLogin=async()=>{setLoading(true);setErr('');try{const d=await api.login(email.trim().toLowerCase(),pw);api.setToken(d.token);onLogin(d.user);}catch(e){setErr(e.message);}finally{setLoading(false);}};
   const doSignup=async()=>{if(!name.trim()){setErr('Name required');return;}if(pw.length<3){setErr('Min 3 chars');return;}if(pw!==confirmPw){setErr("Passwords don't match");return;}setLoading(true);setErr('');try{await api.signup(name.trim(),email.trim().toLowerCase(),pw,role);setSuccess('Account created!');setTimeout(()=>{setMode('login');setSuccess('');},1200);}catch(e){setErr(e.message);}finally{setLoading(false);}};
-  const doForgot=async()=>{if(!email.trim()){setErr('Enter email');return;}setLoading(true);setErr('');try{const r=await api.forgotPassword(email.trim().toLowerCase());setTempPw(r.temp_password);}catch(e){setErr(e.message);}finally{setLoading(false);}};
+  const doForgot=async()=>{if(!email.trim()){setErr('Enter email');return;}setLoading(true);setErr('');try{await api.forgotPassword(email.trim().toLowerCase());setSuccess('If an account exists for that email, a reset link has been sent. Check your inbox.');}catch(e){setErr(e.message);}finally{setLoading(false);}};
   const hk=e=>{if(e.key==='Enter'){mode==='login'?doLogin():mode==='signup'?doSignup():doForgot();}};
   return(<div style={{display:'flex',alignItems:'center',justifyContent:'center',minHeight:'100vh',background:'#f1f5f9'}}>
     <div style={{background:'#fff',border:'1px solid '+T.border,borderRadius:16,width:420,padding:44,textAlign:'center',boxShadow:T.shadowLg}}>
@@ -180,11 +180,12 @@ function AuthScreen({onLogin}){const[mode,setMode]=useState('login');const[email
       <div style={{fontSize:13,color:T.textMuted,marginBottom:32}}>Multi-Entity Cloud Accounting</div>
       {mode==='forgot'?(<>
         <div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:20}}>Reset Password</div>
-        <div style={{marginBottom:12}}><input style={S.input} placeholder="Email address" value={email} onChange={e=>{setEmail(e.target.value);setErr('');setTempPw('');}} onKeyDown={hk}/></div>
+        <div style={{marginBottom:12}}><input style={S.input} placeholder="Email address" value={email} onChange={e=>{setEmail(e.target.value);setErr('');setSuccess('');}} onKeyDown={hk}/></div>
+        <div style={{fontSize:12,color:T.textMuted,marginBottom:12,lineHeight:1.5}}>Enter your email and we will send you a link to reset your password.</div>
         {err&&<div style={S.err}>{err}</div>}
-        {tempPw&&<div style={{background:T.greenDim,border:'1px solid '+T.greenBorder,borderRadius:T.radiusSm,padding:20,margin:'12px 0'}}><div style={{fontSize:12,color:T.green}}>Temporary password:</div><div style={{fontSize:20,fontWeight:700,color:T.textBright,fontFamily:'monospace',letterSpacing:2}}>{tempPw}</div></div>}
+        {success&&<div style={{background:T.greenDim,border:'1px solid '+T.greenBorder,borderRadius:T.radiusSm,padding:16,margin:'12px 0',fontSize:13,color:T.green,lineHeight:1.5}}>{success}</div>}
         <button style={{...S.btnP,width:'100%',padding:11,marginTop:8}} onClick={doForgot} disabled={loading}>{loading?'...':'Reset Password'}</button>
-        <div style={{marginTop:20}}><button style={S.link} onClick={()=>{setMode('login');setErr('');setTempPw('');}}>Back to Sign In</button></div>
+        <div style={{marginTop:20}}><button style={S.link} onClick={()=>{setMode('login');setErr('');setSuccess('');}}>Back to Sign In</button></div>
       </>):(<>
         <div style={{display:'flex',marginBottom:24,borderRadius:T.radiusSm,overflow:'hidden',border:'1px solid '+T.border}}>
           <div onClick={()=>{setMode('login');setErr('');}} style={{flex:1,padding:'10px 0',cursor:'pointer',fontSize:13,fontWeight:600,textAlign:'center',background:mode==='login'?T.accentDim:'transparent',color:mode==='login'?T.accent:T.textMuted}}>Sign In</div>
@@ -316,6 +317,33 @@ function EntityPicker({entities,activeId,onSelect,onManage}){const[open,setOpen]
         <div style={{borderTop:'1px solid '+T.border,padding:12}}><button style={{...S.btnS,width:'100%'}} onClick={()=>{onManage();setOpen(false);}}>Manage Entities</button></div></div></>}</div>);}
 
 // ═══ Main App — JE form state lives here so it persists across modal open/close ═══
+function ResetPasswordScreen({token}){
+  const[pw,setPw]=useState('');const[confirm,setConfirm]=useState('');
+  const[err,setErr]=useState('');const[done,setDone]=useState(false);const[loading,setLoading]=useState(false);
+  const submit=async()=>{
+    if(pw.length<6){setErr('Password must be at least 6 characters');return;}
+    if(pw!==confirm){setErr("Passwords don't match");return;}
+    setLoading(true);setErr('');
+    try{await api.resetPassword(token,pw);setDone(true);setTimeout(()=>{window.location.href='/';},2000);}
+    catch(e){setErr(e.message);}finally{setLoading(false);}
+  };
+  const hk=e=>{if(e.key==='Enter')submit();};
+  return(<div style={{display:'flex',alignItems:'center',justifyContent:'center',minHeight:'100vh',background:'#f1f5f9'}}>
+    <div style={{background:'#fff',border:'1px solid '+T.border,borderRadius:16,width:420,padding:44,textAlign:'center',boxShadow:T.shadowLg}}>
+      <div style={{margin:'0 auto 16px',width:48}}><Logo size={48}/></div>
+      <div style={{fontSize:24,fontWeight:800,color:T.textBright,marginBottom:4}}>CloudLedger</div>
+      <div style={{fontSize:13,color:T.textMuted,marginBottom:32}}>Set a new password</div>
+      {done?(<div style={{background:T.greenDim,border:'1px solid '+T.greenBorder,borderRadius:T.radiusSm,padding:20,fontSize:14,color:T.green,lineHeight:1.5}}>Password updated. Redirecting to sign in…</div>):(<>
+        <div style={{marginBottom:12}}><input style={S.input} type="password" placeholder="New password" value={pw} onChange={e=>{setPw(e.target.value);setErr('');}} onKeyDown={hk}/></div>
+        <div style={{marginBottom:12}}><input style={S.input} type="password" placeholder="Confirm new password" value={confirm} onChange={e=>{setConfirm(e.target.value);setErr('');}} onKeyDown={hk}/></div>
+        {err&&<div style={S.err}>{err}</div>}
+        <button style={{...S.btnP,width:'100%',padding:11,marginTop:8}} onClick={submit} disabled={loading}>{loading?'...':'Update password'}</button>
+        <div style={{marginTop:20}}><button style={S.link} onClick={()=>{window.location.href='/';}}>Back to Sign In</button></div>
+      </>)}
+    </div>
+  </div>);
+}
+
 export default function App(){
   const[user,setUser]=useState(null);const[entities,setEntities]=useState([]);const[activeEntity,setActiveEntity]=useState(null);
   const[page,setPage]=useState('dashboard');const[loading,setLoading]=useState(true);
@@ -413,6 +441,8 @@ export default function App(){
   const refreshEntities=useCallback(async()=>{const e=await api.getEntities();setEntities(e);return e;},[]);
   const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec'],Viewer:['reports']}[user.role]||[]).includes(s);};
   if(loading)return<div style={{...S.app,display:'flex',alignItems:'center',justifyContent:'center'}}><div style={{color:T.textMuted}}>Loading...</div></div>;
+  const _resetToken=(()=>{try{return new URLSearchParams(window.location.search).get('reset_token');}catch{return null;}})();
+  if(_resetToken)return<ResetPasswordScreen token={_resetToken}/>;
   if(!user)return<AuthScreen onLogin={setUser}/>;
   const jeHasContent=jeForm.memo||jeForm.lines.some(l=>l.account_code||l.debit||l.credit)||jePendingFiles.length>0;
 
