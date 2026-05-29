@@ -1525,6 +1525,19 @@ app.get('/api/turnkey/wip-schedule', turnkeyAuth, turnkey.requireScope('turnkey:
   }
 });
 
+// Admin/UI WIP schedule (JWT auth) — same data as the API-key route, for the in-app report.
+app.get('/api/admin/turnkey/wip-schedule', auth, requireRole('Admin'), (req, res) => {
+  const asOf = (req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of))
+    ? req.query.as_of
+    : new Date().toISOString().slice(0, 10);
+  try {
+    const schedule = turnkey.computeWipSchedule(db, asOf);
+    res.json(schedule);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Export the WIP schedule as Excel (.xlsx). Uses the existing 'xlsx' lib.
 app.get('/api/turnkey/wip-schedule.xlsx', turnkeyAuth, turnkey.requireScope('turnkey:sync'), (req, res) => {
   const asOf = (req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of))

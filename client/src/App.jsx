@@ -149,7 +149,7 @@ const S = {
   statVal: { fontSize: 26, fontWeight: 700, fontVariantNumeric: 'tabular-nums', lineHeight: 1.2 },
   statLabel: { fontSize: 11, color: T.textMuted, marginTop: 6, fontWeight: 500 },
 };
-const NI = { dashboard:'\u25a3', journal:'\u270e', coa:'\u2630', ledger:'\u2261', banktxn:'\u21c5', bankrec:'\u2611', trial:'\u2696', bs:'\u25a6', is:'\u25a4', entities:'\u2302', users:'\u263a' };
+const NI = { dashboard:'\u25a3', journal:'\u270e', coa:'\u2630', ledger:'\u2261', banktxn:'\u21c5', bankrec:'\u2611', trial:'\u2696', bs:'\u25a6', is:'\u25a4', wip:'▧', entities:'\u2302', users:'\u263a' };
 
 // ─── Autocomplete ───
 function AccountAutocomplete({accounts,value,onChange,placeholder,exclude}){
@@ -402,6 +402,7 @@ export default function App(){
   const[bankTxns,setBankTxns]=useState([]);const[bankUploading,setBankUploading]=useState(false);
   // Report filter state lifted so they persist across page navigation
   const[tbAsOf,setTbAsOf]=useState(today());
+  const[wipAsOf,setWipAsOf]=useState(today());
   const[bsAsOf,setBsAsOf]=useState(today());
   const[isFrom,setIsFrom]=useState(fy_start());const[isTo,setIsTo]=useState(today());
   const[glFrom,setGlFrom]=useState(fy_start());const[glTo,setGlTo]=useState(today());const[glFilter,setGlFilter]=useState('');
@@ -415,12 +416,15 @@ export default function App(){
   if(!user)return<AuthScreen onLogin={setUser}/>;
   const jeHasContent=jeForm.memo||jeForm.lines.some(l=>l.account_code||l.debit||l.credit)||jePendingFiles.length>0;
 
+  const _activeEnt = entities.find(e=>e.id===activeEntity);
+  const isTurnkeyEntity = !!(_activeEnt && (_activeEnt.code==='TURNKEYR' || /turnkey\s*rail/i.test(_activeEnt.name||'')));
   const navItems=[
     {id:'dashboard',label:'Dashboard',icon:NI.dashboard,section:'reports'},
     {id:'d1',divider:1,label:'TRANSACTIONS'},{id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
     {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
     {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
     {id:'d3',divider:1,label:'REPORTS'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
+    ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
     {id:'d4',divider:1,label:'ADMIN'},{id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},{id:'users',label:'Users',icon:NI.users,section:'all'},
     {id:'d5',divider:1,label:'INTEGRATIONS'},{id:'billcom',label:'Bill.com Setup',icon:'💳',section:'all'},
   ];
@@ -449,6 +453,7 @@ export default function App(){
         {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf}/>}
         {page==='bs'&&activeEntity&&<BalanceSheet entityId={activeEntity} entityName={entityName} asOf={bsAsOf} setAsOf={setBsAsOf}/>}
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo}/>}
+        {page==='wip'&&activeEntity&&<WipSchedule entityName={entityName} asOf={wipAsOf} setAsOf={setWipAsOf}/>}
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='users'&&<UserManagement currentUser={user}/>}
         {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
@@ -1666,6 +1671,55 @@ function BankTransactions({entityId,bankSelAcct:selAcct,setBankSelAcct:setSelAcc
   </div>);}
 
 // ═══ Reports ═══
+function WipSchedule({entityName,asOf,setAsOf}){
+  const[data,setData]=useState(null);
+  const[err,setErr]=useState('');
+  const[loading,setLoading]=useState(true);
+  const validAsOf=/^\d{4}-\d{2}-\d{2}$/.test(asOf)?asOf:today();
+  useEffect(()=>{let alive=true;setLoading(true);setErr('');
+    api.getTurnkeyWip(validAsOf).then(d=>{if(alive){setData(d);setLoading(false);}}).catch(e=>{if(alive){setErr(e.message);setLoading(false);}});
+    return()=>{alive=false;};},[validAsOf]);
+  const rows=(data&&data.rows)||[];
+  const tot=(data&&data.total)||null;
+  const doExport=()=>{
+    const d=[[entityName||'WIP Schedule'],['Work-in-Progress Schedule'],['As of '+validAsOf],[],
+      ['Job #','Job Name','Contract','Revised Contract','Costs to Date','Est Cost to Complete','Est Total Cost','Est Gross Profit','% Complete','Earned Revenue','Billed to Date','Over/(Under) Billing']];
+    rows.forEach(r=>d.push([r.project_code||r.turnkey_project_id,r.project_name||'',r.contract_amount,r.revised_contract,r.costs_to_date,r.estimated_cost_to_complete,r.estimated_total_cost,r.estimated_gross_profit,(r.percent_complete||0)/100,r.earned_revenue,r.billed_to_date,r.over_under_billing]));
+    if(tot){d.push([]);d.push(['','Total',tot.contract_amount,tot.revised_contract,tot.costs_to_date,tot.estimated_cost_to_complete,tot.estimated_total_cost,tot.estimated_gross_profit,'',tot.earned_revenue,tot.billed_to_date,tot.over_under_billing]);}
+    exportToExcel(d,'WIP_'+validAsOf+'.xlsx');
+  };
+  const numCell=(n)=><td style={S.tdR}>{fmt(n)}</td>;
+  return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
+    <div style={S.filterBar}><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div></div>
+    <button style={S.btnExport} onClick={doExport} disabled={!rows.length}>Export Excel</button></div>
+    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>WIP Schedule</div><div style={{fontSize:13,color:T.textMuted}}>As of {validAsOf}</div></div>
+    {err&&<div style={S.err}>{err}</div>}
+    {loading?<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Loading…</div>:
+     rows.length===0?<div style={{textAlign:'center',padding:40,color:T.textMuted}}>No projects linked yet. Projects appear here once they are linked from Turnkey Rail.</div>:
+    <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:1100}}>
+      <thead><tr><th style={S.th}>Job #</th><th style={S.th}>Job Name</th><th style={S.thR}>Contract</th><th style={S.thR}>Revised</th><th style={S.thR}>Costs to Date</th><th style={S.thR}>Est Cost to Compl.</th><th style={S.thR}>Est Total Cost</th><th style={S.thR}>Est Gross Profit</th><th style={S.thR}>% Compl.</th><th style={S.thR}>Earned Rev.</th><th style={S.thR}>Billed</th><th style={S.thR}>Over/(Under)</th></tr></thead>
+      <tbody>{rows.map(r=><tr key={r.turnkey_project_id}>
+        <td style={{...S.td,color:T.textBright}}>{r.project_code||r.turnkey_project_id}</td>
+        <td style={S.td} title={r.project_name}>{r.project_name||''}</td>
+        {numCell(r.contract_amount)}{numCell(r.revised_contract)}{numCell(r.costs_to_date)}{numCell(r.estimated_cost_to_complete)}{numCell(r.estimated_total_cost)}{numCell(r.estimated_gross_profit)}
+        <td style={S.tdR}>{(r.percent_complete||0).toFixed(1)}%</td>
+        {numCell(r.earned_revenue)}{numCell(r.billed_to_date)}
+        <td style={{...S.tdR,color:r.over_under_label==='under'?T.orange:T.textBright}}>{fmt(r.over_under_billing)} {r.over_under_label}</td></tr>)}
+        {tot&&<tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={2}>Total</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>${fmt(tot.contract_amount)}</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>${fmt(tot.revised_contract)}</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>${fmt(tot.costs_to_date)}</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>${fmt(tot.estimated_cost_to_complete)}</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>${fmt(tot.estimated_total_cost)}</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>${fmt(tot.estimated_gross_profit)}</td>
+          <td style={S.tdBold}></td>
+          <td style={{...S.tdBold,textAlign:'right'}}>${fmt(tot.earned_revenue)}</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>${fmt(tot.billed_to_date)}</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>${fmt(tot.over_under_billing)}</td></tr>}
+      </tbody></table></div>}
+  </div></div>);
+}
+
 function TrialBalance({entityId,entityName,asOf,setAsOf}){
   const[balances,setBalances]=useState([]);
   const[drillAcct,setDrillAcct]=useState(null);
