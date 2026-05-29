@@ -722,6 +722,26 @@ app.post('/api/entities/bulk', auth, requireRole('Admin','Accountant'), (req, re
     if (r.changes > 0) { const eid = r.lastInsertRowid; for (const a of DEFAULT_COA) insA.run(eid, a.code, a.name, a.type, a.subtype, a.bank); created.push({ id: eid, code: e.code.toUpperCase(), name: e.name }); } } })();
   res.json({ created, count: created.length });
 });
+// TEMP DIAGNOSTIC (read-only): report child-row references for an entity before deletion. Remove after use.
+app.get('/api/entities/:id/delete-impact', auth, requireRole('Admin'), (req, res) => {
+  const id = parseInt(req.params.id);
+  const q = (sql) => { try { return db.prepare(sql).get(id).c; } catch (e) { return 'ERR:' + e.message; } };
+  const tkCfg = db.prepare('SELECT id, default_entity_id FROM turnkey_config WHERE id = 1').get() || null;
+  res.json({
+    entity_id: id,
+    accounts: q('SELECT COUNT(*) c FROM accounts WHERE entity_id = ?'),
+    journal_entries: q('SELECT COUNT(*) c FROM journal_entries WHERE entity_id = ?'),
+    bank_transactions: q('SELECT COUNT(*) c FROM bank_transactions WHERE entity_id = ?'),
+    billcom_config: q('SELECT COUNT(*) c FROM billcom_config WHERE entity_id = ?'),
+    billcom_account_map: q('SELECT COUNT(*) c FROM billcom_account_map WHERE entity_id = ?'),
+    billcom_sync_log: q('SELECT COUNT(*) c FROM billcom_sync_log WHERE entity_id = ?'),
+    turnkey_project_map: q('SELECT COUNT(*) c FROM turnkey_project_map WHERE cl_entity_id = ?'),
+    turnkey_vendor_map: q('SELECT COUNT(*) c FROM turnkey_vendor_map WHERE cl_entity_id = ?'),
+    turnkey_sync_log: q('SELECT COUNT(*) c FROM turnkey_sync_log WHERE cl_entity_id = ?'),
+    turnkey_config: tkCfg,
+    is_turnkey_default_entity: tkCfg ? (tkCfg.default_entity_id === id) : false
+  });
+});
 app.delete('/api/entities/:id', auth, requireRole('Admin'), (req, res) => { db.prepare('DELETE FROM entities WHERE id = ?').run(req.params.id); res.json({ success: true }); });
 
 // Import trial balance: replaces COA and posts a beginning-balance JE
