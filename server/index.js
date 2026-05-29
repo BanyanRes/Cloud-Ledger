@@ -11,6 +11,7 @@ const XLSX = require('xlsx');
 const pdfParse = require('pdf-parse');
 const path = require('path');
 const fs = require('fs');
+const turnkey = require('./turnkey');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -171,6 +172,76 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_bsl_entity ON billcom_sync_log(entity_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_bsl_billcom_id ON billcom_sync_log(billcom_id);
+  -- ==========================================================
+  -- API keys for system-to-system integrations (e.g., Turnkey Rail)
+  -- ==========================================================
+  CREATE TABLE IF NOT EXISTS api_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_hash TEXT NOT NULL UNIQUE,
+    key_prefix TEXT NOT NULL,
+    name TEXT NOT NULL,
+    scopes TEXT NOT NULL DEFAULT '',
+    last_used_at TEXT,
+    created_by TEXT,
+    created_at TEXT NOT NULL,
+    revoked_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+  -- ==========================================================
+  -- Turnkey Rail integration (mirrors billcom pattern)
+  -- ==========================================================
+  CREATE TABLE IF NOT EXISTS turnkey_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled INTEGER NOT NULL DEFAULT 0,
+    webhook_secret_enc TEXT,
+    updated_by TEXT,
+    updated_at TEXT
+  );
+  -- Maps Turnkey projects -> CloudLedger entities, with all POC account codes
+  CREATE TABLE IF NOT EXISTS turnkey_project_map (
+    turnkey_project_id INTEGER PRIMARY KEY,
+    cl_entity_id INTEGER NOT NULL,
+    cash_account_code TEXT,
+    billcom_clearing_code TEXT,
+    ar_owner_code TEXT,
+    costs_in_excess_code TEXT,
+    cip_code TEXT,
+    ap_sub_code TEXT,
+    billings_uncompleted_code TEXT,
+    billings_in_excess_code TEXT,
+    revenue_code TEXT,
+    cost_of_construction_code TEXT,
+    created_at TEXT,
+    FOREIGN KEY (cl_entity_id) REFERENCES entities(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_tpm_entity ON turnkey_project_map(cl_entity_id);
+  -- Maps Turnkey subcontractor IDs to per-entity vendor sub-accounts (optional)
+  CREATE TABLE IF NOT EXISTS turnkey_vendor_map (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cl_entity_id INTEGER NOT NULL,
+    turnkey_vendor_id INTEGER NOT NULL,
+    vendor_name TEXT,
+    ap_sub_account_code TEXT,
+    created_at TEXT,
+    UNIQUE(cl_entity_id, turnkey_vendor_id),
+    FOREIGN KEY (cl_entity_id) REFERENCES entities(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_tvm_entity ON turnkey_vendor_map(cl_entity_id);
+  -- Sync event audit log + idempotency
+  CREATE TABLE IF NOT EXISTS turnkey_sync_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cl_entity_id INTEGER NOT NULL,
+    sync_type TEXT NOT NULL,
+    turnkey_id TEXT,
+    cl_entry_id INTEGER,
+    status TEXT NOT NULL,
+    message TEXT,
+    payload_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (cl_entity_id) REFERENCES entities(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_tsl_entity ON turnkey_sync_log(cl_entity_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_tsl_turnkey_id ON turnkey_sync_log(sync_type, turnkey_id);
 `);
 
 const userCount = db.prepare('SELECT COUNT(*) as c FROM users').get();
@@ -190,6 +261,45 @@ if (!jeCols.includes('updated_at')) db.exec("ALTER TABLE journal_entries ADD COL
 // Phase 3: default_cash_account on billcom_config (for payment JEs)
 const bcCfgCols = db.prepare("PRAGMA table_info(billcom_config)").all().map(c => c.name);
 if (!bcCfgCols.includes('default_cash_account')) db.exec("ALTER TABLE billcom_config ADD COLUMN default_cash_account TEXT");
+
+// === Turnkey Rail integration v2 migrations ===
+// Job costing: journal_lines.project_id tags each line to a Turnkey project,
+// so a SINGLE company entity can hold ALL projects with proper job-level cost
+// dimension. Reconciles to WIP schedule reports.
+const jlCols = db.prepare("PRAGMA table_info(journal_lines)").all().map(c => c.name);
+if (!jlCols.includes('project_id')) {
+  db.exec("ALTER TABLE journal_lines ADD COLUMN project_id TEXT");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_jl_project ON journal_lines(project_id)");
+  console.log('[db migrate] journal_lines.project_id added');
+}
+// turnkey_project_map redesigned: no longer stores per-project account codes
+// (single COA on the company entity now). We add cl_entity_id linking to the
+// COMPANY entity (same for all projects). Keep existing rows on upgrade.
+const tpmCols = db.prepare("PRAGMA table_info(turnkey_project_map)").all().map(c => c.name);
+if (!tpmCols.includes('project_code')) {
+  db.exec("ALTER TABLE turnkey_project_map ADD COLUMN project_code TEXT");
+  console.log('[db migrate] turnkey_project_map.project_code added');
+}
+if (!tpmCols.includes('project_name')) {
+  db.exec("ALTER TABLE turnkey_project_map ADD COLUMN project_name TEXT");
+  console.log('[db migrate] turnkey_project_map.project_name added');
+}
+if (!tpmCols.includes('contract_amount')) {
+  db.exec("ALTER TABLE turnkey_project_map ADD COLUMN contract_amount REAL");
+  console.log('[db migrate] turnkey_project_map.contract_amount added');
+}
+if (!tpmCols.includes('total_estimated_costs')) {
+  db.exec("ALTER TABLE turnkey_project_map ADD COLUMN total_estimated_costs REAL");
+  console.log('[db migrate] turnkey_project_map.total_estimated_costs added');
+}
+// turnkey_config gets a default_entity_id: the company entity that holds all
+// projects. Admin sets this once before enabling integration.
+const tcCols = db.prepare("PRAGMA table_info(turnkey_config)").all().map(c => c.name);
+if (!tcCols.includes('default_entity_id')) {
+  db.exec("ALTER TABLE turnkey_config ADD COLUMN default_entity_id INTEGER");
+  console.log('[db migrate] turnkey_config.default_entity_id added');
+}
+
 
 // === Bill.com integration helpers ===
 const cryptoMod = require('crypto');
@@ -1357,6 +1467,242 @@ app.get('/api/summary', auth, (req, res) => {
     const bt={}; rows.forEach(r=>{const isDr=r.type==='Asset'||r.type==='Expense'; bt[r.type]=isDr?(r.td-r.tc):(r.tc-r.td);});
     return { ...e, assets:bt.Asset||0, liabilities:bt.Liability||0, revenue:bt.Revenue||0, expenses:bt.Expense||0, net_income:(bt.Revenue||0)-(bt.Expense||0), entry_count: db.prepare('SELECT COUNT(*) as c FROM journal_entries WHERE entity_id=?').get(e.id).c };
   }));
+});
+
+// === Turnkey Rail integration routes ===
+
+// All routes use API key auth, NOT JWT.
+const turnkeyAuth = turnkey.apiKeyAuth(db);
+
+// Health check (no auth — useful for Turnkey to verify connectivity)
+app.get('/api/turnkey/health', (req, res) => {
+  res.json({ status: 'ok', integration: 'turnkey-rail', timestamp: new Date().toISOString() });
+});
+
+// === Turnkey integration config (admin via JWT) ===
+//
+// Sets the company entity (the single "Turnkey Rail" entity that holds all
+// project activity). Must be set before any project linking or sync events.
+app.get('/api/admin/turnkey/config', auth, requireRole('Admin'), (req, res) => {
+  const row = db.prepare('SELECT * FROM turnkey_config WHERE id = 1').get();
+  res.json(row || { id: 1, enabled: 0, default_entity_id: null });
+});
+
+app.put('/api/admin/turnkey/config', auth, requireRole('Admin'), (req, res) => {
+  const enabled = req.body.enabled ? 1 : 0;
+  const entityId = req.body.default_entity_id != null ? Number(req.body.default_entity_id) : null;
+  // Validate the entity exists
+  if (entityId != null) {
+    const ent = db.prepare('SELECT id FROM entities WHERE id = ?').get(entityId);
+    if (!ent) return res.status(400).json({ error: 'default_entity_id refers to a non-existent entity' });
+  }
+  const now = new Date().toISOString();
+  db.prepare(
+    'INSERT INTO turnkey_config (id, enabled, default_entity_id, updated_by, updated_at) ' +
+    'VALUES (1, ?, ?, ?, ?) ' +
+    'ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled, default_entity_id = excluded.default_entity_id, ' +
+    '  updated_by = excluded.updated_by, updated_at = excluded.updated_at'
+  ).run(enabled, entityId, req.user.email, now);
+  // Seed POC chart of accounts on the configured entity (idempotent)
+  if (entityId != null) {
+    const added = turnkey.seedPOCAccountsIfMissing(db, entityId);
+    return res.json({ ok: true, enabled, default_entity_id: entityId, poc_accounts_added: added });
+  }
+  res.json({ ok: true, enabled, default_entity_id: entityId });
+});
+
+// === WIP Schedule (Job Schedule) endpoint ===
+// Returns JSON. as_of query param defaults to today.
+app.get('/api/turnkey/wip-schedule', turnkeyAuth, turnkey.requireScope('turnkey:sync'), (req, res) => {
+  const asOf = (req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of))
+    ? req.query.as_of
+    : new Date().toISOString().slice(0, 10);
+  try {
+    const schedule = turnkey.computeWipSchedule(db, asOf);
+    res.json(schedule);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Export the WIP schedule as Excel (.xlsx). Uses the existing 'xlsx' lib.
+app.get('/api/turnkey/wip-schedule.xlsx', turnkeyAuth, turnkey.requireScope('turnkey:sync'), (req, res) => {
+  const asOf = (req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of))
+    ? req.query.as_of
+    : new Date().toISOString().slice(0, 10);
+  try {
+    const schedule = turnkey.computeWipSchedule(db, asOf);
+    const header = [
+      'Job #', 'Job Name', 'Contract Amount', 'Revised Contract',
+      'Costs to Date', 'Est Cost to Complete', 'Est Total Cost',
+      'Est Gross Profit', '% Complete', 'Earned Revenue',
+      'Billed to Date', 'Over/(Under) Billing'
+    ];
+    const dataRows = schedule.rows.map(r => [
+      r.project_code || r.turnkey_project_id, r.project_name || '',
+      r.contract_amount, r.revised_contract,
+      r.costs_to_date, r.estimated_cost_to_complete, r.estimated_total_cost,
+      r.estimated_gross_profit, r.percent_complete / 100, // store as fraction; format will render %
+      r.earned_revenue, r.billed_to_date, r.over_under_billing,
+    ]);
+    const t = schedule.total;
+    const totalRow = [
+      'TOTAL', '',
+      t.contract_amount, t.revised_contract,
+      t.costs_to_date, t.estimated_cost_to_complete, t.estimated_total_cost,
+      t.estimated_gross_profit, '',
+      t.earned_revenue, t.billed_to_date, t.over_under_billing,
+    ];
+    const aoa = [
+      ['Turnkey Rail — WIP Schedule'],
+      ['As of:', asOf],
+      [],
+      header,
+      ...dataRows,
+      totalRow,
+    ];
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    // Column widths
+    ws['!cols'] = [
+      { wch: 12 }, { wch: 28 }, { wch: 16 }, { wch: 16 },
+      { wch: 16 }, { wch: 20 }, { wch: 16 }, { wch: 16 },
+      { wch: 12 }, { wch: 16 }, { wch: 16 }, { wch: 20 },
+    ];
+    // Number formats for numeric cols
+    const moneyFmt = '#,##0.00;(#,##0.00)';
+    const pctFmt = '0.0%';
+    const numericCols = [2,3,4,5,6,7,9,10,11];
+    const headerRowIdx = 3; // 0-based, '$Job #' is row 4 in spreadsheet (after title+as_of+blank)
+    const firstDataRow = headerRowIdx + 1;
+    for (let i = 0; i < dataRows.length + 1; i++) { // +1 for total row
+      for (const c of numericCols) {
+        const addr = XLSX.utils.encode_cell({ r: firstDataRow + i, c });
+        if (ws[addr]) ws[addr].z = moneyFmt;
+      }
+      // % column (index 8) — only data rows, not total
+      if (i < dataRows.length) {
+        const addr = XLSX.utils.encode_cell({ r: firstDataRow + i, c: 8 });
+        if (ws[addr]) ws[addr].z = pctFmt;
+      }
+    }
+    // Title cell — bold-ish via merge
+    ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 11 } }];
+    XLSX.utils.book_append_sheet(wb, ws, 'WIP Schedule');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="WIP_Schedule_' + asOf + '.xlsx"');
+    res.send(buf);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// === API key management (these use JWT/Admin, not API key) ===
+
+// List API keys (no raw key visible, only metadata)
+app.get('/api/admin/api-keys', auth, requireRole('Admin'), (req, res) => {
+  const rows = db.prepare(
+    'SELECT id, key_prefix, name, scopes, last_used_at, created_by, created_at, revoked_at FROM api_keys ORDER BY id DESC'
+  ).all();
+  res.json(rows);
+});
+
+// Create a new API key. Returns the raw key ONCE — admin must save it.
+app.post('/api/admin/api-keys', auth, requireRole('Admin'), (req, res) => {
+  const name = (req.body.name || '').trim();
+  const scopes = (req.body.scopes || 'turnkey:sync').trim();
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const rawKey = turnkey.generateApiKey();
+  const hash = turnkey.hashApiKey(rawKey);
+  const prefix = turnkey.apiKeyPrefix(rawKey);
+  const now = new Date().toISOString();
+  const result = db.prepare(
+    'INSERT INTO api_keys (key_hash, key_prefix, name, scopes, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(hash, prefix, name, scopes, req.user.email, now);
+  res.json({ id: result.lastInsertRowid, raw_key: rawKey, key_prefix: prefix, name, scopes,
+             warning: 'Save this key now. It will never be shown again.' });
+});
+
+// Revoke an API key
+app.post('/api/admin/api-keys/:id/revoke', auth, requireRole('Admin'), (req, res) => {
+  db.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ?').run(new Date().toISOString(), req.params.id);
+  res.json({ success: true });
+});
+
+// === Project linking (Turnkey calls these with its API key) ===
+
+// Register a Turnkey project as a job dimension on the company entity.
+// Body: { turnkey_project_id, project_code, project_name,
+//         contract_amount?, total_estimated_costs? }
+// Update-on-conflict so this can also be called to refresh contract/estimate.
+app.post('/api/turnkey/projects/link', turnkeyAuth, turnkey.requireScope('turnkey:sync'), (req, res) => {
+  try {
+    const { turnkey_project_id, project_code, project_name,
+            contract_amount, total_estimated_costs } = req.body;
+    if (!turnkey_project_id || !project_code || !project_name) {
+      return res.status(400).json({ error: 'turnkey_project_id, project_code, project_name required' });
+    }
+    const map = turnkey.linkProject(db, {
+      turnkey_project_id, project_code, project_name,
+      contract_amount, total_estimated_costs,
+    });
+    res.json({ ok: true, project_map: map });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get project mapping (for Turnkey to verify the link exists)
+app.get('/api/turnkey/projects/:id', turnkeyAuth, turnkey.requireScope('turnkey:sync'), (req, res) => {
+  const map = db.prepare('SELECT * FROM turnkey_project_map WHERE turnkey_project_id = ?').get(req.params.id);
+  if (!map) return res.status(404).json({ error: 'Project not linked' });
+  res.json(map);
+});
+
+// === Sync event endpoints ===
+// All accept JSON payload; all return { ok, cl_entry_id, idempotent } on success.
+
+function syncRoute(syncFn) {
+  return (req, res) => {
+    try {
+      const result = syncFn(db, req.body || {});
+      res.json({ ok: true, ...result });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  };
+}
+
+app.post('/api/turnkey/sync/sub-payapp-approved',
+  turnkeyAuth, turnkey.requireScope('turnkey:sync'),
+  syncRoute(turnkey.syncSubPayAppApproved));
+
+app.post('/api/turnkey/sync/sub-payapp-paid',
+  turnkeyAuth, turnkey.requireScope('turnkey:sync'),
+  syncRoute(turnkey.syncSubPayAppPaid));
+
+app.post('/api/turnkey/sync/owner-payapp-issued',
+  turnkeyAuth, turnkey.requireScope('turnkey:sync'),
+  syncRoute(turnkey.syncOwnerPayAppIssued));
+
+app.post('/api/turnkey/sync/owner-payment-received',
+  turnkeyAuth, turnkey.requireScope('turnkey:sync'),
+  syncRoute(turnkey.syncOwnerPaymentReceived));
+
+app.post('/api/turnkey/sync/month-end-poc',
+  turnkeyAuth, turnkey.requireScope('turnkey:sync'),
+  syncRoute(turnkey.syncMonthEndPOC));
+
+// View sync log for a project (last 50 events)
+app.get('/api/turnkey/sync-log/:turnkey_project_id', turnkeyAuth, turnkey.requireScope('turnkey:sync'), (req, res) => {
+  const map = db.prepare('SELECT cl_entity_id FROM turnkey_project_map WHERE turnkey_project_id = ?').get(req.params.turnkey_project_id);
+  if (!map) return res.status(404).json({ error: 'Project not linked' });
+  const rows = db.prepare(
+    'SELECT id, sync_type, turnkey_id, cl_entry_id, status, message, created_at FROM turnkey_sync_log ' +
+    'WHERE cl_entity_id = ? ORDER BY id DESC LIMIT 50'
+  ).all(map.cl_entity_id);
+  res.json(rows);
 });
 
 // === Bill.com integration routes ===
