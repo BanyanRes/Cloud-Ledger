@@ -722,27 +722,33 @@ app.post('/api/entities/bulk', auth, requireRole('Admin','Accountant'), (req, re
     if (r.changes > 0) { const eid = r.lastInsertRowid; for (const a of DEFAULT_COA) insA.run(eid, a.code, a.name, a.type, a.subtype, a.bank); created.push({ id: eid, code: e.code.toUpperCase(), name: e.name }); } } })();
   res.json({ created, count: created.length });
 });
-// TEMP DIAGNOSTIC (read-only): report child-row references for an entity before deletion. Remove after use.
-app.get('/api/entities/:id/delete-impact', auth, requireRole('Admin'), (req, res) => {
+app.delete('/api/entities/:id', auth, requireRole('Admin'), (req, res) => {
   const id = parseInt(req.params.id);
-  const q = (sql) => { try { return db.prepare(sql).get(id).c; } catch (e) { return 'ERR:' + e.message; } };
-  const tkCfg = db.prepare('SELECT id, default_entity_id FROM turnkey_config WHERE id = 1').get() || null;
-  res.json({
-    entity_id: id,
-    accounts: q('SELECT COUNT(*) c FROM accounts WHERE entity_id = ?'),
-    journal_entries: q('SELECT COUNT(*) c FROM journal_entries WHERE entity_id = ?'),
-    bank_transactions: q('SELECT COUNT(*) c FROM bank_transactions WHERE entity_id = ?'),
-    billcom_config: q('SELECT COUNT(*) c FROM billcom_config WHERE entity_id = ?'),
-    billcom_account_map: q('SELECT COUNT(*) c FROM billcom_account_map WHERE entity_id = ?'),
-    billcom_sync_log: q('SELECT COUNT(*) c FROM billcom_sync_log WHERE entity_id = ?'),
-    turnkey_project_map: q('SELECT COUNT(*) c FROM turnkey_project_map WHERE cl_entity_id = ?'),
-    turnkey_vendor_map: q('SELECT COUNT(*) c FROM turnkey_vendor_map WHERE cl_entity_id = ?'),
-    turnkey_sync_log: q('SELECT COUNT(*) c FROM turnkey_sync_log WHERE cl_entity_id = ?'),
-    turnkey_config: tkCfg,
-    is_turnkey_default_entity: tkCfg ? (tkCfg.default_entity_id === id) : false
-  });
+  if (!id) return res.status(400).json({ error: 'Invalid entity id' });
+  // Guard: never delete the entity that Turnkey Rail is configured to use.
+  const tkCfg = db.prepare('SELECT default_entity_id FROM turnkey_config WHERE id = 1').get();
+  if (tkCfg && tkCfg.default_entity_id === id) {
+    return res.status(400).json({ error: 'This entity is configured as the Turnkey Rail default entity. Reassign Turnkey config before deleting.' });
+  }
+  // Tables that reference entities WITHOUT ON DELETE CASCADE must be cleared first
+  // (billcom_* keyed by entity_id; turnkey_* keyed by cl_entity_id). Tables that
+  // already cascade (accounts, journal_entries, journal_lines, bank_transactions,
+  // entity_files, etc.) are removed automatically by the final entities delete.
+  try {
+    db.transaction(() => {
+      db.prepare('DELETE FROM billcom_account_map WHERE entity_id = ?').run(id);
+      db.prepare('DELETE FROM billcom_sync_log WHERE entity_id = ?').run(id);
+      db.prepare('DELETE FROM billcom_config WHERE entity_id = ?').run(id);
+      db.prepare('DELETE FROM turnkey_vendor_map WHERE cl_entity_id = ?').run(id);
+      db.prepare('DELETE FROM turnkey_sync_log WHERE cl_entity_id = ?').run(id);
+      db.prepare('DELETE FROM turnkey_project_map WHERE cl_entity_id = ?').run(id);
+      db.prepare('DELETE FROM entities WHERE id = ?').run(id);
+    })();
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: 'Delete failed: ' + e.message });
+  }
 });
-app.delete('/api/entities/:id', auth, requireRole('Admin'), (req, res) => { db.prepare('DELETE FROM entities WHERE id = ?').run(req.params.id); res.json({ success: true }); });
 
 // Import trial balance: replaces COA and posts a beginning-balance JE
 // Account type derived from code: <=19999 Asset, <=29999 Liability, <=39999 Equity, <=49999 Revenue, 50000-69999 Expense, >=70000 Revenue
