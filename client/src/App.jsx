@@ -246,11 +246,11 @@ function QuickAddAccountModal({entityId,onClose,onCreated}){const[form,setForm]=
   </div></div>);}
 
 // ─── JE Modal — form state received from App (persists across open/close) ───
-function JournalEntryModal({entityId,user,onClose,onPosted,form,setForm,pendingFiles,setPendingFiles}){
+function JournalEntryModal({entityId,isTurnkeyEntity,user,onClose,onPosted,form,setForm,pendingFiles,setPendingFiles}){
   const[accounts,setAccounts]=useState([]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[posting,setPosting]=useState(false);const[posted,setPosted]=useState('');
   const[projects,setProjects]=useState([]);
   useEffect(()=>{api.getAccounts(entityId).then(setAccounts);api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));},[entityId]);
-  const showProject=projects.length>0;
+  const showProject=isTurnkeyEntity||projects.length>0;
   const addLine=()=>setForm(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:''}]}));
   const removeLine=i=>setForm(f=>({...f,lines:f.lines.filter((_,j)=>j!==i)}));
   const updateLine=(i,k,v)=>setForm(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,[k]:v}:l)}));
@@ -491,7 +491,7 @@ export default function App(){
         {page==='users'&&<UserManagement currentUser={user}/>}
         {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
       </>})()}</div></div>
-    {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
+    {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
   </div>);}
 
@@ -1364,7 +1364,7 @@ function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSum
 // ═══ Edit JE Modal ═══
 function EditJEModal({entityId,entry,accounts:initAccounts,onClose,onSaved}){
   const[accounts,setAccounts]=useState(initAccounts||[]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[saving,setSaving]=useState(false);
-  const[projects,setProjects]=useState([]);useEffect(()=>{api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));},[entityId]);const showProject=projects.length>0;
+  const[projects,setProjects]=useState([]);useEffect(()=>{api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));},[entityId]);const showProject=projects.length>0||(entry.lines||[]).some(l=>l.project_id);
   const[form,setForm]=useState({date:entry.date,memo:entry.memo,lines:entry.lines.map(l=>({account_code:l.account_code,project_id:l.project_id||'',debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
   const[attachments,setAttachments]=useState(entry.attachments||[]);
   const[attUploading,setAttUploading]=useState(false);
