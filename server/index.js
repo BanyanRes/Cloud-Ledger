@@ -270,6 +270,14 @@ const jeCols = db.prepare("PRAGMA table_info(journal_entries)").all().map(c => c
 if (!jeCols.includes('updated_by')) db.exec("ALTER TABLE journal_entries ADD COLUMN updated_by TEXT");
 if (!jeCols.includes('updated_at')) db.exec("ALTER TABLE journal_entries ADD COLUMN updated_at TEXT");
 
+// Entity type: 'accounting' (default, standard ledger entity) | 'development'
+// (real-estate development project; unlocks Requisition Report / Invoice Packet features)
+const entCols = db.prepare("PRAGMA table_info(entities)").all().map(c => c.name);
+if (!entCols.includes('entity_type')) {
+  db.exec("ALTER TABLE entities ADD COLUMN entity_type TEXT NOT NULL DEFAULT 'accounting'");
+  console.log('[db migrate] entities.entity_type added (default accounting)');
+}
+
 // Phase 3: default_cash_account on billcom_config (for payment JEs)
 const bcCfgCols = db.prepare("PRAGMA table_info(billcom_config)").all().map(c => c.name);
 if (!bcCfgCols.includes('default_cash_account')) db.exec("ALTER TABLE billcom_config ADD COLUMN default_cash_account TEXT");
@@ -556,6 +564,20 @@ function requireEntityAccess(paramName) {
 
 function requireRole(...roles) { return (req, res, next) => { if (!roles.includes(req.user.role) && req.user.role !== 'Admin') return res.status(403).json({ error: 'Forbidden' }); next(); }; }
 
+// Gate Requisition/Invoice-Packet features to development-project entities only.
+// Reads the entity id from the named route param (default 'entity_id'); rejects
+// non-development entities so accounting entities never expose these endpoints.
+function requireDevelopmentEntity(paramName) {
+  return (req, res, next) => {
+    const eid = parseInt(req.params[paramName || 'entity_id']);
+    if (!eid) return res.status(400).json({ error: 'Invalid entity id' });
+    const ent = db.prepare('SELECT entity_type FROM entities WHERE id = ?').get(eid);
+    if (!ent) return res.status(404).json({ error: 'Entity not found' });
+    if (ent.entity_type !== 'development') return res.status(403).json({ error: 'Requisition features are only available for development-project entities' });
+    next();
+  };
+}
+
 // ═══ Auth ═══
 app.post('/api/auth/login', (req, res) => {
   const { email, password } = req.body;
@@ -705,14 +727,31 @@ app.get('/api/entities', auth, (req, res) => {
 });
 app.post('/api/entities', auth, requireRole('Admin','Accountant'), (req, res) => {
   const { name } = req.body; if (!name) return res.status(400).json({ error: 'Name required' });
+  const entityType = req.body.entity_type === 'development' ? 'development' : 'accounting';
   // Auto-generate a code from the name (used internally for sorting/uniqueness)
   const baseCode = name.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8) || 'ENT';
   let code = baseCode; let n = 1;
   while (db.prepare('SELECT id FROM entities WHERE code = ?').get(code)) { code = baseCode + n; n++; }
-  try { const r = db.prepare('INSERT INTO entities (code, name) VALUES (?, ?)').run(code, name); const eid = r.lastInsertRowid;
+  try { const r = db.prepare('INSERT INTO entities (code, name, entity_type) VALUES (?, ?, ?)').run(code, name, entityType); const eid = r.lastInsertRowid;
     const ins = db.prepare('INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct) VALUES (?, ?, ?, ?, ?, ?)');
     db.transaction(() => { for (const a of DEFAULT_COA) ins.run(eid, a.code, a.name, a.type, a.subtype, a.bank); })();
-    res.json({ id: eid, code, name }); } catch(e) { throw e; }
+    res.json({ id: eid, code, name, entity_type: entityType }); } catch(e) { throw e; }
+});
+// Update an entity (currently: name and/or entity_type)
+app.put('/api/entities/:id', auth, requireRole('Admin','Accountant'), (req, res) => {
+  const id = parseInt(req.params.id);
+  if (!id) return res.status(400).json({ error: 'Invalid entity id' });
+  const ent = db.prepare('SELECT * FROM entities WHERE id = ?').get(id);
+  if (!ent) return res.status(404).json({ error: 'Entity not found' });
+  const name = req.body.name !== undefined ? req.body.name : ent.name;
+  if (!name) return res.status(400).json({ error: 'Name required' });
+  let entityType = ent.entity_type;
+  if (req.body.entity_type !== undefined) {
+    if (!['development','accounting'].includes(req.body.entity_type)) return res.status(400).json({ error: 'entity_type must be development or accounting' });
+    entityType = req.body.entity_type;
+  }
+  db.prepare('UPDATE entities SET name = ?, entity_type = ? WHERE id = ?').run(name, entityType, id);
+  res.json({ id, code: ent.code, name, entity_type: entityType });
 });
 app.post('/api/entities/bulk', auth, requireRole('Admin','Accountant'), (req, res) => {
   const { entities } = req.body; if (!Array.isArray(entities)) return res.status(400).json({ error: 'Invalid' });
