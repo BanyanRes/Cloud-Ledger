@@ -40,7 +40,8 @@ export const api = {
   // Turnkey Rail WIP schedule (in-app report). JWT-authed admin endpoint.
   getTurnkeyWip: (asOf) => request('/admin/turnkey/wip-schedule' + (asOf ? ('?as_of=' + asOf) : '')),
   getTurnkeyProjects: () => request('/admin/turnkey/projects'),
-  createEntity: (name) => request('/entities', { method: 'POST', body: { name } }),
+  createEntity: (name, entity_type) => request('/entities', { method: 'POST', body: entity_type ? { name, entity_type } : { name } }),
+  updateEntity: (id, data) => request('/entities/' + id, { method: 'PUT', body: data }),
   importTrialBalance: (eid, file, asOfDate) => {
     const fd = new FormData();
     fd.append('file', file);
@@ -137,6 +138,13 @@ export const api = {
   syncBillcom: (entityId) => request('/billcom/sync/' + entityId, { method: 'POST' }),
   pushBillcomCoa: (entityId, body) => request('/billcom/push-coa/' + entityId, { method: 'POST', body }),
   getBillcomSyncLog: (entityId, limit) => request('/billcom/sync-log/' + entityId + (limit ? '?limit=' + limit : '')),
+
+  // Requisition (development-project coding engine)
+  getRequisitionPeriods: (eid) => request('/requisition/' + eid + '/periods'),
+  createRequisitionPeriod: (eid, data) => request('/requisition/' + eid + '/periods', { method: 'POST', body: data }),
+  getRequisitionStats: (eid) => request('/requisition/' + eid + '/coding-history/stats'),
+  seedRequisitionHistory: (eid, body) => request('/requisition/' + eid + '/seed-history', { method: 'POST', body }),
+  predictRequisitionCoding: (eid, lines) => request('/requisition/' + eid + '/predict', { method: 'POST', body: { lines } }),
 
   setToken, getToken, clearToken,
 };

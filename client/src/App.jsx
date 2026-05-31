@@ -451,6 +451,7 @@ export default function App(){
 
   const _activeEnt = entities.find(e=>e.id===activeEntity);
   const isTurnkeyEntity = !!(_activeEnt && (_activeEnt.code==='TURNKEYR' || /turnkey\s*rail/i.test(_activeEnt.name||'')));
+  const isDevEntity = !!(_activeEnt && _activeEnt.entity_type==='development');
   const navItems=[
     {id:'dashboard',label:'Dashboard',icon:NI.dashboard,section:'reports'},
     {id:'d1',divider:1,label:'TRANSACTIONS'},{id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
@@ -458,6 +459,7 @@ export default function App(){
     {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
     {id:'d3',divider:1,label:'REPORTS'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
+    ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
     {id:'d4',divider:1,label:'ADMIN'},{id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},{id:'users',label:'Users',icon:NI.users,section:'all'},
     {id:'d5',divider:1,label:'INTEGRATIONS'},{id:'billcom',label:'Bill.com Setup',icon:'💳',section:'all'},
   ];
@@ -490,6 +492,7 @@ export default function App(){
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='users'&&<UserManagement currentUser={user}/>}
         {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
+        {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
       </>})()}</div></div>
     {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
@@ -1952,9 +1955,120 @@ function BankReconciliation({entityId,user}){const[accounts,setAccounts]=useStat
         <tbody>{recs.map(r=><tr key={r.id}><td style={S.td}>{r.statement_date}</td><td style={S.td}>{r.account_code}</td><td style={S.tdR}>${fmt(r.statement_balance)}</td><td style={S.tdR}>${fmt(r.book_balance)}</td><td style={S.tdR}>{r.cleared_count}</td><td style={S.td}>{r.completed_by}</td></tr>)}</tbody></table>}</div></div>);}
 
 // ═══ Entity Management ═══
+// ═══ Requisitions (development-project coding engine) ═══
+function Requisitions({entityId,entityName}){
+  const[tab,setTab]=useState('overview');
+  const[stats,setStats]=useState(null);const[periods,setPeriods]=useState([]);
+  const[loading,setLoading]=useState(true);const[err,setErr]=useState('');
+  // new period form
+  const[newReqNum,setNewReqNum]=useState('');const[newPeriodEnd,setNewPeriodEnd]=useState(today());const[periodBusy,setPeriodBusy]=useState(false);const[periodMsg,setPeriodMsg]=useState('');
+  // predict
+  const[predText,setPredText]=useState('');const[predBusy,setPredBusy]=useState(false);const[predResult,setPredResult]=useState(null);const[predErr,setPredErr]=useState('');
+
+  const load=async()=>{setLoading(true);setErr('');
+    try{const[s,p]=await Promise.all([api.getRequisitionStats(entityId),api.getRequisitionPeriods(entityId)]);setStats(s);setPeriods(p||[]);}
+    catch(e){setErr(e.message);}finally{setLoading(false);}};
+  useEffect(()=>{load();},[entityId]);
+
+  const createPeriod=async()=>{const n=parseInt(newReqNum);if(!n){setPeriodMsg('');setErr('Requisition number required');return;}
+    setPeriodBusy(true);setErr('');setPeriodMsg('');
+    try{await api.createRequisitionPeriod(entityId,{req_number:n,period_end:newPeriodEnd});setNewReqNum('');setPeriodMsg('Period Req#'+n+' created.');await load();}
+    catch(e){setErr(e.message);}finally{setPeriodBusy(false);}};
+
+  // Parse pasted invoice lines: "Vendor <tab> Bill# <tab> Amount" per line (amount optional)
+  const parseLines=txt=>txt.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{
+    const parts=l.split('\t').map(s=>s.trim());
+    const [vendor,bill_number,amountRaw]=parts;
+    const amount=amountRaw!=null&&amountRaw!==''?parseFloat(amountRaw.replace(/[$,]/g,'')):undefined;
+    return {vendor,bill_number,...(Number.isFinite(amount)?{amount}:{})};
+  }).filter(x=>x.vendor&&x.bill_number);
+
+  const runPredict=async()=>{const lines=parseLines(predText);
+    if(!lines.length){setPredErr('Paste at least one line: Vendor [tab] Bill# [tab] Amount');setPredResult(null);return;}
+    setPredBusy(true);setPredErr('');setPredResult(null);
+    try{const r=await api.predictRequisitionCoding(entityId,lines);setPredResult(r);}
+    catch(e){setPredErr(e.message);}finally{setPredBusy(false);}};
+
+  const tierStyle=conf=>conf==='high'?{color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder}
+    :conf==='review'?{color:T.orange,background:T.orangeDim,border:'1px solid '+T.orange+'40'}
+    :{color:T.textMuted,background:T.bgElevated,border:'1px solid '+T.border};
+  const badge=conf=><span style={{fontSize:9,fontWeight:700,borderRadius:4,padding:'2px 7px',textTransform:'uppercase',letterSpacing:'0.04em',...tierStyle(conf)}}>{conf}</span>;
+
+  const TabBtn=({id,label})=><button onClick={()=>setTab(id)} style={{background:tab===id?T.accent:'#fff',color:tab===id?'#fff':T.text,border:'1px solid '+(tab===id?T.accent:T.border),borderRadius:T.radiusXs,padding:'8px 16px',fontSize:13,fontWeight:600,cursor:'pointer',marginRight:8}}>{label}</button>;
+
+  return(<div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16}}>
+      <div><div style={S.h1}>Requisitions</div><div style={S.sub}>{entityName} &mdash; development project coding</div></div>
+    </div>
+    {err&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:12}}>{err}</div>}
+
+    <div style={{marginBottom:18}}><TabBtn id="overview" label="Overview"/><TabBtn id="periods" label={'Periods ('+periods.length+')'}/><TabBtn id="predict" label="Code Invoices"/></div>
+
+    {tab==='overview'&&<div style={S.card}>
+      <div style={{...S.h2,marginBottom:14}}>Coding History</div>
+      {loading?<div style={{color:T.textMuted}}>Loading...</div>:stats?<>
+        <div style={{display:'flex',gap:14,flexWrap:'wrap',marginBottom:16}}>
+          {[['History rows',stats.history_rows],['Distinct vendors',stats.distinct_vendors],['Cost codes',stats.coa_codes],['Req range',stats.req_range&&stats.req_range.min!=null?('#'+stats.req_range.min+'–#'+stats.req_range.max):'—']].map(([k,v])=>
+            <div key={k} style={{flex:'1 1 140px',background:T.bgElevated,border:'1px solid '+T.border,borderRadius:8,padding:'14px 16px'}}>
+              <div style={{fontSize:22,fontWeight:700,color:T.textBright}}>{v}</div>
+              <div style={{fontSize:11,color:T.textMuted,marginTop:2,textTransform:'uppercase',letterSpacing:'0.05em'}}>{k}</div></div>)}
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:10}}>
+          <span style={{fontSize:9,fontWeight:700,borderRadius:4,padding:'3px 9px',textTransform:'uppercase',...(stats.ready?{color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder}:{color:T.orange,background:T.orangeDim,border:'1px solid '+T.orange+'40'})}}>{stats.ready?'Ready':'Not ready'}</span>
+          <span style={{fontSize:12,color:T.textMuted}}>{stats.ready?'Enough history is loaded to auto-code invoices.':'Load prior requisition history before coding (use seeded data or import).'}</span>
+        </div></>:<div style={{color:T.textMuted}}>No stats available.</div>}
+    </div>}
+
+    {tab==='periods'&&<div>
+      <div style={{...S.card,borderColor:T.green+'40'}}>
+        <div style={{...S.h2,marginBottom:12}}>Create Requisition Period</div>
+        <div style={S.row}>
+          <div style={{...S.col,flex:1}}><label style={S.label}>Requisition #</label><input style={S.input} type="number" placeholder="e.g. 15" value={newReqNum} onChange={e=>setNewReqNum(e.target.value)}/></div>
+          <div style={{...S.col,flex:1}}><label style={S.label}>Period End</label><input style={S.input} type="date" value={newPeriodEnd} onChange={e=>setNewPeriodEnd(e.target.value)}/></div>
+        </div>
+        {periodMsg&&<div style={{...S.success,padding:10,background:T.greenDim,borderRadius:6,border:'1px solid '+T.greenBorder,marginBottom:10}}>{periodMsg}</div>}
+        <button style={S.btnP} disabled={periodBusy} onClick={createPeriod}>{periodBusy?'Creating...':'Create Period'}</button>
+      </div>
+      <div style={S.cardFlush}><table style={S.table}><thead><tr><th style={S.th}>Req #</th><th style={S.th}>Period End</th><th style={S.th}>Status</th><th style={S.th}>Created</th></tr></thead>
+        <tbody>{periods.length===0?<tr><td colSpan={4} style={{...S.td,color:T.textMuted,textAlign:'center',padding:24}}>No periods yet.</td></tr>
+          :periods.map(p=><tr key={p.id||p.req_number}>
+            <td style={{...S.td,fontWeight:600,color:T.textBright}}>#{p.req_number}</td>
+            <td style={S.td}>{p.period_end||'—'}</td>
+            <td style={S.td}>{p.status||'open'}</td>
+            <td style={{...S.td,color:T.textMuted,fontSize:12}}>{p.created_at?String(p.created_at).slice(0,10):'—'}</td></tr>)}</tbody></table></div>
+    </div>}
+
+    {tab==='predict'&&<div>
+      <div style={S.card}>
+        <div style={{...S.h2,marginBottom:6}}>Code Invoices</div>
+        <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Paste invoice lines, one per line, tab-separated: <strong>Vendor</strong> &rarr; <strong>Bill #</strong> &rarr; <strong>Amount</strong> (amount optional). The engine predicts a cost code per line from prior requisition history.</div>
+        <textarea style={{...S.input,height:160,fontFamily:'monospace',fontSize:12,resize:'vertical'}} placeholder={'Martinus\tPay App #15\t71305.83\nCoastal Payroll\t05.15.26 Payroll\t12291.67'} value={predText} onChange={e=>setPredText(e.target.value)}/>
+        {predErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'10px 0'}}>{predErr}</div>}
+        <button style={{...S.btnP,marginTop:10}} disabled={predBusy} onClick={runPredict}>{predBusy?'Coding...':'Predict Coding'}</button>
+      </div>
+      {predResult&&predResult.summary&&<div style={{...S.card,background:T.bgElevated}}>
+        <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+          {[['High',predResult.summary.high,'green'],['Review',predResult.summary.review,'orange'],['New',predResult.summary.new,'muted'],['Auto-coverage',Math.round((predResult.summary.auto_coverage||0)*100)+'%','accent']].map(([k,v,c])=>
+            <div key={k} style={{flex:'1 1 130px',textAlign:'center'}}>
+              <div style={{fontSize:22,fontWeight:700,color:c==='green'?T.green:c==='orange'?T.orange:c==='accent'?T.accent:T.textMuted}}>{v}</div>
+              <div style={{fontSize:11,color:T.textMuted,textTransform:'uppercase',letterSpacing:'0.05em',marginTop:2}}>{k}</div></div>)}
+        </div></div>}
+      {predResult&&predResult.lines&&<div style={S.cardFlush}><table style={S.table}><thead><tr>
+        <th style={S.th}>Vendor</th><th style={S.th}>Bill #</th><th style={S.thR}>Amount</th><th style={S.th}>Cost Code</th><th style={S.th}>Cost Code Name</th><th style={S.thC}>Tier</th></tr></thead>
+        <tbody>{predResult.lines.map((l,i)=><tr key={i}>
+          <td style={{...S.td,fontWeight:600,color:T.textBright}}>{l.vendor}</td>
+          <td style={{...S.td,fontFamily:'monospace',fontSize:11}}>{l.bill_number}</td>
+          <td style={S.tdR}>{l.amount!=null?Number(l.amount).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'—'}</td>
+          <td style={{...S.td,fontWeight:600}}>{l.cost_code!=null?l.cost_code:<span style={{color:T.textMuted}}>—</span>}</td>
+          <td style={{...S.td,fontSize:12,color:T.textMuted}}>{(l.coding&&l.coding.cost_code_name)||''}</td>
+          <td style={S.tdC}>{badge(l.confidence)}</td></tr>)}</tbody></table></div>}
+    </div>}
+  </div>);}
+
 function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
   const[showAdd,setShowAdd]=useState(false);const[bulk,setBulk]=useState(false);
-  const[name,setName]=useState('');const[bulkText,setBulkText]=useState('');const[err,setErr]=useState('');
+  const[name,setName]=useState('');const[newType,setNewType]=useState('accounting');const[bulkText,setBulkText]=useState('');const[err,setErr]=useState('');
+  const[typeBusy,setTypeBusy]=useState(null);// entity id whose type is being toggled
   const[importing,setImporting]=useState(null);// entity id being imported into
   const[importAsOf,setImportAsOf]=useState('2024-12-31');const[importMsg,setImportMsg]=useState('');const[importErr,setImportErr]=useState('');const[importBusy,setImportBusy]=useState(false);
   const onTBFile=async e=>{const file=e.target.files[0];if(!file||!importing)return;e.target.value='';setImportBusy(true);setImportMsg('');setImportErr('');
@@ -1965,19 +2079,21 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
     <div style={{display:'flex',gap:10}}><button style={S.btnS} onClick={()=>{setBulk(!bulk);setShowAdd(false);}}>{bulk?'Cancel':'Bulk Import'}</button><button style={S.btnP} onClick={()=>{setShowAdd(!showAdd);setBulk(false);}}>{showAdd?'Cancel':'+ Add Entity'}</button></div></div>
     {showAdd&&<div style={{...S.card,borderColor:T.green+'40'}}>
       <div style={{fontSize:14,fontWeight:600,color:T.textBright,marginBottom:12}}>Create New Entity</div>
-      <div style={S.row}><div style={{...S.col,flex:3}}><label style={S.label}>Entity Name</label><input style={S.input} placeholder="e.g. CLR Fund I LP" value={name} onChange={e=>setName(e.target.value)}/></div></div>
+      <div style={S.row}><div style={{...S.col,flex:3}}><label style={S.label}>Entity Name</label><input style={S.input} placeholder="e.g. CLR Fund I LP" value={name} onChange={e=>setName(e.target.value)}/></div>
+        <div style={{...S.col,flex:2}}><label style={S.label}>Entity Type</label><select style={S.input} value={newType} onChange={e=>setNewType(e.target.value)}><option value="accounting">Accounting</option><option value="development">Development Project</option></select></div></div>
       {err&&<div style={S.err}>{err}</div>}
-      <div style={{fontSize:11,color:T.textMuted,marginBottom:10}}>A default chart of accounts will be created. You can replace it by importing a trial balance from the entity row.</div>
-      <button style={S.btnP} onClick={async()=>{if(!name.trim()){setErr('Name required');return;}try{await api.createEntity(name.trim());setName('');setShowAdd(false);setErr('');refresh();}catch(e){setErr(e.message);}}}>Create Entity</button></div>}
+      <div style={{fontSize:11,color:T.textMuted,marginBottom:10}}>A default chart of accounts will be created. You can replace it by importing a trial balance from the entity row. Development-project entities unlock the Requisitions coding tools.</div>
+      <button style={S.btnP} onClick={async()=>{if(!name.trim()){setErr('Name required');return;}try{await api.createEntity(name.trim(),newType);setName('');setNewType('accounting');setShowAdd(false);setErr('');refresh();}catch(e){setErr(e.message);}}}>Create Entity</button></div>}
     {bulk&&<div style={{...S.card,borderColor:T.accent+'40'}}><div style={{...S.h2,marginBottom:8}}>Bulk Import Entities</div><div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>One entity name per line</div>
       <textarea style={{...S.input,height:160,fontFamily:'monospace',fontSize:12,resize:'vertical'}} value={bulkText} onChange={e=>setBulkText(e.target.value)}/>
       {err&&<div style={S.err}>{err}</div>}<button style={{...S.btnP,marginTop:10}} onClick={async()=>{const names=bulkText.split('\n').map(l=>l.trim()).filter(Boolean);if(!names.length){setErr('None');return;}try{for(const n of names)await api.createEntity(n);setBulkText('');setBulk(false);refresh();}catch(e){setErr(e.message);}}}>Import</button></div>}
     <div style={S.cardFlush}><table style={S.table}><thead><tr><th style={S.th}>Entity</th><th style={{...S.th,width:340}}>Actions</th></tr></thead>
       <tbody>{entities.sort((a,b)=>a.name.localeCompare(b.name)).map(e=><tr key={e.id} style={e.id===activeEntity?{background:T.accentDim}:{}}>
-        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{e.name}</td>
+        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{e.name}{e.entity_type==='development'&&<span style={{marginLeft:8,fontSize:9,fontWeight:700,color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder,borderRadius:4,padding:'2px 6px',textTransform:'uppercase',letterSpacing:'0.05em',verticalAlign:'middle'}}>Dev Project</span>}</td>
         <td style={S.td}><div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>setActiveEntity(e.id)}>Select</button>
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11,color:T.accent,borderColor:T.accent+'40'}} onClick={()=>{setImporting(e.id);setImportMsg('');setImportErr('');}}>Import Trial Balance</button>
+          <button style={{...S.btnS,padding:'5px 12px',fontSize:11}} disabled={typeBusy===e.id} title="Toggle between Accounting and Development Project" onClick={async()=>{const next=e.entity_type==='development'?'accounting':'development';if(!confirm('Set "'+e.name+'" to '+(next==='development'?'Development Project':'Accounting')+'?'))return;setTypeBusy(e.id);try{await api.updateEntity(e.id,{entity_type:next});await refresh();}catch(ex){alert(ex.message);}finally{setTypeBusy(null);}}}>{typeBusy===e.id?'...':e.entity_type==='development'?'Make Accounting':'Make Dev Project'}</button>
           <button style={{...S.btnD,padding:'5px 12px',fontSize:11}} onClick={async()=>{if(!confirm('Delete entity '+e.name+' and all its data?'))return;await api.deleteEntity(e.id);const r=await refresh();if(activeEntity===e.id)setActiveEntity(r[0]?.id||null);}}>Delete</button>
         </div></td></tr>)}</tbody></table></div>
     {importing&&<div style={S.modal} onClick={()=>{if(!importBusy)setImporting(null);}}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:560}} onClick={ev=>ev.stopPropagation()}>
