@@ -2565,6 +2565,70 @@ app.post('/api/requisition/:entity_id/predict', ...reqGuards(), (req, res) => {
   });
 });
 
+// ─── Manual invoice-file upload (interim path until Bill.com PDF auto-download / Phase 7 MFA) ───
+// Attach invoice PDFs to a requisition period. Uses the same requisition_invoice_file
+// table the Bill.com auto-downloader will eventually populate, so the packet builder
+// (R5) reads from one place regardless of source. Manual rows carry download_status='manual'.
+function reqPeriodForEntity(eid, pid) {
+  return db.prepare('SELECT * FROM requisition_period WHERE id = ? AND entity_id = ?').get(pid, eid);
+}
+
+app.get('/api/requisition/:entity_id/periods/:period_id/invoices', ...reqGuards(), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const pid = parseInt(req.params.period_id);
+  if (!reqPeriodForEntity(eid, pid)) return res.status(404).json({ error: 'Requisition period not found for this entity' });
+  const files = db.prepare('SELECT id, period_id, billcom_bill_id, billcom_document_id, original_name, page_count, download_status, created_at FROM requisition_invoice_file WHERE period_id = ? ORDER BY id').all(pid);
+  res.json(files);
+});
+
+app.post('/api/requisition/:entity_id/periods/:period_id/invoices', ...reqGuards(), requireRole('Admin', 'Accountant'), upload.array('files', 20), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const pid = parseInt(req.params.period_id);
+  if (!reqPeriodForEntity(eid, pid)) return res.status(404).json({ error: 'Requisition period not found for this entity' });
+  const uploaded = Array.isArray(req.files) ? req.files : [];
+  if (!uploaded.length) return res.status(400).json({ error: 'No files uploaded' });
+  const now = new Date().toISOString();
+  const ins = db.prepare(
+    'INSERT INTO requisition_invoice_file (period_id, stored_filename, original_name, download_status, created_at) ' +
+    "VALUES (?,?,?, 'manual', ?)"
+  );
+  const created = [];
+  const tx = db.transaction(() => {
+    for (const f of uploaded) {
+      const info = ins.run(pid, f.filename, f.originalname, now);
+      created.push({ id: info.lastInsertRowid, original_name: f.originalname });
+    }
+  });
+  tx();
+  res.status(201).json({ uploaded: created.length, files: created });
+});
+
+app.get('/api/requisition/invoice-file/:id/download', (req, res) => {
+  const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'No token' });
+  try { jwt.verify(token, JWT_SECRET); } catch { return res.status(401).json({ error: 'Invalid token' }); }
+  const f = db.prepare('SELECT * FROM requisition_invoice_file WHERE id = ?').get(req.params.id);
+  if (!f || !f.stored_filename) return res.status(404).json({ error: 'Not found' });
+  const filepath = path.resolve(UPLOAD_DIR, f.stored_filename);
+  if (!fs.existsSync(filepath)) return res.status(404).json({ error: 'File missing' });
+  const isPdf = /\.pdf$/i.test(f.original_name || f.stored_filename || '');
+  res.setHeader('Content-Disposition', (isPdf ? 'inline' : 'attachment') + '; filename="' + (f.original_name || 'invoice') + '"');
+  if (isPdf) res.setHeader('Content-Type', 'application/pdf');
+  res.sendFile(filepath, err => { if (err && !res.headersSent) res.status(500).json({ error: 'Failed to send file' }); });
+});
+
+app.delete('/api/requisition/:entity_id/invoice-file/:id', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const f = db.prepare(
+    'SELECT rif.* FROM requisition_invoice_file rif JOIN requisition_period rp ON rp.id = rif.period_id ' +
+    'WHERE rif.id = ? AND rp.entity_id = ?'
+  ).get(parseInt(req.params.id), eid);
+  if (!f) return res.status(404).json({ error: 'Not found' });
+  if (f.stored_filename) { try { fs.unlinkSync(path.join(UPLOAD_DIR, f.stored_filename)); } catch {} }
+  db.prepare('DELETE FROM requisition_invoice_file WHERE id = ?').run(f.id);
+  res.json({ success: true });
+});
+
 if (process.env.NODE_ENV === 'production') app.get('*', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');

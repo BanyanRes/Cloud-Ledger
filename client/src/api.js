@@ -145,6 +145,14 @@ export const api = {
   getRequisitionStats: (eid) => request('/requisition/' + eid + '/coding-history/stats'),
   seedRequisitionHistory: (eid, body) => request('/requisition/' + eid + '/seed-history', { method: 'POST', body }),
   predictRequisitionCoding: (eid, lines) => request('/requisition/' + eid + '/predict', { method: 'POST', body: { lines } }),
+  getRequisitionInvoices: (eid, pid) => request('/requisition/' + eid + '/periods/' + pid + '/invoices'),
+  uploadRequisitionInvoices: (eid, pid, files) => {
+    const fd = new FormData();
+    for (const f of files) fd.append('files', f);
+    return request('/requisition/' + eid + '/periods/' + pid + '/invoices', { method: 'POST', body: fd });
+  },
+  downloadRequisitionInvoice: (id) => API_BASE + '/requisition/invoice-file/' + id + '/download?token=' + encodeURIComponent(getToken() || ''),
+  deleteRequisitionInvoice: (eid, id) => request('/requisition/' + eid + '/invoice-file/' + id, { method: 'DELETE' }),
 
   setToken, getToken, clearToken,
 };
