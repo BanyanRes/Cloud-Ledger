@@ -12,6 +12,7 @@ const pdfParse = require('pdf-parse');
 const path = require('path');
 const fs = require('fs');
 const turnkey = require('./turnkey');
+const requisition = require('./requisition');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -254,6 +255,89 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_tsl_entity ON turnkey_sync_log(cl_entity_id, created_at);
   CREATE INDEX IF NOT EXISTS idx_tsl_turnkey_id ON turnkey_sync_log(sync_type, turnkey_id);
+  -- ==========================================================
+  -- Requisition Report / Invoice Packet (development entities only)
+  -- ==========================================================
+  CREATE TABLE IF NOT EXISTS requisition_period (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id),
+    req_number INTEGER NOT NULL,
+    req_label TEXT NOT NULL,
+    period_start TEXT,
+    period_end TEXT,
+    status TEXT NOT NULL DEFAULT 'draft',
+    prior_workbook_file_id INTEGER,
+    created_at TEXT,
+    updated_at TEXT,
+    UNIQUE(entity_id, req_number)
+  );
+  CREATE INDEX IF NOT EXISTS idx_reqp_entity ON requisition_period(entity_id);
+  CREATE TABLE IF NOT EXISTS requisition_line (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    period_id INTEGER NOT NULL REFERENCES requisition_period(id),
+    cost_category TEXT,
+    cost_code TEXT,
+    bank_cost_category TEXT,
+    gl_coding TEXT,
+    cost_code_name TEXT,
+    vendor TEXT,
+    bill_number TEXT,
+    amount REAL,
+    invoice_date TEXT,
+    notes TEXT,
+    billcom_bill_id TEXT,
+    seq_in_code INTEGER,
+    coding_confidence TEXT,
+    coding_source TEXT,
+    included INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_reql_period ON requisition_line(period_id);
+  CREATE TABLE IF NOT EXISTS requisition_invoice_file (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    period_id INTEGER NOT NULL REFERENCES requisition_period(id),
+    billcom_bill_id TEXT,
+    billcom_document_id TEXT,
+    stored_filename TEXT,
+    original_name TEXT,
+    page_count INTEGER,
+    download_status TEXT,
+    created_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_reqif_period ON requisition_invoice_file(period_id);
+  CREATE TABLE IF NOT EXISTS requisition_coding_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id),
+    vendor_norm TEXT NOT NULL,
+    bill_signature TEXT,
+    cost_category TEXT,
+    cost_code TEXT,
+    bank_cost_category TEXT,
+    gl_coding TEXT,
+    cost_code_name TEXT,
+    req_number INTEGER,
+    weight INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_reqch_lookup ON requisition_coding_history(entity_id, vendor_norm);
+  -- Cost-code catalog per development entity. This is the master list of cost
+  -- codes that drives the Budget-to-Actual report and the canonical
+  -- (cost_category / cost_code_name / bank_cost_category) spelling used when a
+  -- coded line is written. Seeded from prior workbooks / Invoice Logs.
+  CREATE TABLE IF NOT EXISTS requisition_coa_map (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id),
+    cost_code TEXT NOT NULL,
+    cost_code_name TEXT,
+    cost_category TEXT,
+    bank_cost_category TEXT,
+    gl_coding TEXT,
+    budget_amount REAL,
+    sort_order INTEGER,
+    created_at TEXT,
+    UNIQUE(entity_id, cost_code)
+  );
+  CREATE INDEX IF NOT EXISTS idx_reqcoa_entity ON requisition_coa_map(entity_id);
 `);
 
 const userCount = db.prepare('SELECT COUNT(*) as c FROM users').get();
@@ -781,6 +865,17 @@ app.delete('/api/entities/:id', auth, requireRole('Admin'), (req, res) => {
       db.prepare('DELETE FROM turnkey_vendor_map WHERE cl_entity_id = ?').run(id);
       db.prepare('DELETE FROM turnkey_sync_log WHERE cl_entity_id = ?').run(id);
       db.prepare('DELETE FROM turnkey_project_map WHERE cl_entity_id = ?').run(id);
+      // Requisition tables (none cascade). Children (line, invoice_file) are keyed
+      // by period_id, so clear them via the entity's periods first, then periods,
+      // then the entity-keyed coding history.
+      const reqPeriodIds = db.prepare('SELECT id FROM requisition_period WHERE entity_id = ?').all(id).map(r => r.id);
+      for (const pid of reqPeriodIds) {
+        db.prepare('DELETE FROM requisition_line WHERE period_id = ?').run(pid);
+        db.prepare('DELETE FROM requisition_invoice_file WHERE period_id = ?').run(pid);
+      }
+      db.prepare('DELETE FROM requisition_period WHERE entity_id = ?').run(id);
+      db.prepare('DELETE FROM requisition_coding_history WHERE entity_id = ?').run(id);
+      db.prepare('DELETE FROM requisition_coa_map WHERE entity_id = ?').run(id);
       db.prepare('DELETE FROM entities WHERE id = ?').run(id);
     })();
     res.json({ success: true });
@@ -2345,6 +2440,129 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
 
   result.missing_mappings = Array.from(missingMap.values());
   res.json(result);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Requisition / Invoice-Packet API (development-project entities only)
+// Every route is gated: auth → entity access → development-entity check.
+// ═══════════════════════════════════════════════════════════════════════════
+const reqGuards = (param) => [auth, requireEntityAccess(param || 'entity_id'), requireDevelopmentEntity(param || 'entity_id')];
+
+// List requisition periods for an entity (newest req_number first).
+app.get('/api/requisition/:entity_id/periods', ...reqGuards(), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const periods = db.prepare(
+    'SELECT * FROM requisition_period WHERE entity_id = ? ORDER BY req_number DESC'
+  ).all(eid);
+  res.json(periods);
+});
+
+// Create a new requisition period. req_number auto-increments from the entity's
+// max; req_label / period dates optional. Reusing an existing req_number 409s.
+app.post('/api/requisition/:entity_id/periods', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const { req_label, period_start, period_end, prior_workbook_file_id } = req.body || {};
+  let reqNumber = req.body && req.body.req_number != null ? parseInt(req.body.req_number) : null;
+  if (reqNumber == null || Number.isNaN(reqNumber)) {
+    const row = db.prepare('SELECT MAX(req_number) AS m FROM requisition_period WHERE entity_id = ?').get(eid);
+    reqNumber = (row && row.m != null ? row.m : 0) + 1;
+  }
+  const exists = db.prepare('SELECT id FROM requisition_period WHERE entity_id = ? AND req_number = ?').get(eid, reqNumber);
+  if (exists) return res.status(409).json({ error: `Requisition #${reqNumber} already exists for this entity` });
+  const now = new Date().toISOString();
+  const label = req_label || `Requisition #${reqNumber}`;
+  const info = db.prepare(
+    'INSERT INTO requisition_period (entity_id, req_number, req_label, period_start, period_end, status, prior_workbook_file_id, created_at, updated_at) ' +
+    "VALUES (?,?,?,?,?, 'draft', ?,?,?)"
+  ).run(eid, reqNumber, label, period_start || null, period_end || null, prior_workbook_file_id || null, now, now);
+  const period = db.prepare('SELECT * FROM requisition_period WHERE id = ?').get(info.lastInsertRowid);
+  res.status(201).json(period);
+});
+
+// Coding readiness: how much history / how many cost codes this entity has, so
+// the UI can show whether predict() will work before a user runs it.
+app.get('/api/requisition/:entity_id/coding-history/stats', ...reqGuards(), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const hist = db.prepare('SELECT COUNT(*) AS rows, COUNT(DISTINCT vendor_norm) AS vendors, MIN(req_number) AS min_req, MAX(req_number) AS max_req FROM requisition_coding_history WHERE entity_id = ?').get(eid);
+  const coa = db.prepare('SELECT COUNT(*) AS codes FROM requisition_coa_map WHERE entity_id = ?').get(eid);
+  res.json({
+    history_rows: hist.rows || 0,
+    distinct_vendors: hist.vendors || 0,
+    req_range: { min: hist.min_req, max: hist.max_req },
+    coa_codes: coa.codes || 0,
+    ready: (hist.rows || 0) > 0,
+  });
+});
+
+// Seed coding history (and optionally the cost-code catalog) from prior Invoice
+// Logs. Body: { lines: [{vendor, bill_number, cost_category, cost_code,
+// bank_cost_category, gl_coding, cost_code_name, req_number, weight}],
+// coa?: [{cost_code, cost_code_name, cost_category, bank_cost_category,
+// gl_coding, budget_amount, sort_order}], replace?: bool }.
+app.post('/api/requisition/:entity_id/seed-history', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const body = req.body || {};
+  const lines = Array.isArray(body.lines) ? body.lines : [];
+  const coa = Array.isArray(body.coa) ? body.coa : [];
+  const tx = db.transaction(() => {
+    if (body.replace) {
+      db.prepare('DELETE FROM requisition_coding_history WHERE entity_id = ?').run(eid);
+      if (coa.length) db.prepare('DELETE FROM requisition_coa_map WHERE entity_id = ?').run(eid);
+    }
+    for (const ln of lines) {
+      requisition.recordHistory(db, eid, ln, ln.req_number, ln.weight);
+    }
+    if (coa.length) {
+      const now = new Date().toISOString();
+      const up = db.prepare(
+        'INSERT INTO requisition_coa_map (entity_id, cost_code, cost_code_name, cost_category, bank_cost_category, gl_coding, budget_amount, sort_order, created_at) ' +
+        'VALUES (?,?,?,?,?,?,?,?,?) ' +
+        'ON CONFLICT(entity_id, cost_code) DO UPDATE SET ' +
+        'cost_code_name=excluded.cost_code_name, cost_category=excluded.cost_category, ' +
+        'bank_cost_category=excluded.bank_cost_category, gl_coding=excluded.gl_coding, ' +
+        'budget_amount=excluded.budget_amount, sort_order=excluded.sort_order'
+      );
+      coa.forEach((c, i) => {
+        if (c.cost_code == null || c.cost_code === '') return;
+        up.run(eid, String(c.cost_code), c.cost_code_name || null, c.cost_category || null,
+          c.bank_cost_category || null, c.gl_coding || null,
+          c.budget_amount != null ? Number(c.budget_amount) : null,
+          c.sort_order != null ? Number(c.sort_order) : i, now);
+      });
+    }
+  });
+  tx();
+  res.json({ seeded_history: lines.length, seeded_coa: coa.length });
+});
+
+// Predict cost codes for a batch of invoice lines using the validated engine.
+// Body: { lines: [{vendor, bill_number, amount?, invoice_date?, ...}] }.
+// Returns per-line { confidence, cost_code, coding, candidates } plus a summary.
+app.post('/api/requisition/:entity_id/predict', ...reqGuards(), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const lines = Array.isArray(req.body && req.body.lines) ? req.body.lines : [];
+  const index = requisition.buildHistoryIndex(db, eid);
+  let high = 0, review = 0, neu = 0;
+  const results = lines.map((ln) => {
+    const p = requisition.predict(ln, index);
+    if (p.confidence === 'high') high++;
+    else if (p.confidence === 'review') review++;
+    else neu++;
+    return {
+      vendor: ln.vendor,
+      bill_number: ln.bill_number,
+      amount: ln.amount != null ? ln.amount : null,
+      confidence: p.confidence,
+      cost_code: p.cost_code,
+      coding: p.coding,
+      candidates: p.candidates,
+    };
+  });
+  res.json({
+    total: lines.length,
+    summary: { high, review, new: neu, auto_coverage: lines.length ? high / lines.length : 0 },
+    lines: results,
+  });
 });
 
 if (process.env.NODE_ENV === 'production') app.get('*', (req, res) => {
