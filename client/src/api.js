@@ -153,6 +153,36 @@ export const api = {
   },
   downloadRequisitionInvoice: (id) => API_BASE + '/requisition/invoice-file/' + id + '/download?token=' + encodeURIComponent(getToken() || ''),
   deleteRequisitionInvoice: (eid, id) => request('/requisition/' + eid + '/invoice-file/' + id, { method: 'DELETE' }),
+  // Roll-forward: upload Req#N workbook + new-period invoices, get back the
+  // rolled-forward Req#N+1 .xlsx (blob) on success, or a thrown Error carrying
+  // the reconciliation detail on a 422 failure. Returns { blob, filename, summary }.
+  rollForwardRequisition: async (eid, workbookFile, newCurrent, meta = {}) => {
+    const fd = new FormData();
+    fd.append('workbook', workbookFile);
+    fd.append('newCurrent', JSON.stringify(newCurrent || []));
+    if (meta.reqNumber != null && meta.reqNumber !== '') fd.append('reqNumber', String(meta.reqNumber));
+    if (meta.asOfDate) fd.append('asOfDate', meta.asOfDate);
+    const token = getToken();
+    const res = await fetch(API_BASE + '/requisition/' + eid + '/rollforward', {
+      method: 'POST',
+      headers: token ? { Authorization: 'Bearer ' + token } : {},
+      body: fd,
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) {
+      let data = {}; try { data = await res.json(); } catch {}
+      const err = new Error(data.error || 'Roll-forward failed');
+      err.detail = data;
+      throw err;
+    }
+    let summary = {}; try { summary = JSON.parse(res.headers.get('x-reconcile-summary') || '{}'); } catch {}
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const filename = m ? m[1] : 'Requisition_Report.xlsx';
+    const blob = await res.blob();
+    return { blob, filename, summary };
+  },
 
   setToken, getToken, clearToken,
 };

@@ -1966,6 +1966,9 @@ function Requisitions({entityId,entityName}){
   const[predText,setPredText]=useState('');const[predBusy,setPredBusy]=useState(false);const[predResult,setPredResult]=useState(null);const[predErr,setPredErr]=useState('');
   // invoice files (per selected period)
   const[invPeriod,setInvPeriod]=useState(null);const[invFiles,setInvFiles]=useState([]);const[invBusy,setInvBusy]=useState(false);const[invErr,setInvErr]=useState('');const[invMsg,setInvMsg]=useState('');
+  // roll-forward
+  const[rfFile,setRfFile]=useState(null);const[rfText,setRfText]=useState('');const[rfReqNum,setRfReqNum]=useState('');const[rfAsOf,setRfAsOf]=useState(today());
+  const[rfBusy,setRfBusy]=useState(false);const[rfErr,setRfErr]=useState('');const[rfDetail,setRfDetail]=useState(null);const[rfResult,setRfResult]=useState(null);
 
   const load=async()=>{setLoading(true);setErr('');
     try{const[s,p]=await Promise.all([api.getRequisitionStats(entityId),api.getRequisitionPeriods(entityId)]);setStats(s);setPeriods(p||[]);}
@@ -2000,6 +2003,27 @@ function Requisitions({entityId,entityName}){
     try{const r=await api.predictRequisitionCoding(entityId,lines);setPredResult(r);}
     catch(e){setPredErr(e.message);}finally{setPredBusy(false);}};
 
+  // Parse roll-forward invoice lines: "Code <tab> Name <tab> Vendor <tab> Bill# <tab> Amount"
+  // Code/Name optional per line (blank tabs allowed); Amount required.
+  const parseRfLines=txt=>txt.split('\n').map(l=>l.replace(/\r$/,'')).filter(l=>l.trim()).map(l=>{
+    const p=l.split('\t').map(s=>s.trim());
+    const [code,name,vendor,bill,amountRaw]=p;
+    const amount=amountRaw!=null&&amountRaw!==''?parseFloat(amountRaw.replace(/[$,]/g,'')):NaN;
+    return {code:code||undefined,name:name||undefined,vendor:vendor||undefined,bill:bill||undefined,...(Number.isFinite(amount)?{amount}:{})};
+  }).filter(x=>Number.isFinite(x.amount));
+
+  const runRollForward=async()=>{
+    if(!rfFile){setRfErr('Upload the prior requisition workbook (.xlsx) first.');return;}
+    const newCurrent=parseRfLines(rfText);
+    if(!newCurrent.length){setRfErr('Paste at least one current-period invoice line with an amount: Code [tab] Name [tab] Vendor [tab] Bill# [tab] Amount');return;}
+    setRfBusy(true);setRfErr('');setRfDetail(null);setRfResult(null);
+    try{
+      const {blob,filename,summary}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf});
+      const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
+      setRfResult({filename,summary,count:newCurrent.length});
+    }catch(e){setRfErr(e.message);if(e.detail)setRfDetail(e.detail);}
+    finally{setRfBusy(false);}};
+
   const tierStyle=conf=>conf==='high'?{color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder}
     :conf==='review'?{color:T.orange,background:T.orangeDim,border:'1px solid '+T.orange+'40'}
     :{color:T.textMuted,background:T.bgElevated,border:'1px solid '+T.border};
@@ -2013,7 +2037,7 @@ function Requisitions({entityId,entityName}){
     </div>
     {err&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:12}}>{err}</div>}
 
-    <div style={{marginBottom:18}}><TabBtn id="overview" label="Overview"/><TabBtn id="periods" label={'Periods ('+periods.length+')'}/><TabBtn id="predict" label="Code Invoices"/></div>
+    <div style={{marginBottom:18}}><TabBtn id="overview" label="Overview"/><TabBtn id="periods" label={'Periods ('+periods.length+')'}/><TabBtn id="predict" label="Code Invoices"/><TabBtn id="rollforward" label="Roll-Forward"/></div>
 
     {tab==='overview'&&<div style={S.card}>
       <div style={{...S.h2,marginBottom:14}}>Coding History</div>
@@ -2096,6 +2120,58 @@ function Requisitions({entityId,entityName}){
           <td style={{...S.td,fontWeight:600}}>{l.cost_code!=null?l.cost_code:<span style={{color:T.textMuted}}>—</span>}</td>
           <td style={{...S.td,fontSize:12,color:T.textMuted}}>{(l.coding&&l.coding.cost_code_name)||''}</td>
           <td style={S.tdC}>{badge(l.confidence)}</td></tr>)}</tbody></table></div>}
+    </div>}
+
+    {tab==='rollforward'&&<div>
+      <div style={S.card}>
+        <div style={{...S.h2,marginBottom:6}}>Roll Forward to Next Requisition</div>
+        <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>Upload the <strong>prior requisition workbook</strong> (.xlsx) and paste this period's invoices. The engine folds the prior Current Invoice Log into the Prior Log, replaces the Current Log with these new invoices, re-points cross-sheet references, and runs a reconciliation check before producing the next workbook. The result downloads automatically on success.</div>
+
+        <div style={{marginBottom:14}}>
+          <label style={S.label}>Prior requisition workbook (.xlsx)</label>
+          <div style={{display:'flex',gap:10,alignItems:'center',marginTop:4}}>
+            <div style={{position:'relative',display:'inline-block',overflow:'hidden'}}>
+              <button style={{...S.btnS,pointerEvents:'none'}}>{rfFile?'Change file':'Choose .xlsx'}</button>
+              <input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:'pointer'}} onChange={e=>{const f=e.target.files[0];e.target.value='';if(f)setRfFile(f);}}/></div>
+            <span style={{fontSize:12,color:rfFile?T.textBright:T.textMuted}}>{rfFile?rfFile.name:'No file selected'}</span>
+          </div>
+        </div>
+
+        <div style={S.row}>
+          <div style={{...S.col,flex:1}}><label style={S.label}>New Requisition #</label><input style={S.input} type="number" placeholder="e.g. 15" value={rfReqNum} onChange={e=>setRfReqNum(e.target.value)}/></div>
+          <div style={{...S.col,flex:1}}><label style={S.label}>As-of Date</label><input style={S.input} type="date" value={rfAsOf} onChange={e=>setRfAsOf(e.target.value)}/></div>
+        </div>
+
+        <label style={{...S.label,marginTop:6}}>This period's invoices</label>
+        <div style={{fontSize:11,color:T.textMuted,margin:'2px 0 6px'}}>One per line, tab-separated: <strong>Cost Code</strong> &rarr; <strong>Cost Code Name</strong> &rarr; <strong>Vendor</strong> &rarr; <strong>Bill #</strong> &rarr; <strong>Amount</strong>. Code/Name may be left blank (use empty tabs); Amount is required.</div>
+        <textarea style={{...S.input,height:150,fontFamily:'monospace',fontSize:12,resize:'vertical'}} placeholder={'5010\tSite Work\tMartinus\tPay App #15\t71305.83\n6200\tPayroll\tCoastal Payroll\t05.15.26 Payroll\t12291.67'} value={rfText} onChange={e=>setRfText(e.target.value)}/>
+
+        {rfErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'10px 0'}}>{rfErr}</div>}
+        <button style={{...S.btnP,marginTop:12}} disabled={rfBusy} onClick={runRollForward}>{rfBusy?'Rolling forward...':'Roll Forward & Download'}</button>
+      </div>
+
+      {rfResult&&<div style={{...S.card,background:T.greenDim,borderColor:T.greenBorder}}>
+        <div style={{fontWeight:700,color:T.green,marginBottom:8}}>Roll-forward complete &mdash; {rfResult.filename} downloaded</div>
+        <div style={{fontSize:12,color:T.text,marginBottom:10}}>{rfResult.count} current-period invoice line{rfResult.count===1?'':'s'} folded forward. Reconciliation checks passed:</div>
+        {rfResult.summary&&<div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+          {[['Checks',rfResult.summary.total],['Passed',rfResult.summary.passed],['Required failed',rfResult.summary.requiredFailed],['Advisory failed',rfResult.summary.recommendedFailed]].map(([k,v])=>
+            <div key={k} style={{flex:'1 1 120px',textAlign:'center'}}>
+              <div style={{fontSize:22,fontWeight:700,color:k==='Required failed'&&v>0?T.red:T.textBright}}>{v!=null?v:'—'}</div>
+              <div style={{fontSize:10,color:T.textMuted,marginTop:2,textTransform:'uppercase',letterSpacing:'0.05em'}}>{k}</div></div>)}
+        </div>}
+      </div>}
+
+      {rfDetail&&rfDetail.checks&&<div style={{...S.card,background:T.redDim,borderColor:T.red+'40'}}>
+        <div style={{fontWeight:700,color:T.red,marginBottom:8}}>Reconciliation failed &mdash; workbook not produced</div>
+        <div style={{fontSize:12,color:T.text,marginBottom:10}}>A roll-forward only moves data, so a failure means a mechanical issue (a dropped amount, a shifted reference, or a stale subtotal range). The failing checks:</div>
+        <table style={S.table}><thead><tr><th style={S.th}>Check</th><th style={S.th}>Level</th><th style={S.thR}>Expected</th><th style={S.thR}>Actual</th><th style={S.th}>Detail</th></tr></thead>
+          <tbody>{rfDetail.checks.filter(c=>!c.pass).map((c,i)=><tr key={i}>
+            <td style={{...S.td,fontWeight:600,color:T.textBright}}>{c.id}</td>
+            <td style={S.td}>{c.level}</td>
+            <td style={S.tdR}>{c.expected!=null?Number(c.expected).toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</td>
+            <td style={S.tdR}>{c.actual!=null?Number(c.actual).toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</td>
+            <td style={{...S.td,fontSize:11,color:T.textMuted}}>{c.detail}</td></tr>)}</tbody></table>
+      </div>}
     </div>}
   </div>);}
 
