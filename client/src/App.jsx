@@ -1967,8 +1967,10 @@ function Requisitions({entityId,entityName}){
   // invoice files (per selected period)
   const[invPeriod,setInvPeriod]=useState(null);const[invFiles,setInvFiles]=useState([]);const[invBusy,setInvBusy]=useState(false);const[invErr,setInvErr]=useState('');const[invMsg,setInvMsg]=useState('');
   // roll-forward
-  const[rfFile,setRfFile]=useState(null);const[rfText,setRfText]=useState('');const[rfReqNum,setRfReqNum]=useState('');const[rfAsOf,setRfAsOf]=useState(today());
+  const[rfFile,setRfFile]=useState(null);const[rfReqNum,setRfReqNum]=useState('');const[rfAsOf,setRfAsOf]=useState(today());
   const[rfBusy,setRfBusy]=useState(false);const[rfErr,setRfErr]=useState('');const[rfDetail,setRfDetail]=useState(null);const[rfResult,setRfResult]=useState(null);
+  // invoice cards (read by Claude, then editable)
+  const[rfCards,setRfCards]=useState([]);const[rfReading,setRfReading]=useState(0);const[rfReadErr,setRfReadErr]=useState('');
 
   const load=async()=>{setLoading(true);setErr('');
     try{const[s,p]=await Promise.all([api.getRequisitionStats(entityId),api.getRequisitionPeriods(entityId)]);setStats(s);setPeriods(p||[]);}
@@ -2003,19 +2005,35 @@ function Requisitions({entityId,entityName}){
     try{const r=await api.predictRequisitionCoding(entityId,lines);setPredResult(r);}
     catch(e){setPredErr(e.message);}finally{setPredBusy(false);}};
 
-  // Parse roll-forward invoice lines: "Code <tab> Name <tab> Vendor <tab> Bill# <tab> Amount"
-  // Code/Name optional per line (blank tabs allowed); Amount required.
-  const parseRfLines=txt=>txt.split('\n').map(l=>l.replace(/\r$/,'')).filter(l=>l.trim()).map(l=>{
-    const p=l.split('\t').map(s=>s.trim());
-    const [code,name,vendor,bill,amountRaw]=p;
-    const amount=amountRaw!=null&&amountRaw!==''?parseFloat(amountRaw.replace(/[$,]/g,'')):NaN;
-    return {code:code||undefined,name:name||undefined,vendor:vendor||undefined,bill:bill||undefined,...(Number.isFinite(amount)?{amount}:{})};
-  }).filter(x=>Number.isFinite(x.amount));
+  // Read each uploaded invoice with Claude and append an editable card.
+  const onRfInvoices=async(e)=>{const files=[...e.target.files];e.target.value='';if(!files.length)return;
+    setRfReadErr('');setRfReading(n=>n+files.length);
+    for(const f of files){
+      try{const r=await api.readRequisitionInvoice(entityId,f);
+        setRfCards(cards=>[...cards,{
+          _id:Date.now()+'-'+Math.random().toString(36).slice(2,7),
+          filename:r.filename||f.name,
+          cost_code:r.cost_code||'',
+          cost_code_name:r.cost_code_name||'',
+          vendor:r.vendor||'',
+          bill:r.bill_number||'',
+          amount:r.amount!=null?String(r.amount):'',
+          date:r.invoice_date||'',
+          confidence:r.confidence||'new',
+        }]);
+      }catch(ex){setRfReadErr(ex.message);}
+      finally{setRfReading(n=>Math.max(0,n-1));}
+    }};
+  const updateCard=(id,field,val)=>setRfCards(cards=>cards.map(c=>c._id===id?{...c,[field]:val}:c));
+  const removeCard=id=>setRfCards(cards=>cards.filter(c=>c._id!==id));
 
   const runRollForward=async()=>{
     if(!rfFile){setRfErr('Upload the prior requisition workbook (.xlsx) first.');return;}
-    const newCurrent=parseRfLines(rfText);
-    if(!newCurrent.length){setRfErr('Paste at least one current-period invoice line with an amount: Code [tab] Name [tab] Vendor [tab] Bill# [tab] Amount');return;}
+    const newCurrent=rfCards.map(c=>{
+      const amount=c.amount!==''?parseFloat(String(c.amount).replace(/[$,]/g,'')):NaN;
+      return {code:c.cost_code||undefined,name:c.cost_code_name||undefined,vendor:c.vendor||undefined,bill:c.bill||undefined,date:c.date||undefined,...(Number.isFinite(amount)?{amount}:{})};
+    }).filter(x=>Number.isFinite(x.amount));
+    if(!newCurrent.length){setRfErr('Add at least one invoice with an amount before rolling forward.');return;}
     setRfBusy(true);setRfErr('');setRfDetail(null);setRfResult(null);
     try{
       const {blob,filename,summary}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf});
@@ -2125,7 +2143,7 @@ function Requisitions({entityId,entityName}){
     {tab==='rollforward'&&<div>
       <div style={S.card}>
         <div style={{...S.h2,marginBottom:6}}>Roll Forward to Next Requisition</div>
-        <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>Upload the <strong>prior requisition workbook</strong> (.xlsx) and paste this period's invoices. The engine folds the prior Current Invoice Log into the Prior Log, replaces the Current Log with these new invoices, re-points cross-sheet references, and runs a reconciliation check before producing the next workbook. The result downloads automatically on success.</div>
+        <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>Upload the <strong>prior requisition workbook</strong> (.xlsx), then add this period's invoices one at a time below &mdash; each invoice is read automatically and its fields pre-filled for you to check. The engine folds the prior Current Invoice Log into the Prior Log, replaces the Current Log with these invoices, re-points cross-sheet references, and runs a reconciliation check before producing the next workbook. The result downloads automatically on success.</div>
 
         <div style={{marginBottom:14}}>
           <label style={S.label}>Prior requisition workbook (.xlsx)</label>
@@ -2143,11 +2161,38 @@ function Requisitions({entityId,entityName}){
         </div>
 
         <label style={{...S.label,marginTop:6}}>This period's invoices</label>
-        <div style={{fontSize:11,color:T.textMuted,margin:'2px 0 6px'}}>One per line, tab-separated: <strong>Cost Code</strong> &rarr; <strong>Cost Code Name</strong> &rarr; <strong>Vendor</strong> &rarr; <strong>Bill #</strong> &rarr; <strong>Amount</strong>. Code/Name may be left blank (use empty tabs); Amount is required.</div>
-        <textarea style={{...S.input,height:150,fontFamily:'monospace',fontSize:12,resize:'vertical'}} placeholder={'5010\tSite Work\tMartinus\tPay App #15\t71305.83\n6200\tPayroll\tCoastal Payroll\t05.15.26 Payroll\t12291.67'} value={rfText} onChange={e=>setRfText(e.target.value)}/>
+        <div style={{position:'relative',border:'1.5px dashed '+T.border,borderRadius:T.radiusXs||8,padding:'22px 16px',textAlign:'center',background:T.bgElevated,marginTop:4}}>
+          <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:2}}>Drop invoice PDFs here, or click to upload</div>
+          <div style={{fontSize:11,color:T.textMuted}}>Multiple files at once is fine &mdash; each file is read as a separate invoice and its fields are pre-filled.</div>
+          <input type="file" accept=".pdf,application/pdf,image/*" multiple disabled={rfBusy} style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:rfBusy?'not-allowed':'pointer'}} onChange={onRfInvoices}/>
+        </div>
+        {rfReading>0&&<div style={{fontSize:12,color:T.accent,margin:'8px 0'}}>Reading {rfReading} invoice{rfReading===1?'':'s'}&hellip;</div>}
+        {rfReadErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'8px 0'}}>{rfReadErr}</div>}
+
+        {rfCards.length>0&&<div style={{marginTop:14}}>
+          <div style={{fontSize:12,fontWeight:600,color:T.textMuted,marginBottom:8}}>Invoices read &middot; {rfCards.length}</div>
+          {rfCards.map((c,idx)=><div key={c._id} style={{border:'1px solid '+T.border,borderRadius:8,padding:'12px 14px',marginBottom:10,background:'#fff'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+              <div style={{display:'flex',alignItems:'center',gap:8}}>
+                <span style={{fontSize:11,color:T.textMuted}}>#{idx+1}</span>
+                {badge(c.confidence)}
+                <span style={{fontSize:11,color:T.textMuted,maxWidth:240,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{c.filename}</span>
+              </div>
+              <button style={{...S.btnD,padding:'4px 10px',fontSize:11}} onClick={()=>removeCard(c._id)}>Remove</button>
+            </div>
+            <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+              <div style={{flex:'1 1 90px'}}><label style={S.label}>Cost Code</label><input style={S.input} value={c.cost_code} onChange={e=>updateCard(c._id,'cost_code',e.target.value)}/></div>
+              <div style={{flex:'2 1 160px'}}><label style={S.label}>Cost Code Name</label><input style={S.input} value={c.cost_code_name} onChange={e=>updateCard(c._id,'cost_code_name',e.target.value)}/></div>
+              <div style={{flex:'2 1 160px'}}><label style={S.label}>Vendor</label><input style={S.input} value={c.vendor} onChange={e=>updateCard(c._id,'vendor',e.target.value)}/></div>
+              <div style={{flex:'1 1 120px'}}><label style={S.label}>Bill #</label><input style={S.input} value={c.bill} onChange={e=>updateCard(c._id,'bill',e.target.value)}/></div>
+              <div style={{flex:'1 1 110px'}}><label style={S.label}>Amount</label><input style={S.input} value={c.amount} onChange={e=>updateCard(c._id,'amount',e.target.value)}/></div>
+              <div style={{flex:'1 1 120px'}}><label style={S.label}>Invoice Date</label><input style={S.input} type="date" value={c.date} onChange={e=>updateCard(c._id,'date',e.target.value)}/></div>
+            </div>
+          </div>)}
+        </div>}
 
         {rfErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'10px 0'}}>{rfErr}</div>}
-        <button style={{...S.btnP,marginTop:12}} disabled={rfBusy} onClick={runRollForward}>{rfBusy?'Rolling forward...':'Roll Forward & Download'}</button>
+        <button style={{...S.btnP,marginTop:12}} disabled={rfBusy||rfCards.length===0} onClick={runRollForward}>{rfBusy?'Rolling forward...':'Roll Forward & Download'+(rfCards.length?' ('+rfCards.length+')':'')}</button>
       </div>
 
       {rfResult&&<div style={{...S.card,background:T.greenDim,borderColor:T.greenBorder}}>

@@ -2632,6 +2632,86 @@ app.delete('/api/requisition/:entity_id/invoice-file/:id', ...reqGuards(), requi
   res.json({ success: true });
 });
 
+// ─── R4: Read one invoice PDF with Claude (Haiku) and pre-fill fields ─────────
+// Upload a single invoice (PDF or image). The model extracts vendor / bill
+// number / amount / invoice date; we then run the validated coding engine to
+// suggest a cost code. The client renders this as an editable card the user
+// corrects before it joins the requisition. Requires ANTHROPIC_API_KEY in env.
+//
+// multipart/form-data: invoice (file, required)
+// Returns: { vendor, bill_number, amount, invoice_date, cost_code,
+//            cost_code_name, confidence, candidates, model }
+app.post('/api/requisition/:entity_id/read-invoice', ...reqGuards(), requireRole('Admin', 'Accountant'), memUpload.single('invoice'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No invoice file uploaded (field name: invoice)' });
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return res.status(503).json({ error: 'Invoice reading is not configured (ANTHROPIC_API_KEY missing on the server).' });
+
+  const eid = parseInt(req.params.entity_id);
+  const mime = req.file.mimetype || '';
+  const isPdf = mime === 'application/pdf' || /\.pdf$/i.test(req.file.originalname || '');
+  const isImage = /^image\//.test(mime);
+  if (!isPdf && !isImage) return res.status(400).json({ error: 'Upload a PDF or image invoice' });
+
+  const b64 = req.file.buffer.toString('base64');
+  const source = isPdf
+    ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } }
+    : { type: 'image', source: { type: 'base64', media_type: mime, data: b64 } };
+
+  const instruction =
+    'You are reading a single vendor invoice for a real-estate development requisition. ' +
+    'Extract these fields and return ONLY a JSON object, no prose, no markdown fences:\n' +
+    '{"vendor": string|null, "bill_number": string|null, "amount": number|null, "invoice_date": string|null}\n' +
+    '- vendor: the company billing us (the payee/remit-to / "from" party), not our company.\n' +
+    '- bill_number: the invoice number or, for pay applications, the application label (e.g. "Pay App #15").\n' +
+    '- amount: the total amount due for THIS invoice as a number (no currency symbol or commas). ' +
+    'Use the current amount due / total due, not running totals.\n' +
+    '- invoice_date: the invoice date in YYYY-MM-DD if determinable, else null.\n' +
+    'If a field is not present, use null.';
+
+  let extracted;
+  try {
+    const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 512,
+        messages: [{ role: 'user', content: [source, { type: 'text', text: instruction }] }],
+      }),
+    });
+    if (!apiRes.ok) {
+      const t = await apiRes.text();
+      return res.status(502).json({ error: 'Invoice reader failed (Anthropic ' + apiRes.status + '): ' + t.slice(0, 300) });
+    }
+    const data = await apiRes.json();
+    const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    const clean = text.replace(/```json|```/g, '').trim();
+    extracted = JSON.parse(clean);
+  } catch (e) {
+    return res.status(502).json({ error: 'Invoice reader error: ' + e.message });
+  }
+
+  // Suggest a cost code from history using the validated engine.
+  let prediction = { confidence: 'new', cost_code: null, coding: null, candidates: [] };
+  try {
+    const index = requisition.buildHistoryIndex(db, eid);
+    prediction = requisition.predict({ vendor: extracted.vendor, bill_number: extracted.bill_number }, index);
+  } catch {}
+
+  const amountNum = extracted.amount != null && extracted.amount !== '' ? Number(String(extracted.amount).replace(/[$,]/g, '')) : null;
+  res.json({
+    vendor: extracted.vendor || null,
+    bill_number: extracted.bill_number || null,
+    amount: Number.isFinite(amountNum) ? amountNum : null,
+    invoice_date: extracted.invoice_date || null,
+    cost_code: prediction.cost_code,
+    cost_code_name: (prediction.coding && prediction.coding.cost_code_name) || null,
+    confidence: prediction.confidence,
+    candidates: prediction.candidates || [],
+    filename: req.file.originalname,
+  });
+});
+
 // ─── R4: Roll-forward engine route ───────────────────────────────────────────
 // Produce Req#N+1 from an uploaded Req#N workbook + the new period's invoices.
 // The engine writes formulas but does not evaluate them; production has no

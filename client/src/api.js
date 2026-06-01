@@ -153,6 +153,12 @@ export const api = {
   },
   downloadRequisitionInvoice: (id) => API_BASE + '/requisition/invoice-file/' + id + '/download?token=' + encodeURIComponent(getToken() || ''),
   deleteRequisitionInvoice: (eid, id) => request('/requisition/' + eid + '/invoice-file/' + id, { method: 'DELETE' }),
+  // Read one invoice PDF/image with Claude → pre-filled fields + cost-code suggestion.
+  readRequisitionInvoice: (eid, file) => {
+    const fd = new FormData();
+    fd.append('invoice', file);
+    return request('/requisition/' + eid + '/read-invoice', { method: 'POST', body: fd });
+  },
   // Roll-forward: upload Req#N workbook + new-period invoices, get back the
   // rolled-forward Req#N+1 .xlsx (blob) on success, or a thrown Error carrying
   // the reconciliation detail on a 422 failure. Returns { blob, filename, summary }.
