@@ -1962,8 +1962,6 @@ function Requisitions({entityId,entityName}){
   const[loading,setLoading]=useState(true);const[err,setErr]=useState('');
   // new period form
   const[newReqNum,setNewReqNum]=useState('');const[newPeriodEnd,setNewPeriodEnd]=useState(today());const[periodBusy,setPeriodBusy]=useState(false);const[periodMsg,setPeriodMsg]=useState('');
-  // predict
-  const[predText,setPredText]=useState('');const[predBusy,setPredBusy]=useState(false);const[predResult,setPredResult]=useState(null);const[predErr,setPredErr]=useState('');
   // invoice files (per selected period)
   const[invPeriod,setInvPeriod]=useState(null);const[invFiles,setInvFiles]=useState([]);const[invBusy,setInvBusy]=useState(false);const[invErr,setInvErr]=useState('');const[invMsg,setInvMsg]=useState('');
   // roll-forward
@@ -1990,20 +1988,6 @@ function Requisitions({entityId,entityName}){
     catch(ex){setInvErr(ex.message);}finally{setInvBusy(false);}};
   const deleteInv=async(id)=>{if(!confirm('Delete this invoice file?'))return;
     try{await api.deleteRequisitionInvoice(entityId,id);const f=await api.getRequisitionInvoices(entityId,invPeriod.id);setInvFiles(f||[]);}catch(ex){setInvErr(ex.message);}};
-
-  // Parse pasted invoice lines: "Vendor <tab> Bill# <tab> Amount" per line (amount optional)
-  const parseLines=txt=>txt.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{
-    const parts=l.split('\t').map(s=>s.trim());
-    const [vendor,bill_number,amountRaw]=parts;
-    const amount=amountRaw!=null&&amountRaw!==''?parseFloat(amountRaw.replace(/[$,]/g,'')):undefined;
-    return {vendor,bill_number,...(Number.isFinite(amount)?{amount}:{})};
-  }).filter(x=>x.vendor&&x.bill_number);
-
-  const runPredict=async()=>{const lines=parseLines(predText);
-    if(!lines.length){setPredErr('Paste at least one line: Vendor [tab] Bill# [tab] Amount');setPredResult(null);return;}
-    setPredBusy(true);setPredErr('');setPredResult(null);
-    try{const r=await api.predictRequisitionCoding(entityId,lines);setPredResult(r);}
-    catch(e){setPredErr(e.message);}finally{setPredBusy(false);}};
 
   // Read each uploaded invoice with Claude and append an editable card.
   const onRfInvoices=async(e)=>{const files=[...e.target.files];e.target.value='';if(!files.length)return;
@@ -2055,7 +2039,7 @@ function Requisitions({entityId,entityName}){
     </div>
     {err&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:12}}>{err}</div>}
 
-    <div style={{marginBottom:18}}><TabBtn id="overview" label="Overview"/><TabBtn id="periods" label={'Periods ('+periods.length+')'}/><TabBtn id="predict" label="Code Invoices"/><TabBtn id="rollforward" label="Roll-Forward"/></div>
+    <div style={{marginBottom:18}}><TabBtn id="overview" label="Overview"/><TabBtn id="periods" label={'Periods ('+periods.length+')'}/><TabBtn id="rollforward" label="Roll-Forward"/></div>
 
     {tab==='overview'&&<div style={S.card}>
       <div style={{...S.h2,marginBottom:14}}>Coding History</div>
@@ -2112,32 +2096,6 @@ function Requisitions({entityId,entityName}){
                 <a href={api.downloadRequisitionInvoice(f.id)} target="_blank" rel="noreferrer" style={{...S.btnS,padding:'5px 12px',fontSize:11,textDecoration:'none'}}>View</a>
                 <button style={{...S.btnD,padding:'5px 12px',fontSize:11}} onClick={()=>deleteInv(f.id)}>Delete</button></div></td></tr>)}</tbody></table>}
       </div>}
-    </div>}
-
-    {tab==='predict'&&<div>
-      <div style={S.card}>
-        <div style={{...S.h2,marginBottom:6}}>Code Invoices</div>
-        <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Paste invoice lines, one per line, tab-separated: <strong>Vendor</strong> &rarr; <strong>Bill #</strong> &rarr; <strong>Amount</strong> (amount optional). The engine predicts a cost code per line from prior requisition history.</div>
-        <textarea style={{...S.input,height:160,fontFamily:'monospace',fontSize:12,resize:'vertical'}} placeholder={'Martinus\tPay App #15\t71305.83\nCoastal Payroll\t05.15.26 Payroll\t12291.67'} value={predText} onChange={e=>setPredText(e.target.value)}/>
-        {predErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'10px 0'}}>{predErr}</div>}
-        <button style={{...S.btnP,marginTop:10}} disabled={predBusy} onClick={runPredict}>{predBusy?'Coding...':'Predict Coding'}</button>
-      </div>
-      {predResult&&predResult.summary&&<div style={{...S.card,background:T.bgElevated}}>
-        <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
-          {[['High',predResult.summary.high,'green'],['Review',predResult.summary.review,'orange'],['New',predResult.summary.new,'muted'],['Auto-coverage',Math.round((predResult.summary.auto_coverage||0)*100)+'%','accent']].map(([k,v,c])=>
-            <div key={k} style={{flex:'1 1 130px',textAlign:'center'}}>
-              <div style={{fontSize:22,fontWeight:700,color:c==='green'?T.green:c==='orange'?T.orange:c==='accent'?T.accent:T.textMuted}}>{v}</div>
-              <div style={{fontSize:11,color:T.textMuted,textTransform:'uppercase',letterSpacing:'0.05em',marginTop:2}}>{k}</div></div>)}
-        </div></div>}
-      {predResult&&predResult.lines&&<div style={S.cardFlush}><table style={S.table}><thead><tr>
-        <th style={S.th}>Vendor</th><th style={S.th}>Bill #</th><th style={S.thR}>Amount</th><th style={S.th}>Cost Code</th><th style={S.th}>Cost Code Name</th><th style={S.thC}>Tier</th></tr></thead>
-        <tbody>{predResult.lines.map((l,i)=><tr key={i}>
-          <td style={{...S.td,fontWeight:600,color:T.textBright}}>{l.vendor}</td>
-          <td style={{...S.td,fontFamily:'monospace',fontSize:11}}>{l.bill_number}</td>
-          <td style={S.tdR}>{l.amount!=null?Number(l.amount).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):'—'}</td>
-          <td style={{...S.td,fontWeight:600}}>{l.cost_code!=null?l.cost_code:<span style={{color:T.textMuted}}>—</span>}</td>
-          <td style={{...S.td,fontSize:12,color:T.textMuted}}>{(l.coding&&l.coding.cost_code_name)||''}</td>
-          <td style={S.tdC}>{badge(l.confidence)}</td></tr>)}</tbody></table></div>}
     </div>}
 
     {tab==='rollforward'&&<div>
