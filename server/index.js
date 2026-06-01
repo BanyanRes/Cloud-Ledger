@@ -13,6 +13,9 @@ const path = require('path');
 const fs = require('fs');
 const turnkey = require('./turnkey');
 const requisition = require('./requisition');
+const { rollForward } = require('./requisition_rollforward');
+const { verifyRollforward } = require('./requisition_rollforward_verify');
+const ExcelJS = require('exceljs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -2627,6 +2630,97 @@ app.delete('/api/requisition/:entity_id/invoice-file/:id', ...reqGuards(), requi
   if (f.stored_filename) { try { fs.unlinkSync(path.join(UPLOAD_DIR, f.stored_filename)); } catch {} }
   db.prepare('DELETE FROM requisition_invoice_file WHERE id = ?').run(f.id);
   res.json({ success: true });
+});
+
+// ─── R4: Roll-forward engine route ───────────────────────────────────────────
+// Produce Req#N+1 from an uploaded Req#N workbook + the new period's invoices.
+// The engine writes formulas but does not evaluate them; production has no
+// headless LibreOffice, so verifyRollforward runs WITHOUT recalc here. That
+// gates on the structural identities (A1 prior total, A2 per-code, A3 row count,
+// B1 group subtotals, B4 absolute refs) which read amounts/formulas directly and
+// need no evaluation. A4/B5 (which need evaluated SUBTOTAL/Dev-Fee results)
+// degrade to "not evaluated" and do not block.
+//
+// multipart/form-data:
+//   workbook    : the Req#N .xlsx (required)
+//   newCurrent  : JSON string — array of invoice rows for the new period, each
+//                 { code, name, vendor, bill, amount, date?, req? } (required)
+//   reqNumber   : new requisition number (optional, used in titles)
+//   asOfDate    : new period as-of date string (optional, used in titles)
+//
+// On success streams the rolled-forward .xlsx. On a required-check failure
+// returns 422 with the reconciliation detail so the caller can see what broke.
+app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole('Admin', 'Accountant'), memUpload.single('workbook'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No workbook uploaded (field name: workbook)' });
+
+  let newCurrent;
+  try {
+    newCurrent = JSON.parse(req.body.newCurrent || '[]');
+  } catch (e) {
+    return res.status(400).json({ error: 'newCurrent must be valid JSON: ' + e.message });
+  }
+  if (!Array.isArray(newCurrent)) return res.status(400).json({ error: 'newCurrent must be a JSON array of invoice rows' });
+
+  const meta = {};
+  if (req.body.reqNumber != null && req.body.reqNumber !== '') meta.reqNumber = req.body.reqNumber;
+  if (req.body.asOfDate) meta.asOfDate = req.body.asOfDate;
+
+  // Load the uploaded Req#N workbook twice: one mutable copy to roll forward,
+  // and one untouched copy to supply the prior-period sheets for reconciliation.
+  let workbook, priorBook;
+  try {
+    workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(req.file.buffer);
+    priorBook = new ExcelJS.Workbook();
+    await priorBook.xlsx.load(req.file.buffer);
+  } catch (e) {
+    return res.status(400).json({ error: 'Failed to read workbook (.xlsx expected): ' + e.message });
+  }
+
+  const prevSheets = {
+    prior: priorBook.getWorksheet('Prior Invoice Log'),
+    current: priorBook.getWorksheet('Current Invoice Log'),
+  };
+  if (!prevSheets.prior || !prevSheets.current) {
+    return res.status(400).json({ error: 'Workbook is missing required sheets: Prior Invoice Log and/or Current Invoice Log' });
+  }
+
+  try {
+    // Mutate `workbook` into Req#N+1.
+    rollForward(workbook, newCurrent, meta);
+
+    // Verify WITHOUT recalc (no LibreOffice in prod). Structural required checks
+    // gate; A4/B5 degrade to "not evaluated". No callClaude here — a failure is
+    // surfaced to the caller rather than auto-repaired in this synchronous route.
+    const verification = await verifyRollforward({
+      prevSheets,
+      nextWorkbook: workbook,
+      recalc: null,
+      callClaude: null,
+    });
+
+    if (!verification.ok) {
+      return res.status(422).json({
+        error: 'Roll-forward failed reconciliation',
+        ok: false,
+        summary: verification.finalResult && verification.finalResult.summary,
+        unresolved: verification.unresolved,
+        checks: verification.finalResult && verification.finalResult.checks,
+        note: verification.note,
+      });
+    }
+
+    const outBuf = await workbook.xlsx.writeBuffer();
+    const fname = 'Requisition_Report' + (meta.reqNumber ? '_' + String(meta.reqNumber) : '') + '.xlsx';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
+    // Expose the verification summary in a header so the client can confirm which
+    // checks passed without parsing the binary body.
+    res.setHeader('X-Reconcile-Summary', JSON.stringify(verification.finalResult ? verification.finalResult.summary : {}));
+    res.send(Buffer.from(outBuf));
+  } catch (e) {
+    res.status(500).json({ error: 'Roll-forward error: ' + e.message });
+  }
 });
 
 if (process.env.NODE_ENV === 'production') app.get('*', (req, res) => {
