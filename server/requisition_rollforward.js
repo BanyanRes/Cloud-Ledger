@@ -1,0 +1,305 @@
+// ============================================================================
+// Requisition roll-forward engine (exceljs)
+// ----------------------------------------------------------------------------
+// Produces Req#N+1 from Req#N + a set of Req#N+1 current-period invoices. The
+// ONLY data motion is: Req#N Current Log folds into Req#N+1 Prior Log (appended
+// to the matching cost-code group); the new Current Log is replaced with the
+// incoming invoices. Everything else (B2A SUMIF columns, contingency tables)
+// recomputes from formulas once the logs are right.
+//
+// Why rebuild the Prior Log group-by-group instead of inserting rows?
+// Inserting rows and then fixing up shifted SUBTOTAL ranges and absolute
+// references by arithmetic is exactly where the one-off openpyxl pass went
+// wrong (Dev Fee J6 landed one row off). Rebuilding each group from scratch and
+// re-deriving every SUBTOTAL range and every absolute reference BY LABEL removes
+// the whole class of off-by-one shift bugs: we never track a moving row number,
+// we look up the target by its name/bill text in the freshly written sheet.
+//
+// Formula cells inside the logs (e.g. Suncoast "=5532.77-5451") are preserved
+// verbatim - copied as formulas, not as evaluated numbers.
+//
+// This engine writes formulas but does not evaluate them; pair it with a recalc
+// step (headless LibreOffice) and the reconciliation engine to verify the result.
+// ============================================================================
+
+const { cellNum, cellStr, cellFormula, COL } = require('./requisition_reconcile.js');
+
+// Read one invoice-log sheet into an ordered list of groups. A group is a run of
+// data rows terminated by a SUBTOTAL row, with blank spacer rows interspersed.
+//   group = { code, name, subtotalName, rows: [{...cells}], }
+// rows preserve formula-vs-value (formula cells keep their formula string).
+function parseLogGroups(ws) {
+  const groups = [];
+  let cur = null;
+  const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
+  for (let r = 3; r <= last; r++) {
+    const amtCell = ws.getCell(r, COL.amount);
+    const f = cellFormula(amtCell);
+    const name = cellStr(ws.getCell(r, COL.name)).trim();
+    if (f && /SUBTOTAL/i.test(f)) {
+      // close the current group at this subtotal
+      if (cur) { cur.subtotalName = name; groups.push(cur); cur = null; }
+      else { groups.push({ code: null, name: '', subtotalName: name, rows: [] }); }
+      continue;
+    }
+    const amt = cellNum(amtCell);
+    const hasData = amt != null || cellStr(ws.getCell(r, COL.vendor)).trim() || name;
+    if (!hasData) continue; // blank spacer
+    // a data row
+    const row = readRowCells(ws, r);
+    if (!cur) cur = { code: row.code, name: row.name, subtotalName: '', rows: [] };
+    cur.rows.push(row);
+  }
+  if (cur) groups.push(cur);
+  return groups;
+}
+
+// Capture the cell payloads we need to rewrite a row, preserving formulas.
+function readRowCells(ws, r) {
+  const get = (col) => {
+    const c = ws.getCell(r, col);
+    const fm = cellFormula(c);
+    if (fm) return { formula: fm };
+    return c.value;
+  };
+  return {
+    srcRow: r,
+    cat: get(COL.cat), code: cellNum(ws.getCell(r, COL.code)),
+    bankcat: get(COL.bankcat), gl: get(COL.gl),
+    name: cellStr(ws.getCell(r, COL.name)).trim(),
+    vendor: cellStr(ws.getCell(r, COL.vendor)).trim(),
+    bill: get(COL.bill),
+    amount: get(COL.amount),   // may be {formula} or number
+    req: get(COL.req), date: get(COL.date),
+  };
+}
+
+// Classify current-period rows by cost code so they can be folded into the
+// matching prior group.
+function currentRowsByCode(ws) {
+  const byCode = new Map();
+  const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
+  for (let r = 3; r <= last; r++) {
+    const amtCell = ws.getCell(r, COL.amount);
+    const f = cellFormula(amtCell);
+    if (f && /SUBTOTAL/i.test(f)) continue;
+    const amt = cellNum(amtCell);
+    const vendor = cellStr(ws.getCell(r, COL.vendor)).trim();
+    if (amt == null && !vendor) continue;
+    const code = cellNum(ws.getCell(r, COL.code));
+    const key = code == null ? '__none__' : String(code);
+    if (!byCode.has(key)) byCode.set(key, []);
+    byCode.get(key).push(readRowCells(ws, r));
+  }
+  return byCode;
+}
+
+// Write a single data row's cells at target row `r`, preserving formula payloads.
+function writeRowCells(ws, r, row) {
+  const put = (col, payload) => { if (payload !== undefined) ws.getCell(r, col).value = payload; };
+  put(COL.cat, row.cat);
+  if (row.code != null) ws.getCell(r, COL.code).value = row.code;
+  put(COL.bankcat, row.bankcat);
+  put(COL.gl, row.gl);
+  ws.getCell(r, COL.name).value = row.name || null;
+  ws.getCell(r, COL.vendor).value = row.vendor || null;
+  put(COL.bill, row.bill);
+  put(COL.amount, row.amount);
+  put(COL.req, row.req);
+  put(COL.date, row.date);
+}
+
+// Rebuild the Prior Log in `nextPriorWs` from prior groups + folded current rows.
+// Returns a map of useful landmarks (row of each group subtotal, grand total row,
+// and rows of specially-referenced lines) so callers can rewrite absolute refs.
+function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
+  // Clear existing data region (keep header rows 1-2).
+  const existingLast = Math.max(nextPriorWs.rowCount || 0, nextPriorWs.actualRowCount || 0);
+  for (let r = 3; r <= existingLast; r++) {
+    for (let c = 2; c <= 11; c++) nextPriorWs.getCell(r, c).value = null;
+  }
+
+  const landmarks = { groupSubtotalRow: {}, byLabel: {}, grandTotalRow: null };
+  let r = 3;
+  for (const g of priorGroups) {
+    const isGrand = /grand total/i.test(g.subtotalName || '');
+    if (isGrand) {
+      // write grand total after a spacer; range covers all data written so far
+      r += 0;
+      const gtRow = r;
+      nextPriorWs.getCell(gtRow, COL.name).value = g.subtotalName;
+      nextPriorWs.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,I3:I${gtRow - 1})` };
+      landmarks.grandTotalRow = gtRow;
+      r = gtRow + 1;
+      continue;
+    }
+    const dataStart = r;
+    // prior data rows
+    for (const row of g.rows) {
+      writeRowCells(nextPriorWs, r, row);
+      if (row.bill && typeof row.bill === 'string') landmarks.byLabel[row.bill.toLowerCase()] = r;
+      r++;
+    }
+    // folded current rows for this code
+    const key = g.code == null ? '__none__' : String(g.code);
+    const folded = curByCode.get(key) || [];
+    for (const row of folded) {
+      writeRowCells(nextPriorWs, r, row);
+      if (row.bill && typeof row.bill === 'string') landmarks.byLabel[row.bill.toLowerCase()] = r;
+      r++;
+    }
+    curByCode.delete(key);
+    const dataEnd = r - 1;
+    // spacer
+    nextPriorWs.getCell(r, COL.amount).value = null; r++;
+    // subtotal
+    const subRow = r;
+    nextPriorWs.getCell(subRow, COL.name).value = g.subtotalName || ((g.name || '') + ' Total');
+    nextPriorWs.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,I${dataStart}:I${dataEnd + 1})` };
+    if (g.code != null) landmarks.groupSubtotalRow[String(g.code)] = subRow;
+    if (g.subtotalName) landmarks.byLabel[g.subtotalName.toLowerCase()] = subRow;
+    r = subRow + 1;
+    // spacer
+    nextPriorWs.getCell(r, COL.amount).value = null; r++;
+  }
+
+  // Any current codes with no matching prior group are appended as new groups.
+  for (const [key, rows] of curByCode.entries()) {
+    if (!rows.length) continue;
+    const dataStart = r;
+    for (const row of rows) { writeRowCells(nextPriorWs, r, row); r++; }
+    nextPriorWs.getCell(r, COL.amount).value = null; r++;
+    const subRow = r;
+    const nm = (rows[0].name || ('Code ' + key)) + ' Total';
+    nextPriorWs.getCell(subRow, COL.name).value = nm;
+    nextPriorWs.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,I${dataStart}:I${r - 1})` };
+    if (key !== '__none__') landmarks.groupSubtotalRow[key] = subRow;
+    r = subRow + 2;
+  }
+
+  return landmarks;
+}
+
+// Find a data row in a sheet by a bill/name substring (used to re-point absolute
+// refs by label rather than by a tracked row number).
+function findRowByLabel(ws, needles) {
+  const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
+  const wants = needles.map(n => n.toLowerCase());
+  for (let r = 3; r <= last; r++) {
+    const name = cellStr(ws.getCell(r, COL.name)).toLowerCase();
+    const bill = cellStr(ws.getCell(r, COL.bill)).toLowerCase();
+    const hay = name + ' | ' + bill;
+    if (wants.some(w => hay.includes(w))) return r;
+  }
+  return null;
+}
+
+// ----------------------------------------------------------------------------
+// Top-level: roll a workbook forward in place.
+//   workbook    : exceljs Workbook loaded from Req#N (will be mutated to Req#N+1)
+//   newCurrent  : array of invoice rows for the new period, each:
+//                 { code, name, vendor, bill, amount, date, req }
+//   meta        : { reqNumber, asOfDate }  for titles
+// Returns { landmarks } describing where key rows ended up.
+// ----------------------------------------------------------------------------
+function rollForward(workbook, newCurrent, meta = {}) {
+  const priorWs = workbook.getWorksheet('Prior Invoice Log');
+  const curWs = workbook.getWorksheet('Current Invoice Log');
+  const b2a = workbook.getWorksheet('Budget to Actual');
+  const devFee = workbook.getWorksheet('Dev Fee');
+
+  // 1. Capture prior structure + current rows BEFORE mutating anything.
+  const priorGroups = parseLogGroups(priorWs);
+  const curByCode = currentRowsByCode(curWs);
+
+  // 2. Rebuild Prior Log = prior groups + folded current rows.
+  const landmarks = rebuildPriorLog(priorWs, priorGroups, curByCode);
+
+  // 3. Replace Current Log with the incoming period's invoices.
+  replaceCurrentLog(curWs, newCurrent, meta);
+
+  // 4. Re-point absolute references by label (never by tracked row number).
+  repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks });
+
+  // 5. Update titles (date / requisition number).
+  if (meta.asOfDate && b2a.getCell('L1')) b2a.getCell('L1').value = meta.asOfDate;
+  if (meta.reqNumber && b2a.getCell('B4')) b2a.getCell('B4').value = 'Requistion Report # ' + meta.reqNumber;
+
+  return { landmarks };
+}
+
+// Write the new period invoices into the Current Log, grouped by cost code with
+// SUBTOTAL rows and a Grand Total, mirroring the sheet's existing layout.
+function replaceCurrentLog(ws, rows, meta) {
+  const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
+  for (let r = 3; r <= last; r++) for (let c = 2; c <= 11; c++) ws.getCell(r, c).value = null;
+
+  // group incoming rows by code, preserving first-seen order
+  const order = [];
+  const byCode = new Map();
+  for (const row of rows) {
+    const key = row.code == null ? '__none__' : String(row.code);
+    if (!byCode.has(key)) { byCode.set(key, []); order.push(key); }
+    byCode.get(key).push(row);
+  }
+  let r = 3;
+  for (const key of order) {
+    const grp = byCode.get(key);
+    const dataStart = r;
+    for (const row of grp) {
+      writeRowCells(ws, r, {
+        cat: row.cat || row.name, code: row.code, bankcat: row.bankcat, gl: row.gl ?? row.code,
+        name: row.name, vendor: row.vendor, bill: row.bill,
+        amount: row.amount, req: row.req || (meta.reqNumber ? 'Req#' + meta.reqNumber : undefined),
+        date: row.date,
+      });
+      r++;
+    }
+    ws.getCell(r, COL.amount).value = null; r++;            // spacer
+    const subRow = r;
+    ws.getCell(subRow, COL.name).value = (grp[0].name || ('Code ' + key)) + ' Total';
+    ws.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,I${dataStart}:I${r - 1})` };
+    r = subRow + 1;
+    ws.getCell(r, COL.amount).value = null; r++;            // spacer
+  }
+  // grand total
+  const gtRow = r;
+  ws.getCell(gtRow, COL.name).value = 'Grand Total';
+  ws.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,I3:I${gtRow - 1})` };
+}
+
+// Re-point the cross-sheet absolute references that the roll-forward affects.
+// Each is resolved by LABEL against the freshly written sheets, so a shift in
+// row positions can never silently point at the wrong line.
+function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
+  // Dev Fee J6 -> Prior "6 month upfront interest" data row
+  const j6row = findRowByLabel(priorWs, ['6 month upfront interest']);
+  if (j6row && devFee.getCell('J6')) devFee.getCell('J6').value = { formula: `-'Prior Invoice Log'!I${j6row}` };
+
+  // Dev Fee J10 -> Prior "Development Fee Total" subtotal
+  const j10row = findRowByLabel(priorWs, ['Development Fee Total', 'Dev Fee Total']);
+  if (j10row && devFee.getCell('J10')) devFee.getCell('J10').value = { formula: `'Prior Invoice Log'!I${j10row}` };
+
+  // Dev Fee J11 -> Current "Development Fee" data row
+  const j11row = findRowByLabel(curWs, ['Development Fee']);
+  if (j11row && devFee.getCell('J11')) devFee.getCell('J11').value = { formula: `'Current Invoice Log'!I${j11row}` };
+
+  // B2A H45 -> Prior "Working Capital" row
+  const wcRow = findRowByLabel(priorWs, ['Working Capital']);
+  if (wcRow && b2a.getCell('H45')) b2a.getCell('H45').value = { formula: `'Prior Invoice Log'!I${wcRow}` };
+
+  // B2A H49 -> Prior Grand Total ; I49/I50 -> Current Grand Total
+  if (landmarks.grandTotalRow && b2a.getCell('H49')) {
+    b2a.getCell('H49').value = { formula: `H47='Prior Invoice Log'!I${landmarks.grandTotalRow}` };
+  }
+  const curGT = findRowByLabel(curWs, ['Grand Total']);
+  if (curGT) {
+    if (b2a.getCell('I49')) b2a.getCell('I49').value = { formula: `'Current Invoice Log'!I${curGT}=I47` };
+    if (b2a.getCell('I50')) b2a.getCell('I50').value = { formula: `'Current Invoice Log'!I${curGT}-I47` };
+  }
+}
+
+module.exports = {
+  rollForward, parseLogGroups, currentRowsByCode, rebuildPriorLog,
+  replaceCurrentLog, repointAbsoluteRefs, findRowByLabel,
+};
