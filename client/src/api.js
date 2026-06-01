@@ -140,19 +140,10 @@ export const api = {
   getBillcomSyncLog: (entityId, limit) => request('/billcom/sync-log/' + entityId + (limit ? '?limit=' + limit : '')),
 
   // Requisition (development-project coding engine)
-  getRequisitionPeriods: (eid) => request('/requisition/' + eid + '/periods'),
-  createRequisitionPeriod: (eid, data) => request('/requisition/' + eid + '/periods', { method: 'POST', body: data }),
-  getRequisitionStats: (eid) => request('/requisition/' + eid + '/coding-history/stats'),
   seedRequisitionHistory: (eid, body) => request('/requisition/' + eid + '/seed-history', { method: 'POST', body }),
   predictRequisitionCoding: (eid, lines) => request('/requisition/' + eid + '/predict', { method: 'POST', body: { lines } }),
-  getRequisitionInvoices: (eid, pid) => request('/requisition/' + eid + '/periods/' + pid + '/invoices'),
-  uploadRequisitionInvoices: (eid, pid, files) => {
-    const fd = new FormData();
-    for (const f of files) fd.append('files', f);
-    return request('/requisition/' + eid + '/periods/' + pid + '/invoices', { method: 'POST', body: fd });
-  },
-  downloadRequisitionInvoice: (id) => API_BASE + '/requisition/invoice-file/' + id + '/download?token=' + encodeURIComponent(getToken() || ''),
-  deleteRequisitionInvoice: (eid, id) => request('/requisition/' + eid + '/invoice-file/' + id, { method: 'DELETE' }),
+  // Download a stored invoice's original bytes (PDF/image) by its saved id.
+  downloadRequisitionInvoice: (id) => API_BASE + '/requisition/invoice/' + id + '/download?token=' + encodeURIComponent(getToken() || ''),
   // Read one invoice PDF/image with Claude → pre-filled fields + cost-code suggestion.
   readRequisitionInvoice: (eid, file) => {
     const fd = new FormData();
@@ -166,6 +157,7 @@ export const api = {
     const fd = new FormData();
     fd.append('workbook', workbookFile);
     fd.append('newCurrent', JSON.stringify(newCurrent || []));
+    if (meta.invoiceIds && meta.invoiceIds.length) fd.append('invoiceIds', JSON.stringify(meta.invoiceIds));
     if (meta.reqNumber != null && meta.reqNumber !== '') fd.append('reqNumber', String(meta.reqNumber));
     if (meta.asOfDate) fd.append('asOfDate', meta.asOfDate);
     const token = getToken();

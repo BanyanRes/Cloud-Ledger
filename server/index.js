@@ -261,53 +261,28 @@ db.exec(`
   -- ==========================================================
   -- Requisition Report / Invoice Packet (development entities only)
   -- ==========================================================
-  CREATE TABLE IF NOT EXISTS requisition_period (
+  -- One row per invoice read by the roll-forward flow. The PDF bytes are stored
+  -- inline (file_blob) so the invoice packet can be regenerated later without
+  -- depending on Bill.com. req_number is filled in when a roll-forward that
+  -- includes this invoice succeeds; until then it is NULL (read-but-not-yet-rolled).
+  CREATE TABLE IF NOT EXISTS requisition_invoice (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id INTEGER NOT NULL REFERENCES entities(id),
-    req_number INTEGER NOT NULL,
-    req_label TEXT NOT NULL,
-    period_start TEXT,
-    period_end TEXT,
-    status TEXT NOT NULL DEFAULT 'draft',
-    prior_workbook_file_id INTEGER,
-    created_at TEXT,
-    updated_at TEXT,
-    UNIQUE(entity_id, req_number)
-  );
-  CREATE INDEX IF NOT EXISTS idx_reqp_entity ON requisition_period(entity_id);
-  CREATE TABLE IF NOT EXISTS requisition_line (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    period_id INTEGER NOT NULL REFERENCES requisition_period(id),
-    cost_category TEXT,
-    cost_code TEXT,
-    bank_cost_category TEXT,
-    gl_coding TEXT,
-    cost_code_name TEXT,
+    req_number INTEGER,
     vendor TEXT,
     bill_number TEXT,
     amount REAL,
     invoice_date TEXT,
-    notes TEXT,
-    billcom_bill_id TEXT,
-    seq_in_code INTEGER,
-    coding_confidence TEXT,
-    coding_source TEXT,
-    included INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT
-  );
-  CREATE INDEX IF NOT EXISTS idx_reql_period ON requisition_line(period_id);
-  CREATE TABLE IF NOT EXISTS requisition_invoice_file (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    period_id INTEGER NOT NULL REFERENCES requisition_period(id),
-    billcom_bill_id TEXT,
-    billcom_document_id TEXT,
-    stored_filename TEXT,
+    cost_code TEXT,
+    cost_code_name TEXT,
+    confidence TEXT,
     original_name TEXT,
-    page_count INTEGER,
-    download_status TEXT,
+    mime_type TEXT,
+    file_blob BLOB,
     created_at TEXT
   );
-  CREATE INDEX IF NOT EXISTS idx_reqif_period ON requisition_invoice_file(period_id);
+  CREATE INDEX IF NOT EXISTS idx_reqinv_entity ON requisition_invoice(entity_id);
+  CREATE INDEX IF NOT EXISTS idx_reqinv_req ON requisition_invoice(entity_id, req_number);
   CREATE TABLE IF NOT EXISTS requisition_coding_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id INTEGER NOT NULL REFERENCES entities(id),
@@ -868,15 +843,8 @@ app.delete('/api/entities/:id', auth, requireRole('Admin'), (req, res) => {
       db.prepare('DELETE FROM turnkey_vendor_map WHERE cl_entity_id = ?').run(id);
       db.prepare('DELETE FROM turnkey_sync_log WHERE cl_entity_id = ?').run(id);
       db.prepare('DELETE FROM turnkey_project_map WHERE cl_entity_id = ?').run(id);
-      // Requisition tables (none cascade). Children (line, invoice_file) are keyed
-      // by period_id, so clear them via the entity's periods first, then periods,
-      // then the entity-keyed coding history.
-      const reqPeriodIds = db.prepare('SELECT id FROM requisition_period WHERE entity_id = ?').all(id).map(r => r.id);
-      for (const pid of reqPeriodIds) {
-        db.prepare('DELETE FROM requisition_line WHERE period_id = ?').run(pid);
-        db.prepare('DELETE FROM requisition_invoice_file WHERE period_id = ?').run(pid);
-      }
-      db.prepare('DELETE FROM requisition_period WHERE entity_id = ?').run(id);
+      // Requisition tables (none cascade): invoices stored inline, plus coding history.
+      db.prepare('DELETE FROM requisition_invoice WHERE entity_id = ?').run(id);
       db.prepare('DELETE FROM requisition_coding_history WHERE entity_id = ?').run(id);
       db.prepare('DELETE FROM requisition_coa_map WHERE entity_id = ?').run(id);
       db.prepare('DELETE FROM entities WHERE id = ?').run(id);
@@ -2451,52 +2419,6 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
 // ═══════════════════════════════════════════════════════════════════════════
 const reqGuards = (param) => [auth, requireEntityAccess(param || 'entity_id'), requireDevelopmentEntity(param || 'entity_id')];
 
-// List requisition periods for an entity (newest req_number first).
-app.get('/api/requisition/:entity_id/periods', ...reqGuards(), (req, res) => {
-  const eid = parseInt(req.params.entity_id);
-  const periods = db.prepare(
-    'SELECT * FROM requisition_period WHERE entity_id = ? ORDER BY req_number DESC'
-  ).all(eid);
-  res.json(periods);
-});
-
-// Create a new requisition period. req_number auto-increments from the entity's
-// max; req_label / period dates optional. Reusing an existing req_number 409s.
-app.post('/api/requisition/:entity_id/periods', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
-  const eid = parseInt(req.params.entity_id);
-  const { req_label, period_start, period_end, prior_workbook_file_id } = req.body || {};
-  let reqNumber = req.body && req.body.req_number != null ? parseInt(req.body.req_number) : null;
-  if (reqNumber == null || Number.isNaN(reqNumber)) {
-    const row = db.prepare('SELECT MAX(req_number) AS m FROM requisition_period WHERE entity_id = ?').get(eid);
-    reqNumber = (row && row.m != null ? row.m : 0) + 1;
-  }
-  const exists = db.prepare('SELECT id FROM requisition_period WHERE entity_id = ? AND req_number = ?').get(eid, reqNumber);
-  if (exists) return res.status(409).json({ error: `Requisition #${reqNumber} already exists for this entity` });
-  const now = new Date().toISOString();
-  const label = req_label || `Requisition #${reqNumber}`;
-  const info = db.prepare(
-    'INSERT INTO requisition_period (entity_id, req_number, req_label, period_start, period_end, status, prior_workbook_file_id, created_at, updated_at) ' +
-    "VALUES (?,?,?,?,?, 'draft', ?,?,?)"
-  ).run(eid, reqNumber, label, period_start || null, period_end || null, prior_workbook_file_id || null, now, now);
-  const period = db.prepare('SELECT * FROM requisition_period WHERE id = ?').get(info.lastInsertRowid);
-  res.status(201).json(period);
-});
-
-// Coding readiness: how much history / how many cost codes this entity has, so
-// the UI can show whether predict() will work before a user runs it.
-app.get('/api/requisition/:entity_id/coding-history/stats', ...reqGuards(), (req, res) => {
-  const eid = parseInt(req.params.entity_id);
-  const hist = db.prepare('SELECT COUNT(*) AS rows, COUNT(DISTINCT vendor_norm) AS vendors, MIN(req_number) AS min_req, MAX(req_number) AS max_req FROM requisition_coding_history WHERE entity_id = ?').get(eid);
-  const coa = db.prepare('SELECT COUNT(*) AS codes FROM requisition_coa_map WHERE entity_id = ?').get(eid);
-  res.json({
-    history_rows: hist.rows || 0,
-    distinct_vendors: hist.vendors || 0,
-    req_range: { min: hist.min_req, max: hist.max_req },
-    coa_codes: coa.codes || 0,
-    ready: (hist.rows || 0) > 0,
-  });
-});
-
 // Seed coding history (and optionally the cost-code catalog) from prior Invoice
 // Logs. Body: { lines: [{vendor, bill_number, cost_category, cost_code,
 // bank_cost_category, gl_coding, cost_code_name, req_number, weight}],
@@ -2568,68 +2490,19 @@ app.post('/api/requisition/:entity_id/predict', ...reqGuards(), (req, res) => {
   });
 });
 
-// ─── Manual invoice-file upload (interim path until Bill.com PDF auto-download / Phase 7 MFA) ───
-// Attach invoice PDFs to a requisition period. Uses the same requisition_invoice_file
-// table the Bill.com auto-downloader will eventually populate, so the packet builder
-// (R5) reads from one place regardless of source. Manual rows carry download_status='manual'.
-function reqPeriodForEntity(eid, pid) {
-  return db.prepare('SELECT * FROM requisition_period WHERE id = ? AND entity_id = ?').get(pid, eid);
-}
-
-app.get('/api/requisition/:entity_id/periods/:period_id/invoices', ...reqGuards(), (req, res) => {
-  const eid = parseInt(req.params.entity_id);
-  const pid = parseInt(req.params.period_id);
-  if (!reqPeriodForEntity(eid, pid)) return res.status(404).json({ error: 'Requisition period not found for this entity' });
-  const files = db.prepare('SELECT id, period_id, billcom_bill_id, billcom_document_id, original_name, page_count, download_status, created_at FROM requisition_invoice_file WHERE period_id = ? ORDER BY id').all(pid);
-  res.json(files);
-});
-
-app.post('/api/requisition/:entity_id/periods/:period_id/invoices', ...reqGuards(), requireRole('Admin', 'Accountant'), upload.array('files', 20), (req, res) => {
-  const eid = parseInt(req.params.entity_id);
-  const pid = parseInt(req.params.period_id);
-  if (!reqPeriodForEntity(eid, pid)) return res.status(404).json({ error: 'Requisition period not found for this entity' });
-  const uploaded = Array.isArray(req.files) ? req.files : [];
-  if (!uploaded.length) return res.status(400).json({ error: 'No files uploaded' });
-  const now = new Date().toISOString();
-  const ins = db.prepare(
-    'INSERT INTO requisition_invoice_file (period_id, stored_filename, original_name, download_status, created_at) ' +
-    "VALUES (?,?,?, 'manual', ?)"
-  );
-  const created = [];
-  const tx = db.transaction(() => {
-    for (const f of uploaded) {
-      const info = ins.run(pid, f.filename, f.originalname, now);
-      created.push({ id: info.lastInsertRowid, original_name: f.originalname });
-    }
-  });
-  tx();
-  res.status(201).json({ uploaded: created.length, files: created });
-});
-
-app.get('/api/requisition/invoice-file/:id/download', (req, res) => {
+// ─── R4: Stored invoice download ─────────────────────────────────────────────
+// Serve the inline-stored PDF/image bytes for one saved invoice, so the invoice
+// packet (and manual review) can pull the original document back out of the DB.
+app.get('/api/requisition/invoice/:id/download', (req, res) => {
   const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
   if (!token) return res.status(401).json({ error: 'No token' });
   try { jwt.verify(token, JWT_SECRET); } catch { return res.status(401).json({ error: 'Invalid token' }); }
-  const f = db.prepare('SELECT * FROM requisition_invoice_file WHERE id = ?').get(req.params.id);
-  if (!f || !f.stored_filename) return res.status(404).json({ error: 'Not found' });
-  const filepath = path.resolve(UPLOAD_DIR, f.stored_filename);
-  if (!fs.existsSync(filepath)) return res.status(404).json({ error: 'File missing' });
-  const isPdf = /\.pdf$/i.test(f.original_name || f.stored_filename || '');
+  const f = db.prepare('SELECT * FROM requisition_invoice WHERE id = ?').get(req.params.id);
+  if (!f || !f.file_blob) return res.status(404).json({ error: 'Not found' });
+  const isPdf = (f.mime_type === 'application/pdf') || /\.pdf$/i.test(f.original_name || '');
   res.setHeader('Content-Disposition', (isPdf ? 'inline' : 'attachment') + '; filename="' + (f.original_name || 'invoice') + '"');
-  if (isPdf) res.setHeader('Content-Type', 'application/pdf');
-  res.sendFile(filepath, err => { if (err && !res.headersSent) res.status(500).json({ error: 'Failed to send file' }); });
-});
-
-app.delete('/api/requisition/:entity_id/invoice-file/:id', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
-  const eid = parseInt(req.params.entity_id);
-  const f = db.prepare(
-    'SELECT rif.* FROM requisition_invoice_file rif JOIN requisition_period rp ON rp.id = rif.period_id ' +
-    'WHERE rif.id = ? AND rp.entity_id = ?'
-  ).get(parseInt(req.params.id), eid);
-  if (!f) return res.status(404).json({ error: 'Not found' });
-  if (f.stored_filename) { try { fs.unlinkSync(path.join(UPLOAD_DIR, f.stored_filename)); } catch {} }
-  db.prepare('DELETE FROM requisition_invoice_file WHERE id = ?').run(f.id);
-  res.json({ success: true });
+  res.setHeader('Content-Type', f.mime_type || (isPdf ? 'application/pdf' : 'application/octet-stream'));
+  res.send(Buffer.from(f.file_blob));
 });
 
 // ─── R4: Read one invoice PDF with Claude (Haiku) and pre-fill fields ─────────
@@ -2699,13 +2572,44 @@ app.post('/api/requisition/:entity_id/read-invoice', ...reqGuards(), requireRole
   } catch {}
 
   const amountNum = extracted.amount != null && extracted.amount !== '' ? Number(String(extracted.amount).replace(/[$,]/g, '')) : null;
+
+  // Persist the invoice (extracted fields + original bytes) immediately, so the
+  // packet can be regenerated later without re-uploading. req_number stays NULL
+  // until a roll-forward that includes this invoice succeeds.
+  const finalAmount = Number.isFinite(amountNum) ? amountNum : null;
+  const costCodeName = (prediction.coding && prediction.coding.cost_code_name) || null;
+  let invoiceId = null;
+  try {
+    const info = db.prepare(
+      'INSERT INTO requisition_invoice (entity_id, req_number, vendor, bill_number, amount, invoice_date, cost_code, cost_code_name, confidence, original_name, mime_type, file_blob, created_at) ' +
+      'VALUES (?, NULL, ?,?,?,?,?,?,?,?,?,?,?)'
+    ).run(
+      eid,
+      extracted.vendor || null,
+      extracted.bill_number || null,
+      finalAmount,
+      extracted.invoice_date || null,
+      prediction.cost_code,
+      costCodeName,
+      prediction.confidence,
+      req.file.originalname || null,
+      mime || null,
+      req.file.buffer,
+      new Date().toISOString()
+    );
+    invoiceId = info.lastInsertRowid;
+  } catch (e) {
+    return res.status(500).json({ error: 'Failed to save invoice: ' + e.message });
+  }
+
   res.json({
+    invoice_id: invoiceId,
     vendor: extracted.vendor || null,
     bill_number: extracted.bill_number || null,
-    amount: Number.isFinite(amountNum) ? amountNum : null,
+    amount: finalAmount,
     invoice_date: extracted.invoice_date || null,
     cost_code: prediction.cost_code,
-    cost_code_name: (prediction.coding && prediction.coding.cost_code_name) || null,
+    cost_code_name: costCodeName,
     confidence: prediction.confidence,
     candidates: prediction.candidates || [],
     filename: req.file.originalname,
@@ -2744,6 +2648,15 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
   const meta = {};
   if (req.body.reqNumber != null && req.body.reqNumber !== '') meta.reqNumber = req.body.reqNumber;
   if (req.body.asOfDate) meta.asOfDate = req.body.asOfDate;
+
+  // Optional: ids of the saved requisition_invoice rows that make up this period.
+  // On a successful roll-forward we stamp them with the new req_number so the
+  // invoice packet can later group them by requisition.
+  let invoiceIds = [];
+  try {
+    const parsed = JSON.parse(req.body.invoiceIds || '[]');
+    if (Array.isArray(parsed)) invoiceIds = parsed.map(n => parseInt(n)).filter(Number.isFinite);
+  } catch {}
 
   // Load the uploaded Req#N workbook twice: one mutable copy to roll forward,
   // and one untouched copy to supply the prior-period sheets for reconciliation.
@@ -2791,6 +2704,19 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
     }
 
     const outBuf = await workbook.xlsx.writeBuffer();
+
+    // Stamp the saved invoices with the new requisition number (best-effort).
+    if (invoiceIds.length && meta.reqNumber != null && meta.reqNumber !== '') {
+      const rn = parseInt(meta.reqNumber);
+      if (Number.isFinite(rn)) {
+        try {
+          const upd = db.prepare('UPDATE requisition_invoice SET req_number = ? WHERE id = ? AND entity_id = ?');
+          const tx = db.transaction(() => { for (const iid of invoiceIds) upd.run(rn, iid, parseInt(req.params.entity_id)); });
+          tx();
+        } catch {}
+      }
+    }
+
     const fname = 'Requisition_Report' + (meta.reqNumber ? '_' + String(meta.reqNumber) : '') + '.xlsx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');

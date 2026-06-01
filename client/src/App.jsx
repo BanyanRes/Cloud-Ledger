@@ -1957,37 +1957,12 @@ function BankReconciliation({entityId,user}){const[accounts,setAccounts]=useStat
 // ═══ Entity Management ═══
 // ═══ Requisitions (development-project coding engine) ═══
 function Requisitions({entityId,entityName}){
-  const[tab,setTab]=useState('overview');
-  const[stats,setStats]=useState(null);const[periods,setPeriods]=useState([]);
-  const[loading,setLoading]=useState(true);const[err,setErr]=useState('');
-  // new period form
-  const[newReqNum,setNewReqNum]=useState('');const[newPeriodEnd,setNewPeriodEnd]=useState(today());const[periodBusy,setPeriodBusy]=useState(false);const[periodMsg,setPeriodMsg]=useState('');
-  // invoice files (per selected period)
-  const[invPeriod,setInvPeriod]=useState(null);const[invFiles,setInvFiles]=useState([]);const[invBusy,setInvBusy]=useState(false);const[invErr,setInvErr]=useState('');const[invMsg,setInvMsg]=useState('');
+  const[err,setErr]=useState('');
   // roll-forward
   const[rfFile,setRfFile]=useState(null);const[rfReqNum,setRfReqNum]=useState('');const[rfAsOf,setRfAsOf]=useState(today());
   const[rfBusy,setRfBusy]=useState(false);const[rfErr,setRfErr]=useState('');const[rfDetail,setRfDetail]=useState(null);const[rfResult,setRfResult]=useState(null);
   // invoice cards (read by Claude, then editable)
   const[rfCards,setRfCards]=useState([]);const[rfReading,setRfReading]=useState(0);const[rfReadErr,setRfReadErr]=useState('');
-
-  const load=async()=>{setLoading(true);setErr('');
-    try{const[s,p]=await Promise.all([api.getRequisitionStats(entityId),api.getRequisitionPeriods(entityId)]);setStats(s);setPeriods(p||[]);}
-    catch(e){setErr(e.message);}finally{setLoading(false);}};
-  useEffect(()=>{load();},[entityId]);
-
-  const createPeriod=async()=>{const n=parseInt(newReqNum);if(!n){setPeriodMsg('');setErr('Requisition number required');return;}
-    setPeriodBusy(true);setErr('');setPeriodMsg('');
-    try{await api.createRequisitionPeriod(entityId,{req_number:n,period_end:newPeriodEnd});setNewReqNum('');setPeriodMsg('Period Req#'+n+' created.');await load();}
-    catch(e){setErr(e.message);}finally{setPeriodBusy(false);}};
-
-  const openInvoices=async(p)=>{setInvPeriod(p);setInvFiles([]);setInvErr('');setInvMsg('');
-    try{const f=await api.getRequisitionInvoices(entityId,p.id);setInvFiles(f||[]);}catch(e){setInvErr(e.message);}};
-  const onInvFiles=async(e)=>{const files=[...e.target.files];e.target.value='';if(!files.length||!invPeriod)return;
-    setInvBusy(true);setInvErr('');setInvMsg('');
-    try{const r=await api.uploadRequisitionInvoices(entityId,invPeriod.id,files);setInvMsg('Uploaded '+r.uploaded+' file'+(r.uploaded===1?'':'s')+'.');const f=await api.getRequisitionInvoices(entityId,invPeriod.id);setInvFiles(f||[]);}
-    catch(ex){setInvErr(ex.message);}finally{setInvBusy(false);}};
-  const deleteInv=async(id)=>{if(!confirm('Delete this invoice file?'))return;
-    try{await api.deleteRequisitionInvoice(entityId,id);const f=await api.getRequisitionInvoices(entityId,invPeriod.id);setInvFiles(f||[]);}catch(ex){setInvErr(ex.message);}};
 
   // Read each uploaded invoice with Claude and append an editable card.
   const onRfInvoices=async(e)=>{const files=[...e.target.files];e.target.value='';if(!files.length)return;
@@ -1996,6 +1971,7 @@ function Requisitions({entityId,entityName}){
       try{const r=await api.readRequisitionInvoice(entityId,f);
         setRfCards(cards=>[...cards,{
           _id:Date.now()+'-'+Math.random().toString(36).slice(2,7),
+          invoice_id:r.invoice_id||null,
           filename:r.filename||f.name,
           cost_code:r.cost_code||'',
           cost_code_name:r.cost_code_name||'',
@@ -2018,9 +1994,10 @@ function Requisitions({entityId,entityName}){
       return {code:c.cost_code||undefined,name:c.cost_code_name||undefined,vendor:c.vendor||undefined,bill:c.bill||undefined,date:c.date||undefined,...(Number.isFinite(amount)?{amount}:{})};
     }).filter(x=>Number.isFinite(x.amount));
     if(!newCurrent.length){setRfErr('Add at least one invoice with an amount before rolling forward.');return;}
+    const invoiceIds=rfCards.map(c=>c.invoice_id).filter(Boolean);
     setRfBusy(true);setRfErr('');setRfDetail(null);setRfResult(null);
     try{
-      const {blob,filename,summary}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf});
+      const {blob,filename,summary}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoiceIds});
       const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
       setRfResult({filename,summary,count:newCurrent.length});
     }catch(e){setRfErr(e.message);if(e.detail)setRfDetail(e.detail);}
@@ -2031,74 +2008,13 @@ function Requisitions({entityId,entityName}){
     :{color:T.textMuted,background:T.bgElevated,border:'1px solid '+T.border};
   const badge=conf=><span style={{fontSize:9,fontWeight:700,borderRadius:4,padding:'2px 7px',textTransform:'uppercase',letterSpacing:'0.04em',...tierStyle(conf)}}>{conf}</span>;
 
-  const TabBtn=({id,label})=><button onClick={()=>setTab(id)} style={{background:tab===id?T.accent:'#fff',color:tab===id?'#fff':T.text,border:'1px solid '+(tab===id?T.accent:T.border),borderRadius:T.radiusXs,padding:'8px 16px',fontSize:13,fontWeight:600,cursor:'pointer',marginRight:8}}>{label}</button>;
-
   return(<div>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16}}>
-      <div><div style={S.h1}>Requisitions</div><div style={S.sub}>{entityName} &mdash; development project coding</div></div>
+      <div><div style={S.h1}>Requisitions</div><div style={S.sub}>{entityName} &mdash; roll forward to the next requisition</div></div>
     </div>
     {err&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:12}}>{err}</div>}
 
-    <div style={{marginBottom:18}}><TabBtn id="overview" label="Overview"/><TabBtn id="periods" label={'Periods ('+periods.length+')'}/><TabBtn id="rollforward" label="Roll-Forward"/></div>
-
-    {tab==='overview'&&<div style={S.card}>
-      <div style={{...S.h2,marginBottom:14}}>Coding History</div>
-      {loading?<div style={{color:T.textMuted}}>Loading...</div>:stats?<>
-        <div style={{display:'flex',gap:14,flexWrap:'wrap',marginBottom:16}}>
-          {[['History rows',stats.history_rows],['Distinct vendors',stats.distinct_vendors],['Cost codes',stats.coa_codes],['Req range',stats.req_range&&stats.req_range.min!=null?('#'+stats.req_range.min+'–#'+stats.req_range.max):'—']].map(([k,v])=>
-            <div key={k} style={{flex:'1 1 140px',background:T.bgElevated,border:'1px solid '+T.border,borderRadius:8,padding:'14px 16px'}}>
-              <div style={{fontSize:22,fontWeight:700,color:T.textBright}}>{v}</div>
-              <div style={{fontSize:11,color:T.textMuted,marginTop:2,textTransform:'uppercase',letterSpacing:'0.05em'}}>{k}</div></div>)}
-        </div>
-        <div style={{display:'flex',alignItems:'center',gap:10}}>
-          <span style={{fontSize:9,fontWeight:700,borderRadius:4,padding:'3px 9px',textTransform:'uppercase',...(stats.ready?{color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder}:{color:T.orange,background:T.orangeDim,border:'1px solid '+T.orange+'40'})}}>{stats.ready?'Ready':'Not ready'}</span>
-          <span style={{fontSize:12,color:T.textMuted}}>{stats.ready?'Enough history is loaded to auto-code invoices.':'Load prior requisition history before coding (use seeded data or import).'}</span>
-        </div></>:<div style={{color:T.textMuted}}>No stats available.</div>}
-    </div>}
-
-    {tab==='periods'&&<div>
-      <div style={{...S.card,borderColor:T.green+'40'}}>
-        <div style={{...S.h2,marginBottom:12}}>Create Requisition Period</div>
-        <div style={S.row}>
-          <div style={{...S.col,flex:1}}><label style={S.label}>Requisition #</label><input style={S.input} type="number" placeholder="e.g. 15" value={newReqNum} onChange={e=>setNewReqNum(e.target.value)}/></div>
-          <div style={{...S.col,flex:1}}><label style={S.label}>Period End</label><input style={S.input} type="date" value={newPeriodEnd} onChange={e=>setNewPeriodEnd(e.target.value)}/></div>
-        </div>
-        {periodMsg&&<div style={{...S.success,padding:10,background:T.greenDim,borderRadius:6,border:'1px solid '+T.greenBorder,marginBottom:10}}>{periodMsg}</div>}
-        <button style={S.btnP} disabled={periodBusy} onClick={createPeriod}>{periodBusy?'Creating...':'Create Period'}</button>
-      </div>
-      <div style={S.cardFlush}><table style={S.table}><thead><tr><th style={S.th}>Req #</th><th style={S.th}>Period End</th><th style={S.th}>Status</th><th style={S.th}>Created</th><th style={{...S.th,width:120}}>Invoices</th></tr></thead>
-        <tbody>{periods.length===0?<tr><td colSpan={5} style={{...S.td,color:T.textMuted,textAlign:'center',padding:24}}>No periods yet.</td></tr>
-          :periods.map(p=><tr key={p.id||p.req_number} style={invPeriod&&invPeriod.id===p.id?{background:T.accentDim}:{}}>
-            <td style={{...S.td,fontWeight:600,color:T.textBright}}>#{p.req_number}</td>
-            <td style={S.td}>{p.period_end||'—'}</td>
-            <td style={S.td}>{p.status||'open'}</td>
-            <td style={{...S.td,color:T.textMuted,fontSize:12}}>{p.created_at?String(p.created_at).slice(0,10):'—'}</td>
-            <td style={S.td}><button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>openInvoices(p)}>Invoices</button></td></tr>)}</tbody></table></div>
-      {invPeriod&&<div style={{...S.card,marginTop:16,borderColor:T.accent+'40'}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
-          <div style={{...S.h2}}>Invoice Files &mdash; Req #{invPeriod.req_number}</div>
-          <button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>setInvPeriod(null)}>Close</button></div>
-        <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Upload invoice PDFs for this requisition. (Bill.com auto-download is not available yet, so attach them manually here.)</div>
-        <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:12}}>
-          <div style={{position:'relative',display:'inline-block',overflow:'hidden'}}>
-            <button style={{...S.btnP,pointerEvents:'none',opacity:invBusy?0.6:1}}>{invBusy?'Uploading...':'Upload PDFs'}</button>
-            <input type="file" accept=".pdf,application/pdf" multiple disabled={invBusy} style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:invBusy?'not-allowed':'pointer'}} onChange={onInvFiles}/></div>
-          {invMsg&&<span style={{fontSize:12,color:T.green}}>{invMsg}</span>}
-        </div>
-        {invErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:10}}>{invErr}</div>}
-        {invFiles.length===0?<div style={{fontSize:12,color:T.textMuted,padding:'8px 0'}}>No invoice files attached yet.</div>
-          :<table style={S.table}><thead><tr><th style={S.th}>File</th><th style={S.th}>Source</th><th style={S.th}>Uploaded</th><th style={{...S.th,width:140}}></th></tr></thead>
-            <tbody>{invFiles.map(f=><tr key={f.id}>
-              <td style={{...S.td,fontWeight:600,color:T.textBright}}>{f.original_name||('file #'+f.id)}</td>
-              <td style={S.td}><span style={{fontSize:9,fontWeight:700,borderRadius:4,padding:'2px 7px',textTransform:'uppercase',color:f.download_status==='manual'?T.accent:T.green,background:f.download_status==='manual'?T.accentDim:T.greenDim,border:'1px solid '+(f.download_status==='manual'?T.accent+'40':T.greenBorder)}}>{f.download_status||'—'}</span></td>
-              <td style={{...S.td,color:T.textMuted,fontSize:12}}>{f.created_at?String(f.created_at).slice(0,10):'—'}</td>
-              <td style={S.td}><div style={{display:'flex',gap:8}}>
-                <a href={api.downloadRequisitionInvoice(f.id)} target="_blank" rel="noreferrer" style={{...S.btnS,padding:'5px 12px',fontSize:11,textDecoration:'none'}}>View</a>
-                <button style={{...S.btnD,padding:'5px 12px',fontSize:11}} onClick={()=>deleteInv(f.id)}>Delete</button></div></td></tr>)}</tbody></table>}
-      </div>}
-    </div>}
-
-    {tab==='rollforward'&&<div>
+    <div>
       <div style={S.card}>
         <div style={{...S.h2,marginBottom:6}}>Roll Forward to Next Requisition</div>
         <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>Upload the <strong>prior requisition workbook</strong> (.xlsx), then add this period's invoices one at a time below &mdash; each invoice is read automatically and its fields pre-filled for you to check. The engine folds the prior Current Invoice Log into the Prior Log, replaces the Current Log with these invoices, re-points cross-sheet references, and runs a reconciliation check before producing the next workbook. The result downloads automatically on success.</div>
@@ -2175,7 +2091,7 @@ function Requisitions({entityId,entityName}){
             <td style={S.tdR}>{c.actual!=null?Number(c.actual).toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</td>
             <td style={{...S.td,fontSize:11,color:T.textMuted}}>{c.detail}</td></tr>)}</tbody></table>
       </div>}
-    </div>}
+    </div>
   </div>);}
 
 function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
