@@ -59,7 +59,19 @@ function readRowCells(ws, r) {
   const get = (col) => {
     const c = ws.getCell(r, col);
     const fm = cellFormula(c);
-    if (fm) return { formula: fm };
+    if (fm) {
+      // Preserve the cached result alongside the formula. exceljs stores a
+      // formula cell as { formula, result }; dropping `result` means downstream
+      // readers (reconcile's cellNum / readLog) can't pull a number out of the
+      // re-written cell, so a formula-amount data row (e.g. SunCoast
+      // "=5532.77-5451") silently vanishes from the folded Prior Log — taking
+      // its amount and row-count with it (A1/A2/A3 fail). Keep result when
+      // present so the row survives the round-trip even before LibreOffice
+      // recalc runs.
+      const v = c.value;
+      const result = (v && typeof v === 'object' && 'result' in v) ? v.result : undefined;
+      return result === undefined ? { formula: fm } : { formula: fm, result };
+    }
     return c.value;
   };
   return {
@@ -85,7 +97,12 @@ function currentRowsByCode(ws) {
     if (f && /SUBTOTAL/i.test(f)) continue;
     const amt = cellNum(amtCell);
     const vendor = cellStr(ws.getCell(r, COL.vendor)).trim();
-    if (amt == null && !vendor) continue;
+    const name = cellStr(ws.getCell(r, COL.name)).trim();
+    // A row is data if it has an amount, a vendor, OR a name. This MUST match
+    // parseLogGroups' hasData test exactly — otherwise a name-only row (e.g. an
+    // "Echo Land Cost" placeholder with no amount/vendor) is counted by the prior
+    // parser but silently dropped here, folding one row short (A3 row-count fail).
+    if (amt == null && !vendor && !name) continue;
     const code = cellNum(ws.getCell(r, COL.code));
     const key = code == null ? '__none__' : String(code);
     if (!byCode.has(key)) byCode.set(key, []);

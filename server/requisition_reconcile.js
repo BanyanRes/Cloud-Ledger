@@ -97,6 +97,22 @@ function readLog(ws) {
       total += amt;
       const k = code == null ? '__none__' : String(code);
       byCode[k] = (byCode[k] || 0) + amt;
+    } else if (f && (vendor || cellStr(ws.getCell(r, COL.name)).trim())) {
+      // Defensive: a non-SUBTOTAL formula-amount row (e.g. "=5532.77-5451")
+      // whose cached result is missing. cellNum returns null for it, which would
+      // drop the row from the count and undercount A3. If it carries a vendor or
+      // name it is real data — count the row so A3 stays exact. We can't trust an
+      // un-recalculated amount, so contribute 0 to total/byCode; the row's value
+      // is verified once the workbook is recalculated (A1/A2 with results present).
+      const code = cellNum(ws.getCell(r, COL.code));
+      const name = cellStr(ws.getCell(r, COL.name)).trim();
+      rows.push({
+        row: r, code, name,
+        vendor, bill: cellStr(ws.getCell(r, COL.bill)).trim(),
+        amount: 0,
+        req: cellStr(ws.getCell(r, COL.req)).trim(),
+        unevaluatedFormula: f,
+      });
     }
   }
   return { rows, subtotals, total, byCode };
