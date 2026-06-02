@@ -2680,8 +2680,10 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
   }
 
   try {
-    // Mutate `workbook` into Req#N+1.
-    rollForward(workbook, newCurrent, meta);
+    // Mutate `workbook` into Req#N+1. The engine also auto-computes this period's
+    // Development Fee (entity rate from the Dev Fee tab) and appends it as a
+    // Current-Log line; rfResult.devFee carries the amount + row for the packet.
+    const rfResult = rollForward(workbook, newCurrent, meta);
 
     // Verify WITHOUT recalc (no LibreOffice in prod). Structural required checks
     // gate; A4/B5 degrade to "not evaluated". No callClaude here — a failure is
@@ -2740,6 +2742,7 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
         db, workpapersDir: WORKPAPERS_DIR, eid: eidInt,
         reqNumber: meta.reqNumber, asOfDate: meta.asOfDate,
         workbookBuffer: Buffer.from(outBuf), invoices: invoiceRows,
+        devFee: rfResult && rfResult.devFee && !rfResult.devFee.error ? rfResult.devFee : null,
         who: (req.user && (req.user.name || req.user.email)) || 'system',
       });
       if (saved.errors && saved.errors.length) console.error('requisition workpaper save:', saved.errors.join('; '));

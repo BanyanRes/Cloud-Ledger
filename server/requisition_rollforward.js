@@ -223,12 +223,112 @@ function findRowByLabel(ws, needles) {
 }
 
 // ----------------------------------------------------------------------------
+// Compute this period's Development Fee and return a Current-Log row for it.
+//
+// The fee is a percentage of this period's NEW costs, EXCLUDING the dev fee line
+// itself (including it would be circular). The percentage is entity-specific and
+// lives in the Dev Fee tab, not hard-coded here: the tab computes it as
+//   E15 = ROUND(baseCost * rate1, 2)   (e.g. rate1 = 4%)
+//   E17 = ROUND(E15 / 2, 2)            (waived half -> effective 2%)
+//   E19 = E17                          (the amount that goes on the Current Log)
+// We read rate1 and the "/2" structure straight from the tab's formulas so each
+// entity's own rate carries through, then apply it to the freshly-entered
+// invoices' total (minus any dev fee line).
+//
+// Returns { row, amount, code } or null if the tab has no usable dev-fee setup
+// or there are no costs to base a fee on. `row` matches the shape replaceCurrentLog
+// / writeRowCells expect.
+function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta }) {
+  if (!devFeeWs) return null;
+
+  // 1. Identify the dev-fee cost code from the prior workbook's Current Log dev
+  //    fee line so we exclude it from the base and clone its B/C/D/E/F/G coding.
+  let template = null; // { cat, code, bankcat, gl, name, vendor }
+  if (priorCurWs) {
+    const last = Math.max(priorCurWs.rowCount || 0, priorCurWs.actualRowCount || 0);
+    for (let r = 3; r <= last; r++) {
+      const nm = cellStr(priorCurWs.getCell(r, COL.name)).toLowerCase();
+      const bank = cellStr(priorCurWs.getCell(r, COL.bankcat)).toLowerCase();
+      if (nm.includes('development fee') || bank.includes('development fee')) {
+        template = {
+          cat: priorCurWs.getCell(r, COL.cat).value,
+          code: cellNum(priorCurWs.getCell(r, COL.code)),
+          bankcat: priorCurWs.getCell(r, COL.bankcat).value,
+          gl: priorCurWs.getCell(r, COL.gl).value,
+          name: cellStr(priorCurWs.getCell(r, COL.name)).trim() || 'Development Fee',
+          vendor: cellStr(priorCurWs.getCell(r, COL.vendor)).trim() || 'Banyan Residential',
+        };
+        break;
+      }
+    }
+  }
+  const devCode = template && template.code != null ? template.code : 12913;
+
+  // 2. Base = sum of this period's new invoices EXCLUDING the dev fee line.
+  let base = 0;
+  for (const inv of newCurrent) {
+    if (String(inv.code) === String(devCode)) continue; // skip an existing dev fee row
+    const amt = typeof inv.amount === 'number' ? inv.amount
+      : (inv.amount && typeof inv.amount === 'object' && 'result' in inv.amount ? inv.amount.result : Number(inv.amount));
+    if (Number.isFinite(amt)) base += amt;
+  }
+  if (!(base > 0)) return null;
+
+  // 3. Read the entity-specific rate structure from the Dev Fee tab. Parse the
+  //    first percentage out of E15's formula (e.g. "ROUND(E10*4%,2)" -> 0.04) and
+  //    detect the "/2" halving in E17. Fall back to 4% & halving if unreadable.
+  let rate = 0.04, halve = true;
+  const e15f = cellFormula(devFeeWs.getCell('E15')) || '';
+  const e17f = cellFormula(devFeeWs.getCell('E17')) || '';
+  const pctM = e15f.match(/(\d+(?:\.\d+)?)\s*%/) || e15f.match(/\*\s*0?\.(\d+)/);
+  if (pctM) {
+    if (e15f.includes('%')) rate = parseFloat(pctM[1]) / 100;
+    else rate = parseFloat('0.' + pctM[1]);
+  }
+  halve = /\/\s*2\b/.test(e17f) || /E15\s*\/\s*2/i.test(e17f);
+
+  const round2 = (n) => Math.round(n * 100) / 100;
+  let fee = round2(base * rate);
+  if (halve) fee = round2(fee / 2);
+  if (!(fee > 0)) return null;
+
+  // 4. Build the Current-Log row. Bill number is month-based ("April_26 Dev Fee")
+  //    derived from the as-of date, matching the workbook's existing convention.
+  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  let billLabel = 'Dev Fee';
+  if (meta && meta.asOfDate) {
+    const d = new Date(meta.asOfDate);
+    if (!isNaN(d.getTime())) billLabel = `${MONTHS[d.getMonth()]}_${String(d.getFullYear()).slice(2)} Dev Fee`;
+  }
+  const t = template || {};
+  const rateText = (halve ? (rate * 50) : (rate * 100)).toFixed(rate * 100 % 1 === 0 && (halve ? (rate*50)%1===0 : true) ? 0 : 2).replace(/\.00$/, '') + '% of new costs';
+  return {
+    amount: fee,
+    code: devCode,
+    base: round2(base),
+    rateText,
+    row: {
+      cat: t.cat != null ? t.cat : 'Soft Costs',
+      code: devCode,
+      bankcat: t.bankcat != null ? t.bankcat : 'Development Fee',
+      gl: t.gl != null ? t.gl : devCode,
+      name: t.name || 'Development Fee',
+      vendor: t.vendor || 'Banyan Residential',
+      bill: billLabel,
+      amount: fee,
+      req: meta && meta.reqNumber ? 'Req#' + meta.reqNumber : undefined,
+    },
+  };
+}
+
+// ----------------------------------------------------------------------------
 // Top-level: roll a workbook forward in place.
 //   workbook    : exceljs Workbook loaded from Req#N (will be mutated to Req#N+1)
 //   newCurrent  : array of invoice rows for the new period, each:
 //                 { code, name, vendor, bill, amount, date, req }
 //   meta        : { reqNumber, asOfDate }  for titles
-// Returns { landmarks } describing where key rows ended up.
+// Returns { landmarks, devFee } describing where key rows ended up and the
+// auto-computed development fee (amount + the row that was appended), if any.
 // ----------------------------------------------------------------------------
 function rollForward(workbook, newCurrent, meta = {}) {
   const priorWs = workbook.getWorksheet('Prior Invoice Log');
@@ -240,11 +340,32 @@ function rollForward(workbook, newCurrent, meta = {}) {
   const priorGroups = parseLogGroups(priorWs);
   const curByCode = currentRowsByCode(curWs);
 
+  // 1b. Auto-compute this period's Development Fee from the new invoices and the
+  //     entity's Dev Fee tab, then append it as a Current-Log line. Drop any dev
+  //     fee row the caller already included so we never double-count or go
+  //     circular. The dev fee is (new costs ex-dev-fee) x entity rate.
+  const effectiveCurrent = Array.isArray(newCurrent) ? newCurrent.slice() : [];
+  let devFeeInfo = null;
+  try {
+    const df = computeDevFeeRow({ devFeeWs: devFee, priorCurWs: curWs, newCurrent: effectiveCurrent, meta });
+    if (df) {
+      // Remove any caller-supplied dev fee line for the same code, then append ours.
+      const filtered = effectiveCurrent.filter(inv => String(inv.code) !== String(df.code));
+      filtered.push(df.row);
+      effectiveCurrent.length = 0;
+      effectiveCurrent.push(...filtered);
+      devFeeInfo = { amount: df.amount, code: df.code, base: df.base, rateText: df.rateText, row: df.row };
+    }
+  } catch (e) {
+    // Dev fee is best-effort; never block the roll-forward on it.
+    devFeeInfo = { error: e.message };
+  }
+
   // 2. Rebuild Prior Log = prior groups + folded current rows.
   const landmarks = rebuildPriorLog(priorWs, priorGroups, curByCode);
 
-  // 3. Replace Current Log with the incoming period's invoices.
-  replaceCurrentLog(curWs, newCurrent, meta);
+  // 3. Replace Current Log with the incoming period's invoices (incl. dev fee).
+  replaceCurrentLog(curWs, effectiveCurrent, meta);
 
   // 4. Re-point absolute references by label (never by tracked row number).
   repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks });
@@ -253,7 +374,7 @@ function rollForward(workbook, newCurrent, meta = {}) {
   if (meta.asOfDate && b2a.getCell('L1')) b2a.getCell('L1').value = meta.asOfDate;
   if (meta.reqNumber && b2a.getCell('B4')) b2a.getCell('B4').value = 'Requistion Report # ' + meta.reqNumber;
 
-  return { landmarks };
+  return { landmarks, devFee: devFeeInfo };
 }
 
 // Write the new period invoices into the Current Log, grouped by cost code with

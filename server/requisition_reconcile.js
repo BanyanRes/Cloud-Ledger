@@ -14,7 +14,7 @@
 //   A4  Grand Total cell  : Prior Log grand-total SUBTOTAL == A1 sum
 //   B1  Group subtotals   : each group SUBTOTAL == sum of its data rows
 //   B4  Absolute refs     : Dev Fee J6/J10/J11 hit the intended row (by label/value)
-//   B5  Dev Fee discrep.  : Dev Fee J14 == 0  (J8 == J10 + J11)
+//   B5  Dev Fee amount    : posted current Dev Fee (J11) == this-period new costs (ex dev fee) x entity rate
 //   C1  This-period tie   : B2A this-period column total == Current Log grand total
 //
 // Each check returns { id, level, pass, expected, actual, delta, detail }.
@@ -260,16 +260,48 @@ function reconcile(prev, next, opts = {}) {
     checks.push(chk('B4', 'required', refFails.length === 0, 0, refFails.length,
       refFails.length ? 'Absolute-ref mismatch: ' + JSON.stringify(refFails) : 'dev-fee absolute refs resolve correctly'));
 
-    const j8 = cellNum(dv.getCell('J8'));
-    const j10 = cellNum(dv.getCell('J10'));
-    const j11 = cellNum(dv.getCell('J11'));
-    if (j8 != null && j10 != null && j11 != null) {
-      const disc = j8 - (j10 + j11);
-      checks.push(chk('B5', 'required', approxEq(disc, 0, tol), 0, round2(disc),
-        'Dev Fee discrepancy J8 - (J10+J11); J8=' + round2(j8) + ' J10=' + round2(j10) + ' J11=' + round2(j11)));
-    } else {
-      checks.push(chk('B5', 'required', false, 0, null,
-        'Dev Fee J8/J10/J11 not evaluated (recalc the workbook before checking)'));
+    // B5 - this period's posted Development Fee ties to (new costs x rate).
+    // The Dev Fee is computed as a percentage of this period's NEW costs,
+    // EXCLUDING the dev fee line itself (excluding it avoids circularity). We
+    // recompute that expected fee here from the Current Log + the entity's rate
+    // structure on the Dev Fee tab (E15 = base*rate1, E17 = E15/2) and compare it
+    // to J11, the posted current-period Dev Fee. Reading the rate from the tab
+    // keeps this entity-agnostic; the old cumulative check (J8 == J10+J11) no
+    // longer applies because J8's cumulative target can't refresh without a
+    // recalc and the fee is now a this-period figure.
+    {
+      const nCurr = readLog(next.current);
+      // Identify the dev fee cost code from the current Dev Fee line (J11's
+      // target row), falling back to 12913.
+      let devCode = 12913;
+      const j11f = cellFormula(dv.getCell('J11'));
+      const j11m = j11f && j11f.match(/I(\d+)/);
+      if (j11m) {
+        const c = cellNum(next.current.getCell(Number(j11m[1]), COL.code));
+        if (c != null) devCode = c;
+      }
+      // base = sum of this period's current-log data rows EXCLUDING dev fee code.
+      let base = 0;
+      for (const rw of nCurr.rows) {
+        if (String(rw.code) === String(devCode)) continue;
+        base += rw.amount || 0;
+      }
+      // Read entity rate from the tab: E15 "*4%" or "*0.04" -> 0.04; E17 "/2" -> halve.
+      let rate = 0.04, halve = true;
+      const e15f = cellFormula(dv.getCell('E15')) || '';
+      const e17f = cellFormula(dv.getCell('E17')) || '';
+      const pctM = e15f.match(/(\d+(?:\.\d+)?)\s*%/) || e15f.match(/\*\s*0?\.(\d+)/);
+      if (pctM) rate = e15f.includes('%') ? parseFloat(pctM[1]) / 100 : parseFloat('0.' + pctM[1]);
+      halve = /\/\s*2\b/.test(e17f) || /E15\s*\/\s*2/i.test(e17f);
+      let expectedFee = round2(base * rate);
+      if (halve) expectedFee = round2(expectedFee / 2);
+      // J11 = posted current dev fee (plain 0 when none this period).
+      const j11 = cellNum(dv.getCell('J11')) || 0;
+      const disc = round2(j11 - expectedFee);
+      checks.push(chk('B5', 'required', approxEq(disc, 0, tol), round2(expectedFee), round2(j11),
+        'Dev Fee J11 vs (new costs ' + round2(base) + ' x ' +
+        (halve ? (rate * 50) : (rate * 100)) + '%); expected=' + round2(expectedFee) +
+        ' posted=' + round2(j11) + ' disc=' + disc));
     }
   }
 
