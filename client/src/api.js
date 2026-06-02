@@ -175,11 +175,13 @@ export const api = {
       throw err;
     }
     let summary = {}; try { summary = JSON.parse(res.headers.get('x-reconcile-summary') || '{}'); } catch {}
+    const workpaperFolder = res.headers.get('x-workpaper-folder') || '';
+    let workpaperSaved = {}; try { workpaperSaved = JSON.parse(res.headers.get('x-workpaper-saved') || '{}'); } catch {}
     const cd = res.headers.get('content-disposition') || '';
     const m = cd.match(/filename="?([^"]+)"?/);
     const filename = m ? m[1] : 'Requisition_Report.xlsx';
     const blob = await res.blob();
-    return { blob, filename, summary };
+    return { blob, filename, summary, workpaperFolder, workpaperSaved };
   },
 
   setToken, getToken, clearToken,

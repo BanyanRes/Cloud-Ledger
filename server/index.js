@@ -15,6 +15,7 @@ const turnkey = require('./turnkey');
 const requisition = require('./requisition');
 const { rollForward } = require('./requisition_rollforward');
 const { verifyRollforward } = require('./requisition_rollforward_verify');
+const { saveRequisitionOutputs } = require('./requisition_workpaper_save');
 const ExcelJS = require('exceljs');
 
 const app = express();
@@ -2715,6 +2716,31 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
           tx();
         } catch {}
       }
+    }
+
+    // Auto-save the workbook + a merged invoice packet into the entity's
+    // Workpapers under "<year>/Requisition Reports/<Month year>" (best-effort:
+    // a save failure is logged but never blocks the user's download).
+    try {
+      const eidInt = parseInt(req.params.entity_id);
+      let invoiceRows = [];
+      if (invoiceIds.length) {
+        const placeholders = invoiceIds.map(() => '?').join(',');
+        invoiceRows = db.prepare(
+          `SELECT id, original_name, mime_type, file_blob FROM requisition_invoice WHERE entity_id = ? AND id IN (${placeholders})`
+        ).all(eidInt, ...invoiceIds);
+      }
+      const saved = await saveRequisitionOutputs({
+        db, workpapersDir: WORKPAPERS_DIR, eid: eidInt,
+        reqNumber: meta.reqNumber, asOfDate: meta.asOfDate,
+        workbookBuffer: Buffer.from(outBuf), invoices: invoiceRows,
+        who: (req.user && (req.user.name || req.user.email)) || 'system',
+      });
+      if (saved.errors && saved.errors.length) console.error('requisition workpaper save:', saved.errors.join('; '));
+      res.setHeader('X-Workpaper-Folder', saved.folder || '');
+      res.setHeader('X-Workpaper-Saved', JSON.stringify({ workbook: !!saved.workbook, packet: !!saved.packet }));
+    } catch (e) {
+      console.error('requisition workpaper save failed:', e.message);
     }
 
     const fname = 'Requisition_Report' + (meta.reqNumber ? '_' + String(meta.reqNumber) : '') + '.xlsx';

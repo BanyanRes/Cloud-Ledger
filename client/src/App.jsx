@@ -1997,9 +1997,9 @@ function Requisitions({entityId,entityName}){
     const invoiceIds=rfCards.map(c=>c.invoice_id).filter(Boolean);
     setRfBusy(true);setRfErr('');setRfDetail(null);setRfResult(null);
     try{
-      const {blob,filename,summary}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoiceIds});
+      const {blob,filename,summary,workpaperFolder,workpaperSaved}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoiceIds});
       const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
-      setRfResult({filename,summary,count:newCurrent.length});
+      setRfResult({filename,summary,count:newCurrent.length,workpaperFolder,workpaperSaved});
     }catch(e){setRfErr(e.message);if(e.detail)setRfDetail(e.detail);}
     finally{setRfBusy(false);}};
 
@@ -2077,6 +2077,10 @@ function Requisitions({entityId,entityName}){
             <div key={k} style={{flex:'1 1 120px',textAlign:'center'}}>
               <div style={{fontSize:22,fontWeight:700,color:k==='Required failed'&&v>0?T.red:T.textBright}}>{v!=null?v:'—'}</div>
               <div style={{fontSize:10,color:T.textMuted,marginTop:2,textTransform:'uppercase',letterSpacing:'0.05em'}}>{k}</div></div>)}
+        </div>}
+        {rfResult.workpaperFolder&&<div style={{fontSize:12,color:T.text,marginTop:12,paddingTop:10,borderTop:'1px solid '+T.greenBorder}}>
+          Saved to Workpapers: <strong>{rfResult.workpaperFolder}</strong>
+          {rfResult.workpaperSaved&&<span style={{color:T.textMuted}}> &mdash; {[rfResult.workpaperSaved.workbook?'report':null,rfResult.workpaperSaved.packet?'invoice packet':null].filter(Boolean).join(' + ')||'no files'}</span>}
         </div>}
       </div>}
 
