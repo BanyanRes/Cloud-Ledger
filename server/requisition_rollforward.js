@@ -124,7 +124,16 @@ function writeRowCells(ws, r, row) {
   put(COL.amount, row.amount);
   put(COL.req, row.req);
   put(COL.date, row.date);
+  // Give the data row a comfortable height. The sheet's defaultRowHeight is 13pt
+  // which crowds the 10pt text once a row is rewritten (the original autofit
+  // state is lost), so set an explicit height that comfortably fits the text.
+  ws.getRow(r).height = DATA_ROW_HEIGHT;
 }
+
+// Explicit data/subtotal row height (points). The invoice logs use 10pt Calibri;
+// the workbook's defaultRowHeight of 13 leaves text looking cramped/clipped once
+// rows are rewritten, so rewritten data and subtotal rows get this height.
+const DATA_ROW_HEIGHT = 15;
 
 // Rebuild the Prior Log in `nextPriorWs` from prior groups + folded current rows.
 // Returns a map of useful landmarks (row of each group subtotal, grand total row,
@@ -146,6 +155,7 @@ function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
       const gtRow = r;
       nextPriorWs.getCell(gtRow, COL.name).value = g.subtotalName;
       nextPriorWs.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,I3:I${gtRow - 1})` };
+      nextPriorWs.getRow(gtRow).height = DATA_ROW_HEIGHT;
       landmarks.grandTotalRow = gtRow;
       r = gtRow + 1;
       continue;
@@ -173,6 +183,7 @@ function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
     const subRow = r;
     nextPriorWs.getCell(subRow, COL.name).value = g.subtotalName || ((g.name || '') + ' Total');
     nextPriorWs.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,I${dataStart}:I${dataEnd + 1})` };
+    nextPriorWs.getRow(subRow).height = DATA_ROW_HEIGHT;
     if (g.code != null) landmarks.groupSubtotalRow[String(g.code)] = subRow;
     if (g.subtotalName) landmarks.byLabel[g.subtotalName.toLowerCase()] = subRow;
     r = subRow + 1;
@@ -276,6 +287,7 @@ function replaceCurrentLog(ws, rows, meta) {
     const subRow = r;
     ws.getCell(subRow, COL.name).value = (grp[0].name || ('Code ' + key)) + ' Total';
     ws.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,I${dataStart}:I${r - 1})` };
+    ws.getRow(subRow).height = DATA_ROW_HEIGHT;
     r = subRow + 1;
     ws.getCell(r, COL.amount).value = null; r++;            // spacer
   }
@@ -283,6 +295,7 @@ function replaceCurrentLog(ws, rows, meta) {
   const gtRow = r;
   ws.getCell(gtRow, COL.name).value = 'Grand Total';
   ws.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,I3:I${gtRow - 1})` };
+  ws.getRow(gtRow).height = DATA_ROW_HEIGHT;
 }
 
 // Re-point the cross-sheet absolute references that the roll-forward affects.
