@@ -288,18 +288,112 @@ function replaceCurrentLog(ws, rows, meta) {
 // Re-point the cross-sheet absolute references that the roll-forward affects.
 // Each is resolved by LABEL against the freshly written sheets, so a shift in
 // row positions can never silently point at the wrong line.
+//
+// In addition to repointing, this fills in the CACHED RESULTS for the Dev Fee
+// block (J5-J14) and the repointed reference cells. The production roll-forward
+// runs without a LibreOffice recalc, so any formula we write lands with no
+// cached result; reconcile's B5 check (J8/J10/J11 numeric) then degrades to
+// "not evaluated" and the required gate fails forever. By computing these values
+// here from data already present (sums of explicit ranges, plain-number cells)
+// the Dev Fee numbers are self-calculated and B5 evaluates without a spreadsheet
+// engine. (Excel/LibreOffice still recompute them on open; we only seed results.)
 function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
+  // Sum the data-row amounts inside a SUBTOTAL(9, I a:I b) range on a sheet,
+  // excluding nested SUBTOTAL rows (mirrors how Excel's SUBTOTAL ignores them).
+  const sumSubtotalRange = (ws, subtotalRow) => {
+    const f = cellFormula(ws.getCell(subtotalRow, COL.amount));
+    if (!f) return null;
+    const m = f.match(/I(\d+):I(\d+)/i);
+    if (!m) return null;
+    const a = Number(m[1]), b = Number(m[2]);
+    let sum = 0;
+    for (let r = a; r <= b; r++) {
+      const c = ws.getCell(r, COL.amount);
+      if (cellFormula(c) && /SUBTOTAL/i.test(cellFormula(c))) continue; // skip nested subtotals
+      const n = cellNum(c);
+      if (n != null) sum += n;
+    }
+    return sum;
+  };
+  // Read a numeric value out of a cell (plain number or cached formula result).
+  const num = (ws, addrRow, col) => cellNum(ws.getCell(addrRow, col));
+  // Set a cell to a formula while seeding its cached result so downstream,
+  // recalc-free readers (reconcile) get a number. exceljs silently DROPS a
+  // result of 0 from a formula cell, which would make cellNum read it as "not
+  // evaluated"; when the computed result is exactly 0 we therefore store a plain
+  // numeric 0 instead (the spreadsheet still recomputes the formula on open, and
+  // these Dev Fee cells are cross-references whose displayed value is what the
+  // reconciliation needs to read back).
+  const setFR = (cell, formula, result) => {
+    if (!cell) return;
+    if (result == null || Number.isNaN(result)) { cell.value = { formula }; return; }
+    if (result === 0) { cell.value = 0; return; }
+    cell.value = { formula, result };
+  };
+  const round2 = (n) => Math.round(n * 100) / 100;
+
   // Dev Fee J6 -> Prior "6 month upfront interest" data row
   const j6row = findRowByLabel(priorWs, ['6 month upfront interest']);
-  if (j6row && devFee.getCell('J6')) devFee.getCell('J6').value = { formula: `-'Prior Invoice Log'!I${j6row}` };
+  let j6 = null;
+  if (j6row && devFee.getCell('J6')) {
+    const v = num(priorWs, j6row, COL.amount);
+    j6 = v == null ? null : -v;
+    setFR(devFee.getCell('J6'), `-'Prior Invoice Log'!I${j6row}`, j6);
+  }
 
   // Dev Fee J10 -> Prior "Development Fee Total" subtotal
   const j10row = findRowByLabel(priorWs, ['Development Fee Total', 'Dev Fee Total']);
-  if (j10row && devFee.getCell('J10')) devFee.getCell('J10').value = { formula: `'Prior Invoice Log'!I${j10row}` };
+  let j10 = null;
+  if (j10row && devFee.getCell('J10')) {
+    j10 = sumSubtotalRange(priorWs, j10row);
+    setFR(devFee.getCell('J10'), `'Prior Invoice Log'!I${j10row}`, j10 == null ? null : round2(j10));
+  }
 
-  // Dev Fee J11 -> Current "Development Fee" data row
+  // Dev Fee J11 -> Current "Development Fee" data row. If this period has no
+  // Development Fee line, do NOT leave J11 pointing at the prior workbook's stale
+  // row — re-point it to 0 so the discrepancy math stays correct and B4's label
+  // check doesn't trip on an empty row.
   const j11row = findRowByLabel(curWs, ['Development Fee']);
-  if (j11row && devFee.getCell('J11')) devFee.getCell('J11').value = { formula: `'Current Invoice Log'!I${j11row}` };
+  let j11 = 0;
+  if (devFee.getCell('J11')) {
+    if (j11row) {
+      j11 = num(curWs, j11row, COL.amount) || 0;
+      setFR(devFee.getCell('J11'), `'Current Invoice Log'!I${j11row}`, round2(j11));
+    } else {
+      // No Development Fee this period. Write a PLAIN 0 (not a formula): exceljs
+      // silently drops result:0 from a formula cell, which would make reconcile's
+      // cellNum read it as "not evaluated" and fail B5 forever. A plain numeric 0
+      // is read back as 0, and there is no current-period Dev Fee row to point at.
+      j11 = 0;
+      devFee.getCell('J11').value = 0;
+    }
+  }
+
+  // Seed the dependent Dev Fee cells (J5,J7,J8,J12,J14) so B5 evaluates without
+  // a recalc. J5 = E5 + E7 - B2A!J40 ; J7 = J5 + J6 ; J8 = ROUND(J7*2%,2) ;
+  // J12 = J10 + J11 ; J14 = J8 - J12. Only seed when every input is available.
+  const e5 = cellNum(devFee.getCell('E5'));
+  const e7 = cellNum(devFee.getCell('E7'));
+  const b2aJ40 = b2a ? cellNum(b2a.getCell('J40')) : null;
+  if (e5 != null && e7 != null && b2aJ40 != null && devFee.getCell('J5')) {
+    const j5 = e5 + e7 - b2aJ40;
+    setFR(devFee.getCell('J5'), cellFormula(devFee.getCell('J5')) || `E5+E7-'Budget to Actual'!J40`, round2(j5));
+    if (j6 != null && devFee.getCell('J7')) {
+      const j7 = j5 + j6;
+      setFR(devFee.getCell('J7'), cellFormula(devFee.getCell('J7')) || `SUM(J5:J6)`, round2(j7));
+      if (devFee.getCell('J8')) {
+        const j8 = round2(j7 * 0.02);
+        setFR(devFee.getCell('J8'), cellFormula(devFee.getCell('J8')) || `ROUND(J7*0.02,2)`, j8);
+        if (j10 != null && devFee.getCell('J12')) {
+          const j12 = round2(j10 + j11);
+          setFR(devFee.getCell('J12'), cellFormula(devFee.getCell('J12')) || `SUM(J10:J11)`, j12);
+          if (devFee.getCell('J14')) {
+            setFR(devFee.getCell('J14'), cellFormula(devFee.getCell('J14')) || `J8-J12`, round2(j8 - j12));
+          }
+        }
+      }
+    }
+  }
 
   // B2A H45 -> Prior "Working Capital" row
   const wcRow = findRowByLabel(priorWs, ['Working Capital']);

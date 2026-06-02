@@ -233,7 +233,18 @@ function reconcile(prev, next, opts = {}) {
     const refFails = [];
     for (const rc of refChecks) {
       const f = cellFormula(dv.getCell(rc.cell));
-      if (!f) { refFails.push({ cell: rc.cell, issue: 'no formula' }); continue; }
+      if (!f) {
+        // J11 (current-period Development Fee) legitimately carries NO formula
+        // when the current Dev Fee contribution is 0 — either there is no
+        // Development Fee line this period, or the line exists but its amount is
+        // 0. In both cases the roll-forward writes a plain numeric 0 (exceljs
+        // drops result:0 from a formula cell, so a "='Current...'!Ixx" pointing
+        // at a 0 would read back as "not evaluated"). A plain 0 in J11 is correct
+        // and self-consistent with J12 = J10 + 0, so accept it.
+        if (rc.cell === 'J11' && cellNum(dv.getCell('J11')) === 0) continue;
+        refFails.push({ cell: rc.cell, issue: 'no formula' });
+        continue;
+      }
       const m = f.match(/I(\d+)/);
       if (!m) { refFails.push({ cell: rc.cell, issue: 'no row ref', formula: f }); continue; }
       const targetRow = Number(m[1]);
