@@ -2726,9 +2726,15 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
       let invoiceRows = [];
       if (invoiceIds.length) {
         const placeholders = invoiceIds.map(() => '?').join(',');
-        invoiceRows = db.prepare(
-          `SELECT id, original_name, mime_type, file_blob FROM requisition_invoice WHERE entity_id = ? AND id IN (${placeholders})`
+        const fetched = db.prepare(
+          `SELECT id, original_name, mime_type, file_blob, vendor, bill_number, amount, cost_code, cost_code_name FROM requisition_invoice WHERE entity_id = ? AND id IN (${placeholders})`
         ).all(eidInt, ...invoiceIds);
+        // Preserve the caller's order (= the Current Invoice Log row order the
+        // user arranged on screen). A bare `IN (...)` returns rows in arbitrary
+        // DB order, which would scramble the packet relative to the log; re-sort
+        // by the position of each id in invoiceIds so the packet matches the log.
+        const byId = new Map(fetched.map(r => [r.id, r]));
+        invoiceRows = invoiceIds.map(id => byId.get(id)).filter(Boolean);
       }
       const saved = await saveRequisitionOutputs({
         db, workpapersDir: WORKPAPERS_DIR, eid: eidInt,

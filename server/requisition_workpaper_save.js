@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { PDFDocument } = require('pdf-lib');
+const { PDFDocument, PDFName, PDFNumber, PDFString, PDFArray, PDFDict, PDFNull } = require('pdf-lib');
 
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
@@ -69,45 +69,117 @@ function saveBufferToWorkpapers(db, workpapersDir, eid, folderPath, originalName
   return { id: info.lastInsertRowid, original_name: finalName, size: buffer.length };
 }
 
-// Merge a list of stored invoices into one PDF. Each invoice carries
-// { file_blob (Buffer), mime_type, original_name }. PDFs are appended page by
-// page; images (png/jpg) are embedded one per page. Unsupported types are
-// skipped. Returns a Buffer, or null if nothing usable was produced.
+// Merge a list of stored invoices into one PDF, in the given order, with a
+// top-level PDF bookmark (outline) at the first page of each invoice so the
+// packet is navigable and its order mirrors the Current Invoice Log.
+//
+// Each invoice carries { file_blob (Buffer), mime_type, original_name } and
+// optionally { vendor, bill_number, amount, cost_code, cost_code_name } used to
+// label its bookmark. PDFs are appended page by page; images (png/jpg) are
+// embedded one per page. Unsupported types are skipped. The caller's array
+// order is preserved exactly. Returns a Buffer, or null if nothing usable.
 async function buildInvoicePacket(invoices) {
   if (!invoices || !invoices.length) return null;
   const out = await PDFDocument.create();
   let added = 0;
+  // Track where each invoice starts in the merged packet and its label, so we
+  // can build the outline after all pages are placed.
+  const marks = []; // { pageIndex, title }
+
+  const money = (n) => {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return '';
+    const sign = v < 0 ? '-' : '';
+    return ' ' + sign + '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+  const labelFor = (inv) => {
+    const gl = inv.cost_code != null && inv.cost_code !== '' ? String(inv.cost_code) + ' ' : '';
+    const vendor = (inv.vendor || inv.cost_code_name || inv.original_name || 'Invoice').toString().trim();
+    const bill = inv.bill_number ? ' Inv. ' + inv.bill_number : '';
+    const amt = money(inv.amount);
+    return (gl + vendor + bill + amt).trim() || 'Invoice';
+  };
+
   for (const inv of invoices) {
     const buf = inv.file_blob;
     if (!buf || !buf.length) continue;
     const mime = (inv.mime_type || '').toLowerCase();
     const name = (inv.original_name || '').toLowerCase();
+    const startIndex = out.getPageCount();
+    let placed = false;
     try {
       if (mime.includes('pdf') || name.endsWith('.pdf')) {
         const src = await PDFDocument.load(buf, { ignoreEncryption: true });
         const pages = await out.copyPages(src, src.getPageIndices());
         pages.forEach(p => out.addPage(p));
-        added++;
+        placed = pages.length > 0;
       } else if (mime.includes('png') || name.endsWith('.png')) {
         const img = await out.embedPng(buf);
         const page = out.addPage([img.width, img.height]);
         page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
-        added++;
+        placed = true;
       } else if (mime.includes('jpeg') || mime.includes('jpg') || name.endsWith('.jpg') || name.endsWith('.jpeg')) {
         const img = await out.embedJpg(buf);
         const page = out.addPage([img.width, img.height]);
         page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
-        added++;
+        placed = true;
       }
       // other types: skip silently
     } catch (e) {
       // a single bad file shouldn't sink the whole packet
       console.error('invoice packet: skipped a file:', name || inv.id, e.message);
     }
+    if (placed) {
+      marks.push({ pageIndex: startIndex, title: labelFor(inv) });
+      added++;
+    }
   }
   if (!added) return null;
+  addOutline(out, marks);
   const bytes = await out.save();
   return Buffer.from(bytes);
+}
+
+// Attach a flat PDF outline (bookmarks) to `doc`. `marks` is an ordered list of
+// { pageIndex, title }. pdf-lib has no high-level outline API, so we assemble
+// the /Outlines dictionary and the linked list of outline items by hand and
+// register them in the catalog. Each item is a top-level bookmark whose /Dest
+// jumps to the top of its page (XYZ with null left/top = "keep position").
+function addOutline(doc, marks) {
+  if (!marks || !marks.length) return;
+  const context = doc.context;
+  const pages = doc.getPages();
+
+  // Create the parent /Outlines dict first; children reference it as /Parent.
+  const outlinesDict = context.obj({ Type: 'Outlines' });
+  const outlinesRef = context.register(outlinesDict);
+
+  // Pre-create a ref for each item so siblings can link /Next and /Prev.
+  const itemRefs = marks.map(() => context.nextRef());
+
+  marks.forEach((m, i) => {
+    const page = pages[Math.min(m.pageIndex, pages.length - 1)];
+    const dest = PDFArray.withContext(context);
+    dest.push(page.ref);
+    dest.push(PDFName.of('XYZ'));
+    dest.push(PDFNull); // left  — null = keep current horizontal position
+    dest.push(PDFNull); // top   — null = keep current vertical position
+    dest.push(PDFNumber.of(0));    // zoom (0 = keep current zoom)
+
+    const item = new Map();
+    item.set(PDFName.of('Title'), PDFString.of(m.title));
+    item.set(PDFName.of('Parent'), outlinesRef);
+    item.set(PDFName.of('Dest'), dest);
+    if (i > 0) item.set(PDFName.of('Prev'), itemRefs[i - 1]);
+    if (i < marks.length - 1) item.set(PDFName.of('Next'), itemRefs[i + 1]);
+    context.assign(itemRefs[i], PDFDict.fromMapWithContext(item, context));
+  });
+
+  outlinesDict.set(PDFName.of('First'), itemRefs[0]);
+  outlinesDict.set(PDFName.of('Last'), itemRefs[itemRefs.length - 1]);
+  outlinesDict.set(PDFName.of('Count'), PDFNumber.of(marks.length));
+
+  doc.catalog.set(PDFName.of('Outlines'), outlinesRef);
 }
 
 // Main entry. Saves the workbook and (if any invoices) the merged packet into
