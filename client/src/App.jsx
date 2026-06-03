@@ -2117,17 +2117,17 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
   const[glPreview,setGlPreview]=useState(null);// {columns,total_rows,suggested,preview}
   const[glMap,setGlMap]=useState({});// field -> column name
   const[glFused,setGlFused]=useState(false);const[glFusedDelim,setGlFusedDelim]=useState('auto');
-  const[glBusy,setGlBusy]=useState(false);const[glErr,setGlErr]=useState('');const[glResult,setGlResult]=useState(null);
-  const resetGl=()=>{setGlEntity(null);setGlFile(null);setGlStep('upload');setGlPreview(null);setGlMap({});setGlFused(false);setGlFusedDelim('auto');setGlBusy(false);setGlErr('');setGlResult(null);};
+  const[glBusy,setGlBusy]=useState(false);const[glErr,setGlErr]=useState('');const[glResult,setGlResult]=useState(null);const[glUnbalanced,setGlUnbalanced]=useState(null);
+  const resetGl=()=>{setGlEntity(null);setGlFile(null);setGlStep('upload');setGlPreview(null);setGlMap({});setGlFused(false);setGlFusedDelim('auto');setGlBusy(false);setGlErr('');setGlResult(null);setGlUnbalanced(null);};
   const onGlFile=async e=>{const file=e.target.files[0];if(!file||!glEntity)return;e.target.value='';setGlBusy(true);setGlErr('');
     try{const r=await api.importGLPreview(glEntity,file);setGlFile(file);setGlPreview(r);
       const s=r.suggested||{};setGlMap({account_number:s.account_number||'',account_name:s.account_name||'',transaction_date:s.transaction_date||'',description:s.description||'',memo:s.memo||'',debit:s.debit||'',credit:s.credit||'',reference:s.reference||'',running_balance:s.running_balance||''});
       setGlFused(!!s.fused);setGlFusedDelim('auto');setGlStep('map');}
     catch(ex){setGlErr(ex.message);}finally{setGlBusy(false);}};
-  const runGlImport=async()=>{if(!glFile||!glEntity)return;setGlBusy(true);setGlErr('');
+  const runGlImport=async()=>{if(!glFile||!glEntity)return;setGlBusy(true);setGlErr('');setGlUnbalanced(null);
     const mapping={...glMap,fused:glFused,fused_column:glFused?(glMap.account_number||glPreview?.suggested?.fused_column):null,fused_delimiter:glFusedDelim==='auto'?null:glFusedDelim};
     try{const r=await api.importGL(glEntity,glFile,mapping);setGlResult(r);setGlStep('done');}
-    catch(ex){setGlErr(ex.message);}finally{setGlBusy(false);}};
+    catch(ex){setGlErr(ex.message);if(ex.detail&&ex.detail.unbalanced_groups)setGlUnbalanced(ex.detail);}finally{setGlBusy(false);}};
   const GL_FIELDS=[{k:'account_number',label:'Account Number',req:true},{k:'account_name',label:'Account Name',req:true},{k:'transaction_date',label:'Transaction Date',req:true},{k:'description',label:'Description',req:false},{k:'memo',label:'Memo',req:false},{k:'debit',label:'Debit',req:true},{k:'credit',label:'Credit',req:true},{k:'reference',label:'Reference / Doc # (groups lines into JEs)',req:false},{k:'running_balance',label:'Running Balance (verification only, not stored)',req:false}];
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
     <div><div style={S.h1}>Entity Management</div><div style={S.sub}>{entities.length} entities</div></div>
@@ -2220,6 +2220,22 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
           <table style={{...S.table,fontSize:10}}><thead><tr>{glPreview.columns.map(c=><th key={c} style={{...S.th,fontSize:10,whiteSpace:'nowrap',padding:'5px 8px'}}>{c}</th>)}</tr></thead>
             <tbody>{glPreview.preview.map((row,i)=><tr key={i}>{glPreview.columns.map(c=><td key={c} style={{...S.td,fontSize:10,whiteSpace:'nowrap',padding:'4px 8px'}}>{String(row[c]??'')}</td>)}</tr>)}</tbody></table></div>
         {glErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:10}}>{glErr}</div>}
+        {glUnbalanced&&glUnbalanced.unbalanced_groups&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:10}}>
+          <div style={{fontWeight:600,marginBottom:6}}>{glUnbalanced.unbalanced_count} {glUnbalanced.grouping==='by_reference'?'reference group(s)':'date(s)'} out of balance &mdash; nothing was imported.</div>
+          <div style={{overflowX:'auto'}}><table style={{...S.table,fontSize:11}}><thead><tr>
+            <th style={{...S.th,fontSize:11,padding:'4px 8px'}}>{glUnbalanced.grouping==='by_reference'?'Date / Ref':'Date'}</th>
+            <th style={{...S.th,fontSize:11,padding:'4px 8px',textAlign:'right'}}>Debits</th>
+            <th style={{...S.th,fontSize:11,padding:'4px 8px',textAlign:'right'}}>Credits</th>
+            <th style={{...S.th,fontSize:11,padding:'4px 8px',textAlign:'right'}}>Difference</th>
+            <th style={{...S.th,fontSize:11,padding:'4px 8px',textAlign:'right'}}>Lines</th></tr></thead>
+            <tbody>{glUnbalanced.unbalanced_groups.map((g,i)=><tr key={i}>
+              <td style={{...S.td,fontSize:11,padding:'4px 8px',whiteSpace:'nowrap'}}>{g.date}{g.reference?(' / '+g.reference):''}</td>
+              <td style={{...S.td,fontSize:11,padding:'4px 8px',textAlign:'right'}}>{g.debit.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+              <td style={{...S.td,fontSize:11,padding:'4px 8px',textAlign:'right'}}>{g.credit.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+              <td style={{...S.td,fontSize:11,padding:'4px 8px',textAlign:'right',color:T.red,fontWeight:600}}>{g.difference.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
+              <td style={{...S.td,fontSize:11,padding:'4px 8px',textAlign:'right'}}>{g.lines}</td></tr>)}</tbody></table></div>
+          <div style={{fontSize:11,marginTop:6,opacity:.85}}>A balanced general ledger nets to zero within every transaction date. An out-of-balance date usually means a single-sided export or a line posted to the wrong date. Fix the source file and re-import.</div>
+        </div>}
         <div style={{display:'flex',gap:10,alignItems:'center'}}>
           <button style={{...S.btnP,opacity:glBusy?.6:1}} disabled={glBusy} onClick={runGlImport}>{glBusy?'Importing...':'Import'}</button>
           <button style={S.btnS} onClick={()=>{setGlStep('upload');setGlErr('');}} disabled={glBusy}>Back</button>
@@ -2229,7 +2245,7 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
         <div style={{...S.success,padding:12,background:T.greenDim,borderRadius:6,border:'1px solid '+T.greenBorder,marginBottom:12}}>
           Imported <strong>{glResult.lines_imported}</strong> lines into <strong>{glResult.entries_created}</strong> journal entries across <strong>{glResult.accounts_imported}</strong> accounts.<br/>
           Total debits ${glResult.total_debit.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})} / credits ${glResult.total_credit.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})} &mdash; {glResult.balanced?'balanced ✓':'NOT balanced ✗'}.<br/>
-          Grouping: {glResult.grouping==='by_reference'?'by reference / document #':'single bulk entry'}.{glResult.rows_skipped>0&&<> {glResult.rows_skipped} row(s) skipped (blank/zero/unparseable).</>}
+          Grouping: {glResult.grouping==='by_reference'?'by reference / document #':'one journal entry per transaction date'}.{glResult.rows_skipped>0&&<> {glResult.rows_skipped} row(s) skipped (blank/zero/unparseable).</>}
         </div>
         {glResult.verification&&<div style={{...(glResult.verification.mismatches.length?S.err:S.success),padding:12,borderRadius:6,marginBottom:12,background:glResult.verification.mismatches.length?T.redDim:T.greenDim,border:'1px solid '+(glResult.verification.mismatches.length?T.red+'30':T.greenBorder)}}>
           <strong>Running-balance check:</strong> {glResult.verification.matched}/{glResult.verification.checked} accounts match.

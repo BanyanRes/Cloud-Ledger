@@ -1210,14 +1210,49 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
     if (!parsedLines.length) return res.status(400).json({ error: 'No valid transaction rows found. Check your column mapping and that amounts are numeric.' });
 
     // Group into journal entries. If a reference column is mapped, group by date+ref into
-    // balanced entries; otherwise fall back to a single bulk import JE.
+    // balanced entries; otherwise group by transaction date (one JE per date). A single
+    // JE may never span multiple dates — every entry shares one posting date.
     const groups = new Map();
     const useRef = !!m.reference && parsedLines.some(l => l.ref);
     parsedLines.forEach((l, i) => {
-      const key = useRef ? (l.date + '||' + (l.ref || ('_' + i))) : '__bulk__';
+      const key = useRef ? (l.date + '||' + (l.ref || ('_' + i))) : l.date;
       if (!groups.has(key)) groups.set(key, { date: l.date, ref: l.ref, lines: [] });
       groups.get(key).lines.push(l);
     });
+
+    // Balance gate: every JE must balance (debits == credits) on its own.
+    // For reference grouping each date+ref group must net to zero; for date grouping
+    // each date must net to zero. A balanced source GL guarantees this, so any
+    // out-of-balance group signals a single-sided export or a misdated line —
+    // refuse the import and report the offending groups rather than post garbage.
+    {
+      const unbalanced = [];
+      for (const g of groups.values()) {
+        const dr = g.lines.reduce((s, l) => s + l.dr, 0);
+        const cr = g.lines.reduce((s, l) => s + l.cr, 0);
+        if (Math.abs(dr - cr) > 0.01) {
+          unbalanced.push({
+            date: g.date,
+            ...(useRef ? { reference: g.ref || '(none)' } : {}),
+            debit: +dr.toFixed(2),
+            credit: +cr.toFixed(2),
+            difference: +(dr - cr).toFixed(2),
+            lines: g.lines.length,
+          });
+        }
+      }
+      if (unbalanced.length) {
+        unbalanced.sort((a, b) => Math.abs(b.difference) - Math.abs(a.difference));
+        return res.status(400).json({
+          error: useRef
+            ? ('Import halted: ' + unbalanced.length + ' reference group(s) do not balance (debits ≠ credits). A balanced general ledger should net to zero within every transaction.')
+            : ('Import halted: ' + unbalanced.length + ' date(s) do not balance (debits ≠ credits). When the whole GL balances, every date must balance too — an out-of-balance date usually means a single-sided export or a misdated line.'),
+          grouping: useRef ? 'by_reference' : 'by_date',
+          unbalanced_groups: unbalanced.slice(0, 50),
+          unbalanced_count: unbalanced.length,
+        });
+      }
+    }
 
     // Running-balance verification: compare each account's last imported running balance
     // (in file order) to the net debit-credit we computed for that account.
@@ -1266,9 +1301,9 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
         entryNum++;
         const memo = useRef
           ? ('GL detail import' + (g.ref ? ' — ' + g.ref : ''))
-          : ('GL detail import (' + asOfLabel + ')');
-        // JE date: for grouped entries, the group date; for bulk, the latest line date.
-        const jeDate = useRef ? g.date : g.lines.reduce((mx, l) => l.date > mx ? l.date : mx, g.lines[0].date);
+          : ('GL detail import (' + g.date + ')');
+        // Every group is single-date by construction, so the JE date is the group date.
+        const jeDate = g.date;
         const r = insJE.run(eid, entryNum, jeDate, memo, req.user.name || req.user.email);
         for (const l of g.lines) {
           insLine.run(r.lastInsertRowid, l.code, l.dr, l.cr, l.description);
@@ -1281,7 +1316,7 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
 
     res.json({
       success: true,
-      grouping: useRef ? 'by_reference' : 'bulk',
+      grouping: useRef ? 'by_reference' : 'by_date',
       entries_created: result.jeCount,
       lines_imported: result.lineCount,
       accounts_imported: result.accounts,

@@ -13,7 +13,7 @@ async function request(path, options = {}) {
   });
   if (res.status === 401) { clearToken(); window.location.reload(); return null; }
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Request failed');
+  if (!res.ok) { const err = new Error(data.error || 'Request failed'); err.detail = data; throw err; }
   return data;
 }
 
