@@ -48,6 +48,18 @@ export const api = {
     if (asOfDate) fd.append('as_of_date', asOfDate);
     return request('/entities/' + eid + '/import-tb', { method: 'POST', body: fd });
   },
+  importGLPreview: (eid, file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return request('/entities/' + eid + '/import-gl/preview', { method: 'POST', body: fd });
+  },
+  importGL: (eid, file, mapping, asOfDate) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('mapping', JSON.stringify(mapping));
+    if (asOfDate) fd.append('as_of_date', asOfDate);
+    return request('/entities/' + eid + '/import-gl', { method: 'POST', body: fd });
+  },
   bulkCreateEntities: (ents) => request('/entities/bulk', { method: 'POST', body: { entities: ents } }),
   deleteEntity: (id) => request('/entities/' + id, { method: 'DELETE' }),
 

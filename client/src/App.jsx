@@ -19,7 +19,7 @@ const fy_start = () => new Date().getFullYear() + '-01-01';
 const fmtSize = b => b > 1048576 ? (b/1048576).toFixed(1)+' MB' : (b/1024).toFixed(0)+' KB';
 const acctLabel = (code, name) => code + ' - ' + name;
 function exportToExcel(data, fn) { const ws = XLSX.utils.aoa_to_sheet(data); ws['!cols'] = data[0].map((_, ci) => ({ wch: Math.min(Math.max(...data.map(r => String(r[ci]||'').length), 8)+2, 40) })); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); XLSX.writeFile(wb, fn); }
-const BLANK_JE = () => ({date:today(),memo:'',lines:[{account_code:'',debit:'',credit:''},{account_code:'',debit:'',credit:''}]});
+const BLANK_JE = () => ({date:today(),memo:'',lines:[{account_code:'',debit:'',credit:'',description:''},{account_code:'',debit:'',credit:'',description:''}]});
 const SIDEBAR_KEY = 'cl_sidebar';
 
 // ─── Cloud Ledger Logo SVG ───
@@ -251,14 +251,14 @@ function JournalEntryModal({entityId,isTurnkeyEntity,user,onClose,onPosted,form,
   const[projects,setProjects]=useState([]);
   useEffect(()=>{api.getAccounts(entityId).then(setAccounts);api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));},[entityId]);
   const showProject=isTurnkeyEntity||projects.length>0;
-  const addLine=()=>setForm(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:''}]}));
+  const addLine=()=>setForm(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:'',description:''}]}));
   const removeLine=i=>setForm(f=>({...f,lines:f.lines.filter((_,j)=>j!==i)}));
   const updateLine=(i,k,v)=>setForm(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,[k]:v}:l)}));
   const tDr=form.lines.reduce((s,l)=>s+parseAmt(l.debit),0);const tCr=form.lines.reduce((s,l)=>s+parseAmt(l.credit),0);const bal=Math.abs(tDr-tCr)<0.005&&tDr>0;
   const discard=()=>{setForm(BLANK_JE());setPendingFiles([]);};
   const onFilesSelected=e=>{const files=Array.from(e.target.files);if(files.length>0)setPendingFiles(p=>[...p,...files]);e.target.value='';};
   const post=async()=>{if(!form.date||!form.memo.trim()){setErr('Date and memo required');return;}if(form.lines.some(l=>!l.account_code)){setErr('All lines need an account');return;}if(!bal){setErr('Entry must balance');return;}
-    setPosting(true);setErr('');try{const r=await api.createEntry(entityId,{date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),project_id:l.project_id||null}))});
+    setPosting(true);setErr('');try{const r=await api.createEntry(entityId,{date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null}))});
       let msg='JE-'+String(r.entry_num).padStart(4,'0')+' posted';
       if(pendingFiles.length>0){try{const u=await api.uploadAttachments(entityId,r.id,pendingFiles);msg+=' with '+u.length+' attachment(s)';}catch(ue){msg+=' (attachments failed: '+ue.message+')';}}
       setForm(BLANK_JE());setPendingFiles([]);setPosted(msg+'!');setTimeout(()=>setPosted(''),5000);if(onPosted)onPosted();}
@@ -276,15 +276,16 @@ function JournalEntryModal({entityId,isTurnkeyEntity,user,onClose,onPosted,form,
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo / Description</label><input style={S.input} placeholder="What is this entry for?" value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
-    <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th>{showProject&&<th style={{...S.th,width:170}}>Project</th>}<th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
+    <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th>{showProject&&<th style={{...S.th,width:170}}>Project</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select account...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></td>
         {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>updateLine(i,'project_id',e.target.value)}><option value="">— none —</option>{projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}</select></td>}
+        <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} placeholder="(optional)" value={l.description||''} onChange={e=>updateLine(i,'description',e.target.value)}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'debit',f);}} onBlur={e=>updateLine(i,'debit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.credit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'credit',f);}} onBlur={e=>updateLine(i,'credit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px',borderBottom:'1px solid '+T.borderLight,textAlign:'center'}}>{form.lines.length>2&&<button style={S.btnGhost} onClick={()=>removeLine(i)}>&times;</button>}</td></tr>)}
-      <tr style={{background:T.bgElevated}}><td colSpan={showProject?2:1} style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
+      <tr style={{background:T.bgElevated}}><td colSpan={showProject?3:2} style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
     <div style={{border:'1px solid '+(pendingFiles.length>0?T.teal+'40':T.border),borderRadius:T.radiusSm,padding:16,marginBottom:16,background:pendingFiles.length>0?T.tealDim:'#fff'}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:pendingFiles.length>0?12:0}}>
         <span style={{fontSize:12,fontWeight:600,color:pendingFiles.length>0?T.teal:T.textMuted}}>{pendingFiles.length>0?pendingFiles.length+' file(s) attached':'No attachments'}</span>
@@ -1368,17 +1369,17 @@ function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSum
 function EditJEModal({entityId,entry,accounts:initAccounts,onClose,onSaved}){
   const[accounts,setAccounts]=useState(initAccounts||[]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[saving,setSaving]=useState(false);
   const[projects,setProjects]=useState([]);useEffect(()=>{api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));},[entityId]);const showProject=projects.length>0||(entry.lines||[]).some(l=>l.project_id);
-  const[form,setForm]=useState({date:entry.date,memo:entry.memo,lines:entry.lines.map(l=>({account_code:l.account_code,project_id:l.project_id||'',debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
+  const[form,setForm]=useState({date:entry.date,memo:entry.memo,lines:entry.lines.map(l=>({account_code:l.account_code,project_id:l.project_id||'',description:l.description||'',debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
   const[attachments,setAttachments]=useState(entry.attachments||[]);
   const[attUploading,setAttUploading]=useState(false);
   const attInputRef=useRef(null);
   useEffect(()=>{if(!initAccounts?.length)api.getAccounts(entityId).then(setAccounts);},[entityId,initAccounts]);
-  const addLine=()=>setForm(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:''}]}));
+  const addLine=()=>setForm(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:'',description:''}]}));
   const removeLine=i=>setForm(f=>({...f,lines:f.lines.filter((_,j)=>j!==i)}));
   const updateLine=(i,k,v)=>setForm(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,[k]:v}:l)}));
   const tDr=form.lines.reduce((s,l)=>s+parseAmt(l.debit),0);const tCr=form.lines.reduce((s,l)=>s+parseAmt(l.credit),0);const bal=Math.abs(tDr-tCr)<0.005&&tDr>0;
   const save=async()=>{if(!form.date||!form.memo.trim()){setErr('Date and memo required');return;}if(form.lines.some(l=>!l.account_code)){setErr('All lines need an account');return;}if(!bal){setErr('Must balance');return;}
-    setSaving(true);setErr('');try{await api.updateEntry(entityId,entry.id,{date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),project_id:l.project_id||null}))});
+    setSaving(true);setErr('');try{await api.updateEntry(entityId,entry.id,{date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null}))});
       onSaved();onClose();}catch(e){setErr(e.message);}finally{setSaving(false);}};
   const uploadAtt=async e=>{const fl=e.target.files;if(!fl||fl.length===0)return;setErr('');setAttUploading(true);
     try{const r=await api.uploadAttachments(entityId,entry.id,fl);setAttachments(p=>[...p,...(r.attachments||r.files||r||[])]);}
@@ -1398,15 +1399,16 @@ function EditJEModal({entityId,entry,accounts:initAccounts,onClose,onSaved}){
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo</label><input style={S.input} value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
-    <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th>{showProject&&<th style={{...S.th,width:170}}>Project</th>}<th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
+    <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th>{showProject&&<th style={{...S.th,width:170}}>Project</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></td>
         {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>updateLine(i,'project_id',e.target.value)}><option value="">— none —</option>{projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}</select></td>}
+        <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} value={l.description||''} placeholder="(optional)" onChange={e=>updateLine(i,'description',e.target.value)}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'debit',f);}} onBlur={e=>updateLine(i,'debit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} value={l.credit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'credit',f);}} onBlur={e=>updateLine(i,'credit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px',borderBottom:'1px solid '+T.borderLight,textAlign:'center'}}>{form.lines.length>2&&<button style={S.btnGhost} onClick={()=>removeLine(i)}>&times;</button>}</td></tr>)}
-      <tr style={{background:T.bgElevated}}><td colSpan={showProject?2:1} style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
+      <tr style={{background:T.bgElevated}}><td colSpan={showProject?3:2} style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
     {/* Attachments */}
     <div style={{marginBottom:16}}>
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
@@ -1456,9 +1458,10 @@ function JournalList({entityId,entityName,onNewEntry}){const[entries,setEntries]
             <button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>setEditEntry(e)}>Edit</button>
             <button style={{...S.btnD,padding:'5px 12px',fontSize:11}} onClick={()=>del(e.id)}>Delete</button></div></div>
         <table style={{...S.table,tableLayout:'fixed',width:'100%'}}>
-          <colgroup><col/><col style={{width:'160px'}}/><col style={{width:'160px'}}/></colgroup>
-          <thead><tr><th style={S.th}>Account</th><th style={S.thR}>Debit</th><th style={S.thR}>Credit</th></tr></thead>
+          <colgroup><col style={{width:'280px'}}/><col/><col style={{width:'140px'}}/><col style={{width:'140px'}}/></colgroup>
+          <thead><tr><th style={S.th}>Account</th><th style={S.th}>Description</th><th style={S.thR}>Debit</th><th style={S.thR}>Credit</th></tr></thead>
           <tbody>{e.lines.map((l,i)=><tr key={i}><td style={S.td} title={acctLabel(l.account_code,acctName(l.account_code))}>{acctLabel(l.account_code,acctName(l.account_code))}</td>
+            <td style={{...S.td,color:T.textMuted,fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={l.description||''}>{l.description||''}</td>
             <td style={S.tdR}>{l.debit>0?fmt(l.debit):''}</td><td style={S.tdR}>{l.credit>0?fmt(l.credit):''}</td></tr>)}</tbody></table>
         {e.attachments?.length>0&&<div style={{marginTop:10,display:'flex',flexWrap:'wrap',gap:4}}>{e.attachments.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>)}</div>}
       </div>)}</div>}
@@ -1517,7 +1520,7 @@ function GeneralLedger({entityId,entityName,from,setFrom,to,setTo,filter,setFilt
         <span style={{fontWeight:700,color:T.textBright,fontSize:14}}>{acct.code}</span><span>{acct.name}</span><span style={S.tag(acct.type)}>{acct.type}</span></div>
         {txns.length===0?<div style={{padding:20,color:T.textDim}}>No transactions</div>:
         <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:900}}><thead><tr><th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Memo</th><th style={S.thR}>Debit</th><th style={S.thR}>Credit</th><th style={S.thR}>Balance</th><th style={{...S.th,width:100}}>Docs</th></tr></thead>
-          <tbody>{txns.map((t,i)=>{run+=dr?(t.debit-t.credit):(t.credit-t.debit);const atts=entryAtts[t.jeId];return<tr key={i}><td style={{...S.td,color:T.textMuted}}>{t.date}</td><td style={S.td}><button style={{background:'none',border:0,padding:0,color:T.accent,fontWeight:600,cursor:'pointer',fontSize:'inherit',fontFamily:'inherit'}} onClick={()=>{const e=entries.find(x=>x.id===t.jeId);if(e)setEditEntry(e);}}>JE-{String(t.jeNum).padStart(4,'0')}</button></td><td style={S.td}>{t.memo}</td><td style={S.tdR}>{t.debit>0?fmt(t.debit):''}</td><td style={S.tdR}>{t.credit>0?fmt(t.credit):''}</td><td style={{...S.tdR,fontWeight:600,color:T.textBright}}>{fmt(run)}</td>
+          <tbody>{txns.map((t,i)=>{run+=dr?(t.debit-t.credit):(t.credit-t.debit);const atts=entryAtts[t.jeId];return<tr key={i}><td style={{...S.td,color:T.textMuted}}>{t.date}</td><td style={S.td}><button style={{background:'none',border:0,padding:0,color:T.accent,fontWeight:600,cursor:'pointer',fontSize:'inherit',fontFamily:'inherit'}} onClick={()=>{const e=entries.find(x=>x.id===t.jeId);if(e)setEditEntry(e);}}>JE-{String(t.jeNum).padStart(4,'0')}</button></td><td style={S.td} title={t.description||t.memo}>{t.description||t.memo}</td><td style={S.tdR}>{t.debit>0?fmt(t.debit):''}</td><td style={S.tdR}>{t.credit>0?fmt(t.credit):''}</td><td style={{...S.tdR,fontWeight:600,color:T.textBright}}>{fmt(run)}</td>
             <td style={S.td}>{atts?atts.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>):''}</td></tr>;})}</tbody></table></div>}</div>);})}
     {editEntry&&<EditJEModal entityId={entityId} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={()=>{setEditEntry(null);reload();}}/>}
     </div>);}
@@ -2107,6 +2110,25 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
   const onTBFile=async e=>{const file=e.target.files[0];if(!file||!importing)return;e.target.value='';setImportBusy(true);setImportMsg('');setImportErr('');
     try{const r=await api.importTrialBalance(importing,file,importAsOf);setImportMsg('Imported '+r.accounts_imported+' accounts. Opening JE: $'+r.total_debit.toFixed(2)+' debits / $'+r.total_credit.toFixed(2)+' credits.'+(r.plug_added?' (Difference plugged to Retained Earnings.)':''));}
     catch(ex){setImportErr(ex.message);}finally{setImportBusy(false);}};
+  // ── GL detail import (two-step: preview/map → import) ──
+  const[glEntity,setGlEntity]=useState(null);// entity id for GL import modal
+  const[glFile,setGlFile]=useState(null);
+  const[glStep,setGlStep]=useState('upload');// 'upload' | 'map' | 'done'
+  const[glPreview,setGlPreview]=useState(null);// {columns,total_rows,suggested,preview}
+  const[glMap,setGlMap]=useState({});// field -> column name
+  const[glFused,setGlFused]=useState(false);const[glFusedDelim,setGlFusedDelim]=useState('auto');
+  const[glBusy,setGlBusy]=useState(false);const[glErr,setGlErr]=useState('');const[glResult,setGlResult]=useState(null);
+  const resetGl=()=>{setGlEntity(null);setGlFile(null);setGlStep('upload');setGlPreview(null);setGlMap({});setGlFused(false);setGlFusedDelim('auto');setGlBusy(false);setGlErr('');setGlResult(null);};
+  const onGlFile=async e=>{const file=e.target.files[0];if(!file||!glEntity)return;e.target.value='';setGlBusy(true);setGlErr('');
+    try{const r=await api.importGLPreview(glEntity,file);setGlFile(file);setGlPreview(r);
+      const s=r.suggested||{};setGlMap({account_number:s.account_number||'',account_name:s.account_name||'',transaction_date:s.transaction_date||'',description:s.description||'',memo:s.memo||'',debit:s.debit||'',credit:s.credit||'',reference:s.reference||'',running_balance:s.running_balance||''});
+      setGlFused(!!s.fused);setGlFusedDelim('auto');setGlStep('map');}
+    catch(ex){setGlErr(ex.message);}finally{setGlBusy(false);}};
+  const runGlImport=async()=>{if(!glFile||!glEntity)return;setGlBusy(true);setGlErr('');
+    const mapping={...glMap,fused:glFused,fused_column:glFused?(glMap.account_number||glPreview?.suggested?.fused_column):null,fused_delimiter:glFusedDelim==='auto'?null:glFusedDelim};
+    try{const r=await api.importGL(glEntity,glFile,mapping);setGlResult(r);setGlStep('done');}
+    catch(ex){setGlErr(ex.message);}finally{setGlBusy(false);}};
+  const GL_FIELDS=[{k:'account_number',label:'Account Number',req:true},{k:'account_name',label:'Account Name',req:true},{k:'transaction_date',label:'Transaction Date',req:true},{k:'description',label:'Description',req:false},{k:'memo',label:'Memo',req:false},{k:'debit',label:'Debit',req:true},{k:'credit',label:'Credit',req:true},{k:'reference',label:'Reference / Doc # (groups lines into JEs)',req:false},{k:'running_balance',label:'Running Balance (verification only, not stored)',req:false}];
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
     <div><div style={S.h1}>Entity Management</div><div style={S.sub}>{entities.length} entities</div></div>
     <div style={{display:'flex',gap:10}}><button style={S.btnS} onClick={()=>{setBulk(!bulk);setShowAdd(false);}}>{bulk?'Cancel':'Bulk Import'}</button><button style={S.btnP} onClick={()=>{setShowAdd(!showAdd);setBulk(false);}}>{showAdd?'Cancel':'+ Add Entity'}</button></div></div>
@@ -2120,14 +2142,15 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
     {bulk&&<div style={{...S.card,borderColor:T.accent+'40'}}><div style={{...S.h2,marginBottom:8}}>Bulk Import Entities</div><div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>One entity name per line</div>
       <textarea style={{...S.input,height:160,fontFamily:'monospace',fontSize:12,resize:'vertical'}} value={bulkText} onChange={e=>setBulkText(e.target.value)}/>
       {err&&<div style={S.err}>{err}</div>}<button style={{...S.btnP,marginTop:10}} onClick={async()=>{const names=bulkText.split('\n').map(l=>l.trim()).filter(Boolean);if(!names.length){setErr('None');return;}try{for(const n of names)await api.createEntity(n);setBulkText('');setBulk(false);refresh();}catch(e){setErr(e.message);}}}>Import</button></div>}
-    <div style={S.cardFlush}><table style={S.table}><thead><tr><th style={S.th}>Entity</th><th style={{...S.th,width:340}}>Actions</th></tr></thead>
+    <div style={{...S.cardFlush,overflowX:'auto'}}><table style={{...S.table,minWidth:980}}><thead><tr><th style={S.th}>Entity</th><th style={{...S.th,width:720,minWidth:720}}>Actions</th></tr></thead>
       <tbody>{entities.sort((a,b)=>a.name.localeCompare(b.name)).map(e=><tr key={e.id} style={e.id===activeEntity?{background:T.accentDim}:{}}>
         <td style={{...S.td,fontWeight:600,color:T.textBright}}>{e.name}{e.entity_type==='development'&&<span style={{marginLeft:8,fontSize:9,fontWeight:700,color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder,borderRadius:4,padding:'2px 6px',textTransform:'uppercase',letterSpacing:'0.05em',verticalAlign:'middle'}}>Dev Project</span>}</td>
-        <td style={S.td}><div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-          <button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>setActiveEntity(e.id)}>Select</button>
-          <button style={{...S.btnS,padding:'5px 12px',fontSize:11,color:T.accent,borderColor:T.accent+'40'}} onClick={()=>{setImporting(e.id);setImportMsg('');setImportErr('');}}>Import Trial Balance</button>
-          <button style={{...S.btnS,padding:'5px 12px',fontSize:11}} disabled={typeBusy===e.id} title="Toggle between Accounting and Development Project" onClick={async()=>{const next=e.entity_type==='development'?'accounting':'development';if(!confirm('Set "'+e.name+'" to '+(next==='development'?'Development Project':'Accounting')+'?'))return;setTypeBusy(e.id);try{await api.updateEntity(e.id,{entity_type:next});await refresh();}catch(ex){alert(ex.message);}finally{setTypeBusy(null);}}}>{typeBusy===e.id?'...':e.entity_type==='development'?'Make Accounting':'Make Dev Project'}</button>
-          <button style={{...S.btnD,padding:'5px 12px',fontSize:11}} onClick={async()=>{if(!confirm('Delete entity '+e.name+' and all its data?'))return;await api.deleteEntity(e.id);const r=await refresh();if(activeEntity===e.id)setActiveEntity(r[0]?.id||null);}}>Delete</button>
+        <td style={S.td}><div style={{display:'flex',gap:8,flexWrap:'nowrap',whiteSpace:'nowrap'}}>
+          <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0}} onClick={()=>setActiveEntity(e.id)}>Select</button>
+          <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0,color:T.accent,borderColor:T.accent+'40'}} onClick={()=>{setImporting(e.id);setImportMsg('');setImportErr('');}}>Import Trial Balance</button>
+          <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0,color:T.accent,borderColor:T.accent+'40'}} onClick={()=>{resetGl();setGlEntity(e.id);}}>Import General Ledger Detail</button>
+          <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0}} disabled={typeBusy===e.id} title="Toggle between Accounting and Development Project" onClick={async()=>{const next=e.entity_type==='development'?'accounting':'development';if(!confirm('Set "'+e.name+'" to '+(next==='development'?'Development Project':'Accounting')+'?'))return;setTypeBusy(e.id);try{await api.updateEntity(e.id,{entity_type:next});await refresh();}catch(ex){alert(ex.message);}finally{setTypeBusy(null);}}}>{typeBusy===e.id?'...':e.entity_type==='development'?'Make Accounting':'Make Dev Project'}</button>
+          <button style={{...S.btnD,padding:'5px 12px',fontSize:11,flexShrink:0}} onClick={async()=>{if(!confirm('Delete entity '+e.name+' and all its data?'))return;await api.deleteEntity(e.id);const r=await refresh();if(activeEntity===e.id)setActiveEntity(r[0]?.id||null);}}>Delete</button>
         </div></td></tr>)}</tbody></table></div>
     {importing&&<div style={S.modal} onClick={()=>{if(!importBusy)setImporting(null);}}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:560}} onClick={ev=>ev.stopPropagation()}>
       <button style={S.modalClose} onClick={()=>setImporting(null)}>&times;</button>
@@ -2155,6 +2178,66 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
           <input type="file" accept=".csv,.xlsx,.xls" disabled={importBusy} style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:importBusy?'not-allowed':'pointer'}} onChange={onTBFile}/></div>
         <button style={S.btnS} onClick={()=>setImporting(null)} disabled={importBusy}>Close</button>
       </div></div></div>}
+    {glEntity&&<div style={S.modal} onClick={()=>{if(!glBusy)resetGl();}}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:glStep==='map'?920:600}} onClick={ev=>ev.stopPropagation()}>
+      <button style={S.modalClose} onClick={()=>{if(!glBusy)resetGl();}}>&times;</button>
+      <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:6}}>Import General Ledger Detail</div>
+      <div style={{fontSize:13,color:T.textMuted,marginBottom:18}}>Entity: <strong style={{color:T.textBright}}>{entities.find(en=>en.id===glEntity)?.name}</strong></div>
+      {glStep==='upload'&&<>
+        <div style={{...S.card,background:T.bgElevated,padding:14,marginBottom:14}}>
+          <div style={{fontSize:12,fontWeight:600,color:T.textBright,marginBottom:6}}>How it works</div>
+          <div style={{fontSize:11,color:T.textMuted,lineHeight:1.6}}>Upload an inception-to-date GL detail export (.xlsx or .csv) from any accounting system. We'll detect the columns and let you map them &mdash; account number, name, date, description/memo, debit and credit. If account number and name share one cell (e.g. <em>1000 &middot; Cash</em>), we'll split them.<br/><br/>Transactions are grouped into balanced journal entries by date + reference (if a reference column exists), otherwise into a single import entry.</div></div>
+        <div style={{fontSize:11,color:T.orange,marginBottom:14,padding:10,background:T.orangeDim,borderRadius:6,border:'1px solid '+T.orange+'30'}}>
+          <strong>Warning:</strong> Importing GL detail rebuilds the chart of accounts from your file and replaces any prior trial-balance or GL import on this entity (latest import wins), so the two never double-count.</div>
+        {glErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:10}}>{glErr}</div>}
+        <div style={{display:'flex',gap:10,alignItems:'center'}}>
+          <div style={{position:'relative',display:'inline-block',overflow:'hidden'}}>
+            <button style={{...S.btnP,pointerEvents:'none',opacity:glBusy?.6:1}}>{glBusy?'Reading...':'Choose File'}</button>
+            <input type="file" accept=".csv,.xlsx,.xls" disabled={glBusy} style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:glBusy?'not-allowed':'pointer'}} onChange={onGlFile}/></div>
+          <button style={S.btnS} onClick={resetGl} disabled={glBusy}>Cancel</button>
+        </div></>}
+      {glStep==='map'&&glPreview&&<>
+        <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Detected <strong style={{color:T.textBright}}>{glPreview.total_rows}</strong> rows. Map your columns to CloudLedger fields, then import. Required fields are marked <span style={{color:T.red}}>*</span>.</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px 16px',marginBottom:14}}>
+          {GL_FIELDS.map(f=><div key={f.k}>
+            <label style={{...S.label,fontSize:11}}>{f.label}{f.req&&<span style={{color:T.red}}> *</span>}</label>
+            <select style={S.input} value={glMap[f.k]||''} onChange={ev=>setGlMap(m=>({...m,[f.k]:ev.target.value}))}>
+              <option value="">— none —</option>
+              {glPreview.columns.map(c=><option key={c} value={c}>{c}</option>)}
+            </select></div>)}
+        </div>
+        <div style={{...S.card,background:T.bgElevated,padding:12,marginBottom:14}}>
+          <label style={{display:'flex',alignItems:'center',gap:8,fontSize:12,color:T.textBright,cursor:'pointer'}}>
+            <input type="checkbox" checked={glFused} onChange={ev=>setGlFused(ev.target.checked)}/>
+            Account Number column also contains the Account Name in one cell (split it)</label>
+          {glFused&&<div style={{marginTop:10,display:'flex',alignItems:'center',gap:10}}>
+            <span style={{fontSize:11,color:T.textMuted}}>Separator:</span>
+            <select style={{...S.input,width:200,margin:0}} value={glFusedDelim} onChange={ev=>setGlFusedDelim(ev.target.value)}>
+              <option value="auto">Auto-detect</option><option value=" · ">space · space</option><option value=" - ">space - space</option><option value=":">colon</option><option value=" ">first space</option></select>
+            <span style={{fontSize:11,color:T.textMuted}}>e.g. "1000 · Cash" → 1000 + Cash</span></div>}
+        </div>
+        <div style={{fontSize:11,fontWeight:600,color:T.textBright,marginBottom:6}}>Preview (first {glPreview.preview.length} rows)</div>
+        <div style={{overflowX:'auto',marginBottom:14,border:'1px solid '+T.borderLight,borderRadius:6}}>
+          <table style={{...S.table,fontSize:10}}><thead><tr>{glPreview.columns.map(c=><th key={c} style={{...S.th,fontSize:10,whiteSpace:'nowrap',padding:'5px 8px'}}>{c}</th>)}</tr></thead>
+            <tbody>{glPreview.preview.map((row,i)=><tr key={i}>{glPreview.columns.map(c=><td key={c} style={{...S.td,fontSize:10,whiteSpace:'nowrap',padding:'4px 8px'}}>{String(row[c]??'')}</td>)}</tr>)}</tbody></table></div>
+        {glErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:10}}>{glErr}</div>}
+        <div style={{display:'flex',gap:10,alignItems:'center'}}>
+          <button style={{...S.btnP,opacity:glBusy?.6:1}} disabled={glBusy} onClick={runGlImport}>{glBusy?'Importing...':'Import'}</button>
+          <button style={S.btnS} onClick={()=>{setGlStep('upload');setGlErr('');}} disabled={glBusy}>Back</button>
+          <button style={S.btnS} onClick={resetGl} disabled={glBusy}>Cancel</button>
+        </div></>}
+      {glStep==='done'&&glResult&&<>
+        <div style={{...S.success,padding:12,background:T.greenDim,borderRadius:6,border:'1px solid '+T.greenBorder,marginBottom:12}}>
+          Imported <strong>{glResult.lines_imported}</strong> lines into <strong>{glResult.entries_created}</strong> journal entries across <strong>{glResult.accounts_imported}</strong> accounts.<br/>
+          Total debits ${glResult.total_debit.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})} / credits ${glResult.total_credit.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})} &mdash; {glResult.balanced?'balanced ✓':'NOT balanced ✗'}.<br/>
+          Grouping: {glResult.grouping==='by_reference'?'by reference / document #':'single bulk entry'}.{glResult.rows_skipped>0&&<> {glResult.rows_skipped} row(s) skipped (blank/zero/unparseable).</>}
+        </div>
+        {glResult.verification&&<div style={{...(glResult.verification.mismatches.length?S.err:S.success),padding:12,borderRadius:6,marginBottom:12,background:glResult.verification.mismatches.length?T.redDim:T.greenDim,border:'1px solid '+(glResult.verification.mismatches.length?T.red+'30':T.greenBorder)}}>
+          <strong>Running-balance check:</strong> {glResult.verification.matched}/{glResult.verification.checked} accounts match.
+          {glResult.verification.mismatches.length>0&&<><br/><span style={{fontSize:11}}>Mismatches (computed vs reported): {glResult.verification.mismatches.map(mm=>mm.code+' ('+mm.computed.toLocaleString()+' vs '+mm.reported.toLocaleString()+')').join(', ')}</span></>}
+        </div>}
+        <button style={S.btnP} onClick={()=>{const r=refresh&&refresh();resetGl();}}>Done</button>
+      </>}
+    </div></div>}
   </div>);}
 
 // ═══ User Management (with role editing) ═══

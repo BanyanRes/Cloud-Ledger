@@ -355,6 +355,12 @@ if (!jlCols.includes('project_id')) {
   db.exec("CREATE INDEX IF NOT EXISTS idx_jl_project ON journal_lines(project_id)");
   console.log('[db migrate] journal_lines.project_id added');
 }
+// GL detail import: per-line narrative explaining why the transaction was booked.
+// Existing routes default it to '' so this is a safe additive migration.
+if (!jlCols.includes('description')) {
+  db.exec("ALTER TABLE journal_lines ADD COLUMN description TEXT DEFAULT ''");
+  console.log('[db migrate] journal_lines.description added');
+}
 // turnkey_project_map redesigned: no longer stores per-project account codes
 // (single COA on the company entity now). We add cl_entity_id linking to the
 // COMPANY entity (same for all projects). Keep existing rows on upgrade.
@@ -975,8 +981,11 @@ app.post('/api/entities/:eid/import-tb', auth, requireEntityAccess(), requireRol
 
     db.transaction(() => {
       // Remove any prior opening-balance imports so the new import replaces them cleanly
-      // (otherwise re-importing would stack on top of the previous opening balances)
+      // (otherwise re-importing would stack on top of the previous opening balances).
+      // Also remove any prior GL-detail import: importing a TB replaces GL history and
+      // vice-versa (latest import wins), so the two never double-count on one entity.
       db.prepare("DELETE FROM journal_entries WHERE entity_id = ? AND memo = 'Opening balance from imported trial balance'").run(eid);
+      db.prepare("DELETE FROM journal_entries WHERE entity_id = ? AND memo LIKE 'GL detail import%'").run(eid);
 
       // Replace chart of accounts
       db.prepare('DELETE FROM accounts WHERE entity_id = ?').run(eid);
@@ -1006,6 +1015,282 @@ app.post('/api/entities/:eid/import-tb', auth, requireEntityAccess(), requireRol
     res.json({ success: true, accounts_imported: parsed.length, lines: lines.length, total_debit: totalDr, total_credit: totalCr, plug_added: plugAdded });
   } catch (e) {
     res.status(400).json({ error: 'Failed to import trial balance: ' + e.message });
+  }
+});
+
+// ═══ General Ledger Detail import ═══
+// GL detail reports are one row per transaction and every accounting package lays
+// them out differently, so import is a two-step "preview → map → import" flow:
+//   1) POST /import-gl/preview  parses the raw grid, auto-detects columns + whether
+//      account number & name are fused in one cell, and returns a preview.
+//   2) POST /import-gl  takes the user-confirmed column mapping and posts the data.
+// Importing GL detail replaces any prior TB import AND prior GL import on the entity
+// (latest import wins), so the two never double-count.
+
+// Account type from a numeric code prefix — same convention as the TB importer.
+function glTypeFromCode(codeStr) {
+  const n = parseInt(String(codeStr).replace(/[^0-9]/g, ''), 10);
+  if (isNaN(n)) return null;
+  if (n <= 19999) return 'Asset';
+  if (n <= 29999) return 'Liability';
+  if (n <= 39999) return 'Equity';
+  if (n <= 49999) return 'Revenue';
+  if (n <= 69999) return 'Expense';
+  return 'Revenue';
+}
+
+// Split a fused "code + name" cell (e.g. "1000 · Cash", "1000 - Cash", "1000: Cash",
+// "1000 Cash", "Cash (1000)") into { code, name }. Returns null if no leading/trailing
+// numeric code can be isolated. `delimiter` (optional) forces a specific separator.
+function splitCodeName(raw, delimiter) {
+  const s = String(raw == null ? '' : raw).trim();
+  if (!s) return null;
+  if (delimiter && delimiter !== 'auto') {
+    const idx = s.indexOf(delimiter);
+    if (idx >= 0) {
+      const code = s.slice(0, idx).trim();
+      const name = s.slice(idx + delimiter.length).trim();
+      if (code) return { code, name };
+    }
+  }
+  // Trailing parenthesized code: "Cash (1000)"
+  let m = s.match(/^(.*?)[\s]*\((\d[\w-]*)\)\s*$/);
+  if (m && m[2]) return { code: m[2].trim(), name: m[1].trim() };
+  // Leading code with a separator: "1000 · Cash", "1000-Cash", "1000: Cash", "1000 | Cash"
+  m = s.match(/^(\d[\w-]*?)\s*[·:|.\-–—]\s*(.+)$/);
+  if (m) return { code: m[1].trim(), name: m[2].trim() };
+  // Leading code separated by whitespace: "1000 Cash Operating"
+  m = s.match(/^(\d[\w-]*)\s+(.+)$/);
+  if (m) return { code: m[1].trim(), name: m[2].trim() };
+  return null;
+}
+
+// Heuristic: does a column look like a fused code+name? Sample non-empty values and
+// see if most of them split cleanly AND none is a plain number (which would be a code-only col).
+function looksFused(values) {
+  const sample = values.map(v => String(v == null ? '' : v).trim()).filter(Boolean).slice(0, 50);
+  if (sample.length === 0) return false;
+  let split = 0, plainNum = 0;
+  for (const v of sample) {
+    if (/^[\d.,()-]+$/.test(v)) plainNum++;
+    else if (splitCodeName(v)) split++;
+  }
+  return plainNum === 0 && split >= Math.ceil(sample.length * 0.6);
+}
+
+const GL_NUM = s => { const raw = String(s == null ? '' : s).trim(); const neg = /^\(.*\)$/.test(raw); let v = parseFloat(raw.replace(/[,$()\s]/g, '')) || 0; return neg ? -Math.abs(v) : v; };
+
+function glReadGrid(buffer) {
+  const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  // header:1 → array-of-arrays so we can tolerate junk/blank header rows and pick the
+  // row with the most non-empty cells as the header.
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: false, raw: false });
+  if (!aoa.length) return { columns: [], rows: [] };
+  let hdrIdx = 0, best = -1;
+  for (let i = 0; i < Math.min(aoa.length, 15); i++) {
+    const filled = aoa[i].filter(c => String(c).trim()).length;
+    if (filled > best) { best = filled; hdrIdx = i; }
+  }
+  const headerRow = aoa[hdrIdx].map((c, i) => { const t = String(c).trim(); return t || ('Column ' + (i + 1)); });
+  const rows = [];
+  for (let i = hdrIdx + 1; i < aoa.length; i++) {
+    const obj = {}; let any = false;
+    headerRow.forEach((h, j) => { const v = aoa[i][j]; obj[h] = v == null ? '' : v; if (String(v).trim()) any = true; });
+    if (any) rows.push(obj);
+  }
+  return { columns: headerRow, rows };
+}
+
+function glAutoMap(columns, rows) {
+  const norm = c => String(c).toLowerCase().trim();
+  const find = (patterns, used) => {
+    const pool = columns.filter(c => !used.includes(c));
+    for (const pat of patterns) { const hit = pool.find(c => norm(c) === pat); if (hit) return hit; }
+    for (const pat of patterns) { const hit = pool.find(c => norm(c).includes(pat)); if (hit) return hit; }
+    return null;
+  };
+  const used = [];
+  const push = c => { if (c) used.push(c); return c || null; };
+  const acctNum  = push(find(['account number', 'account #', 'account code', 'acct number', 'acct code', 'gl account', 'account', 'acct', 'code'], used));
+  const date     = push(find(['transaction date', 'trans date', 'posting date', 'post date', 'date'], used));
+  const debit    = push(find(['debit', 'dr'], used));
+  const credit   = push(find(['credit', 'cr'], used));
+  const acctName = push(find(['account name', 'account description', 'acct name', 'account title'], used));
+  const desc     = push(find(['description', 'memo/description', 'detail', 'narrative', 'line description'], used));
+  const memo     = push(find(['memo', 'note', 'notes', 'reference detail'], used));
+  const ref      = push(find(['reference', 'ref', 'document number', 'doc number', 'doc #', 'entry number', 'journal number', 'transaction number', 'num', 'voucher'], used));
+  const running  = push(find(['running balance', 'balance', 'ending balance', 'cumulative'], used));
+  // Detect a fused code+name column when no separate name was found.
+  let fused = false, fusedCol = null;
+  if (acctNum) {
+    const vals = rows.map(r => r[acctNum]);
+    if (!acctName && looksFused(vals)) { fused = true; fusedCol = acctNum; }
+  }
+  return { account_number: acctNum, account_name: acctName, transaction_date: date, description: desc, memo, debit, credit, reference: ref, running_balance: running, fused, fused_column: fusedCol };
+}
+
+app.post('/api/entities/:eid/import-gl/preview', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), memUpload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const { columns, rows } = glReadGrid(req.file.buffer);
+    if (!columns.length || !rows.length) return res.status(400).json({ error: 'No data rows found in file' });
+    const suggested = glAutoMap(columns, rows);
+    res.json({
+      columns,
+      total_rows: rows.length,
+      suggested,
+      preview: rows.slice(0, 20),
+    });
+  } catch (e) {
+    res.status(400).json({ error: 'Failed to read file: ' + e.message });
+  }
+});
+
+app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), memUpload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const eid = +req.params.eid;
+  let mapping;
+  try { mapping = JSON.parse(req.body.mapping || '{}'); } catch { return res.status(400).json({ error: 'Invalid mapping' }); }
+  const asOfLabel = req.body.as_of_date || new Date().toISOString().slice(0, 10);
+  try {
+    const { columns, rows } = glReadGrid(req.file.buffer);
+    if (!rows.length) return res.status(400).json({ error: 'No data rows found in file' });
+
+    const m = mapping;
+    if (!m.account_number) return res.status(400).json({ error: 'Account Number column must be mapped' });
+    if (!m.transaction_date) return res.status(400).json({ error: 'Transaction Date column must be mapped' });
+    if (!m.debit && !m.credit) return res.status(400).json({ error: 'Debit and/or Credit columns must be mapped' });
+    if (!m.account_name && !m.fused) return res.status(400).json({ error: 'Account Name column must be mapped (or enable code+name splitting)' });
+    if (!m.description && !m.memo) return res.status(400).json({ error: 'A Description or Memo column must be mapped' });
+
+    const isoDate = (v) => {
+      if (v instanceof Date && !isNaN(v)) return v.toISOString().slice(0, 10);
+      const s = String(v == null ? '' : v).trim();
+      if (!s) return null;
+      if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+      const d = new Date(s);
+      return isNaN(d) ? null : d.toISOString().slice(0, 10);
+    };
+
+    // Parse each row into a normalized line.
+    const parsedLines = [];
+    const acctNames = new Map(); // code -> name
+    let skipped = 0;
+    for (const row of rows) {
+      let code, name;
+      if (m.fused) {
+        const sp = splitCodeName(row[m.fused_column || m.account_number], m.fused_delimiter);
+        if (!sp) { skipped++; continue; }
+        code = sp.code; name = sp.name;
+        if (m.account_name && String(row[m.account_name] || '').trim()) name = String(row[m.account_name]).trim();
+      } else {
+        code = String(row[m.account_number] || '').trim();
+        name = String(row[m.account_name] || '').trim();
+      }
+      if (!code) { skipped++; continue; }
+      const date = isoDate(row[m.transaction_date]);
+      if (!date) { skipped++; continue; }
+      const dr = m.debit ? Math.abs(GL_NUM(row[m.debit])) : 0;
+      const cr = m.credit ? Math.abs(GL_NUM(row[m.credit])) : 0;
+      if (dr < 0.005 && cr < 0.005) { skipped++; continue; }
+      const descParts = [];
+      if (m.description && String(row[m.description] || '').trim()) descParts.push(String(row[m.description]).trim());
+      if (m.memo && String(row[m.memo] || '').trim()) descParts.push(String(row[m.memo]).trim());
+      const description = descParts.join(' — ');
+      const ref = m.reference ? String(row[m.reference] || '').trim() : '';
+      const running = m.running_balance ? GL_NUM(row[m.running_balance]) : null;
+      if (name && !acctNames.has(code)) acctNames.set(code, name);
+      else if (!acctNames.has(code)) acctNames.set(code, '');
+      parsedLines.push({ code, date, dr, cr, description, ref, running });
+    }
+
+    if (!parsedLines.length) return res.status(400).json({ error: 'No valid transaction rows found. Check your column mapping and that amounts are numeric.' });
+
+    // Group into journal entries. If a reference column is mapped, group by date+ref into
+    // balanced entries; otherwise fall back to a single bulk import JE.
+    const groups = new Map();
+    const useRef = !!m.reference && parsedLines.some(l => l.ref);
+    parsedLines.forEach((l, i) => {
+      const key = useRef ? (l.date + '||' + (l.ref || ('_' + i))) : '__bulk__';
+      if (!groups.has(key)) groups.set(key, { date: l.date, ref: l.ref, lines: [] });
+      groups.get(key).lines.push(l);
+    });
+
+    // Running-balance verification: compare each account's last imported running balance
+    // (in file order) to the net debit-credit we computed for that account.
+    let verification = null;
+    if (m.running_balance) {
+      const lastRun = new Map();   // code -> last running value seen
+      const netByCode = new Map(); // code -> sum(dr-cr)
+      for (const l of parsedLines) {
+        if (l.running !== null && !isNaN(l.running)) lastRun.set(l.code, l.running);
+        netByCode.set(l.code, (netByCode.get(l.code) || 0) + (l.dr - l.cr));
+      }
+      const mismatches = [];
+      for (const [code, run] of lastRun) {
+        const net = +(netByCode.get(code) || 0).toFixed(2);
+        // running balance is on the account's natural side; compare on magnitude with sign
+        if (Math.abs(net - +run.toFixed(2)) > 0.01 && Math.abs((-net) - +run.toFixed(2)) > 0.01) {
+          mismatches.push({ code, computed: net, reported: +run.toFixed(2) });
+        }
+      }
+      verification = { checked: lastRun.size, matched: lastRun.size - mismatches.length, mismatches: mismatches.slice(0, 25) };
+    }
+
+    const result = db.transaction(() => {
+      // Latest import wins: clear prior TB import and prior GL import on this entity.
+      db.prepare("DELETE FROM journal_entries WHERE entity_id = ? AND memo = 'Opening balance from imported trial balance'").run(eid);
+      db.prepare("DELETE FROM journal_entries WHERE entity_id = ? AND memo LIKE 'GL detail import%'").run(eid);
+
+      // Rebuild COA from the accounts encountered in the GL.
+      db.prepare('DELETE FROM accounts WHERE entity_id = ?').run(eid);
+      const insAcct = db.prepare('INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct) VALUES (?, ?, ?, ?, ?, ?)');
+      for (const [code, nm] of acctNames) {
+        const type = glTypeFromCode(code) || 'Asset';
+        const name = nm || code;
+        const isBank = type === 'Asset' && /cash|bank|checking|savings/i.test(name);
+        insAcct.run(eid, code, name, type, '', isBank ? 1 : 0);
+      }
+
+      const insJE = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)');
+      const insLine = db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description) VALUES (?,?,?,?,?)');
+      let entryNum = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(eid).m || 0);
+      let jeCount = 0, lineCount = 0, totalDr = 0, totalCr = 0;
+
+      // Stable order: by date, then reference.
+      const ordered = [...groups.values()].sort((a, b) => (a.date + (a.ref || '')).localeCompare(b.date + (b.ref || '')));
+      for (const g of ordered) {
+        entryNum++;
+        const memo = useRef
+          ? ('GL detail import' + (g.ref ? ' — ' + g.ref : ''))
+          : ('GL detail import (' + asOfLabel + ')');
+        // JE date: for grouped entries, the group date; for bulk, the latest line date.
+        const jeDate = useRef ? g.date : g.lines.reduce((mx, l) => l.date > mx ? l.date : mx, g.lines[0].date);
+        const r = insJE.run(eid, entryNum, jeDate, memo, req.user.name || req.user.email);
+        for (const l of g.lines) {
+          insLine.run(r.lastInsertRowid, l.code, l.dr, l.cr, l.description);
+          lineCount++; totalDr += l.dr; totalCr += l.cr;
+        }
+        jeCount++;
+      }
+      return { jeCount, lineCount, totalDr, totalCr, accounts: acctNames.size };
+    })();
+
+    res.json({
+      success: true,
+      grouping: useRef ? 'by_reference' : 'bulk',
+      entries_created: result.jeCount,
+      lines_imported: result.lineCount,
+      accounts_imported: result.accounts,
+      rows_skipped: skipped,
+      total_debit: +result.totalDr.toFixed(2),
+      total_credit: +result.totalCr.toFixed(2),
+      balanced: Math.abs(result.totalDr - result.totalCr) < 0.01,
+      verification,
+    });
+  } catch (e) {
+    res.status(400).json({ error: 'Failed to import GL detail: ' + e.message });
   }
 });
 
@@ -1070,7 +1355,7 @@ app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole(
   const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id=?').get(req.params.eid).m||0)+1;
   const result = db.transaction(() => {
     const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)').run(req.params.eid, num, date, memo, req.user.name);
-    for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, project_id) VALUES (?,?,?,?,?)').run(r.lastInsertRowid, l.account_code, l.debit||0, l.credit||0, l.project_id||null);
+    for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id) VALUES (?,?,?,?,?,?)').run(r.lastInsertRowid, l.account_code, l.debit||0, l.credit||0, l.description||'', l.project_id||null);
     return r.lastInsertRowid;
   })();
   res.json({ id: result, entry_num: num });
@@ -1095,7 +1380,7 @@ app.put('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requireRo
     db.prepare("UPDATE journal_entries SET date=?, memo=?, updated_by=?, updated_at=datetime('now') WHERE id=?")
       .run(date, memo, req.user.name || req.user.email, req.params.id);
     db.prepare('DELETE FROM journal_lines WHERE entry_id=?').run(req.params.id);
-    for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, project_id) VALUES (?,?,?,?,?)').run(req.params.id, l.account_code, l.debit || 0, l.credit || 0, l.project_id || null);
+    for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id) VALUES (?,?,?,?,?,?)').run(req.params.id, l.account_code, l.debit || 0, l.credit || 0, l.description || '', l.project_id || null);
   })();
   res.json({ success: true, entry_num: entry.entry_num });
 });
