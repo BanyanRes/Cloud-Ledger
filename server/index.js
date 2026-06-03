@@ -142,9 +142,11 @@ db.exec(`
     UNIQUE(entity_id, folder_path)
   );
   CREATE INDEX IF NOT EXISTS idx_accounts_entity ON accounts(entity_id);
+  CREATE INDEX IF NOT EXISTS idx_accounts_entity_code ON accounts(entity_id, code);
   CREATE INDEX IF NOT EXISTS idx_je_entity ON journal_entries(entity_id);
   CREATE INDEX IF NOT EXISTS idx_je_date ON journal_entries(entity_id, date);
   CREATE INDEX IF NOT EXISTS idx_jl_entry ON journal_lines(entry_id);
+  CREATE INDEX IF NOT EXISTS idx_jl_account_code ON journal_lines(account_code);
   CREATE INDEX IF NOT EXISTS idx_bt_entity ON bank_transactions(entity_id, bank_account_code);
   CREATE INDEX IF NOT EXISTS idx_bts_txn ON bank_transaction_splits(txn_id);
   CREATE INDEX IF NOT EXISTS idx_ja_entry ON journal_attachments(entry_id);
