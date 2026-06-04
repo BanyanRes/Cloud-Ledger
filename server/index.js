@@ -557,8 +557,19 @@ async function billcomListClassification({ sessionId, devKey, baseUrl, resource 
   return out;
 }
 
+// Hard wall-clock timeout for a single Bill.com fetch. AbortController proved
+// unreliable at cutting fetches in this runtime, so race the fetch against a
+// timer and surface a clear error instead of letting Railway 502 at its gateway.
+function billcomFetch(url, opts, ms) {
+  return Promise.race([
+    fetch(url, opts),
+    new Promise((_, rej) => setTimeout(() => rej(new Error('Bill.com request timed out after ' + (ms || 15000) + 'ms')), ms || 15000)),
+  ]);
+}
+
 // Generic paginated GET for v3 list endpoints. Used for bills + payments.
-async function billcomListV3({ sessionId, devKey, baseUrl, resourcePath, extraParams }) {
+// maxItems (optional) caps total rows fetched so a sync can stay bounded.
+async function billcomListV3({ sessionId, devKey, baseUrl, resourcePath, extraParams, maxItems }) {
   const base = (baseUrl || BILLCOM_BASE_URLS.sandbox);
   const out = [];
   let nextPage = null;
@@ -568,10 +579,10 @@ async function billcomListV3({ sessionId, devKey, baseUrl, resourcePath, extraPa
     const params = new URLSearchParams({ max: String(max), ...(extraParams || {}) });
     if (nextPage) params.set('nextPage', nextPage);
     const url = base + resourcePath + '?' + params.toString();
-    const resp = await fetch(url, {
+    const resp = await billcomFetch(url, {
       method: 'GET',
       headers: { 'sessionId': sessionId, 'devKey': devKey, 'Accept': 'application/json' }
-    });
+    }, 15000);
     const text = await resp.text();
     let json; try { json = JSON.parse(text); } catch { throw new Error('Non-JSON response (HTTP ' + resp.status + '): ' + text.slice(0, 200)); }
     if (!resp.ok) {
@@ -583,6 +594,7 @@ async function billcomListV3({ sessionId, devKey, baseUrl, resourcePath, extraPa
     nextPage = json.nextPage || null;
     pageCount++;
     if (!nextPage) break;
+    if (maxItems && out.length >= maxItems) break;
     if (out.length > 10000) break;
     if (pageCount > 100) break;
   }
@@ -599,10 +611,10 @@ async function billcomListPayments(args) {
 
 async function billcomGetById({ sessionId, devKey, baseUrl, resourcePath, id }) {
   const url = (baseUrl || BILLCOM_BASE_URLS.sandbox) + resourcePath + '/' + encodeURIComponent(id);
-  const resp = await fetch(url, {
+  const resp = await billcomFetch(url, {
     method: 'GET',
     headers: { 'sessionId': sessionId, 'devKey': devKey, 'Accept': 'application/json' }
-  });
+  }, 12000);
   const text = await resp.text();
   let json; try { json = JSON.parse(text); } catch { throw new Error('Non-JSON detail (HTTP ' + resp.status + '): ' + text.slice(0, 200)); }
   if (!resp.ok) {
@@ -2978,14 +2990,21 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   }
   const listArgs = { sessionId: session.sessionId, devKey: billcomDecrypt(cfg.dev_key_enc), baseUrl: cfg.api_base_url };
 
+  // Bounded sync: process at most maxBills per invocation so the request always
+  // returns well under Railway's gateway ceiling. Dedup via billcom_sync_log makes
+  // repeated runs safe + incremental — re-run until processed === 0. Caller may
+  // override with body.max_bills (clamped 1..100).
+  const maxBills = Math.max(1, Math.min(100, parseInt((req.body && req.body.max_bills) || 25)));
+  const deadline = Date.now() + 230000; // stop starting new work past ~3.8m, safely under the 300s gateway cap
+
   let bills, payments;
   try {
-    bills = await billcomListBills(listArgs);
+    bills = await billcomListBills({ ...listArgs, maxItems: 500 });
   } catch (e) {
     return res.status(502).json({ error: 'Failed to fetch bills: ' + e.message });
   }
   try {
-    payments = await billcomListPayments(listArgs);
+    payments = await billcomListPayments({ ...listArgs, maxItems: 500 });
   } catch (e) {
     return res.status(502).json({ error: 'Failed to fetch payments: ' + e.message });
   }
@@ -3023,6 +3042,8 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     "SELECT 1 FROM billcom_sync_log WHERE entity_id = ? AND sync_type = ? AND billcom_id = ? AND status = 'success' LIMIT 1"
   );
 
+  let billsProcessed = 0;
+  result.bills.budget_reached = false;
   for (const bill of bills) {
     const billId = String(pick(bill, 'id') || '');
     if (!billId) continue;
@@ -3036,6 +3057,13 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       result.bills.details.push({ id: billId, status: 'skip', reason: 'already synced' });
       continue;
     }
+    // Bounded work: stop starting new bills once the per-run budget or time
+    // deadline is hit. Remaining bills are picked up on the next sync run.
+    if (billsProcessed >= maxBills || Date.now() > deadline) {
+      result.bills.budget_reached = true;
+      break;
+    }
+    billsProcessed++;
 
     // List endpoint omits some fields (notably chartOfAccountId on line items); hydrate from detail.
     let detail = bill;
@@ -3127,6 +3155,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     }
   }
 
+  result.payments.budget_reached = false;
   for (const pay of payments) {
     const payId = String(pick(pay, 'id') || '');
     if (!payId) continue;
@@ -3140,6 +3169,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       result.payments.details.push({ id: payId, status: 'skip', reason: 'already synced' });
       continue;
     }
+    if (Date.now() > deadline) { result.payments.budget_reached = true; break; }
 
     const processDate = pick(pay, 'processDate', 'process_date', 'paymentDate', 'payment_date');
     const amount = Number(pick(pay, 'amount', 'paymentAmount', 'totalAmount') || 0);
