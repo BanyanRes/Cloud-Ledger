@@ -3071,6 +3071,12 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   const maxBills = Math.max(1, Math.min(100, parseInt((req.body && req.body.max_bills) || 25)));
   const deadline = Date.now() + 230000; // stop starting new work past ~3.8m, safely under the 300s gateway cap
 
+  // Opening-balance cutoff: all balances before this date were booked via the
+  // opening journal entry (from the GL detail report), so importing bills/payments
+  // dated before it would double-count. Skip anything earlier. Configurable via
+  // config.sync_cutoff_date or body.cutoff_date; defaults to 2026-01-01.
+  const cutoffDate = String((req.body && req.body.cutoff_date) || cfg.sync_cutoff_date || '2026-01-01');
+
   let bills, payments;
   try {
     bills = await billcomListBills({ ...listArgs, maxItems: 500 });
@@ -3157,6 +3163,13 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       result.bills.errors++;
       logSync.run(entityId, 'bill', billId, null, 'error', 'missing invoiceDate or lineItems', now);
       result.bills.details.push({ id: billId, status: 'error', reason: 'missing invoiceDate or lineItems' });
+      continue;
+    }
+
+    // Skip bills dated before the opening-balance cutoff (already in the opening JE).
+    if (String(invoiceDate) < cutoffDate) {
+      result.bills.skipped++;
+      result.bills.details.push({ id: billId, status: 'skip', reason: 'before cutoff ' + cutoffDate + ' (date ' + invoiceDate + ')' });
       continue;
     }
 
@@ -3253,6 +3266,13 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       result.payments.errors++;
       logSync.run(entityId, 'payment', payId, null, 'error', 'missing processDate or zero amount', now);
       result.payments.details.push({ id: payId, status: 'error', reason: 'missing processDate or zero amount' });
+      continue;
+    }
+
+    // Skip payments dated before the opening-balance cutoff (already in the opening JE).
+    if (String(processDate) < cutoffDate) {
+      result.payments.skipped++;
+      result.payments.details.push({ id: payId, status: 'skip', reason: 'before cutoff ' + cutoffDate + ' (date ' + processDate + ')' });
       continue;
     }
 
