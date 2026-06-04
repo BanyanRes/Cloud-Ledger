@@ -1291,7 +1291,7 @@ function WorkpapersModal({entity, user, onClose}){
     {err && <div style={{...S.err, marginBottom: 10}}>{err}</div>}
     {msg && <div style={{...S.success, marginBottom: 10}}>{msg}</div>}
     {/* File & folder list */}
-    <div style={{flex: 1, minHeight: 320, overflowY: 'auto', border: '1px solid ' + T.border, borderRadius: T.radiusSm}}>
+    <div style={{flex: '0 1 auto', minHeight: 160, overflowY: 'auto', border: '1px solid ' + T.border, borderRadius: T.radiusSm}}>
       {loading ? <div style={{padding: 60, textAlign: 'center', color: T.textMuted}}>Loading...</div>
        : (childFolders.length === 0 && currentFiles.length === 0)
          ? <div style={{padding: 60, textAlign: 'center', color: T.textDim}}>This folder is empty{canEdit ? '. Upload files or create a subfolder to get started.' : '.'}</div>
