@@ -178,6 +178,32 @@ db.exec(`
     FOREIGN KEY (entity_id) REFERENCES entities(id)
   );
   CREATE INDEX IF NOT EXISTS idx_bam_entity ON billcom_account_map(entity_id);
+  -- Bill.com dimension maps: accountingClassId -> CL class (investor),
+  -- jobId -> CL location (deal). Only mapped ids carry a dimension onto synced
+  -- JE lines; an unmapped id (e.g. a workflow-status class) syncs as NULL, so
+  -- the map itself is the filter — no hardcoded skip list needed.
+  CREATE TABLE IF NOT EXISTS billcom_class_map (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL,
+    billcom_class_id TEXT NOT NULL,
+    billcom_class_name TEXT,
+    cl_class_id INTEGER NOT NULL,
+    created_at TEXT,
+    UNIQUE(entity_id, billcom_class_id),
+    FOREIGN KEY (entity_id) REFERENCES entities(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_bccm_entity ON billcom_class_map(entity_id);
+  CREATE TABLE IF NOT EXISTS billcom_location_map (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL,
+    billcom_job_id TEXT NOT NULL,
+    billcom_job_name TEXT,
+    cl_location_id INTEGER NOT NULL,
+    created_at TEXT,
+    UNIQUE(entity_id, billcom_job_id),
+    FOREIGN KEY (entity_id) REFERENCES entities(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_bclm_entity ON billcom_location_map(entity_id);
   CREATE TABLE IF NOT EXISTS billcom_sync_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id INTEGER NOT NULL,
@@ -2810,6 +2836,10 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
 
   const mapRows = db.prepare('SELECT billcom_account_id, billcom_account_name, cl_account_code FROM billcom_account_map WHERE entity_id = ?').all(entityId);
   const mapById = new Map(mapRows.map(r => [String(r.billcom_account_id), r]));
+  // Dimension maps: only mapped Bill.com class/job ids carry a CL class/location
+  // onto the synced line; unmapped ids (incl. workflow-status classes) -> null.
+  const classMap = new Map(db.prepare('SELECT billcom_class_id, cl_class_id FROM billcom_class_map WHERE entity_id = ?').all(entityId).map(r => [String(r.billcom_class_id), r.cl_class_id]));
+  const locMap = new Map(db.prepare('SELECT billcom_job_id, cl_location_id FROM billcom_location_map WHERE entity_id = ?').all(entityId).map(r => [String(r.billcom_job_id), r.cl_location_id]));
 
   let session;
   try {
@@ -2918,7 +2948,11 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
         billMissing.push({ id: acctId, name });
         continue;
       }
-      debitLines.push({ account_code: mapping.cl_account_code, debit: amt, credit: 0 });
+      debitLines.push({
+        account_code: mapping.cl_account_code, debit: amt, credit: 0,
+        class_id: classMap.get(String(pick(cls, 'accountingClassId', 'classId') || '')) || null,
+        location_id: locMap.get(String(pick(cls, 'jobId', 'locationId') || '')) || null,
+      });
       totalDr += amt;
     }
 
@@ -2942,7 +2976,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       continue;
     }
 
-    const lines = [...debitLines, { account_code: apAccount, debit: 0, credit: totalDr }];
+    const lines = [...debitLines, { account_code: apAccount, debit: 0, credit: totalDr, class_id: null, location_id: null }];
     const memo = 'Bill.com bill #' + billNumber;
 
     try {
@@ -2951,8 +2985,8 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
         const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)')
           .run(entityId, num, invoiceDate, memo, actor);
         for (const l of lines) {
-          db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit) VALUES (?,?,?,?)')
-            .run(r.lastInsertRowid, l.account_code, l.debit, l.credit);
+          db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, class_id, location_id) VALUES (?,?,?,?,?,?)')
+            .run(r.lastInsertRowid, l.account_code, l.debit, l.credit, l.class_id || null, l.location_id || null);
         }
         logSync.run(entityId, 'bill', billId, r.lastInsertRowid, 'success', 'created JE #' + num, now);
         return r.lastInsertRowid;
