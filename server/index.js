@@ -2781,14 +2781,14 @@ app.post('/api/billcom/dimension-maps/:entity_id/auto', auth, requireEntityAcces
     for (const c of bcClasses) {
       const nm = nameOf(c); const clId = clClassByName.get(norm(nm));
       if (clId) { insC.run(eid, idOf(c), nm, clId, now); result.classes.matched.push({ billcom: nm, cl_class_id: clId }); }
-      else result.classes.unmatched.push(nm);
+      else result.classes.unmatched.push({ billcom_class_id: idOf(c), name: nm });
     }
     db.prepare('DELETE FROM billcom_location_map WHERE entity_id = ?').run(eid);
     const insL = db.prepare('INSERT INTO billcom_location_map (entity_id, billcom_job_id, billcom_job_name, cl_location_id, created_at) VALUES (?,?,?,?,?)');
     for (const j of bcJobs) {
       const nm = nameOf(j); const clId = clLocByName.get(norm(nm));
       if (clId) { insL.run(eid, idOf(j), nm, clId, now); result.locations.matched.push({ billcom: nm, cl_location_id: clId }); }
-      else result.locations.unmatched.push(nm);
+      else result.locations.unmatched.push({ billcom_job_id: idOf(j), name: nm });
     }
   });
   try { tx(); } catch (e) { return res.status(500).json({ error: e.message }); }
