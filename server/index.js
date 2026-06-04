@@ -3021,6 +3021,45 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   result.missing_mappings = Array.from(missingMap.values());
   res.json(result);
 });
+
+// TEMP DIAGNOSTIC (remove after CLRF dimension mapping is built): fetch ONE bill
+// by its Bill.com id and dump the full line-item + classifications structure, so
+// the location/class mapping is built against a properly-coded bill. Read-only.
+app.get('/api/billcom/_inspect1/:entity_id/:bill_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const billId = String(req.params.bill_id || '');
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
+  let session;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    const devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
+  const devKey = billcomDecrypt(cfg.dev_key_enc);
+  const base = cfg.api_base_url || BILLCOM_BASE_URLS.sandbox;
+  const hdrs = { 'sessionId': session.sessionId, 'devKey': devKey, 'Accept': 'application/json' };
+  const withTimeout = (p, ms, label) => Promise.race([
+    p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout ' + ms + 'ms (' + label + ')')), ms)),
+  ]);
+  try {
+    const d = await withTimeout(
+      fetch(base + '/bills/' + encodeURIComponent(billId), { method: 'GET', headers: hdrs }).then(r => r.text().then(t => ({ status: r.status, t }))),
+      9000, 'detail'
+    );
+    let detail; try { detail = JSON.parse(d.t); } catch { detail = null; }
+    const li = detail && Array.isArray(detail.billLineItems) ? detail.billLineItems
+      : (detail && Array.isArray(detail.lineItems) ? detail.lineItems : []);
+    res.json({
+      status: d.status,
+      bill_top_keys: detail ? Object.keys(detail) : null,
+      bill_level_classifications: detail ? detail.classifications : null,
+      line_item_count: li.length,
+      line_items: li.map(item => ({ amount: item.amount, classifications: item.classifications })),
+    });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Requisition / Invoice-Packet API (development-project entities only)
 // Every route is gated: auth → entity access → development-entity check.
