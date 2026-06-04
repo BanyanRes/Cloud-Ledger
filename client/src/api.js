@@ -95,7 +95,18 @@ export const api = {
     if (opts.from) p.push('from=' + opts.from);
     if (opts.to) p.push('to=' + opts.to);
     if (opts.close_pl_before) p.push('close_pl_before=' + opts.close_pl_before);
+    if (opts.location_id) p.push('location_id=' + opts.location_id);
+    if (opts.class_id) p.push('class_id=' + opts.class_id);
     return request('/entities/' + eid + '/balances' + (p.length ? '?' + p.join('&') : ''));
+  },
+  getGLDetail: (eid, opts = {}) => {
+    const p = [];
+    if (opts.from) p.push('from=' + opts.from);
+    if (opts.to) p.push('to=' + opts.to);
+    if (opts.location_id) p.push('location_id=' + opts.location_id);
+    if (opts.class_id) p.push('class_id=' + opts.class_id);
+    if (opts.account_code) p.push('account_code=' + encodeURIComponent(opts.account_code));
+    return request('/entities/' + eid + '/gl-detail' + (p.length ? '?' + p.join('&') : ''));
   },
   getClasses: (eid) => request('/entities/' + eid + '/classes'),
   getLocations: (eid) => request('/entities/' + eid + '/locations'),

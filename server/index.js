@@ -1617,6 +1617,54 @@ app.get('/api/entities/:eid/entries', auth, requireEntityAccess(), (req, res) =>
   res.json(entries.map(e => ({ ...e, lines: lineStmt.all(e.id), attachments: attachStmt.all(e.id) })));
 });
 
+// GL detail (flat lines) for a printable/exportable general ledger, optionally
+// filtered by location or class. Returns one row per journal line with its entry
+// date/num/memo, account code+name+type, dr/cr, description, and dimension names,
+// plus a running balance per account (ordered by date, entry_num). When a
+// location_id/class_id is given, only lines carrying that tag are returned — by
+// design an untagged line is not part of any location's ledger.
+app.get('/api/entities/:eid/gl-detail', auth, requireEntityAccess(), (req, res) => {
+  const { from, to, location_id, class_id, account_code } = req.query;
+  const params = [req.params.eid];
+  let where = '';
+  if (from) { where += ' AND je.date >= ?'; params.push(from); }
+  if (to) { where += ' AND je.date <= ?'; params.push(to); }
+  if (location_id) { where += ' AND jl.location_id = ?'; params.push(location_id); }
+  if (class_id) { where += ' AND jl.class_id = ?'; params.push(class_id); }
+  if (account_code) { where += ' AND jl.account_code = ?'; params.push(account_code); }
+  const rows = db.prepare(`
+    SELECT jl.id AS line_id, je.id AS entry_id, je.entry_num, je.date, je.memo,
+           jl.account_code, a.name AS account_name, a.type AS account_type,
+           jl.debit, jl.credit, jl.description,
+           dc.name AS class_name, dl.name AS location_name
+    FROM journal_lines jl
+    JOIN journal_entries je ON je.id = jl.entry_id
+    LEFT JOIN accounts a ON a.entity_id = je.entity_id AND a.code = jl.account_code
+    LEFT JOIN dim_classes dc ON dc.id = jl.class_id
+    LEFT JOIN dim_locations dl ON dl.id = jl.location_id
+    WHERE je.entity_id = ?${where}
+    ORDER BY jl.account_code, je.date, je.entry_num, jl.id
+  `).all(...params);
+  // Running balance per account (natural side: Asset/Expense are debit-positive).
+  const run = new Map();
+  const out = rows.map(r => {
+    const isDr = r.account_type === 'Asset' || r.account_type === 'Expense';
+    const delta = isDr ? (r.debit - r.credit) : (r.credit - r.debit);
+    const bal = (run.get(r.account_code) || 0) + delta;
+    run.set(r.account_code, bal);
+    return {
+      line_id: r.line_id, entry_id: r.entry_id, entry_num: r.entry_num, date: r.date, memo: r.memo,
+      account_code: r.account_code, account_name: r.account_name, account_type: r.account_type,
+      debit: +(r.debit || 0).toFixed(2), credit: +(r.credit || 0).toFixed(2),
+      description: r.description || '', class_name: r.class_name || '', location_name: r.location_name || '',
+      running_balance: +bal.toFixed(2),
+    };
+  });
+  const totalDr = +out.reduce((s, r) => s + r.debit, 0).toFixed(2);
+  const totalCr = +out.reduce((s, r) => s + r.credit, 0).toFixed(2);
+  res.json({ lines: out, count: out.length, total_debit: totalDr, total_credit: totalCr });
+});
+
 app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { date, memo, lines } = req.body; if (!date||!memo||!lines||lines.length<2) return res.status(400).json({ error: 'Invalid' });
   const tDr = lines.reduce((s,l) => s+(l.debit||0), 0); const tCr = lines.reduce((s,l) => s+(l.credit||0), 0);
@@ -1979,12 +2027,18 @@ app.delete('/api/entities/:eid/bank-transactions/batch/:batchId', auth, requireE
 
 // ═══ Balances (with soft close) ═══
 app.get('/api/entities/:eid/balances', auth, requireEntityAccess(), (req, res) => {
-  const { as_of, from, to, close_pl_before } = req.query;
+  const { as_of, from, to, close_pl_before, location_id, class_id } = req.query;
   let dateFilter = ''; const params = [req.params.eid];
   if (as_of) { dateFilter = ' AND je.date <= ?'; params.push(as_of); }
   else if (from && to) { dateFilter = ' AND je.date >= ? AND je.date <= ?'; params.push(from, to); }
   else if (from) { dateFilter = ' AND je.date >= ?'; params.push(from); }
   else if (to) { dateFilter = ' AND je.date <= ?'; params.push(to); }
+  // Dimension filter: restrict to lines tagged with a specific location/class. Used
+  // for a per-location trial balance. Only location-tagged lines are picked up, by
+  // design — an untagged line belongs to no location's TB.
+  let dimFilter = '';
+  if (location_id) { dimFilter += ' AND jl.location_id = ?'; params.push(location_id); }
+  if (class_id) { dimFilter += ' AND jl.class_id = ?'; params.push(class_id); }
 
   if (close_pl_before && as_of) {
     const priorPL = db.prepare(`SELECT a.type, SUM(jl.debit) as td, SUM(jl.credit) as tc FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=? AND je.date<? AND a.type IN ('Revenue','Expense') GROUP BY a.type`).all(req.params.eid, close_pl_before);
@@ -2010,7 +2064,7 @@ app.get('/api/entities/:eid/balances', auth, requireEntityAccess(), (req, res) =
     return res.json(results);
   }
 
-  const rows = db.prepare(`SELECT jl.account_code, a.type, a.name, a.subtype, a.bank_acct, SUM(jl.debit) as total_debit, SUM(jl.credit) as total_credit FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=?${dateFilter} GROUP BY jl.account_code`).all(...params);
+  const rows = db.prepare(`SELECT jl.account_code, a.type, a.name, a.subtype, a.bank_acct, SUM(jl.debit) as total_debit, SUM(jl.credit) as total_credit FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=?${dateFilter}${dimFilter} GROUP BY jl.account_code`).all(...params);
   res.json(rows.map(r => { const isDr=r.type==='Asset'||r.type==='Expense'; return { code:r.account_code, name:r.name, type:r.type, subtype:r.subtype, bank_acct:r.bank_acct, balance:isDr?(r.total_debit-r.total_credit):(r.total_credit-r.total_debit), total_debit:r.total_debit, total_credit:r.total_credit }; }));
 });
 
