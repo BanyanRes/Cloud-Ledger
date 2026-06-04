@@ -1236,6 +1236,10 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
           if (sp) { code = sp.code; name = sp.name; }
         }
       }
+      // Last resort: an account with a name but no resolvable numeric code (e.g.
+      // "Retained Earnings"). Use the name itself as the code so the line is kept
+      // and its JE still balances; dropping it would unbalance the entry.
+      if (!code && name) code = name;
       if (!code) { skipped++; continue; }
       const date = isoDate(row[m.transaction_date]);
       if (!date) { skipped++; continue; }
@@ -1264,8 +1268,12 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
     // JE may never span multiple dates — every entry shares one posting date.
     const groups = new Map();
     const useRef = !!m.reference && parsedLines.some(l => l.ref);
-    parsedLines.forEach((l, i) => {
-      const key = useRef ? (l.date + '||' + (l.ref || ('_' + i))) : l.date;
+    // With a reference column, lines that HAVE a ref group by date+ref; lines that
+    // LACK a ref (e.g. QBO bills/payments/expenses with a blank Num) group by date
+    // alone, so same-day reference-less activity forms one balanced entry instead of
+    // many one-line groups. Without a reference column, everything groups by date.
+    parsedLines.forEach((l) => {
+      const key = useRef ? (l.ref ? (l.date + '||' + l.ref) : (l.date + '||__noref__')) : l.date;
       if (!groups.has(key)) groups.set(key, { date: l.date, ref: l.ref, lines: [] });
       groups.get(key).lines.push(l);
     });
@@ -1333,8 +1341,19 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
       // Rebuild COA from the accounts encountered in the GL.
       db.prepare('DELETE FROM accounts WHERE entity_id = ?').run(eid);
       const insAcct = db.prepare('INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct) VALUES (?, ?, ?, ?, ?, ?)');
+      // For accounts with no numeric code (code == name fallback), infer the type
+      // from common equity/P&L keywords rather than defaulting everything to Asset.
+      const typeFromName = (nm) => {
+        const s = String(nm || '').toLowerCase();
+        if (/retained earnings|equity|capital|contribution|distribution|member|partner|accumulated/.test(s)) return 'Equity';
+        if (/payable|liabilit|accrued|due to|note payable|loan/.test(s)) return 'Liability';
+        if (/receivable|due from|cash|bank|prepaid|investment|asset/.test(s)) return 'Asset';
+        if (/income|revenue|gain/.test(s)) return 'Revenue';
+        if (/expense|cost|fee|loss/.test(s)) return 'Expense';
+        return 'Equity';
+      };
       for (const [code, nm] of acctNames) {
-        const type = glTypeFromCode(code) || 'Asset';
+        const type = glTypeFromCode(code) || typeFromName(nm || code);
         const name = nm || code;
         const isBank = type === 'Asset' && /cash|bank|checking|savings/i.test(name);
         insAcct.run(eid, code, name, type, '', isBank ? 1 : 0);
