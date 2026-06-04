@@ -1194,10 +1194,13 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
     if (!rows.length) return res.status(400).json({ error: 'No data rows found in file' });
 
     const m = mapping;
-    if (!m.account_number) return res.status(400).json({ error: 'Account Number column must be mapped' });
+    if (!m.account_number && !m.fused) return res.status(400).json({ error: 'Account Number column must be mapped' });
     if (!m.transaction_date) return res.status(400).json({ error: 'Transaction Date column must be mapped' });
     if (!m.debit && !m.credit) return res.status(400).json({ error: 'Debit and/or Credit columns must be mapped' });
-    if (!m.account_name && !m.fused) return res.status(400).json({ error: 'Account Name column must be mapped (or enable code+name splitting)' });
+    // Account name is optional when an account-number column is present: names are
+    // backfilled from the number's row (or parsed from a fused "code name" cell),
+    // and any account still missing a name falls back to using its code as the name.
+    if (!m.account_number && !m.account_name && !m.fused) return res.status(400).json({ error: 'Map an Account Name column, or enable code+name splitting' });
     if (!m.description && !m.memo) return res.status(400).json({ error: 'A Description or Memo column must be mapped' });
 
     const isoDate = (v) => {
