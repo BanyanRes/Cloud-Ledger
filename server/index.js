@@ -1421,8 +1421,23 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
       return { jeCount, lineCount, totalDr, totalCr, accounts: acctNames.size, classes: classNames.size, locations: locationNames.size };
     })();
 
+    // Post-commit read-back: re-query the persisted counts on a fresh statement,
+    // OUTSIDE the transaction, so the response proves the data actually landed on
+    // this entity rather than merely reporting what the transaction intended to
+    // write. If these disagree with `result`, the import did not persist and the
+    // caller is told so explicitly instead of seeing a false success.
+    const persisted = {
+      entries: db.prepare('SELECT COUNT(*) AS c FROM journal_entries WHERE entity_id = ?').get(eid).c,
+      accounts: db.prepare('SELECT COUNT(*) AS c FROM accounts WHERE entity_id = ?').get(eid).c,
+      lines: db.prepare(
+        'SELECT COUNT(*) AS c FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id WHERE je.entity_id = ?'
+      ).get(eid).c,
+    };
+    const persistedOk = persisted.entries >= result.jeCount && persisted.lines >= result.lineCount;
+
     res.json({
       success: true,
+      entity_id: eid,
       grouping: useRef ? 'by_reference' : 'by_date',
       entries_created: result.jeCount,
       lines_imported: result.lineCount,
@@ -1433,6 +1448,8 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
       total_debit: +result.totalDr.toFixed(2),
       total_credit: +result.totalCr.toFixed(2),
       balanced: Math.abs(result.totalDr - result.totalCr) < 0.01,
+      persisted,
+      persisted_ok: persistedOk,
       verification,
     });
   } catch (e) {

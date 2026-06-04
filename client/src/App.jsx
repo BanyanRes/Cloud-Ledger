@@ -2248,6 +2248,9 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
           {(glResult.classes_imported>0||glResult.locations_imported>0)&&<>Dimensions: {glResult.classes_imported>0&&<><strong>{glResult.classes_imported}</strong> classes</>}{glResult.classes_imported>0&&glResult.locations_imported>0&&', '}{glResult.locations_imported>0&&<><strong>{glResult.locations_imported}</strong> locations</>} tracked.<br/></>}
           Grouping: {glResult.grouping==='by_reference'?'by reference / document #':'one journal entry per transaction date'}.{glResult.rows_skipped>0&&<> {glResult.rows_skipped} row(s) skipped (blank/zero/unparseable).</>}
         </div>
+        {glResult.persisted&&<div style={{...(glResult.persisted_ok?S.success:S.err),padding:12,borderRadius:6,marginBottom:12,background:glResult.persisted_ok?T.greenDim:T.redDim,border:'1px solid '+(glResult.persisted_ok?T.greenBorder:T.red+'30')}}>
+          <strong>Persistence check{glResult.entity_id?' (entity '+glResult.entity_id+')':''}:</strong> {glResult.persisted_ok?'✓ saved':'✗ NOT SAVED'} &mdash; {glResult.persisted.entries} entries, {glResult.persisted.lines} lines, {glResult.persisted.accounts} accounts now in the database for this entity.
+        </div>}
         {glResult.verification&&<div style={{...(glResult.verification.mismatches.length?S.err:S.success),padding:12,borderRadius:6,marginBottom:12,background:glResult.verification.mismatches.length?T.redDim:T.greenDim,border:'1px solid '+(glResult.verification.mismatches.length?T.red+'30':T.greenBorder)}}>
           <strong>Running-balance check:</strong> {glResult.verification.matched}/{glResult.verification.checked} accounts match.
           {glResult.verification.mismatches.length>0&&<><br/><span style={{fontSize:11}}>Mismatches (computed vs reported): {glResult.verification.mismatches.map(mm=>mm.code+' ('+mm.computed.toLocaleString()+' vs '+mm.reported.toLocaleString()+')').join(', ')}</span></>}
