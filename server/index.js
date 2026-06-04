@@ -531,6 +531,32 @@ async function billcomListAccounts({ sessionId, devKey, baseUrl }) {
   return out;
 }
 
+// Generic v3 classification list (paginated) for any resource under
+// /classifications, e.g. 'accounting-classes', 'jobs', 'locations'. Returns the
+// raw items. Mirrors billcomListAccounts' pagination + error handling.
+async function billcomListClassification({ sessionId, devKey, baseUrl, resource }) {
+  const base = (baseUrl || BILLCOM_BASE_URLS.sandbox);
+  const out = [];
+  let nextPage = null;
+  while (true) {
+    const params = new URLSearchParams({ max: '100' });
+    if (nextPage) params.set('nextPage', nextPage);
+    const url = base + '/classifications/' + resource + '?' + params.toString();
+    const resp = await fetch(url, { method: 'GET', headers: { 'sessionId': sessionId, 'devKey': devKey, 'Accept': 'application/json' } });
+    const text = await resp.text();
+    let json; try { json = JSON.parse(text); } catch { throw new Error('Non-JSON (' + resource + ', HTTP ' + resp.status + '): ' + text.slice(0, 150)); }
+    if (!resp.ok) {
+      const msg = Array.isArray(json) ? json.map(e => e.message || JSON.stringify(e)).join('; ') : (json.message || ('HTTP ' + resp.status));
+      throw new Error('Bill.com error (' + resource + '): ' + msg);
+    }
+    const items = Array.isArray(json.results) ? json.results : (Array.isArray(json) ? json : []);
+    out.push(...items);
+    nextPage = json.nextPage || null;
+    if (!nextPage || out.length > 10000) break;
+  }
+  return out;
+}
+
 // Generic paginated GET for v3 list endpoints. Used for bills + payments.
 async function billcomListV3({ sessionId, devKey, baseUrl, resourcePath, extraParams }) {
   const base = (baseUrl || BILLCOM_BASE_URLS.sandbox);
@@ -2707,6 +2733,68 @@ app.put('/api/billcom/mappings/:entity_id', auth, requireEntityAccess('entity_id
   }
 });
 
+// Bill.com dimension maps (class=investor via accountingClassId, location=deal
+// via jobId). GET returns current maps; POST auto-populates by name-matching
+// Bill.com classes/jobs to CloudLedger's class/location dimensions, writing only
+// confident matches. Unmatched (incl. workflow-status classes) are reported but
+// not written, so they sync as null by design. Matches are editable via PUT.
+app.get('/api/billcom/dimension-maps/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const classes = db.prepare('SELECT billcom_class_id, billcom_class_name, cl_class_id FROM billcom_class_map WHERE entity_id = ? ORDER BY id').all(eid);
+  const locations = db.prepare('SELECT billcom_job_id, billcom_job_name, cl_location_id FROM billcom_location_map WHERE entity_id = ? ORDER BY id').all(eid);
+  res.json({ classes, locations });
+});
+
+app.post('/api/billcom/dimension-maps/:entity_id/auto', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(eid);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+  let session, devKey;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'Bill.com login failed: ' + e.message }); }
+  const args = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+
+  let bcClasses, bcJobs;
+  try { bcClasses = await billcomListClassification({ ...args, resource: 'accounting-classes' }); }
+  catch (e) { return res.status(502).json({ error: 'fetch classes failed: ' + e.message }); }
+  try { bcJobs = await billcomListClassification({ ...args, resource: 'jobs' }); }
+  catch (e) { return res.status(502).json({ error: 'fetch jobs failed: ' + e.message }); }
+
+  // CL dimensions for this entity (class = investor, location = deal).
+  const clClasses = db.prepare('SELECT id, name FROM dim_classes WHERE entity_id = ?').all(eid);
+  const clLocs = db.prepare('SELECT id, name FROM dim_locations WHERE entity_id = ?').all(eid);
+  const norm = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const clClassByName = new Map(clClasses.map(c => [norm(c.name), c.id]));
+  const clLocByName = new Map(clLocs.map(l => [norm(l.name), l.id]));
+  const nameOf = (o) => o.name || o.shortName || o.description || '';
+  const idOf = (o) => String(o.id || '');
+
+  const now = new Date().toISOString();
+  const result = { classes: { matched: [], unmatched: [] }, locations: { matched: [], unmatched: [] } };
+
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM billcom_class_map WHERE entity_id = ?').run(eid);
+    const insC = db.prepare('INSERT INTO billcom_class_map (entity_id, billcom_class_id, billcom_class_name, cl_class_id, created_at) VALUES (?,?,?,?,?)');
+    for (const c of bcClasses) {
+      const nm = nameOf(c); const clId = clClassByName.get(norm(nm));
+      if (clId) { insC.run(eid, idOf(c), nm, clId, now); result.classes.matched.push({ billcom: nm, cl_class_id: clId }); }
+      else result.classes.unmatched.push(nm);
+    }
+    db.prepare('DELETE FROM billcom_location_map WHERE entity_id = ?').run(eid);
+    const insL = db.prepare('INSERT INTO billcom_location_map (entity_id, billcom_job_id, billcom_job_name, cl_location_id, created_at) VALUES (?,?,?,?,?)');
+    for (const j of bcJobs) {
+      const nm = nameOf(j); const clId = clLocByName.get(norm(nm));
+      if (clId) { insL.run(eid, idOf(j), nm, clId, now); result.locations.matched.push({ billcom: nm, cl_location_id: clId }); }
+      else result.locations.unmatched.push(nm);
+    }
+  });
+  try { tx(); } catch (e) { return res.status(500).json({ error: e.message }); }
+  res.json(result);
+});
+
 // Phase 5: Push CloudLedger COA to Bill.com and auto-create mappings.
 app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
@@ -3055,45 +3143,6 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   result.missing_mappings = Array.from(missingMap.values());
   res.json(result);
 });
-
-// TEMP DIAGNOSTIC (remove after CLRF dimension mapping is built): fetch ONE bill
-// by its Bill.com id and dump the full line-item + classifications structure, so
-// the location/class mapping is built against a properly-coded bill. Read-only.
-app.get('/api/billcom/_inspect1/:entity_id/:bill_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  const billId = String(req.params.bill_id || '');
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
-  let session;
-  try {
-    const password = billcomDecrypt(cfg.password_enc);
-    const devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
-  const devKey = billcomDecrypt(cfg.dev_key_enc);
-  const base = cfg.api_base_url || BILLCOM_BASE_URLS.sandbox;
-  const hdrs = { 'sessionId': session.sessionId, 'devKey': devKey, 'Accept': 'application/json' };
-  const withTimeout = (p, ms, label) => Promise.race([
-    p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout ' + ms + 'ms (' + label + ')')), ms)),
-  ]);
-  try {
-    const d = await withTimeout(
-      fetch(base + '/bills/' + encodeURIComponent(billId), { method: 'GET', headers: hdrs }).then(r => r.text().then(t => ({ status: r.status, t }))),
-      9000, 'detail'
-    );
-    let detail; try { detail = JSON.parse(d.t); } catch { detail = null; }
-    const li = detail && Array.isArray(detail.billLineItems) ? detail.billLineItems
-      : (detail && Array.isArray(detail.lineItems) ? detail.lineItems : []);
-    res.json({
-      status: d.status,
-      bill_top_keys: detail ? Object.keys(detail) : null,
-      bill_level_classifications: detail ? detail.classifications : null,
-      line_item_count: li.length,
-      line_items: li.map(item => ({ amount: item.amount, classifications: item.classifications })),
-    });
-  } catch (e) { res.status(502).json({ error: e.message }); }
-});
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Requisition / Invoice-Packet API (development-project entities only)
 // Every route is gated: auth → entity access → development-entity check.
