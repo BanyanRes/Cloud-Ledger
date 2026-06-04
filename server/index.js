@@ -1214,6 +1214,17 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
 
     // Parse each row into a normalized line.
     const parsedLines = [];
+    // Name-candidate columns: when the account-number cell is blank we look here to
+    // recover a "code name" or at least an account name, regardless of whether the
+    // user mapped an account-name column. Prefer an explicitly mapped account_name,
+    // then common name-bearing headers (e.g. QBO's "Full name").
+    const nameCandidates = [];
+    if (m.account_name) nameCandidates.push(m.account_name);
+    for (const c of columns) {
+      if (nameCandidates.includes(c)) continue;
+      if ([m.account_number, m.transaction_date, m.debit, m.credit, m.reference, m.running_balance, m.class, m.location].includes(c)) continue;
+      if (/full name|account name|account|name|acct/i.test(c)) nameCandidates.push(c);
+    }
     const acctNames = new Map(); // code -> name
     const classNames = new Set();    // distinct class values encountered
     const locationNames = new Set(); // distinct location values encountered
@@ -1228,12 +1239,20 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
       } else {
         code = String(row[m.account_number] || '').trim();
         name = String(row[m.account_name] || '').trim();
-        // Fallback: some exports leave the account-number cell blank but carry a
-        // fused "code name" in the account-name column (e.g. "551100 Expense").
-        // Recover the code/name from there so the line isn't dropped.
-        if (!code && name) {
-          const sp = splitCodeName(name);
-          if (sp) { code = sp.code; name = sp.name; }
+        // Fallback: some exports leave the account-number cell blank but carry the
+        // account elsewhere (e.g. QBO's "Full name" holds "551100 Expense" or just
+        // "Retained Earnings"). Search the name-candidate columns for a usable value,
+        // independent of whether an account-name column was explicitly mapped.
+        if (!code) {
+          let cand = name;
+          if (!cand) {
+            for (const c of nameCandidates) { const v = String(row[c] || '').trim(); if (v) { cand = v; break; } }
+          }
+          if (cand) {
+            const sp = splitCodeName(cand);
+            if (sp) { code = sp.code; name = sp.name; }
+            else { name = cand; }
+          }
         }
       }
       // Last resort: an account with a name but no resolvable numeric code (e.g.
