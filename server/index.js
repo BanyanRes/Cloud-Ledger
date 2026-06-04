@@ -3055,44 +3055,38 @@ app.get('/api/billcom/_inspect/:entity_id', auth, requireEntityAccess('entity_id
   const t0 = Date.now();
   try {
     const text = await withTimeout(
-      fetch(base + '/bills?max=1', { method: 'GET', headers: hdrs }).then(r => r.text().then(t => ({ status: r.status, t }))),
+      fetch(base + '/bills?max=25', { method: 'GET', headers: hdrs }).then(r => r.text().then(t => ({ status: r.status, t }))),
       8000, 'list'
     );
-    out.bills_call = { ms: Date.now() - t0, http_status: text.status, body_first_300: text.t.slice(0, 300) };
-    try {
-      let listJson; try { listJson = JSON.parse(text.t); } catch { listJson = null; }
-      const first = listJson && Array.isArray(listJson.results) ? listJson.results[0] : null;
-      const billId = first && first.id ? String(first.id) : null;
-      if (billId) {
-        const td = Date.now();
+    out.bills_call = { ms: Date.now() - t0, http_status: text.status };
+    let listJson; try { listJson = JSON.parse(text.t); } catch { listJson = null; }
+    const results = listJson && Array.isArray(listJson.results) ? listJson.results : [];
+    out.bill_count_page = results.length;
+    const keysOf = (v) => (v && typeof v === 'object' && !Array.isArray(v)) ? Object.keys(v) : (v == null ? null : typeof v);
+    const sampleObj = (v) => (v && typeof v === 'object' && !Array.isArray(v))
+      ? Object.fromEntries(Object.entries(v).slice(0, 12).map(([k, val]) => [k, (val && typeof val === 'object') ? '(obj)' : String(val).slice(0, 40)]))
+      : v;
+    out.bills = [];
+    // Fetch details for up to ~10 bills, bounded, looking for any with location/class.
+    for (const b of results.slice(0, 10)) {
+      const billId = b && b.id ? String(b.id) : null;
+      if (!billId) continue;
+      try {
         const d = await withTimeout(
           fetch(base + '/bills/' + encodeURIComponent(billId), { method: 'GET', headers: hdrs }).then(r => r.text().then(t => ({ status: r.status, t }))),
-          8000, 'detail'
+          7000, 'detail'
         );
         let detail; try { detail = JSON.parse(d.t); } catch { detail = null; }
-        const describe = (v) => {
-          if (v == null) return null;
-          if (typeof v === 'object') return Array.isArray(v)
-            ? { __array_len: v.length, __first: v[0] && typeof v[0] === 'object' ? Object.keys(v[0]) : v[0] }
-            : { __keys: Object.keys(v), __sample: Object.fromEntries(Object.entries(v).slice(0, 10).map(([k, val]) => [k, (val && typeof val === 'object') ? '(obj)' : String(val).slice(0, 30)])) };
-          return String(v).slice(0, 40);
-        };
-        const li = detail && Array.isArray(detail.lineItems) ? detail.lineItems
-          : (detail && Array.isArray(detail.billLineItems) ? detail.billLineItems : []);
-        out.detail = {
-          bill_id: billId,
-          ms: Date.now() - td,
-          detail_status: d.status,
-          top_keys: detail ? Object.keys(detail) : null,
-          detail_first_400: !detail ? d.t.slice(0, 400) : undefined,
-          line_item_count: li.length,
-          line_items: li.slice(0, 2).map(item => ({
-            keys: Object.keys(item),
-            classifications: describe(item.classifications),
-          })),
-        };
-      }
-    } catch (e2) { out.detail = { error: e2.message }; }
+        const li = detail && Array.isArray(detail.billLineItems) ? detail.billLineItems
+          : (detail && Array.isArray(detail.lineItems) ? detail.lineItems : []);
+        out.bills.push({
+          vendor: b.vendorName,
+          amount: b.amount,
+          bill_level_classifications: { keys: keysOf(detail && detail.classifications), sample: sampleObj(detail && detail.classifications) },
+          line_items: li.slice(0, 3).map(item => ({ classifications_keys: keysOf(item.classifications), classifications_sample: sampleObj(item.classifications) })),
+        });
+      } catch (e2) { out.bills.push({ vendor: b.vendorName, error: e2.message }); }
+    }
   } catch (e) {
     out.bills_call = { ms: Date.now() - t0, error: e.message };
   }
