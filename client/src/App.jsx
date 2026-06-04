@@ -1253,7 +1253,7 @@ function WorkpapersModal({entity, user, onClose}){
     return new Date(ts + (ts.includes('Z') || ts.includes('+') ? '' : 'Z')).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
   };
 
-  return (<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox, maxWidth: 900, maxHeight: '90vh', display: 'flex', flexDirection: 'column'}} onClick={e => e.stopPropagation()}>
+  return (<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox, maxWidth: 1180, maxHeight: '92vh', display: 'flex', flexDirection: 'column'}} onClick={e => e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{marginBottom: 16}}>
       <div style={{fontSize: 18, fontWeight: 700, color: T.textBright, display: 'flex', alignItems: 'center', gap: 10}}>
@@ -1291,10 +1291,10 @@ function WorkpapersModal({entity, user, onClose}){
     {err && <div style={{...S.err, marginBottom: 10}}>{err}</div>}
     {msg && <div style={{...S.success, marginBottom: 10}}>{msg}</div>}
     {/* File & folder list */}
-    <div style={{flex: 1, overflowY: 'auto', border: '1px solid ' + T.border, borderRadius: T.radiusSm}}>
-      {loading ? <div style={{padding: 40, textAlign: 'center', color: T.textMuted}}>Loading...</div>
+    <div style={{flex: 1, minHeight: 400, overflowY: 'auto', border: '1px solid ' + T.border, borderRadius: T.radiusSm}}>
+      {loading ? <div style={{padding: 60, textAlign: 'center', color: T.textMuted}}>Loading...</div>
        : (childFolders.length === 0 && currentFiles.length === 0)
-         ? <div style={{padding: 40, textAlign: 'center', color: T.textDim}}>This folder is empty{canEdit ? '. Upload files or create a subfolder to get started.' : '.'}</div>
+         ? <div style={{padding: 60, textAlign: 'center', color: T.textDim}}>This folder is empty{canEdit ? '. Upload files or create a subfolder to get started.' : '.'}</div>
          : <table style={S.table}>
             <thead style={{position: 'sticky', top: 0, background: T.bgCard, zIndex: 1}}>
               <tr><th style={S.th}>Name</th><th style={S.thR} width={110}>Size</th><th style={S.th} width={180}>Uploaded By</th><th style={S.th} width={180}>Date (PST)</th><th style={S.th} width={120}></th></tr>
