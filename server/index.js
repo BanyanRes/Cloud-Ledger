@@ -2795,6 +2795,40 @@ app.post('/api/billcom/dimension-maps/:entity_id/auto', auth, requireEntityAcces
   res.json(result);
 });
 
+// Upsert manual dimension-map rows without disturbing existing ones. Body:
+// { classes?: [{billcom_class_id, billcom_class_name?, cl_class_id}],
+//   locations?: [{billcom_job_id, billcom_job_name?, cl_location_id}] }.
+// Used to add name-mismatch matches the auto step couldn't make (e.g. Bill.com
+// "Buna" -> CL "CLR Buna Property Owner LLC"). A null cl id deletes the mapping.
+app.put('/api/billcom/dimension-maps/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const classes = Array.isArray(req.body && req.body.classes) ? req.body.classes : [];
+  const locations = Array.isArray(req.body && req.body.locations) ? req.body.locations : [];
+  const now = new Date().toISOString();
+  try {
+    const tx = db.transaction(() => {
+      const upC = db.prepare('INSERT INTO billcom_class_map (entity_id, billcom_class_id, billcom_class_name, cl_class_id, created_at) VALUES (?,?,?,?,?) ON CONFLICT(entity_id, billcom_class_id) DO UPDATE SET cl_class_id=excluded.cl_class_id, billcom_class_name=excluded.billcom_class_name');
+      const delC = db.prepare('DELETE FROM billcom_class_map WHERE entity_id = ? AND billcom_class_id = ?');
+      for (const c of classes) {
+        if (!c.billcom_class_id) continue;
+        if (c.cl_class_id == null) delC.run(eid, String(c.billcom_class_id));
+        else upC.run(eid, String(c.billcom_class_id), c.billcom_class_name || null, parseInt(c.cl_class_id), now);
+      }
+      const upL = db.prepare('INSERT INTO billcom_location_map (entity_id, billcom_job_id, billcom_job_name, cl_location_id, created_at) VALUES (?,?,?,?,?) ON CONFLICT(entity_id, billcom_job_id) DO UPDATE SET cl_location_id=excluded.cl_location_id, billcom_job_name=excluded.billcom_job_name');
+      const delL = db.prepare('DELETE FROM billcom_location_map WHERE entity_id = ? AND billcom_job_id = ?');
+      for (const l of locations) {
+        if (!l.billcom_job_id) continue;
+        if (l.cl_location_id == null) delL.run(eid, String(l.billcom_job_id));
+        else upL.run(eid, String(l.billcom_job_id), l.billcom_job_name || null, parseInt(l.cl_location_id), now);
+      }
+    });
+    tx();
+    const classCount = db.prepare('SELECT COUNT(*) c FROM billcom_class_map WHERE entity_id = ?').get(eid).c;
+    const locCount = db.prepare('SELECT COUNT(*) c FROM billcom_location_map WHERE entity_id = ?').get(eid).c;
+    res.json({ ok: true, class_map_rows: classCount, location_map_rows: locCount });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Phase 5: Push CloudLedger COA to Bill.com and auto-create mappings.
 app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
