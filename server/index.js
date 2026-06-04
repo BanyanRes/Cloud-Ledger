@@ -2718,6 +2718,47 @@ app.get('/api/billcom/mappings/:entity_id', auth, requireEntityAccess('entity_id
   res.json({ mappings: rows });
 });
 
+// Map-only auto-populate of the GL account map: match existing Bill.com accounts
+// to CL account codes by account number (name fallback) and write matches. Never
+// creates anything in Bill.com (unlike push-coa). Unmatched CL codes are reported.
+app.post('/api/billcom/mappings/:entity_id/auto', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(eid);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+  let session, devKey, bcAccounts;
+  try {
+    const pw = billcomDecrypt(cfg.password_enc);
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password: pw, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+    bcAccounts = await billcomListAccounts({ sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login or account list failed: ' + e.message }); }
+
+  const norm = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  const bcByNum = new Map();
+  const bcByName = new Map();
+  for (const a of bcAccounts) {
+    const num = a && (a.accountNumber || a.number || (a.account && a.account.accountNumber));
+    if (num) bcByNum.set(String(num), a);
+    if (a && a.name) bcByName.set(norm(a.name), a);
+  }
+  const clAccounts = db.prepare('SELECT code, name FROM accounts WHERE entity_id = ?').all(eid);
+  const now = new Date().toISOString();
+  const result = { matched: [], unmatched: [] };
+  try {
+    const tx = db.transaction(() => {
+      db.prepare('DELETE FROM billcom_account_map WHERE entity_id = ?').run(eid);
+      const ins = db.prepare('INSERT INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)');
+      for (const c of clAccounts) {
+        const bc = bcByNum.get(String(c.code)) || bcByName.get(norm(c.name));
+        if (bc && bc.id) { ins.run(eid, String(bc.id), bc.name || null, String(c.code), now); result.matched.push({ code: c.code, name: c.name, billcom_id: bc.id }); }
+        else result.unmatched.push({ code: c.code, name: c.name });
+      }
+    });
+    tx();
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+  res.json({ matched: result.matched.length, unmatched: result.unmatched.length, unmatched_codes: result.unmatched, billcom_account_count: bcAccounts.length });
+});
+
 app.put('/api/billcom/mappings/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
