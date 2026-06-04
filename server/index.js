@@ -1062,8 +1062,28 @@ app.post('/api/entities/:eid/import-tb', auth, requireEntityAccess(), requireRol
 
 // Account type from a numeric code prefix — same convention as the TB importer.
 function glTypeFromCode(codeStr) {
-  const n = parseInt(String(codeStr).replace(/[^0-9]/g, ''), 10);
+  const digits = String(codeStr).replace(/[^0-9]/g, '');
+  const n = parseInt(digits, 10);
   if (isNaN(n)) return null;
+  // Charts of accounts vary in code width. The classic 4–5 digit scheme uses the
+  // absolute number (1xxxx Asset, 2xxxx Liability, …). Wider schemes (e.g. CLRF's
+  // 6-digit codes like 120100, 551100) classify by the LEADING digit instead, so
+  // for any code with more than 5 digits we key off the first digit rather than
+  // the magnitude (which would otherwise overflow every threshold → Revenue).
+  if (digits.length > 5) {
+    switch (digits[0]) {
+      case '1': return 'Asset';
+      case '2': return 'Liability';
+      case '3': return 'Equity';
+      case '4': return 'Revenue';
+      case '5':
+      case '6':
+      case '7':
+      case '8':
+      case '9': return 'Expense';
+      default: return null;
+    }
+  }
   if (n <= 19999) return 'Asset';
   if (n <= 29999) return 'Liability';
   if (n <= 39999) return 'Equity';
@@ -1253,6 +1273,21 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
             if (sp) { code = sp.code; name = sp.name; }
             else { name = cand; }
           }
+        }
+      }
+      // Name backfill: we have a numeric code but no descriptive name (the account-
+      // number column held only digits). Recover a name from the candidate columns —
+      // e.g. QBO's "Full name" carries "120100 Investment in CLIP". If a candidate
+      // splits into the same code, take its name; otherwise use the candidate text
+      // (minus a leading copy of the code) as the name.
+      if (code && !name) {
+        for (const c of nameCandidates) {
+          const v = String(row[c] || '').trim();
+          if (!v) continue;
+          const sp = splitCodeName(v);
+          if (sp && sp.code === code && sp.name) { name = sp.name; break; }
+          if (!sp && v !== code) { name = v; break; }
+          if (sp && sp.name && sp.code !== code) { name = sp.name; break; }
         }
       }
       // Last resort: an account with a name but no resolvable numeric code (e.g.
