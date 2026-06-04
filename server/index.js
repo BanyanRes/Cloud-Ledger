@@ -3022,45 +3022,46 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   res.json(result);
 });
 
-// TEMP DIAGNOSTIC (remove after CLRF dimension mapping is confirmed): inspect the
-// shape of a few real bills' line items + classifications, WITHOUT creating any
-// JEs. Returns only structural info (keys + small scalar values), never secrets.
+// TEMP DIAGNOSTIC (remove after CLRF connection is confirmed): determine WHY v3
+// data calls stall. Reports the login `trusted` flag and does ONE timeout-bounded
+// raw GET /bills?max=1 so we see the actual HTTP status/body instead of hanging.
+// Never returns secrets.
 app.get('/api/billcom/_inspect/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
   if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
+  const out = {};
   let session;
   try {
     const password = billcomDecrypt(cfg.password_enc);
     const devKey = billcomDecrypt(cfg.dev_key_enc);
     session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
   } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
-  const listArgs = { sessionId: session.sessionId, devKey: billcomDecrypt(cfg.dev_key_enc), baseUrl: cfg.api_base_url };
-  let bills;
-  try { bills = await billcomListBills(listArgs); } catch (e) { return res.status(502).json({ error: 'list bills failed: ' + e.message }); }
-  const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
-  // shallow-describe a value: scalars pass through (truncated), objects -> their keys
-  const describe = (v) => {
-    if (v == null) return null;
-    if (typeof v === 'object') return Array.isArray(v) ? { __array_len: v.length, __first_keys: v[0] && typeof v[0] === 'object' ? Object.keys(v[0]) : typeof v[0] } : { __keys: Object.keys(v) };
-    return String(v).slice(0, 40);
+  // Surface the trust flag + the keys the login returned (no secret values).
+  out.login = {
+    trusted: (session && (session.trusted ?? session.mfaTrusted)) ?? '(field absent)',
+    keys: session && typeof session === 'object' ? Object.keys(session) : typeof session,
+    sessionId_len: session && session.sessionId ? String(session.sessionId).length : 0,
   };
-  const out = { bill_count: Array.isArray(bills) ? bills.length : 0, samples: [] };
-  const sample = (Array.isArray(bills) ? bills : []).slice(0, 3);
-  for (const b of sample) {
-    const id = String(pick(b, 'id') || '');
-    let detail = b;
-    try { detail = await billcomGetById({ ...listArgs, resourcePath: '/bills', id }); } catch (e) {}
-    const lineItems = pick(detail, 'lineItems', 'line_items', 'billLineItems') || [];
-    const liShapes = (Array.isArray(lineItems) ? lineItems : []).slice(0, 3).map(li => {
-      const cls = pick(li, 'classifications') || {};
-      const shaped = {};
-      for (const k of Object.keys(li)) shaped[k] = describe(li[k]);
-      const clsShaped = {};
-      if (cls && typeof cls === 'object') for (const k of Object.keys(cls)) clsShaped[k] = describe(cls[k]);
-      return { line_keys: Object.keys(li), classifications: clsShaped };
+  // One bounded raw call to GET /bills?max=1 with a hard 12s timeout.
+  const devKey = billcomDecrypt(cfg.dev_key_enc);
+  const base = cfg.api_base_url || BILLCOM_BASE_URLS.sandbox;
+  const url = base + '/bills?max=1';
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12000);
+  const t0 = Date.now();
+  try {
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { 'sessionId': session.sessionId, 'devKey': devKey, 'Accept': 'application/json' },
+      signal: ctrl.signal,
     });
-    out.samples.push({ bill_top_keys: Object.keys(detail || {}), line_item_count: Array.isArray(lineItems) ? lineItems.length : 0, line_items: liShapes });
+    clearTimeout(timer);
+    const text = await resp.text();
+    out.bills_call = { ms: Date.now() - t0, http_status: resp.status, body_first_300: text.slice(0, 300) };
+  } catch (e) {
+    clearTimeout(timer);
+    out.bills_call = { ms: Date.now() - t0, error: e.name + ': ' + e.message };
   }
   res.json(out);
 });
