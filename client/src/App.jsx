@@ -1766,44 +1766,52 @@ function TrialBalance({entityId,entityName,asOf,setAsOf}){
   const[drillAcct,setDrillAcct]=useState(null);
   const[locations,setLocations]=useState([]);
   const[locId,setLocId]=useState('');// '' = all (whole-entity TB); otherwise a location_id
+  const[classes,setClasses]=useState([]);
+  const[classId,setClassId]=useState('');// '' = all investors; otherwise a class_id (investor)
   // Guard: while the user is editing the date input, asOf can briefly be '' or a partial string like '2026-'.
   // Avoid crashing the page on Invalid Date — fall back to today() until a complete YYYY-MM-DD is entered.
   const validAsOf=/^\d{4}-\d{2}-\d{2}$/.test(asOf)&&!isNaN(new Date(asOf+'T00:00:00').getTime())?asOf:today();
   const fyS=validAsOf.slice(0,4)+'-01-01';
   const locName=locId?(locations.find(l=>String(l.id)===String(locId))?.name||''):'';
+  const className=classId?(classes.find(c=>String(c.id)===String(classId))?.name||''):'';
+  const dimmed=!!(locId||classId); // any dimension selected → activity view
+  const scopeLabel=[locName,className].filter(Boolean).join(' · ');
   // 12-month window ending at asOf. If asOf is 2026-04-10, window is 2025-04-11 → 2026-04-10.
   const drillFrom=useMemo(()=>{const d=new Date(validAsOf+'T00:00:00');d.setFullYear(d.getFullYear()-1);d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);},[validAsOf]);
-  // Whole-entity TB uses the soft-close (close_pl_before) path. A per-location TB is
-  // activity-based: it sums only lines tagged with that location, so there is no
-  // period-close/RE roll — pass location_id with the as_of date only.
+  // Whole-entity TB uses the soft-close (close_pl_before) path. A dimension-scoped TB
+  // (location and/or class/investor) is activity-based: it sums only lines carrying
+  // the selected tag(s), so there is no period-close/RE roll — pass the dimension
+  // id(s) with the as_of date only.
   useEffect(()=>{
-    if(locId) api.getBalances(entityId,{as_of:validAsOf,location_id:locId}).then(setBalances);
+    if(dimmed) api.getBalances(entityId,{as_of:validAsOf,...(locId?{location_id:locId}:{}),...(classId?{class_id:classId}:{})}).then(setBalances);
     else api.getBalances(entityId,{as_of:validAsOf,close_pl_before:fyS}).then(setBalances);
-  },[entityId,validAsOf,fyS,locId]);
+  },[entityId,validAsOf,fyS,locId,classId,dimmed]);
   useEffect(()=>{api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));},[entityId]);
+  useEffect(()=>{api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
   let tDr=0,tCr=0;const rows=balances.filter(b=>Math.abs(b.balance)>0.005).map(b=>{const isDr=b.type==='Asset'||b.type==='Expense';const dr=(isDr&&b.balance>0)||(!isDr&&b.balance<0)?Math.abs(b.balance):0;const cr=(isDr&&b.balance<0)||(!isDr&&b.balance>0)?Math.abs(b.balance):0;tDr+=dr;tCr+=cr;return{...b,dr,cr};});
-  const doExport=()=>{const lbl=locName?(' — '+locName):'';const d=[[entityName||'Trial Balance'],['Trial Balance'+lbl],['As of '+asOf],[],['Code','Account','Type','Debit','Credit']];rows.forEach(r=>d.push([r.code,r.name,r.type,r.dr||'',r.cr||'']));d.push([]);d.push(['','','Total',tDr,tCr]);exportToExcel(d,'TB'+(locName?'_'+locName.replace(/[^A-Za-z0-9]+/g,'_'):'')+'_'+asOf+'.xlsx');};
+  const fnameTag=[locName,className].filter(Boolean).map(s=>s.replace(/[^A-Za-z0-9]+/g,'_')).join('_');
+  const doExport=()=>{const lbl=scopeLabel?(' — '+scopeLabel):'';const d=[[entityName||'Trial Balance'],['Trial Balance'+lbl],['As of '+asOf],[],['Code','Account','Type','Debit','Credit']];rows.forEach(r=>d.push([r.code,r.name,r.type,r.dr||'',r.cr||'']));d.push([]);d.push(['','','Total',tDr,tCr]);exportToExcel(d,'TB'+(fnameTag?'_'+fnameTag:'')+'_'+asOf+'.xlsx');};
   const amtStyle={...S.tdR,cursor:'pointer'};
-  // GL detail export (optionally scoped to the selected location). Pulls flat lines
-  // with running balance from /gl-detail and writes a printable workbook. Through
-  // the as-of date as an upper bound; location-tagged lines only when a location is
-  // selected.
+  // GL detail export (optionally scoped to the selected location and/or investor).
+  // Pulls flat lines with running balance from /gl-detail through the as-of date;
+  // dimension-tagged lines only when a dimension is selected.
   const doExportGL=async()=>{
     try{
-      const r=await api.getGLDetail(entityId,{to:validAsOf,...(locId?{location_id:locId}:{})});
-      const lbl=locName?(' — '+locName):'';
+      const r=await api.getGLDetail(entityId,{to:validAsOf,...(locId?{location_id:locId}:{}),...(classId?{class_id:classId}:{})});
+      const lbl=scopeLabel?(' — '+scopeLabel):'';
       const d=[[entityName||'General Ledger'],['GL Detail'+lbl],['Through '+asOf],[],['Date','Entry #','Account','Account Name','Memo / Description','Location','Class','Debit','Credit','Running Bal']];
       (r.lines||[]).forEach(l=>d.push([l.date,l.entry_num,l.account_code,l.account_name,l.description||l.memo||'',l.location_name,l.class_name,l.debit||'',l.credit||'',l.running_balance]));
       d.push([]);d.push(['','','','','','','','Total Dr','Total Cr','']);
       d.push(['','','','','','','',r.total_debit,r.total_credit,'']);
-      exportToExcel(d,'GL'+(locName?'_'+locName.replace(/[^A-Za-z0-9]+/g,'_'):'')+'_'+asOf+'.xlsx');
+      exportToExcel(d,'GL'+(fnameTag?'_'+fnameTag:'')+'_'+asOf+'.xlsx');
     }catch(e){alert('GL export failed: '+e.message);}
   };
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
     <div style={S.filterBar}><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
-      <div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div></div>
-    <div style={{display:'flex',gap:8}}><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (location-tagged only when a location is selected)">Export GL Detail</button><button style={S.btnExport} onClick={doExport}>Export TB</button></div></div>
-    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Trial Balance{locName?(' — '+locName):''}</div><div style={{fontSize:13,color:T.textMuted}}>As of {asOf}{locName?' · location-tagged activity only':''}</div></div>
+      <div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>
+      <div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div></div>
+    <div style={{display:'flex',gap:8}}><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={doExport}>Export TB</button></div></div>
+    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Trial Balance{scopeLabel?(' — '+scopeLabel):''}</div><div style={{fontSize:13,color:T.textMuted}}>As of {asOf}{dimmed?' · dimension-tagged activity only':''}</div></div>
     <table style={{...S.table,tableLayout:'fixed',width:'100%'}}>
       <colgroup><col style={{width:'90px'}}/><col/><col style={{width:'120px'}}/><col style={{width:'160px'}}/><col style={{width:'160px'}}/></colgroup>
       <thead><tr><th style={S.th}>Code</th><th style={S.th}>Account</th><th style={S.th}>Type</th><th style={S.thR}>Debit</th><th style={S.thR}>Credit</th></tr></thead>
