@@ -3043,52 +3043,48 @@ app.get('/api/billcom/_inspect/:entity_id', auth, requireEntityAccess('entity_id
     keys: session && typeof session === 'object' ? Object.keys(session) : typeof session,
     sessionId_len: session && session.sessionId ? String(session.sessionId).length : 0,
   };
-  // One bounded raw call to GET /bills?max=1 with a hard 12s timeout.
+  // Bounded raw call to GET /bills?max=1. Use Promise.race for a hard wall-clock
+  // cap (AbortController alone has proven unreliable at cutting the fetch here).
   const devKey = billcomDecrypt(cfg.dev_key_enc);
   const base = cfg.api_base_url || BILLCOM_BASE_URLS.sandbox;
-  const url = base + '/bills?max=1';
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 12000);
+  const hdrs = { 'sessionId': session.sessionId, 'devKey': devKey, 'Accept': 'application/json' };
+  const withTimeout = (p, ms, label) => Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error('timeout after ' + ms + 'ms (' + label + ')')), ms)),
+  ]);
   const t0 = Date.now();
   try {
-    const resp = await fetch(url, {
-      method: 'GET',
-      headers: { 'sessionId': session.sessionId, 'devKey': devKey, 'Accept': 'application/json' },
-      signal: ctrl.signal,
-    });
-    clearTimeout(timer);
-    const text = await resp.text();
-    out.bills_call = { ms: Date.now() - t0, http_status: resp.status, body_first_300: text.slice(0, 300) };
-    // If the list returned, grab the first bill's id and fetch its DETAIL so we can
-    // see the line-item classifications (location/class) shape.
+    const text = await withTimeout(
+      fetch(base + '/bills?max=1', { method: 'GET', headers: hdrs }).then(r => r.text().then(t => ({ status: r.status, t }))),
+      8000, 'list'
+    );
+    out.bills_call = { ms: Date.now() - t0, http_status: text.status, body_first_300: text.t.slice(0, 300) };
     try {
-      let listJson; try { listJson = JSON.parse(text); } catch { listJson = null; }
+      let listJson; try { listJson = JSON.parse(text.t); } catch { listJson = null; }
       const first = listJson && Array.isArray(listJson.results) ? listJson.results[0] : null;
       const billId = first && first.id ? String(first.id) : null;
       if (billId) {
-        const ctrl2 = new AbortController();
-        const timer2 = setTimeout(() => ctrl2.abort(), 12000);
-        const dResp = await fetch(base + '/bills/' + encodeURIComponent(billId), {
-          method: 'GET',
-          headers: { 'sessionId': session.sessionId, 'devKey': devKey, 'Accept': 'application/json' },
-          signal: ctrl2.signal,
-        });
-        clearTimeout(timer2);
-        const dText = await dResp.text();
-        let detail; try { detail = JSON.parse(dText); } catch { detail = null; }
+        const td = Date.now();
+        const d = await withTimeout(
+          fetch(base + '/bills/' + encodeURIComponent(billId), { method: 'GET', headers: hdrs }).then(r => r.text().then(t => ({ status: r.status, t }))),
+          8000, 'detail'
+        );
+        let detail; try { detail = JSON.parse(d.t); } catch { detail = null; }
         const describe = (v) => {
           if (v == null) return null;
           if (typeof v === 'object') return Array.isArray(v)
             ? { __array_len: v.length, __first: v[0] && typeof v[0] === 'object' ? Object.keys(v[0]) : v[0] }
-            : { __keys: Object.keys(v), __sample: Object.fromEntries(Object.entries(v).slice(0, 8).map(([k, val]) => [k, (val && typeof val === 'object') ? '(obj)' : String(val).slice(0, 30)])) };
+            : { __keys: Object.keys(v), __sample: Object.fromEntries(Object.entries(v).slice(0, 10).map(([k, val]) => [k, (val && typeof val === 'object') ? '(obj)' : String(val).slice(0, 30)])) };
           return String(v).slice(0, 40);
         };
         const li = detail && Array.isArray(detail.lineItems) ? detail.lineItems
           : (detail && Array.isArray(detail.billLineItems) ? detail.billLineItems : []);
         out.detail = {
           bill_id: billId,
-          detail_status: dResp.status,
+          ms: Date.now() - td,
+          detail_status: d.status,
           top_keys: detail ? Object.keys(detail) : null,
+          detail_first_400: !detail ? d.t.slice(0, 400) : undefined,
           line_item_count: li.length,
           line_items: li.slice(0, 2).map(item => ({
             keys: Object.keys(item),
@@ -3096,10 +3092,9 @@ app.get('/api/billcom/_inspect/:entity_id', auth, requireEntityAccess('entity_id
           })),
         };
       }
-    } catch (e2) { out.detail = { error: e2.name + ': ' + e2.message }; }
+    } catch (e2) { out.detail = { error: e2.message }; }
   } catch (e) {
-    clearTimeout(timer);
-    out.bills_call = { ms: Date.now() - t0, error: e.name + ': ' + e.message };
+    out.bills_call = { ms: Date.now() - t0, error: e.message };
   }
   res.json(out);
 });
