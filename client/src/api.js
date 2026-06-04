@@ -97,6 +97,19 @@ export const api = {
     if (opts.close_pl_before) p.push('close_pl_before=' + opts.close_pl_before);
     return request('/entities/' + eid + '/balances' + (p.length ? '?' + p.join('&') : ''));
   },
+  getClasses: (eid) => request('/entities/' + eid + '/classes'),
+  getLocations: (eid) => request('/entities/' + eid + '/locations'),
+  setLocationKind: (eid, id, kind) => request('/entities/' + eid + '/locations/' + id, { method: 'PATCH', body: { kind } }),
+  setClassKind: (eid, id, kind) => request('/entities/' + eid + '/classes/' + id, { method: 'PATCH', body: { kind } }),
+  getDimensionBalances: (eid, opts = {}) => {
+    const p = [];
+    if (opts.dim) p.push('dim=' + opts.dim);
+    if (opts.accounts) p.push('accounts=' + encodeURIComponent(opts.accounts));
+    if (opts.account_prefix) p.push('account_prefix=' + encodeURIComponent(opts.account_prefix));
+    if (opts.kind) p.push('kind=' + encodeURIComponent(opts.kind));
+    if (opts.as_of) p.push('as_of=' + opts.as_of);
+    return request('/entities/' + eid + '/dimension-balances' + (p.length ? '?' + p.join('&') : ''));
+  },
   getSummary: () => request('/summary'),
 
   // Bank Transactions

@@ -363,6 +363,37 @@ if (!jlCols.includes('description')) {
   db.exec("ALTER TABLE journal_lines ADD COLUMN description TEXT DEFAULT ''");
   console.log('[db migrate] journal_lines.description added');
 }
+// Analytical dimensions on journal lines: class (e.g. investor tracking) and
+// location (e.g. deal/asset on which pre-deal costs are capitalized). Both are
+// normalized master tables scoped per entity, referenced by nullable FKs on
+// journal_lines. Dimensions are LINE attributes, never JE grouping keys, so a
+// single balanced JE may carry many different investors/deals across its lines.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS dim_classes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    kind TEXT DEFAULT 'investor',
+    UNIQUE(entity_id, name)
+  );
+  CREATE TABLE IF NOT EXISTS dim_locations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    kind TEXT DEFAULT '',
+    UNIQUE(entity_id, name)
+  );
+`);
+if (!jlCols.includes('class_id')) {
+  db.exec("ALTER TABLE journal_lines ADD COLUMN class_id INTEGER");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_jl_class ON journal_lines(class_id)");
+  console.log('[db migrate] journal_lines.class_id added');
+}
+if (!jlCols.includes('location_id')) {
+  db.exec("ALTER TABLE journal_lines ADD COLUMN location_id INTEGER");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_jl_location ON journal_lines(location_id)");
+  console.log('[db migrate] journal_lines.location_id added');
+}
 // turnkey_project_map redesigned: no longer stores per-project account codes
 // (single COA on the company entity now). We add cl_entity_id linking to the
 // COMPANY entity (same for all projects). Keep existing rows on upgrade.
@@ -1123,13 +1154,16 @@ function glAutoMap(columns, rows) {
   const memo     = push(find(['memo', 'note', 'notes', 'reference detail'], used));
   const ref      = push(find(['reference', 'ref', 'document number', 'doc number', 'doc #', 'entry number', 'journal number', 'transaction number', 'num', 'voucher'], used));
   const running  = push(find(['running balance', 'balance', 'ending balance', 'cumulative'], used));
+  // Analytical dimensions: class (investor) and location (deal/asset).
+  const klass    = push(find(['item class', 'class', 'investor'], used));
+  const location = push(find(['location', 'deal', 'property', 'asset'], used));
   // Detect a fused code+name column when no separate name was found.
   let fused = false, fusedCol = null;
   if (acctNum) {
     const vals = rows.map(r => r[acctNum]);
     if (!acctName && looksFused(vals)) { fused = true; fusedCol = acctNum; }
   }
-  return { account_number: acctNum, account_name: acctName, transaction_date: date, description: desc, memo, debit, credit, reference: ref, running_balance: running, fused, fused_column: fusedCol };
+  return { account_number: acctNum, account_name: acctName, transaction_date: date, description: desc, memo, debit, credit, reference: ref, running_balance: running, class: klass, location, fused, fused_column: fusedCol };
 }
 
 app.post('/api/entities/:eid/import-gl/preview', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), memUpload.single('file'), (req, res) => {
@@ -1178,6 +1212,8 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
     // Parse each row into a normalized line.
     const parsedLines = [];
     const acctNames = new Map(); // code -> name
+    const classNames = new Set();    // distinct class values encountered
+    const locationNames = new Set(); // distinct location values encountered
     let skipped = 0;
     for (const row of rows) {
       let code, name;
@@ -1189,6 +1225,13 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
       } else {
         code = String(row[m.account_number] || '').trim();
         name = String(row[m.account_name] || '').trim();
+        // Fallback: some exports leave the account-number cell blank but carry a
+        // fused "code name" in the account-name column (e.g. "551100 Expense").
+        // Recover the code/name from there so the line isn't dropped.
+        if (!code && name) {
+          const sp = splitCodeName(name);
+          if (sp) { code = sp.code; name = sp.name; }
+        }
       }
       if (!code) { skipped++; continue; }
       const date = isoDate(row[m.transaction_date]);
@@ -1202,9 +1245,13 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
       const description = descParts.join(' — ');
       const ref = m.reference ? String(row[m.reference] || '').trim() : '';
       const running = m.running_balance ? GL_NUM(row[m.running_balance]) : null;
+      const className = m.class ? String(row[m.class] || '').trim() : '';
+      const locationName = m.location ? String(row[m.location] || '').trim() : '';
+      if (className) classNames.add(className);
+      if (locationName) locationNames.add(locationName);
       if (name && !acctNames.has(code)) acctNames.set(code, name);
       else if (!acctNames.has(code)) acctNames.set(code, '');
-      parsedLines.push({ code, date, dr, cr, description, ref, running });
+      parsedLines.push({ code, date, dr, cr, description, ref, running, className, locationName });
     }
 
     if (!parsedLines.length) return res.status(400).json({ error: 'No valid transaction rows found. Check your column mapping and that amounts are numeric.' });
@@ -1291,7 +1338,24 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
       }
 
       const insJE = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)');
-      const insLine = db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description) VALUES (?,?,?,?,?)');
+      const insLine = db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, class_id, location_id) VALUES (?,?,?,?,?,?,?)');
+
+      // Resolve analytical dimensions: upsert each distinct class/location for this
+      // entity and build name->id maps. Dimensions accumulate (unique per name), so
+      // re-imports reuse existing ids rather than duplicating.
+      const classId = new Map();
+      const locationId = new Map();
+      if (classNames.size) {
+        const insClass = db.prepare("INSERT OR IGNORE INTO dim_classes (entity_id, name, kind) VALUES (?, ?, 'investor')");
+        const getClass = db.prepare('SELECT id FROM dim_classes WHERE entity_id = ? AND name = ?');
+        for (const nm of classNames) { insClass.run(eid, nm); classId.set(nm, getClass.get(eid, nm).id); }
+      }
+      if (locationNames.size) {
+        const insLoc = db.prepare("INSERT OR IGNORE INTO dim_locations (entity_id, name, kind) VALUES (?, ?, '')");
+        const getLoc = db.prepare('SELECT id FROM dim_locations WHERE entity_id = ? AND name = ?');
+        for (const nm of locationNames) { insLoc.run(eid, nm); locationId.set(nm, getLoc.get(eid, nm).id); }
+      }
+
       let entryNum = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(eid).m || 0);
       let jeCount = 0, lineCount = 0, totalDr = 0, totalCr = 0;
 
@@ -1306,12 +1370,14 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
         const jeDate = g.date;
         const r = insJE.run(eid, entryNum, jeDate, memo, req.user.name || req.user.email);
         for (const l of g.lines) {
-          insLine.run(r.lastInsertRowid, l.code, l.dr, l.cr, l.description);
+          insLine.run(r.lastInsertRowid, l.code, l.dr, l.cr, l.description,
+            l.className ? (classId.get(l.className) || null) : null,
+            l.locationName ? (locationId.get(l.locationName) || null) : null);
           lineCount++; totalDr += l.dr; totalCr += l.cr;
         }
         jeCount++;
       }
-      return { jeCount, lineCount, totalDr, totalCr, accounts: acctNames.size };
+      return { jeCount, lineCount, totalDr, totalCr, accounts: acctNames.size, classes: classNames.size, locations: locationNames.size };
     })();
 
     res.json({
@@ -1320,6 +1386,8 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
       entries_created: result.jeCount,
       lines_imported: result.lineCount,
       accounts_imported: result.accounts,
+      classes_imported: result.classes,
+      locations_imported: result.locations,
       rows_skipped: skipped,
       total_debit: +result.totalDr.toFixed(2),
       total_credit: +result.totalCr.toFixed(2),
@@ -1333,6 +1401,77 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
 
 // ═══ Accounts ═══
 app.get('/api/entities/:eid/accounts', auth, requireEntityAccess(), (req, res) => res.json(db.prepare('SELECT * FROM accounts WHERE entity_id = ? ORDER BY code').all(req.params.eid)));
+
+// === Analytical dimensions (class = investor, location = deal/asset) ===
+// List dimension values with how many lines reference each.
+app.get('/api/entities/:eid/classes', auth, requireEntityAccess(), (req, res) =>
+  res.json(db.prepare(`SELECT c.id, c.name, c.kind, COUNT(jl.id) AS line_count
+    FROM dim_classes c LEFT JOIN journal_lines jl ON jl.class_id = c.id
+    WHERE c.entity_id = ? GROUP BY c.id ORDER BY c.name`).all(req.params.eid)));
+
+app.get('/api/entities/:eid/locations', auth, requireEntityAccess(), (req, res) =>
+  res.json(db.prepare(`SELECT l.id, l.name, l.kind, COUNT(jl.id) AS line_count
+    FROM dim_locations l LEFT JOIN journal_lines jl ON jl.location_id = l.id
+    WHERE l.entity_id = ? GROUP BY l.id ORDER BY l.name`).all(req.params.eid)));
+
+// Tag a location's kind (e.g. 'deal' vs 'capital_activity') so deal reports can filter.
+app.patch('/api/entities/:eid/locations/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const { kind } = req.body;
+  db.prepare('UPDATE dim_locations SET kind = ? WHERE id = ? AND entity_id = ?').run(kind || '', req.params.id, req.params.eid);
+  res.json({ success: true });
+});
+app.patch('/api/entities/:eid/classes/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const { kind } = req.body;
+  db.prepare('UPDATE dim_classes SET kind = ? WHERE id = ? AND entity_id = ?').run(kind || 'investor', req.params.id, req.params.eid);
+  res.json({ success: true });
+});
+
+// Dimension balance report: net (debit-credit) per dimension value, optionally
+// restricted to a set of account codes and/or as-of date. Used for
+// "capitalized deal cost by location" (accounts=investment accts, dim=location)
+// and investor-level balances (dim=class). Query params:
+//   dim=class|location (default location)
+//   accounts=120100,120200 (comma list; omit for all accounts)
+//   account_prefix=120 (alternative to accounts; matches code prefix)
+//   kind=deal (restrict to dimension values of this kind)
+//   as_of=YYYY-MM-DD (entries on/before this date)
+app.get('/api/entities/:eid/dimension-balances', auth, requireEntityAccess(), (req, res) => {
+  const eid = req.params.eid;
+  const dim = req.query.dim === 'class' ? 'class' : 'location';
+  const dimTable = dim === 'class' ? 'dim_classes' : 'dim_locations';
+  const dimCol = dim === 'class' ? 'class_id' : 'location_id';
+  const params = [eid];
+  let acctClause = '';
+  if (req.query.accounts) {
+    const codes = String(req.query.accounts).split(',').map(s => s.trim()).filter(Boolean);
+    if (codes.length) { acctClause = ` AND jl.account_code IN (${codes.map(() => '?').join(',')})`; params.push(...codes); }
+  } else if (req.query.account_prefix) {
+    acctClause = ' AND jl.account_code LIKE ?'; params.push(String(req.query.account_prefix) + '%');
+  }
+  let dateClause = '';
+  if (req.query.as_of) { dateClause = ' AND je.date <= ?'; params.push(req.query.as_of); }
+  let kindClause = '';
+  if (req.query.kind) { kindClause = ' AND d.kind = ?'; params.push(req.query.kind); }
+  const rows = db.prepare(`
+    SELECT d.id, d.name, d.kind,
+           SUM(jl.debit) AS total_debit, SUM(jl.credit) AS total_credit,
+           SUM(jl.debit - jl.credit) AS net, COUNT(jl.id) AS line_count
+    FROM journal_lines jl
+    JOIN journal_entries je ON jl.entry_id = je.id
+    JOIN ${dimTable} d ON d.id = jl.${dimCol}
+    WHERE je.entity_id = ?${acctClause}${dateClause}${kindClause}
+    GROUP BY d.id ORDER BY net DESC
+  `).all(...params);
+  const total = rows.reduce((s, r) => s + (r.net || 0), 0);
+  res.json({
+    dimension: dim,
+    rows: rows.map(r => ({ id: r.id, name: r.name, kind: r.kind,
+      total_debit: +(r.total_debit || 0).toFixed(2), total_credit: +(r.total_credit || 0).toFixed(2),
+      net: +(r.net || 0).toFixed(2), line_count: r.line_count })),
+    total_net: +total.toFixed(2),
+  });
+});
+
 app.post('/api/entities/:eid/accounts', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { code, name, type, subtype, bank_acct } = req.body; if (!code||!name||!type) return res.status(400).json({ error: 'Required' });
   try { const r = db.prepare('INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct) VALUES (?, ?, ?, ?, ?, ?)').run(req.params.eid, code, name, type, subtype||'', bank_acct?1:0);
@@ -1392,7 +1531,7 @@ app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole(
   const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id=?').get(req.params.eid).m||0)+1;
   const result = db.transaction(() => {
     const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)').run(req.params.eid, num, date, memo, req.user.name);
-    for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id) VALUES (?,?,?,?,?,?)').run(r.lastInsertRowid, l.account_code, l.debit||0, l.credit||0, l.description||'', l.project_id||null);
+    for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?,?)').run(r.lastInsertRowid, l.account_code, l.debit||0, l.credit||0, l.description||'', l.project_id||null, l.class_id||null, l.location_id||null);
     return r.lastInsertRowid;
   })();
   res.json({ id: result, entry_num: num });
@@ -1417,7 +1556,7 @@ app.put('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requireRo
     db.prepare("UPDATE journal_entries SET date=?, memo=?, updated_by=?, updated_at=datetime('now') WHERE id=?")
       .run(date, memo, req.user.name || req.user.email, req.params.id);
     db.prepare('DELETE FROM journal_lines WHERE entry_id=?').run(req.params.id);
-    for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id) VALUES (?,?,?,?,?,?)').run(req.params.id, l.account_code, l.debit || 0, l.credit || 0, l.description || '', l.project_id || null);
+    for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?,?)').run(req.params.id, l.account_code, l.debit || 0, l.credit || 0, l.description || '', l.project_id || null, l.class_id || null, l.location_id || null);
   })();
   res.json({ success: true, entry_num: entry.entry_num });
 });
