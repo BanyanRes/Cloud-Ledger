@@ -3137,6 +3137,15 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       result.bills.details.push({ id: billId, status: 'skip', reason: 'already synced' });
       continue;
     }
+    // Cheap cutoff check on the list object's date (avoids an expensive detail
+    // fetch for the many pre-cutoff bills). A detail-based check below is the
+    // safety net for when the list omits a date.
+    const listDate = pick(bill, 'invoiceDate', 'invoice_date', 'dueDate') || pick(pick(bill, 'invoice') || {}, 'invoiceDate', 'invoice_date');
+    if (listDate && String(listDate) < cutoffDate) {
+      result.bills.skipped++;
+      result.bills.details.push({ id: billId, status: 'skip', reason: 'before cutoff ' + cutoffDate + ' (date ' + listDate + ')' });
+      continue;
+    }
     // Bounded work: stop starting new bills once the per-run budget or time
     // deadline is hit. Remaining bills are picked up on the next sync run.
     if (billsProcessed >= maxBills || Date.now() > deadline) {
