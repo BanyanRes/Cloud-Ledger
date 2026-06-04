@@ -69,8 +69,16 @@ function readRowCells(ws, r) {
       // present so the row survives the round-trip even before LibreOffice
       // recalc runs.
       const v = c.value;
-      const result = (v && typeof v === 'object' && 'result' in v) ? v.result : undefined;
-      return result === undefined ? { formula: fm } : { formula: fm, result };
+      let result = (v && typeof v === 'object' && 'result' in v) ? v.result : undefined;
+      // If the source cell never carried a cached result but the formula is
+      // self-contained literal arithmetic, compute and stamp the result now.
+      // This makes the recovered amount (e.g. 81.77) durable in the folded
+      // workbook instead of having to be re-derived on every subsequent read.
+      if (result === undefined || result === null) {
+        const computed = cellNum(c);
+        if (computed != null) result = computed;
+      }
+      return (result === undefined || result === null) ? { formula: fm } : { formula: fm, result };
     }
     return c.value;
   };

@@ -26,12 +26,96 @@
 const TOL = 0.01; // dollar tolerance for float/rounding noise
 
 // ----- cell helpers ---------------------------------------------------------
+// Safe evaluator for self-contained arithmetic formulas (e.g. a manual invoice
+// split like "5532.77-5451"). Accepts ONLY numeric literals and + - * / ( ) —
+// no cell references, no function calls, no names. Returns a number, or null
+// when the formula is anything other than pure literal arithmetic. We never run
+// untrusted workbook text through eval/Function; this is a hand-written
+// tokenizer + shunting-yard evaluator whose grammar physically cannot reach a
+// cell reference or function call.
+function evalLiteralArithmetic(formula) {
+  if (typeof formula !== 'string') return null;
+  let s = formula.trim();
+  if (s[0] === '=') s = s.slice(1).trim();
+  if (s === '') return null;
+  // Reject anything that isn't digits, dot, the four operators, parens, or space.
+  // A letter, '!', ':', '$', or ',' means a ref/function/range — bail out.
+  if (!/^[0-9.+\-*/() \t]+$/.test(s)) return null;
+
+  const tokens = s.match(/\d+\.?\d*|\.\d+|[+\-*/()]/g);
+  if (!tokens || tokens.join('') !== s.replace(/[ \t]/g, '')) return null;
+
+  const prec = { '+': 1, '-': 1, '*': 2, '/': 2 };
+  const out = [];      // output queue (RPN)
+  const ops = [];      // operator stack
+  let prevType = null; // 'num' | 'op' | '(' | ')'  — to detect unary minus
+  for (const t of tokens) {
+    if (/^[0-9.]/.test(t)) {
+      const n = Number(t);
+      if (!isFinite(n)) return null;
+      out.push(n);
+      prevType = 'num';
+    } else if (t === '(') {
+      ops.push(t);
+      prevType = '(';
+    } else if (t === ')') {
+      while (ops.length && ops[ops.length - 1] !== '(') out.push(ops.pop());
+      if (!ops.length) return null; // unbalanced
+      ops.pop(); // discard '('
+      prevType = ')';
+    } else {
+      // operator: treat leading/post-operator/post-'(' minus as unary (0 - x)
+      if (t === '-' && (prevType === null || prevType === 'op' || prevType === '(')) {
+        out.push(0);
+      } else if (prevType === null || prevType === 'op' || prevType === '(') {
+        return null; // a binary op with no left operand (e.g. "*5") is malformed
+      }
+      while (ops.length && ops[ops.length - 1] !== '(' && prec[ops[ops.length - 1]] >= prec[t]) {
+        out.push(ops.pop());
+      }
+      ops.push(t);
+      prevType = 'op';
+    }
+  }
+  while (ops.length) { const op = ops.pop(); if (op === '(') return null; out.push(op); }
+
+  const st = [];
+  for (const tok of out) {
+    if (typeof tok === 'number') { st.push(tok); continue; }
+    const b = st.pop(), a = st.pop();
+    if (a === undefined || b === undefined) return null;
+    let r;
+    if (tok === '+') r = a + b;
+    else if (tok === '-') r = a - b;
+    else if (tok === '*') r = a * b;
+    else if (tok === '/') { if (b === 0) return null; r = a / b; }
+    else return null;
+    st.push(r);
+  }
+  if (st.length !== 1 || !isFinite(st[0])) return null;
+  return st[0];
+}
+
 // exceljs: plain cell -> .value is the value; formula cell -> .value is
-// { formula, result }. Pull a number out of either shape.
+// { formula, result }. Pull a number out of either shape. When a formula cell
+// has no cached result (workbook saved without a recalc), fall back to
+// evaluating it IF it is self-contained literal arithmetic — this rescues
+// manual invoice-split rows (e.g. "5532.77-5451" = 81.77) that would otherwise
+// read as null and silently drop their amount from A1/A2 totals. Formulas that
+// reference other cells/sheets still return null and are handled by the
+// count-but-zero defensive branches downstream.
 function cellNum(cell) {
   if (!cell) return null;
   let v = cell.value;
-  if (v && typeof v === 'object' && 'result' in v) v = v.result;
+  if (v && typeof v === 'object' && 'formula' in v) {
+    if ('result' in v && v.result !== undefined && v.result !== null) {
+      v = v.result;
+    } else {
+      return evalLiteralArithmetic(v.formula);
+    }
+  } else if (v && typeof v === 'object' && 'result' in v) {
+    v = v.result;
+  }
   if (typeof v === 'number') return v;
   if (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) return Number(v);
   return null;
