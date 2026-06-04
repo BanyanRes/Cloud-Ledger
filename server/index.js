@@ -2995,6 +2995,39 @@ app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id
   res.json({ logs: rows });
 });
 
+// TEMP DIAGNOSTIC (remove after invoice-coding spreadsheet is produced): fetch
+// vendor/date/amount for a list of bill ids. Read-only, bounded per request.
+app.post('/api/billcom/_billinfo/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const ids = Array.isArray(req.body && req.body.ids) ? req.body.ids : [];
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(eid);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
+  let session, devKey;
+  try {
+    const pw = billcomDecrypt(cfg.password_enc);
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password: pw, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
+  const listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+  const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
+  const out = [];
+  for (const id of ids.slice(0, 50)) {
+    try {
+      const d = await billcomGetById({ ...listArgs, resourcePath: '/bills', id: String(id) });
+      const inv = pick(d, 'invoice') || {};
+      out.push({
+        id: String(id),
+        vendor: pick(d, 'vendorName') || pick(d, 'vendorId') || '',
+        invoice_number: pick(inv, 'invoiceNumber') || pick(d, 'invoiceNumber') || '',
+        invoice_date: pick(inv, 'invoiceDate') || pick(d, 'invoiceDate') || pick(d, 'dueDate') || '',
+        amount: pick(d, 'amount') != null ? Number(pick(d, 'amount')) : null,
+        description: pick(d, 'description') || '',
+      });
+    } catch (e) { out.push({ id: String(id), error: e.message }); }
+  }
+  res.json({ bills: out });
+});
+
 app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
