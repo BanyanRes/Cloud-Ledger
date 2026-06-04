@@ -2776,10 +2776,15 @@ app.post('/api/billcom/dimension-maps/:entity_id/auto', auth, requireEntityAcces
   const result = { classes: { matched: [], unmatched: [] }, locations: { matched: [], unmatched: [] } };
 
   const tx = db.transaction(() => {
+    // Workflow-status classes are not investors. Skip them even when CL happens
+    // to have a same-named class, so re-running /auto never re-pollutes the map.
+    const WORKFLOW_CLASS_NAMES = new Set(['pay', 'hold', 'already paid', 'paid', 'on hold']);
     db.prepare('DELETE FROM billcom_class_map WHERE entity_id = ?').run(eid);
     const insC = db.prepare('INSERT INTO billcom_class_map (entity_id, billcom_class_id, billcom_class_name, cl_class_id, created_at) VALUES (?,?,?,?,?)');
     for (const c of bcClasses) {
-      const nm = nameOf(c); const clId = clClassByName.get(norm(nm));
+      const nm = nameOf(c);
+      if (WORKFLOW_CLASS_NAMES.has(norm(nm))) { result.classes.unmatched.push({ billcom_class_id: idOf(c), name: nm, skipped: 'workflow status' }); continue; }
+      const clId = clClassByName.get(norm(nm));
       if (clId) { insC.run(eid, idOf(c), nm, clId, now); result.classes.matched.push({ billcom: nm, cl_class_id: clId }); }
       else result.classes.unmatched.push({ billcom_class_id: idOf(c), name: nm });
     }
