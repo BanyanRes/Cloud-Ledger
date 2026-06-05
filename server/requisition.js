@@ -25,7 +25,7 @@ function normVendor(v) {
   if (!v) return '';
   let s = String(v).toLowerCase();
   s = s.replace(/[.,]/g, '');
-  s = s.replace(/\b(llc|inc|company|co|corp|corporation|ltd|lp|llp|the)\b/g, '');
+  s = s.replace(/\b(pllc|pllp|llp|llc|pc|pa|inc|incorporated|company|co|corp|corporation|ltd|limited|lp|the)\b/g, '');
   s = s.replace(/\s+/g, ' ').trim();
   return s;
 }
