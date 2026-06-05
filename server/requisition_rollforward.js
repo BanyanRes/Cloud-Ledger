@@ -378,11 +378,16 @@ function rollForward(workbook, newCurrent, meta = {}) {
   // 4. Re-point absolute references by label (never by tracked row number).
   repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks });
 
+  // 4b. Roll the B2A contingency columns forward: this period's "Current"
+  //     (col F) folds into next period's "Previous" (col E), then F clears to 0.
+  //     Subtotal/total rows are left to recompute from the updated data cells.
+  const contingency = rollForwardContingency(b2a);
+
   // 5. Update titles (date / requisition number).
   if (meta.asOfDate && b2a.getCell('L1')) b2a.getCell('L1').value = meta.asOfDate;
   if (meta.reqNumber && b2a.getCell('B4')) b2a.getCell('B4').value = 'Requistion Report # ' + meta.reqNumber;
 
-  return { landmarks, devFee: devFeeInfo };
+  return { landmarks, devFee: devFeeInfo, contingency };
 }
 
 // Write the new period invoices into the Current Log, grouped by cost code with
@@ -425,7 +430,90 @@ function replaceCurrentLog(ws, rows, meta) {
   ws.getCell(gtRow, COL.name).value = 'Grand Total';
   ws.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,I3:I${gtRow - 1})` };
   ws.getRow(gtRow).height = DATA_ROW_HEIGHT;
+
+  // Per request, the Current Invoice Log carries NO bold anywhere — header,
+  // data, subtotal, or grand-total. exceljs preserves the template cell's font
+  // when only .value is rewritten, so the prior workbook's bold survives into
+  // the new sheet; strip it explicitly across every cell that has a font.
+  stripBold(ws);
 }
+
+// Remove bold from every cell on a worksheet, preserving all other font
+// attributes (name, size, color, italic, etc.). exceljs fonts are plain objects
+// but must be reassigned as a whole to take effect — mutating cell.font.bold in
+// place does not persist — so we spread the existing font into a new object.
+function stripBold(ws) {
+  if (!ws) return;
+  ws.eachRow({ includeEmpty: true }, (row) => {
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      const f = cell.font;
+      if (f && f.bold) cell.font = { ...f, bold: false };
+    });
+  });
+}
+//
+// On the B2A sheet, column E ("Previous Contingency" / prior "Funding &
+// Reallocation") is the cumulative prior-period figure and column F ("Current
+// Contingency" / this-period "Funding & Reallocation") is the activity that
+// happened in the period just closed. Rolling forward to the next requisition
+// means last period's CURRENT becomes next period's PREVIOUS: for every data
+// row, E := E + F, and F is then cleared to 0 so the new period starts empty.
+//
+// Only DATA rows are touched. Subtotal / total rows (E or F is a SUM(...) or any
+// cross-cell formula such as "=E12+E22+E43+E45") are LEFT ALONE — they recompute
+// from the updated data cells, and rewriting them would corrupt the schedule.
+// A row qualifies only when BOTH E and F are literal values (plain number or
+// self-contained literal arithmetic like "=140716.49+327097.19"); cellNum
+// returns null for any cell-referencing formula, which is exactly the subtotal
+// guard we want. Rows where F is empty/zero are skipped (no movement to fold in).
+//
+// E's audit trail is preserved: if E was a literal-arithmetic formula, F is
+// appended as another additive term (e.g. "=24182.71+48139.68" + F 9160 ->
+// "=24182.71+48139.68+9160") rather than collapsing it to a single number. A
+// plain-number E becomes the numeric sum. A seeded `result` keeps the value
+// readable without a spreadsheet recalc (prod has no LibreOffice).
+function rollForwardContingency(b2a) {
+  if (!b2a) return { moved: 0 };
+  const COL_E = 5, COL_F = 6;
+  let moved = 0;
+  const last = Math.max(b2a.rowCount || 0, b2a.actualRowCount || 0);
+  for (let r = 3; r <= last; r++) {
+    const eCell = b2a.getCell(r, COL_E);
+    const fCell = b2a.getCell(r, COL_F);
+
+    // Skip subtotal/total rows: any cell-referencing formula in E or F makes
+    // cellNum return null. (Literal-arithmetic formulas DO resolve, so genuine
+    // data rows like "=140716.49+327097.19" are still handled.)
+    const eIsRefFormula = !!cellFormula(eCell) && cellNum(eCell) == null;
+    const fIsRefFormula = !!cellFormula(fCell) && cellNum(fCell) == null;
+    if (eIsRefFormula || fIsRefFormula) continue;
+
+    const fVal = cellNum(fCell);
+    if (fVal == null || fVal === 0) continue; // nothing to fold in this row
+
+    const eFormula = cellFormula(eCell); // literal-arithmetic formula, or null
+    const eVal = cellNum(eCell) || 0;
+    const newE = round2(eVal + fVal);
+
+    if (eFormula) {
+      // Preserve the existing additive breakdown; append F as another term so
+      // the worksheet still shows where each dollar came from.
+      let body = eFormula.trim();
+      if (body[0] === '=') body = body.slice(1);
+      const term = fVal < 0 ? `-${Math.abs(fVal)}` : `+${fVal}`;
+      eCell.value = { formula: body + term, result: newE };
+    } else {
+      eCell.value = newE;
+    }
+
+    // Clear the current-period column (keep it numeric 0, matching the sheet's
+    // existing convention where untouched current cells are 0, not blank).
+    fCell.value = 0;
+    moved++;
+  }
+  return { moved };
+}
+function round2(n) { return Math.round(n * 100) / 100; }
 
 // Re-point the cross-sheet absolute references that the roll-forward affects.
 // Each is resolved by LABEL against the freshly written sheets, so a shift in

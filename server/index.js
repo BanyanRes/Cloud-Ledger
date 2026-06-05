@@ -3742,34 +3742,65 @@ app.post('/api/requisition/:entity_id/read-invoice', ...reqGuards(), requireRole
 });
 
 // Build the rolled-forward output filename from the prior workbook's name,
-// bumping the requisition number (#N -> #N+1, or to the supplied reqNumber) and
-// the embedded date to the As-of Date (preserving the original date's format:
-// separator and 2- vs 4-digit year). Returns a safe generic name if the prior
-// filename has no recognizable "#<num>" token to anchor on.
+// bumping the requisition number and the embedded date to the As-of Date while
+// preserving the prior name's exact shape. Two requisition-number conventions
+// are supported, anchored so we never touch the leading document code digits:
+//   1. A hash token   "...Report #11 01.31.2026.xlsx"   (#<num>)
+//   2. An underscore-separated token after the word "Report", as produced by
+//      the Workpapers save + manual exports:
+//        "0005_B1_County_Line_SRN_Requisition_Report__11_01_31_2026.xlsx"
+//      i.e. "Report" + "_"(x1-2) + <reqNum> + "_" + <date>. The plain "#"-less
+//      digit run is why the old #-only matcher fell through to the generic
+//      fallback for these names.
+// The embedded date is matched with the same separator used in the prior name
+// (".", "/", "-", or "_") and the same 2- vs 4-digit year width.
+// Returns a safe generic name only if no requisition-number anchor is found.
 function buildRollforwardFilename(originalName, reqNumber, asOfDate) {
   const fallback = 'Requisition_Report' + (reqNumber ? '_' + String(reqNumber) : '') + '.xlsx';
   if (!originalName || typeof originalName !== 'string') return fallback;
   let base = originalName.replace(/\.[^.]+$/, '');// strip extension
-  const numRe = /#\s*(\d+)/;
-  if (!numRe.test(base)) return fallback;// no req-number anchor -> don't guess
-  // Replace the requisition number.
-  if (reqNumber != null && reqNumber !== '') {
-    base = base.replace(numRe, '#' + String(reqNumber));
-  }
-  // Replace an embedded date (MM.DD.YYYY or MM.DD.YY, also / or - separators)
-  // with the As-of Date, matching the original's separator and year width.
+
+  // Parse the As-of Date once; used by both conventions below.
+  let mm, dd, yyyy;
   if (asOfDate) {
     const d = new Date(asOfDate + 'T00:00:00');
     if (!isNaN(d)) {
-      const mm = String(d.getMonth() + 1).padStart(2, '0');
-      const dd = String(d.getDate()).padStart(2, '0');
-      const yyyy = String(d.getFullYear());
-      const dateRe = /(\d{1,2})([.\/-])(\d{1,2})\2(\d{4}|\d{2})(?!\d)/;
-      base = base.replace(dateRe, (m, _mo, sep, _da, yr) => {
-        const year = yr.length === 2 ? yyyy.slice(-2) : yyyy;
-        return mm + sep + dd + sep + year;
-      });
+      mm = String(d.getMonth() + 1).padStart(2, '0');
+      dd = String(d.getDate()).padStart(2, '0');
+      yyyy = String(d.getFullYear());
     }
+  }
+  const setReq = reqNumber != null && reqNumber !== '';
+
+  // Convention 2 (underscore form) FIRST, matched as ONE token so the req number
+  // and the date can never be confused for one another:
+  //   "Report" + "_"(x1-2) + <req> + "_" + MM + "_" + DD + "_" + YYYY|YY
+  // Matching the whole run lets us rewrite req + date together and is why the
+  // prior #-only matcher (which left this form untouched) produced the wrong name.
+  const underBlockRe = /(Report_+)(\d+)_(\d{1,2})_(\d{1,2})_(\d{4}|\d{2})(?!\d)/i;
+  const um = base.match(underBlockRe);
+  if (um) {
+    const pfx = um[1];
+    const req = setReq ? String(reqNumber) : um[2];
+    let newDate = um[3] + '_' + um[4] + '_' + um[5];
+    if (mm) {
+      const yr = um[5].length === 2 ? yyyy.slice(-2) : yyyy;
+      newDate = mm + '_' + dd + '_' + yr;
+    }
+    base = base.replace(underBlockRe, pfx + req + '_' + newDate);
+    return base + '.xlsx';
+  }
+
+  // Convention 1 (hash form): bump "#<num>" then the dotted/slashed/dashed date.
+  const hashRe = /#\s*(\d+)/;
+  if (!hashRe.test(base)) return fallback; // no anchor of either kind -> don't guess
+  if (setReq) base = base.replace(hashRe, '#' + String(reqNumber));
+  if (mm) {
+    const dateRe = /(\d{1,2})([.\/-])(\d{1,2})\2(\d{4}|\d{2})(?!\d)/;
+    base = base.replace(dateRe, (m, _mo, sep, _da, yr) => {
+      const year = yr.length === 2 ? yyyy.slice(-2) : yyyy;
+      return mm + sep + dd + sep + year;
+    });
   }
   return base + '.xlsx';
 }
@@ -3942,6 +3973,13 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
       if (saved.errors && saved.errors.length) console.error('requisition workpaper save:', saved.errors.join('; '));
       res.setHeader('X-Workpaper-Folder', saved.folder || '');
       res.setHeader('X-Workpaper-Saved', JSON.stringify({ workbook: !!saved.workbook, packet: !!saved.packet }));
+      // Expose the saved invoice-packet PDF's entity-file id + name so the client
+      // can download the packet into the user's Downloads folder alongside the
+      // workbook (the packet is also retained in Workpapers via this same id).
+      if (saved.packet && saved.packet.id) {
+        res.setHeader('X-Packet-File-Id', String(saved.packet.id));
+        res.setHeader('X-Packet-File-Name', String(saved.packet.original_name || 'Invoice Packet.pdf').replace(/[\r\n"]/g, ' '));
+      }
     } catch (e) {
       console.error('requisition workpaper save failed:', e.message);
     }

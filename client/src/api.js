@@ -225,11 +225,15 @@ export const api = {
     let failedChecks = []; try { failedChecks = JSON.parse(res.headers.get('x-reconcile-failed') || '[]'); } catch {}
     const workpaperFolder = res.headers.get('x-workpaper-folder') || '';
     let workpaperSaved = {}; try { workpaperSaved = JSON.parse(res.headers.get('x-workpaper-saved') || '{}'); } catch {}
+    // Invoice-packet PDF saved to Workpapers; its entity-file id lets the client
+    // also download the packet into the user's Downloads folder.
+    const packetFileId = res.headers.get('x-packet-file-id') || '';
+    const packetFileName = res.headers.get('x-packet-file-name') || '';
     const cd = res.headers.get('content-disposition') || '';
     const m = cd.match(/filename="?([^"]+)"?/);
     const filename = m ? m[1] : 'Requisition_Report.xlsx';
     const blob = await res.blob();
-    return { blob, filename, summary, failedChecks, workpaperFolder, workpaperSaved };
+    return { blob, filename, summary, failedChecks, workpaperFolder, workpaperSaved, packetFileId, packetFileName };
   },
 
   setToken, getToken, clearToken,

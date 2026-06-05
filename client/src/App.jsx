@@ -2209,8 +2209,23 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     }));
     setRfBusy(true);setRfErr('');setRfDetail(null);setRfResult(null);
     try{
-      const {blob,filename,summary,failedChecks,workpaperFolder,workpaperSaved}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoices});
+      const {blob,filename,summary,failedChecks,workpaperFolder,workpaperSaved,packetFileId,packetFileName}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoices});
       const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
+      // Also download the invoice-packet PDF into the user's Downloads folder
+      // (it is retained in Workpapers too). Fetch the saved entity-file as a blob
+      // and trigger a second download; a short delay avoids the browser
+      // suppressing the back-to-back download.
+      if(packetFileId){
+        try{
+          const presp=await fetch(api.downloadEntityFile(packetFileId));
+          if(presp.ok){
+            const pblob=await presp.blob();
+            const purl=URL.createObjectURL(pblob);const pa=document.createElement('a');
+            pa.href=purl;pa.download=packetFileName||'Invoice Packet.pdf';
+            document.body.appendChild(pa);setTimeout(()=>{pa.click();pa.remove();URL.revokeObjectURL(purl);},400);
+          }
+        }catch(pe){/* packet download is best-effort; the workbook already downloaded */}
+      }
       // Success: clear the working set (invoices/workbook/req#), keep the result banner.
       setReqState(cur=>({...cur,cards:[],file:null,reqNum:'',detail:null,result:{filename,summary,failedChecks,count:newCurrent.length,workpaperFolder,workpaperSaved}}));
     }catch(e){setRfErr(e.message);if(e.detail)setRfDetail(e.detail);}
