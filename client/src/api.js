@@ -40,7 +40,7 @@ export const api = {
   // Turnkey Rail WIP schedule (in-app report). JWT-authed admin endpoint.
   getTurnkeyWip: (asOf) => request('/admin/turnkey/wip-schedule' + (asOf ? ('?as_of=' + asOf) : '')),
   getTurnkeyProjects: () => request('/admin/turnkey/projects'),
-  createEntity: (name, entity_type) => request('/entities', { method: 'POST', body: entity_type ? { name, entity_type } : { name } }),
+  createEntity: (name, entity_type, display_id) => request('/entities', { method: 'POST', body: { name, ...(entity_type ? { entity_type } : {}), ...(display_id ? { display_id } : {}) } }),
   updateEntity: (id, data) => request('/entities/' + id, { method: 'PUT', body: data }),
   importTrialBalance: (eid, file, asOfDate) => {
     const fd = new FormData();

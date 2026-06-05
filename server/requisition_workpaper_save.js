@@ -226,7 +226,7 @@ function addOutline(doc, marks) {
 // Main entry. Saves the workbook and (if any invoices) the merged packet into
 // the period folder. Best-effort: never throws — returns a result summary so the
 // caller can log it without risking the user's download.
-async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfDate, workbookBuffer, invoices, devFee, who }) {
+async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfDate, workbookBuffer, invoices, devFee, who, packetPrefix }) {
   const result = { folder: null, workbook: null, packet: null, errors: [] };
   try {
     const folderPath = requisitionFolderPath(asOfDate);
@@ -276,9 +276,15 @@ async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfD
 
       const packetBuf = await buildInvoicePacket(packetInvoices);
       if (packetBuf) {
+        // Packet filename: "<entity id / name> Invoice Packet <Month Year>.pdf"
+        // e.g. "0005 B1a County Line SRN Invoice Packet February 2026.pdf".
+        // Falls back to the Req label prefix if no entity prefix was supplied.
+        const { monthName } = periodFolderParts(asOfDate);
+        const prefix = (packetPrefix && String(packetPrefix).trim()) || reqLabel;
+        const packetName = `${prefix} Invoice Packet ${monthName}.pdf`;
         result.packet = saveBufferToWorkpapers(
           db, workpapersDir, eid, folderPath,
-          `${reqLabel} Invoice Packet.pdf`,
+          packetName,
           'application/pdf',
           packetBuf, who
         );

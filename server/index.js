@@ -368,6 +368,12 @@ if (!entCols.includes('entity_type')) {
   db.exec("ALTER TABLE entities ADD COLUMN entity_type TEXT NOT NULL DEFAULT 'accounting'");
   console.log('[db migrate] entities.entity_type added (default accounting)');
 }
+// display_id: short user-facing identifier (e.g. "0005 B1a") used as a filename
+// prefix for requisition invoice packets. Optional; falls back to entity name.
+if (!entCols.includes('display_id')) {
+  db.exec("ALTER TABLE entities ADD COLUMN display_id TEXT");
+  console.log('[db migrate] entities.display_id added');
+}
 
 // Phase 3: default_cash_account on billcom_config (for payment JEs)
 const bcCfgCols = db.prepare("PRAGMA table_info(billcom_config)").all().map(c => c.name);
@@ -899,14 +905,15 @@ app.get('/api/entities', auth, (req, res) => {
 app.post('/api/entities', auth, requireRole('Admin','Accountant'), (req, res) => {
   const { name } = req.body; if (!name) return res.status(400).json({ error: 'Name required' });
   const entityType = ['development','shell'].includes(req.body.entity_type) ? req.body.entity_type : 'accounting';
+  const displayId = (req.body.display_id || '').trim() || null;
   // Auto-generate a code from the name (used internally for sorting/uniqueness)
   const baseCode = name.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8) || 'ENT';
   let code = baseCode; let n = 1;
   while (db.prepare('SELECT id FROM entities WHERE code = ?').get(code)) { code = baseCode + n; n++; }
-  try { const r = db.prepare('INSERT INTO entities (code, name, entity_type) VALUES (?, ?, ?)').run(code, name, entityType); const eid = r.lastInsertRowid;
+  try { const r = db.prepare('INSERT INTO entities (code, name, entity_type, display_id) VALUES (?, ?, ?, ?)').run(code, name, entityType, displayId); const eid = r.lastInsertRowid;
     const ins = db.prepare('INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct) VALUES (?, ?, ?, ?, ?, ?)');
     db.transaction(() => { for (const a of DEFAULT_COA) ins.run(eid, a.code, a.name, a.type, a.subtype, a.bank); })();
-    res.json({ id: eid, code, name, entity_type: entityType }); } catch(e) { throw e; }
+    res.json({ id: eid, code, name, entity_type: entityType, display_id: displayId }); } catch(e) { throw e; }
 });
 // Update an entity (currently: name and/or entity_type)
 app.put('/api/entities/:id', auth, requireRole('Admin','Accountant'), (req, res) => {
@@ -921,8 +928,10 @@ app.put('/api/entities/:id', auth, requireRole('Admin','Accountant'), (req, res)
     if (!['development','accounting','shell'].includes(req.body.entity_type)) return res.status(400).json({ error: 'entity_type must be development, accounting, or shell' });
     entityType = req.body.entity_type;
   }
-  db.prepare('UPDATE entities SET name = ?, entity_type = ? WHERE id = ?').run(name, entityType, id);
-  res.json({ id, code: ent.code, name, entity_type: entityType });
+  let displayId = ent.display_id;
+  if (req.body.display_id !== undefined) displayId = (req.body.display_id || '').trim() || null;
+  db.prepare('UPDATE entities SET name = ?, entity_type = ?, display_id = ? WHERE id = ?').run(name, entityType, displayId, id);
+  res.json({ id, code: ent.code, name, entity_type: entityType, display_id: displayId });
 });
 app.post('/api/entities/bulk', auth, requireRole('Admin','Accountant'), (req, res) => {
   const { entities } = req.body; if (!Array.isArray(entities)) return res.status(400).json({ error: 'Invalid' });
@@ -3681,12 +3690,15 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
         const byId = new Map(fetched.map(r => [r.id, r]));
         invoiceRows = invoiceIds.map(id => byId.get(id)).filter(Boolean);
       }
+      const entRow = db.prepare('SELECT name, display_id FROM entities WHERE id = ?').get(eidInt) || {};
+      const packetPrefix = (entRow.display_id && entRow.display_id.trim()) || entRow.name || '';
       const saved = await saveRequisitionOutputs({
         db, workpapersDir: WORKPAPERS_DIR, eid: eidInt,
         reqNumber: meta.reqNumber, asOfDate: meta.asOfDate,
         workbookBuffer: Buffer.from(outBuf), invoices: invoiceRows,
         devFee: rfResult && rfResult.devFee && !rfResult.devFee.error ? rfResult.devFee : null,
         who: (req.user && (req.user.name || req.user.email)) || 'system',
+        packetPrefix,
       });
       if (saved.errors && saved.errors.length) console.error('requisition workpaper save:', saved.errors.join('; '));
       res.setHeader('X-Workpaper-Folder', saved.folder || '');
