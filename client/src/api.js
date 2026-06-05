@@ -110,6 +110,12 @@ export const api = {
   },
   getClasses: (eid) => request('/entities/' + eid + '/classes'),
   getLocations: (eid) => request('/entities/' + eid + '/locations'),
+  createLocation: (eid, data) => request('/entities/' + eid + '/locations', { method: 'POST', body: data }),
+  updateLocation: (eid, id, data) => request('/entities/' + eid + '/locations/' + id, { method: 'PATCH', body: data }),
+  deleteLocation: (eid, id) => request('/entities/' + eid + '/locations/' + id, { method: 'DELETE' }),
+  createClass: (eid, data) => request('/entities/' + eid + '/classes', { method: 'POST', body: data }),
+  updateClass: (eid, id, data) => request('/entities/' + eid + '/classes/' + id, { method: 'PATCH', body: data }),
+  deleteClass: (eid, id) => request('/entities/' + eid + '/classes/' + id, { method: 'DELETE' }),
   setLocationKind: (eid, id, kind) => request('/entities/' + eid + '/locations/' + id, { method: 'PATCH', body: { kind } }),
   setClassKind: (eid, id, kind) => request('/entities/' + eid + '/classes/' + id, { method: 'PATCH', body: { kind } }),
   getDimensionBalances: (eid, opts = {}) => {

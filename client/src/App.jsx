@@ -246,13 +246,13 @@ function QuickAddAccountModal({entityId,onClose,onCreated}){const[form,setForm]=
   </div></div>);}
 
 // ─── JE Modal — form state received from App (persists across open/close) ───
-function JournalEntryModal({entityId,isTurnkeyEntity,isShellEntity,user,onClose,onPosted,form,setForm,pendingFiles,setPendingFiles}){
+function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,onPosted,form,setForm,pendingFiles,setPendingFiles}){
   const[accounts,setAccounts]=useState([]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[posting,setPosting]=useState(false);const[posted,setPosted]=useState('');
   const[projects,setProjects]=useState([]);
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
   useEffect(()=>{api.getAccounts(entityId).then(setAccounts);api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
   const showProject=isTurnkeyEntity||projects.length>0;
-  const showLocation=isShellEntity&&locations.length>0;const showClass=isShellEntity&&classes.length>0;
+  const showLocation=dimsEnabled&&locations.length>0;const showClass=dimsEnabled&&classes.length>0;
   const addLine=()=>setForm(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:'',description:''}]}));
   const removeLine=i=>setForm(f=>({...f,lines:f.lines.filter((_,j)=>j!==i)}));
   const updateLine=(i,k,v)=>setForm(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,[k]:v}:l)}));
@@ -283,8 +283,8 @@ function JournalEntryModal({entityId,isTurnkeyEntity,isShellEntity,user,onClose,
         <select style={S.select} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select account...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></td>
         {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>updateLine(i,'project_id',e.target.value)}><option value="">— none —</option>{projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}</select></td>}
-        {showLocation&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.location_id||''} onChange={e=>updateLine(i,'location_id',e.target.value)}><option value="">— none —</option>{locations.map(loc=><option key={loc.id} value={loc.id}>{loc.name}</option>)}</select></td>}
-        {showClass&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.class_id||''} onChange={e=>updateLine(i,'class_id',e.target.value)}><option value="">— none —</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></td>}
+        {showLocation&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.location_id||''} onChange={e=>updateLine(i,'location_id',e.target.value)}><option value="">— none —</option>{locations.map(loc=><option key={loc.id} value={loc.id}>{loc.code?loc.code+" — ":""}{loc.name}</option>)}</select></td>}
+        {showClass&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.class_id||''} onChange={e=>updateLine(i,'class_id',e.target.value)}><option value="">— none —</option>{classes.map(c=><option key={c.id} value={c.id}>{c.code?c.code+" — ":""}{c.name}</option>)}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} placeholder="(optional)" value={l.description||''} onChange={e=>updateLine(i,'description',e.target.value)}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'debit',f);}} onBlur={e=>updateLine(i,'debit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.credit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'credit',f);}} onBlur={e=>updateLine(i,'credit',blurAmt(e.target.value))}/></td>
@@ -458,10 +458,11 @@ export default function App(){
   const isTurnkeyEntity = !!(_activeEnt && (_activeEnt.code==='TURNKEYR' || /turnkey\s*rail/i.test(_activeEnt.name||'')));
   const isDevEntity = !!(_activeEnt && _activeEnt.entity_type==='development');
   const isShellEntity = !!(_activeEnt && _activeEnt.entity_type==='shell');
+  const dimsEnabled = !!_activeEnt && !isShellEntity;// location/class dimensions available on every entity EXCEPT shell
   const navItems=[
     {id:'dashboard',label:'Dashboard',icon:NI.dashboard,section:'reports'},
     {id:'d1',divider:1,label:'TRANSACTIONS'},{id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
-    {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
+    {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},...(dimsEnabled?[{id:'dimensions',label:'Locations & Classes',icon:'🏷️',section:'coa'}]:[]),{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
     {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
     {id:'d3',divider:1,label:'REPORTS'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
@@ -486,12 +487,13 @@ export default function App(){
           {sidebarCol?<span style={{fontSize:15}}>{n.icon}</span>:<span>{n.icon}  {n.label}</span>}</div>:null)}</div>
       <div style={S.main}>{(()=>{const en=entities.find(e=>e.id===activeEntity);const entityName=en?en.name:'';return<>
         {page==='dashboard'&&<Dashboard entityId={activeEntity} setActiveEntity={setActiveEntity} setPage={setPage} user={user} key={rk}/>}
-        {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} isShellEntity={isShellEntity} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)}/>}
+        {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)}/>}
         {page==='coa'&&activeEntity&&<ChartOfAccounts entityId={activeEntity} canEdit={canAccess('coa')}/>}
-        {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} isShellEntity={isShellEntity} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
+        {page==='dimensions'&&activeEntity&&dimsEnabled&&<DimensionsManager entityId={activeEntity} entityName={entityName} canEdit={canAccess('coa')} key={activeEntity+'-'+rk}/>}
+        {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
         {page==='banktxn'&&activeEntity&&<BankTransactions entityId={activeEntity} bankSelAcct={bankSelAcct} setBankSelAcct={setBankSelAcct} bankTxns={bankTxns} setBankTxns={setBankTxns} bankUploading={bankUploading} setBankUploading={setBankUploading} bankStatusFilter={bankStatusFilter} setBankStatusFilter={setBankStatusFilter}/>}
         {page==='bankrec'&&activeEntity&&<BankReconciliation entityId={activeEntity} user={user}/>}
-        {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} isShellEntity={isShellEntity} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf}/>}
+        {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf}/>}
         {page==='bs'&&activeEntity&&<BalanceSheet entityId={activeEntity} entityName={entityName} asOf={bsAsOf} setAsOf={setBsAsOf}/>}
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo}/>}
         {page==='wip'&&activeEntity&&<WipSchedule entityName={entityName} asOf={wipAsOf} setAsOf={setWipAsOf}/>}
@@ -500,7 +502,7 @@ export default function App(){
         {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
       </>})()}</div></div>
-    {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} isShellEntity={isShellEntity} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
+    {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
   </div>);}
 
@@ -1371,12 +1373,12 @@ function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSum
   </div>);}
 
 // ═══ Edit JE Modal ═══
-function EditJEModal({entityId,isShellEntity,entry,accounts:initAccounts,onClose,onSaved}){
+function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,onSaved}){
   const[accounts,setAccounts]=useState(initAccounts||[]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[saving,setSaving]=useState(false);
   const[projects,setProjects]=useState([]);useEffect(()=>{api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));},[entityId]);const showProject=projects.length>0||(entry.lines||[]).some(l=>l.project_id);
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
   useEffect(()=>{api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
-  const showLocation=(isShellEntity&&locations.length>0)||(entry.lines||[]).some(l=>l.location_id);const showClass=(isShellEntity&&classes.length>0)||(entry.lines||[]).some(l=>l.class_id);
+  const showLocation=(dimsEnabled&&locations.length>0)||(entry.lines||[]).some(l=>l.location_id);const showClass=(dimsEnabled&&classes.length>0)||(entry.lines||[]).some(l=>l.class_id);
   const[form,setForm]=useState({date:entry.date,memo:entry.memo,lines:entry.lines.map(l=>({account_code:l.account_code,project_id:l.project_id||'',location_id:l.location_id||'',class_id:l.class_id||'',description:l.description||'',debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
   const[attachments,setAttachments]=useState(entry.attachments||[]);
   const[attUploading,setAttUploading]=useState(false);
@@ -1412,8 +1414,8 @@ function EditJEModal({entityId,isShellEntity,entry,accounts:initAccounts,onClose
         <select style={S.select} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></td>
         {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>updateLine(i,'project_id',e.target.value)}><option value="">— none —</option>{projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}</select></td>}
-        {showLocation&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.location_id||''} onChange={e=>updateLine(i,'location_id',e.target.value)}><option value="">— none —</option>{locations.map(loc=><option key={loc.id} value={loc.id}>{loc.name}</option>)}</select></td>}
-        {showClass&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.class_id||''} onChange={e=>updateLine(i,'class_id',e.target.value)}><option value="">— none —</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></td>}
+        {showLocation&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.location_id||''} onChange={e=>updateLine(i,'location_id',e.target.value)}><option value="">— none —</option>{locations.map(loc=><option key={loc.id} value={loc.id}>{loc.code?loc.code+" — ":""}{loc.name}</option>)}</select></td>}
+        {showClass&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.class_id||''} onChange={e=>updateLine(i,'class_id',e.target.value)}><option value="">— none —</option>{classes.map(c=><option key={c.id} value={c.id}>{c.code?c.code+" — ":""}{c.name}</option>)}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} value={l.description||''} placeholder="(optional)" onChange={e=>updateLine(i,'description',e.target.value)}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'debit',f);}} onBlur={e=>updateLine(i,'debit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} value={l.credit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'credit',f);}} onBlur={e=>updateLine(i,'credit',blurAmt(e.target.value))}/></td>
@@ -1449,7 +1451,7 @@ function EditJEModal({entityId,isShellEntity,entry,accounts:initAccounts,onClose
   </div></div>);}
 
 // ═══ Journal List ═══
-function JournalList({entityId,entityName,isShellEntity,onNewEntry}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');
+function JournalList({entityId,entityName,dimsEnabled,onNewEntry}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');
   const[editEntry,setEditEntry]=useState(null);
   const load=useCallback(async()=>{const[e,a]=await Promise.all([api.getEntries(entityId,from||undefined,to||undefined),api.getAccounts(entityId)]);setEntries(e);setAccounts(a);},[entityId,from,to]);
   useEffect(()=>{load();},[load]);const del=async id=>{if(!confirm('Delete this journal entry?'))return;await api.deleteEntry(entityId,id);load();};const acctName=code=>accounts.find(a=>a.code===code)?.name||'?';
@@ -1475,8 +1477,62 @@ function JournalList({entityId,entityName,isShellEntity,onNewEntry}){const[entri
             <td style={S.tdR}>{l.debit>0?fmt(l.debit):''}</td><td style={S.tdR}>{l.credit>0?fmt(l.credit):''}</td></tr>)}</tbody></table>
         {e.attachments?.length>0&&<div style={{marginTop:10,display:'flex',flexWrap:'wrap',gap:4}}>{e.attachments.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>)}</div>}
       </div>)}</div>}
-    {editEntry&&<EditJEModal entityId={entityId} isShellEntity={isShellEntity} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={load}/>}
+    {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={load}/>}
   </div>);}
+
+// ═══ Dimensions (Locations & Classes) manager ═══
+function DimList({title,subtitle,items,canEdit,onCreate,onUpdate,onDelete}){
+  const[showAdd,setShowAdd]=useState(false);const[form,setForm]=useState({code:'',name:''});const[err,setErr]=useState('');
+  const[editing,setEditing]=useState(null);const[editForm,setEditForm]=useState({code:'',name:''});const[editErr,setEditErr]=useState('');
+  const startEdit=it=>{setEditing(it.id);setEditForm({code:it.code||'',name:it.name||''});setEditErr('');};
+  const add=async()=>{if(!form.name.trim()){setErr('Name required');return;}try{await onCreate({name:form.name.trim(),code:form.code.trim()||null});setForm({code:'',name:''});setShowAdd(false);setErr('');}catch(e){setErr(e.message);}};
+  const save=async()=>{if(!editForm.name.trim()){setEditErr('Name required');return;}try{await onUpdate(editing,{name:editForm.name.trim(),code:editForm.code.trim()||null});setEditing(null);}catch(e){setEditErr(e.message);}};
+  const del=async it=>{if(!confirm('Delete "'+it.name+'"?'))return;try{await onDelete(it.id);}catch(e){alert(e.message);}};
+  return(<div style={{flex:1,minWidth:340}}>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+      <div><div style={{fontSize:15,fontWeight:700,color:T.textBright}}>{title}</div><div style={{fontSize:12,color:T.textMuted}}>{subtitle||(items.length+' total')}</div></div>
+      {canEdit&&<button style={{...S.btnP,padding:'6px 12px',fontSize:12}} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add'}</button>}</div>
+    {showAdd&&<div style={{...S.card,borderColor:T.green+'40',padding:14,marginBottom:12}}><div style={{display:'flex',gap:8,alignItems:'flex-end'}}>
+      <div style={{width:110}}><label style={S.label}>Code</label><input style={S.input} placeholder="(optional)" value={form.code} onChange={e=>setForm(f=>({...f,code:e.target.value}))}/></div>
+      <div style={{flex:1}}><label style={S.label}>Name</label><input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter')add();}}/></div>
+      <button style={S.btnP} onClick={add}>Add</button></div>{err&&<div style={{...S.err,marginTop:8,marginBottom:0}}>{err}</div>}</div>}
+    <div style={S.cardFlush}><table style={S.table}><thead><tr><th style={{...S.th,width:110}}>Code</th><th style={S.th}>Name</th><th style={{...S.thC,width:70}}>Lines</th>{canEdit&&<th style={{...S.th,width:90}}>Actions</th>}</tr></thead>
+      <tbody>{items.length===0&&<tr><td colSpan={canEdit?4:3} style={{...S.td,color:T.textMuted,textAlign:'center',padding:'18px'}}>None yet</td></tr>}
+      {items.map(it=>editing===it.id?
+        <tr key={it.id} style={{background:T.accentDim}}>
+          <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.code} onChange={e=>setEditForm(f=>({...f,code:e.target.value}))} placeholder="(optional)"/></td>
+          <td style={{padding:'6px 8px'}} colSpan={canEdit?1:2}><input style={S.input} value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter')save();}}/></td>
+          {!canEdit&&<td style={S.tdC}>{it.line_count}</td>}
+          {canEdit&&<td style={S.tdC}>{it.line_count}</td>}
+          {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}><button style={{...S.btnGhost,color:T.green,fontSize:11}} onClick={save}>Save</button><button style={{...S.btnGhost,fontSize:11}} onClick={()=>setEditing(null)}>Cancel</button></div></td>}
+        </tr>
+        :<tr key={it.id}>
+          <td style={{...S.td,color:T.textBright}}>{it.code||<span style={{color:T.textMuted}}>—</span>}</td>
+          <td style={S.td}>{it.name}</td>
+          <td style={S.tdC}>{it.line_count>0?it.line_count:<span style={{color:T.textMuted}}>0</span>}</td>
+          {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}>
+            <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>startEdit(it)}>Edit</button>
+            <button style={{...S.btnGhost,color:it.line_count>0?T.textMuted:T.red,fontSize:11}} title={it.line_count>0?'Used on '+it.line_count+' line(s) — cannot delete':'Delete'} onClick={()=>del(it)}>x</button></div></td>}
+        </tr>)}
+      </tbody></table></div>
+    {editErr&&<div style={{...S.err,marginTop:8}}>{editErr}</div>}</div>);
+}
+function DimensionsManager({entityId,entityName,canEdit}){
+  const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
+  const load=useCallback(async()=>{const[l,c]=await Promise.all([api.getLocations(entityId),api.getClasses(entityId)]);setLocations(l||[]);setClasses(c||[]);},[entityId]);
+  useEffect(()=>{load();},[load]);
+  return(<div><div style={{marginBottom:20}}><div style={S.h1}>Locations & Classes</div><div style={S.sub}>{entityName} — dimensions you can tag on journal-entry lines and filter reports by</div></div>
+    <div style={{display:'flex',gap:24,flexWrap:'wrap',alignItems:'flex-start'}}>
+      <DimList title="Locations" subtitle={(locations.length)+' location'+(locations.length===1?'':'s')+' (deals / properties)'} items={locations} canEdit={canEdit}
+        onCreate={async d=>{await api.createLocation(entityId,d);await load();}}
+        onUpdate={async(id,d)=>{await api.updateLocation(entityId,id,d);await load();}}
+        onDelete={async id=>{await api.deleteLocation(entityId,id);await load();}}/>
+      <DimList title="Investor Classes" subtitle={(classes.length)+' class'+(classes.length===1?'':'es')+' (investors / capital classes)'} items={classes} canEdit={canEdit}
+        onCreate={async d=>{await api.createClass(entityId,d);await load();}}
+        onUpdate={async(id,d)=>{await api.updateClass(entityId,id,d);await load();}}
+        onDelete={async id=>{await api.deleteClass(entityId,id);await load();}}/>
+    </div></div>);
+}
 
 // ═══ Chart of Accounts ═══
 function ChartOfAccounts({entityId,canEdit}){const[accounts,setAccounts]=useState([]);const[showAdd,setShowAdd]=useState(false);
@@ -1513,7 +1569,7 @@ function ChartOfAccounts({entityId,canEdit}){const[accounts,setAccounts]=useStat
           <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={async()=>{try{await api.deleteAccount(entityId,a.code);load();}catch(e){alert(e.message);}}}>x</button></div></td>}</tr>)}</tbody></table></div></div>);}
 
 // ═══ General Ledger ═══
-function GeneralLedger({entityId,entityName,isShellEntity,from,setFrom,to,setTo,filter,setFilter}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);
+function GeneralLedger({entityId,entityName,dimsEnabled,from,setFrom,to,setTo,filter,setFilter}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);
   const[editEntry,setEditEntry]=useState(null);
   const reload=useCallback(()=>{Promise.all([api.getEntries(entityId,from||undefined,to||undefined),api.getAccounts(entityId)]).then(([e,a])=>{setEntries(e);setAccounts(a);});},[entityId,from,to]);
   useEffect(()=>{reload();},[reload]);
@@ -1532,7 +1588,7 @@ function GeneralLedger({entityId,entityName,isShellEntity,from,setFrom,to,setTo,
         <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:900}}><thead><tr><th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Memo</th><th style={S.thR}>Debit</th><th style={S.thR}>Credit</th><th style={S.thR}>Balance</th><th style={{...S.th,width:100}}>Docs</th></tr></thead>
           <tbody>{txns.map((t,i)=>{run+=dr?(t.debit-t.credit):(t.credit-t.debit);const atts=entryAtts[t.jeId];return<tr key={i}><td style={{...S.td,color:T.textMuted}}>{t.date}</td><td style={S.td}><button style={{background:'none',border:0,padding:0,color:T.accent,fontWeight:600,cursor:'pointer',fontSize:'inherit',fontFamily:'inherit'}} onClick={()=>{const e=entries.find(x=>x.id===t.jeId);if(e)setEditEntry(e);}}>JE-{String(t.jeNum).padStart(4,'0')}</button></td><td style={S.td} title={t.description||t.memo}>{t.description||t.memo}</td><td style={S.tdR}>{t.debit>0?fmt(t.debit):''}</td><td style={S.tdR}>{t.credit>0?fmt(t.credit):''}</td><td style={{...S.tdR,fontWeight:600,color:T.textBright}}>{fmt(run)}</td>
             <td style={S.td}>{atts?atts.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>):''}</td></tr>;})}</tbody></table></div>}</div>);})}
-    {editEntry&&<EditJEModal entityId={entityId} isShellEntity={isShellEntity} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={()=>{setEditEntry(null);reload();}}/>}
+    {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={()=>{setEditEntry(null);reload();}}/>}
     </div>);}
 
 // ═══ Bank Transactions (state lifted to App for navigation persistence) ═══
@@ -1771,7 +1827,7 @@ function WipSchedule({entityName,asOf,setAsOf}){
   </div></div>);
 }
 
-function TrialBalance({entityId,entityName,isShellEntity,asOf,setAsOf}){
+function TrialBalance({entityId,entityName,dimsEnabled,asOf,setAsOf}){
   const[balances,setBalances]=useState([]);
   const[drillAcct,setDrillAcct]=useState(null);
   const[locations,setLocations]=useState([]);
@@ -1818,8 +1874,8 @@ function TrialBalance({entityId,entityName,isShellEntity,asOf,setAsOf}){
   };
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
     <div style={S.filterBar}><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
-      {isShellEntity&&<div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>}
-      {isShellEntity&&<div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div>}</div>
+      {dimsEnabled&&<div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>}
+      {dimsEnabled&&<div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div>}</div>
     <div style={{display:'flex',gap:8}}><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={doExport}>Export TB</button></div></div>
     <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Trial Balance{scopeLabel?(' — '+scopeLabel):''}</div><div style={{fontSize:13,color:T.textMuted}}>As of {asOf}{dimmed?' · dimension-tagged activity only':''}</div></div>
     <table style={{...S.table,tableLayout:'fixed',width:'100%'}}>

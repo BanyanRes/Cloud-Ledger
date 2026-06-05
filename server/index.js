@@ -420,6 +420,11 @@ if (!jlCols.includes('location_id')) {
   db.exec("CREATE INDEX IF NOT EXISTS idx_jl_location ON journal_lines(location_id)");
   console.log('[db migrate] journal_lines.location_id added');
 }
+// Dimension code columns (name was the only label originally; code added for reporting/sorting)
+const dcCols = db.prepare("PRAGMA table_info(dim_classes)").all().map(c => c.name);
+if (!dcCols.includes('code')) { db.exec("ALTER TABLE dim_classes ADD COLUMN code TEXT"); console.log('[db migrate] dim_classes.code added'); }
+const dlCols = db.prepare("PRAGMA table_info(dim_locations)").all().map(c => c.name);
+if (!dlCols.includes('code')) { db.exec("ALTER TABLE dim_locations ADD COLUMN code TEXT"); console.log('[db migrate] dim_locations.code added'); }
 // turnkey_project_map redesigned: no longer stores per-project account codes
 // (single COA on the company entity now). We add cl_entity_id linking to the
 // COMPANY entity (same for all projects). Keep existing rows on upgrade.
@@ -1562,24 +1567,61 @@ app.get('/api/entities/:eid/accounts', auth, requireEntityAccess(), (req, res) =
 // === Analytical dimensions (class = investor, location = deal/asset) ===
 // List dimension values with how many lines reference each.
 app.get('/api/entities/:eid/classes', auth, requireEntityAccess(), (req, res) =>
-  res.json(db.prepare(`SELECT c.id, c.name, c.kind, COUNT(jl.id) AS line_count
+  res.json(db.prepare(`SELECT c.id, c.name, c.code, c.kind, COUNT(jl.id) AS line_count
     FROM dim_classes c LEFT JOIN journal_lines jl ON jl.class_id = c.id
     WHERE c.entity_id = ? GROUP BY c.id ORDER BY c.name`).all(req.params.eid)));
 
 app.get('/api/entities/:eid/locations', auth, requireEntityAccess(), (req, res) =>
-  res.json(db.prepare(`SELECT l.id, l.name, l.kind, COUNT(jl.id) AS line_count
+  res.json(db.prepare(`SELECT l.id, l.name, l.code, l.kind, COUNT(jl.id) AS line_count
     FROM dim_locations l LEFT JOIN journal_lines jl ON jl.location_id = l.id
     WHERE l.entity_id = ? GROUP BY l.id ORDER BY l.name`).all(req.params.eid)));
 
-// Tag a location's kind (e.g. 'deal' vs 'capital_activity') so deal reports can filter.
+// ── Dimension CRUD (locations + classes). name required; code optional. ──
+app.post('/api/entities/:eid/locations', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const name = (req.body.name || '').trim(); if (!name) return res.status(400).json({ error: 'Name required' });
+  const code = (req.body.code || '').trim() || null;
+  try { const r = db.prepare('INSERT INTO dim_locations (entity_id, name, code, kind) VALUES (?, ?, ?, ?)').run(req.params.eid, name, code, req.body.kind || '');
+    res.json({ id: r.lastInsertRowid, name, code, kind: req.body.kind || '', line_count: 0 }); }
+  catch(e) { if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'A location with that name already exists' }); throw e; }
+});
 app.patch('/api/entities/:eid/locations/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
-  const { kind } = req.body;
-  db.prepare('UPDATE dim_locations SET kind = ? WHERE id = ? AND entity_id = ?').run(kind || '', req.params.id, req.params.eid);
+  const row = db.prepare('SELECT * FROM dim_locations WHERE id = ? AND entity_id = ?').get(req.params.id, req.params.eid);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  const name = req.body.name !== undefined ? (req.body.name || '').trim() : row.name; if (!name) return res.status(400).json({ error: 'Name required' });
+  const code = req.body.code !== undefined ? ((req.body.code || '').trim() || null) : row.code;
+  const kind = req.body.kind !== undefined ? (req.body.kind || '') : row.kind;
+  try { db.prepare('UPDATE dim_locations SET name = ?, code = ?, kind = ? WHERE id = ? AND entity_id = ?').run(name, code, kind, req.params.id, req.params.eid);
+    res.json({ id: Number(req.params.id), name, code, kind }); }
+  catch(e) { if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'A location with that name already exists' }); throw e; }
+});
+app.delete('/api/entities/:eid/locations/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const used = db.prepare('SELECT COUNT(*) AS n FROM journal_lines WHERE location_id = ?').get(req.params.id).n;
+  if (used > 0) return res.status(409).json({ error: 'Location is used on ' + used + ' journal line(s); reassign or remove those first' });
+  db.prepare('DELETE FROM dim_locations WHERE id = ? AND entity_id = ?').run(req.params.id, req.params.eid);
   res.json({ success: true });
 });
+
+app.post('/api/entities/:eid/classes', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const name = (req.body.name || '').trim(); if (!name) return res.status(400).json({ error: 'Name required' });
+  const code = (req.body.code || '').trim() || null;
+  try { const r = db.prepare('INSERT INTO dim_classes (entity_id, name, code, kind) VALUES (?, ?, ?, ?)').run(req.params.eid, name, code, req.body.kind || 'investor');
+    res.json({ id: r.lastInsertRowid, name, code, kind: req.body.kind || 'investor', line_count: 0 }); }
+  catch(e) { if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'A class with that name already exists' }); throw e; }
+});
 app.patch('/api/entities/:eid/classes/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
-  const { kind } = req.body;
-  db.prepare('UPDATE dim_classes SET kind = ? WHERE id = ? AND entity_id = ?').run(kind || 'investor', req.params.id, req.params.eid);
+  const row = db.prepare('SELECT * FROM dim_classes WHERE id = ? AND entity_id = ?').get(req.params.id, req.params.eid);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  const name = req.body.name !== undefined ? (req.body.name || '').trim() : row.name; if (!name) return res.status(400).json({ error: 'Name required' });
+  const code = req.body.code !== undefined ? ((req.body.code || '').trim() || null) : row.code;
+  const kind = req.body.kind !== undefined ? (req.body.kind || 'investor') : row.kind;
+  try { db.prepare('UPDATE dim_classes SET name = ?, code = ?, kind = ? WHERE id = ? AND entity_id = ?').run(name, code, kind, req.params.id, req.params.eid);
+    res.json({ id: Number(req.params.id), name, code, kind }); }
+  catch(e) { if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'A class with that name already exists' }); throw e; }
+});
+app.delete('/api/entities/:eid/classes/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const used = db.prepare('SELECT COUNT(*) AS n FROM journal_lines WHERE class_id = ?').get(req.params.id).n;
+  if (used > 0) return res.status(409).json({ error: 'Class is used on ' + used + ' journal line(s); reassign or remove those first' });
+  db.prepare('DELETE FROM dim_classes WHERE id = ? AND entity_id = ?').run(req.params.id, req.params.eid);
   res.json({ success: true });
 });
 
