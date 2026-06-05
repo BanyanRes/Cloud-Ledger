@@ -3675,8 +3675,29 @@ app.post('/api/requisition/:entity_id/read-invoice', ...reqGuards(), requireRole
     }
     const data = await apiRes.json();
     const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
-    const clean = text.replace(/```json|```/g, '').trim();
-    extracted = JSON.parse(clean);
+    let clean = text.replace(/```json|```/g, '').trim();
+    // The model sometimes appends prose after the JSON object (common when a PDF
+    // holds multiple invoices), which breaks a whole-string JSON.parse. Extract
+    // the first balanced {...} object and parse only that.
+    try {
+      extracted = JSON.parse(clean);
+    } catch (firstErr) {
+      const start = clean.indexOf('{');
+      if (start === -1) throw firstErr;
+      let depth = 0, end = -1, inStr = false, esc = false;
+      for (let i = start; i < clean.length; i++) {
+        const ch = clean[i];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (ch === '\\') esc = true;
+          else if (ch === '"') inStr = false;
+        } else if (ch === '"') inStr = true;
+        else if (ch === '{') depth++;
+        else if (ch === '}') { depth--; if (depth === 0) { end = i; break; } }
+      }
+      if (end === -1) throw firstErr;
+      extracted = JSON.parse(clean.slice(start, end + 1));
+    }
   } catch (e) {
     return res.status(502).json({ error: 'Invoice reader error: ' + e.message });
   }
