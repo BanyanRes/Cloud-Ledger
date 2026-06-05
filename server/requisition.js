@@ -193,6 +193,37 @@ function predict(line, index) {
     }
   }
 
+  // 3.5) First-token match. The first token is usually the distinctive trade
+  // name (e.g. "entergy" in "Entergy Texas" vs history "Entergy Services"),
+  // which token-overlap similarity can miss when the remaining words differ.
+  // Match on the first token; if several historical vendors share it, narrow by
+  // the second token. Only accept when this resolves to exactly ONE vendor —
+  // otherwise it's ambiguous and we leave it blank rather than mis-code.
+  const myToks = tokenSet(v);
+  if (myToks.size && Array.isArray(index.vendorTokens)) {
+    // tokenSet is a Set (insertion order preserved), so spreading gives token order.
+    const myOrdered = [...myToks];
+    const firstTok = myOrdered[0];
+    let pool = index.vendorTokens.filter((c) => { const ct = [...c.tokens]; return ct[0] === firstTok; });
+    if (pool.length > 1 && myOrdered[1]) {
+      const secondTok = myOrdered[1];
+      const narrowed = pool.filter((c) => { const ct = [...c.tokens]; return ct[1] === secondTok; });
+      if (narrowed.length) pool = narrowed;
+    }
+    if (pool.length === 1) {
+      const codes = index.vendorMap.get(pool[0].norm);
+      if (codes && codes.size > 0) {
+        const ranked = rankCodes(codes);
+        return {
+          confidence: 'review',
+          cost_code: ranked[0].cost_code,
+          coding: ranked[0].sample,
+          candidates: ranked.map((r) => r.sample),
+        };
+      }
+    }
+  }
+
   // 4) Unseen vendor.
   return empty;
 }
