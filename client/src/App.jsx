@@ -1456,7 +1456,7 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
 // preview + validate, then post the valid rows.
 function BulkJEModal({entityId,onClose,onPosted}){
   const[file,setFile]=useState(null);
-  const[preview,setPreview]=useState(null);// {entries, mapped, total, valid, invalid}
+  const[preview,setPreview]=useState(null);// {entries, mapped, total, valid, invalid, line_count}
   const[busy,setBusy]=useState(false);
   const[err,setErr]=useState('');
   const[posted,setPosted]=useState(null);
@@ -1469,7 +1469,7 @@ function BulkJEModal({entityId,onClose,onPosted}){
   const onPick=e=>{const f=e.target.files[0];e.target.value='';if(f){setFile(f);doPreview(f);}};
   const commit=async()=>{
     if(!preview)return;
-    const valid=preview.entries.filter(en=>en.valid).map(en=>({date:en.date,memo:en.memo,debit_account:en.debit_account,credit_account:en.credit_account,amount:en.amount,line_description:en.line_description,location_id:en.location_id,class_id:en.class_id}));
+    const valid=preview.entries.filter(en=>en.valid).map(en=>({date:en.date,memo:en.memo,lines:en.lines.map(l=>({account_code:l.account_code,debit:l.debit,credit:l.credit,location_id:l.location_id,class_id:l.class_id}))}));
     if(!valid.length){setErr('No valid entries to post.');return;}
     setBusy(true);setErr('');
     try{const r=await api.bulkEntriesCommit(entityId,valid);setPosted(r.posted);setTimeout(()=>onPosted(),900);}
@@ -1477,10 +1477,10 @@ function BulkJEModal({entityId,onClose,onPosted}){
     finally{setBusy(false);}
   };
   const validCount=preview?preview.entries.filter(e=>e.valid).length:0;
-  return(<div style={S.modal} onClick={()=>{if(!busy)onClose();}}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:900}} onClick={e=>e.stopPropagation()}>
+  return(<div style={S.modal} onClick={()=>{if(!busy)onClose();}}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:920}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:6}}>Bulk Upload Journal Entries</div>
-    <div style={{fontSize:13,color:T.textMuted,marginBottom:16,lineHeight:1.6}}>Each row is one balanced entry. Required columns: <strong>Date</strong>, <strong>Memo</strong>, <strong>Debit Account #</strong>, <strong>Credit Account #</strong>, <strong>Amount</strong>. Optional: Line Description, Location, Class. Accepts .xlsx or .csv.</div>
+    <div style={{fontSize:13,color:T.textMuted,marginBottom:16,lineHeight:1.6}}>One row per journal line. Lines sharing the same <strong>Date</strong> are grouped into one entry, which must balance. Required columns: <strong>Date</strong>, <strong>Account #</strong>, <strong>Debit</strong>, <strong>Credit</strong>. Optional: Account Description, Memo, Location, Class. Accepts .xlsx or .csv.</div>
 
     <div style={{position:'relative',border:'1.5px dashed '+T.border,borderRadius:8,padding:'20px 16px',textAlign:'center',background:T.bgElevated,marginBottom:14}}>
       <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:2}}>{file?file.name:'Click to choose a spreadsheet'}</div>
@@ -1493,24 +1493,37 @@ function BulkJEModal({entityId,onClose,onPosted}){
     {posted!=null&&<div style={{fontSize:14,fontWeight:600,color:T.green,padding:12,background:T.greenDim,borderRadius:6,border:'1px solid '+T.greenBorder}}>Posted {posted} journal {posted===1?'entry':'entries'}. ✓</div>}
 
     {preview&&posted==null&&<div>
-      <div style={{display:'flex',gap:16,alignItems:'center',marginBottom:12,fontSize:13}}>
-        <span style={{fontWeight:700,color:T.textBright}}>{preview.total} row{preview.total===1?'':'s'}</span>
+      <div style={{display:'flex',gap:16,alignItems:'center',marginBottom:12,fontSize:13,flexWrap:'wrap'}}>
+        <span style={{fontWeight:700,color:T.textBright}}>{preview.line_count} line{preview.line_count===1?'':'s'} &rarr; {preview.total} entr{preview.total===1?'y':'ies'}</span>
         <span style={{color:T.green,fontWeight:600}}>{preview.valid} valid</span>
-        {preview.invalid>0&&<span style={{color:T.red,fontWeight:600}}>{preview.invalid} with errors (will be skipped)</span>}
+        {preview.invalid>0&&<span style={{color:T.red,fontWeight:600}}>{preview.invalid} with errors (skipped)</span>}
       </div>
-      <div style={{maxHeight:340,overflow:'auto',border:'1px solid '+T.border,borderRadius:8}}>
-        <table style={{...S.table,width:'100%'}}>
-          <thead><tr><th style={S.th}>Row</th><th style={S.th}>Date</th><th style={S.th}>Memo</th><th style={S.th}>Dr</th><th style={S.th}>Cr</th><th style={S.thR}>Amount</th><th style={S.th}>Status</th></tr></thead>
-          <tbody>{preview.entries.map(en=><tr key={en.row} style={en.valid?{}:{background:T.redDim}}>
-            <td style={S.td}>{en.row}</td>
-            <td style={S.td}>{en.date||<span style={{color:T.red}}>—</span>}</td>
-            <td style={{...S.td,maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={en.memo}>{en.memo}</td>
-            <td style={S.td}>{en.debit_account||'—'}</td>
-            <td style={S.td}>{en.credit_account||'—'}</td>
-            <td style={S.tdR}>{Number.isFinite(en.amount)?fmt(en.amount):'—'}</td>
-            <td style={S.td}>{en.valid?<span style={{color:T.green,fontWeight:600,fontSize:11}}>OK</span>:<span style={{color:T.red,fontSize:11}} title={en.errors.join('; ')}>{en.errors.join('; ')}</span>}</td>
-          </tr>)}</tbody>
-        </table>
+      <div style={{maxHeight:360,overflow:'auto',border:'1px solid '+T.border,borderRadius:8}}>
+        {preview.entries.map((en,ei)=><div key={ei} style={{borderBottom:'1px solid '+T.borderLight,padding:'10px 12px',background:en.valid?'#fff':T.redDim}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6,gap:10}}>
+            <div style={{display:'flex',alignItems:'center',gap:10,minWidth:0}}>
+              <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>{en.date||<span style={{color:T.red}}>no date</span>}</span>
+              <span style={{fontSize:12,color:T.textMuted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={en.memo}>{en.memo}</span>
+              <span style={{fontSize:11,color:T.textDim}}>rows {en.rows.join(', ')}</span>
+            </div>
+            {en.valid?<span style={{color:T.green,fontWeight:600,fontSize:11,whiteSpace:'nowrap'}}>OK</span>
+              :<span style={{color:T.red,fontSize:11,maxWidth:300,textAlign:'right'}} title={en.errors.join('; ')}>{en.errors.join('; ')}</span>}
+          </div>
+          <table style={{...S.table,width:'100%',tableLayout:'fixed'}}>
+            <colgroup><col style={{width:'110px'}}/><col/><col style={{width:'120px'}}/><col style={{width:'120px'}}/></colgroup>
+            <tbody>{en.lines.map((l,li)=><tr key={li}>
+              <td style={{...S.td,fontSize:12}}>{l.account_code}</td>
+              <td style={{...S.td,fontSize:12,color:T.textMuted,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={l.account_name+(l.errors&&l.errors.length?(' — '+l.errors.join('; ')):'')}>{l.account_name||''}{l.errors&&l.errors.length>0&&<span style={{color:T.red}}> ⚠ {l.errors.join('; ')}</span>}</td>
+              <td style={{...S.tdR,fontSize:12}}>{l.debit>0?fmt(l.debit):''}</td>
+              <td style={{...S.tdR,fontSize:12}}>{l.credit>0?fmt(l.credit):''}</td>
+            </tr>)}
+            <tr style={{borderTop:'1px solid '+T.border}}>
+              <td style={{...S.td,fontSize:11,fontWeight:700}} colSpan={2}>Totals</td>
+              <td style={{...S.tdR,fontSize:11,fontWeight:700,color:Math.abs(en.total_debit-en.total_credit)<=0.005?T.green:T.red}}>{fmt(en.total_debit)}</td>
+              <td style={{...S.tdR,fontSize:11,fontWeight:700,color:Math.abs(en.total_debit-en.total_credit)<=0.005?T.green:T.red}}>{fmt(en.total_credit)}</td>
+            </tr></tbody>
+          </table>
+        </div>)}
       </div>
       <div style={{display:'flex',gap:10,marginTop:16,justifyContent:'flex-end'}}>
         <button style={S.btnS} onClick={onClose} disabled={busy}>Cancel</button>

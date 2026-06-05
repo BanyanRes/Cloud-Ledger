@@ -1793,131 +1793,132 @@ app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole(
   res.json({ id: result, entry_num: num });
 });
 
-// ─── Bulk journal-entry upload (one balanced entry per row) ──────────────────
+// ─── Bulk journal-entry upload (one journal LINE per row) ────────────────────
 // Spreadsheet layout (header names matched case-insensitively, fuzzy):
-//   Date | Memo | Debit Account # | Credit Account # | Amount | Line Description?
-//   | Location? | Class?
-// Each row debits the debit account and credits the credit account by Amount,
-// so every row is a self-balancing entry. Required: date, debit acct, credit
-// acct, amount. Parses + validates into a preview; a separate confirm step posts.
+//   Date | Account # | Account Description | Debit | Credit | Memo? | Location? | Class?
+// Each row is one journal line: an amount goes in Debit OR Credit for the given
+// account. Lines are grouped into journal entries by DATE — all lines sharing a
+// date form one entry, which must balance (sum debits == sum credits). Memo is
+// optional; the first non-empty memo in a date group is used for the entry.
+// Required columns: Date, Account #, and a Debit and Credit column.
 function parseBulkJE(buffer, eid) {
   const { columns, rows } = glReadGrid(buffer);
   const norm = c => String(c).toLowerCase().replace(/[^a-z0-9]/g, '');
-  const pick = (cands) => {
+  const pick = (cands, exclude = []) => {
     for (const want of cands) {
-      const hit = columns.find(c => norm(c) === want);
+      const hit = columns.find(c => norm(c) === want && !exclude.includes(c));
       if (hit) return hit;
     }
-    // loose contains-match fallback
     for (const want of cands) {
-      const hit = columns.find(c => norm(c).includes(want));
+      const hit = columns.find(c => norm(c).includes(want) && !exclude.includes(c));
       if (hit) return hit;
     }
     return null;
   };
-  const colDate   = pick(['date', 'postingdate', 'transactiondate', 'gldate']);
-  const colMemo   = pick(['memo', 'description', 'entrymemo', 'desc']);
-  const colDr     = pick(['debitaccount', 'debitacct', 'debitaccountnumber', 'dracct', 'draccount', 'debit']);
-  const colCr     = pick(['creditaccount', 'creditacct', 'creditaccountnumber', 'cracct', 'craccount', 'credit']);
-  const colAmt    = pick(['amount', 'amt', 'value']);
-  const colLineDesc = pick(['linedescription', 'linememo']);
-  const colLoc    = pick(['location', 'locationname', 'locationcode', 'deal']);
-  const colClass  = pick(['class', 'investor', 'investorclass', 'classname', 'classcode']);
+  const colDate    = pick(['date', 'postingdate', 'transactiondate', 'gldate']);
+  const colAcct    = pick(['account', 'accountnumber', 'acct', 'acctnumber', 'accountno', 'glaccount', 'code']);
+  const colAcctDesc= pick(['accountdescription', 'accountname', 'acctdescription', 'acctname']);
+  const colDebit   = pick(['debit', 'dr', 'debitamount']);
+  const colCredit  = pick(['credit', 'cr', 'creditamount']);
+  const colMemo    = pick(['memo', 'entrymemo', 'description', 'desc'], [colAcctDesc].filter(Boolean));
+  const colLoc     = pick(['location', 'locationname', 'locationcode', 'deal']);
+  const colClass   = pick(['class', 'investor', 'investorclass', 'classname', 'classcode']);
 
   const missing = [];
   if (!colDate) missing.push('Date');
-  if (!colMemo) missing.push('Memo');
-  if (!colDr) missing.push('Debit Account #');
-  if (!colCr) missing.push('Credit Account #');
-  if (!colAmt) missing.push('Amount');
+  if (!colAcct) missing.push('Account #');
+  if (!colDebit) missing.push('Debit');
+  if (!colCredit) missing.push('Credit');
   if (missing.length) {
     return { error: 'Missing required column(s): ' + missing.join(', ') + '. Found columns: ' + columns.join(', ') };
   }
 
-  // Lookups for validation.
-  const accounts = new Set(db.prepare('SELECT code FROM accounts WHERE entity_id=?').all(eid).map(a => String(a.code)));
+  const accountRows = db.prepare('SELECT code, name FROM accounts WHERE entity_id=?').all(eid);
+  const accounts = new Map(accountRows.map(a => [String(a.code), a.name]));
   const locRows = db.prepare('SELECT id, name, code FROM dim_locations WHERE entity_id=?').all(eid);
   const classRows = db.prepare('SELECT id, name, code FROM dim_classes WHERE entity_id=?').all(eid);
-  const dimLookup = (rows) => {
-    const m = new Map();
-    for (const r of rows) {
-      if (r.name) m.set(String(r.name).toLowerCase().trim(), r.id);
-      if (r.code) m.set(String(r.code).toLowerCase().trim(), r.id);
-    }
-    return m;
-  };
+  const dimLookup = (rs) => { const m = new Map(); for (const r of rs) { if (r.name) m.set(String(r.name).toLowerCase().trim(), r.id); if (r.code) m.set(String(r.code).toLowerCase().trim(), r.id); } return m; };
   const locMap = dimLookup(locRows);
   const classMap = dimLookup(classRows);
 
   const toISO = (v) => {
-    if (v instanceof Date && !isNaN(v)) {
-      return v.getFullYear() + '-' + String(v.getMonth() + 1).padStart(2, '0') + '-' + String(v.getDate()).padStart(2, '0');
-    }
+    if (v instanceof Date && !isNaN(v)) return v.getFullYear() + '-' + String(v.getMonth() + 1).padStart(2, '0') + '-' + String(v.getDate()).padStart(2, '0');
     const s = String(v == null ? '' : v).trim();
     if (!s) return null;
     if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
     const m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/); // MM/DD/YYYY
-    if (m) {
-      let [_, mo, da, yr] = m; if (yr.length === 2) yr = '20' + yr;
-      return yr + '-' + mo.padStart(2, '0') + '-' + da.padStart(2, '0');
-    }
+    if (m) { let [, mo, da, yr] = m; if (yr.length === 2) yr = '20' + yr; return yr + '-' + mo.padStart(2, '0') + '-' + da.padStart(2, '0'); }
     const d = new Date(s);
     if (!isNaN(d)) return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
     return null;
   };
 
-  const entries = [];
+  // 1) Parse each row into a line (with per-row errors).
+  const lines = [];
   rows.forEach((row, idx) => {
     const rowNum = idx + 1;
     const errors = [];
     const dateISO = toISO(row[colDate]);
-    const memo = String(row[colMemo] == null ? '' : row[colMemo]).trim();
-    const drCode = String(row[colDr] == null ? '' : row[colDr]).trim().replace(/\.0$/, '');
-    const crCode = String(row[colCr] == null ? '' : row[colCr]).trim().replace(/\.0$/, '');
-    const amount = GL_NUM(row[colAmt]);
-    const lineDesc = colLineDesc ? String(row[colLineDesc] == null ? '' : row[colLineDesc]).trim() : '';
+    const acctCode = String(row[colAcct] == null ? '' : row[colAcct]).trim().replace(/\.0$/, '');
+    const memo = colMemo ? String(row[colMemo] == null ? '' : row[colMemo]).trim() : '';
+    const debit = Math.abs(GL_NUM(row[colDebit]));
+    const credit = Math.abs(GL_NUM(row[colCredit]));
 
     if (!dateISO) errors.push('invalid or missing Date');
-    if (!memo) errors.push('missing Memo');
-    if (!drCode) errors.push('missing Debit Account #');
-    else if (!accounts.has(drCode)) errors.push('debit account ' + drCode + ' not in chart of accounts');
-    if (!crCode) errors.push('missing Credit Account #');
-    else if (!accounts.has(crCode)) errors.push('credit account ' + crCode + ' not in chart of accounts');
-    if (!(Math.abs(amount) > 0)) errors.push('Amount must be a non-zero number');
-    if (drCode && crCode && drCode === crCode) errors.push('debit and credit accounts are the same');
+    if (!acctCode) errors.push('missing Account #');
+    else if (!accounts.has(acctCode)) errors.push('account ' + acctCode + ' not in chart of accounts');
+    if (debit > 0 && credit > 0) errors.push('row has both a Debit and a Credit — put the amount in one column');
+    if (!(debit > 0) && !(credit > 0)) errors.push('row has no Debit or Credit amount');
 
-    let location_id = null, location_label = '';
-    if (colLoc) {
-      const raw = String(row[colLoc] == null ? '' : row[colLoc]).trim();
-      if (raw) {
-        const id = locMap.get(raw.toLowerCase());
-        if (id) { location_id = id; location_label = raw; }
-        else errors.push('location "' + raw + '" not found for this entity');
-      }
-    }
-    let class_id = null, class_label = '';
-    if (colClass) {
-      const raw = String(row[colClass] == null ? '' : row[colClass]).trim();
-      if (raw) {
-        const id = classMap.get(raw.toLowerCase());
-        if (id) { class_id = id; class_label = raw; }
-        else errors.push('class "' + raw + '" not found for this entity');
-      }
-    }
+    let location_id = null;
+    if (colLoc) { const raw = String(row[colLoc] == null ? '' : row[colLoc]).trim(); if (raw) { const id = locMap.get(raw.toLowerCase()); if (id) location_id = id; else errors.push('location "' + raw + '" not found for this entity'); } }
+    let class_id = null;
+    if (colClass) { const raw = String(row[colClass] == null ? '' : row[colClass]).trim(); if (raw) { const id = classMap.get(raw.toLowerCase()); if (id) class_id = id; else errors.push('class "' + raw + '" not found for this entity'); } }
 
-    entries.push({
-      row: rowNum, date: dateISO, memo, debit_account: drCode, credit_account: crCode,
-      amount: +amount.toFixed(2), line_description: lineDesc,
-      location_id, location_label, class_id, class_label,
-      valid: errors.length === 0, errors,
+    lines.push({
+      row: rowNum, date: dateISO, account_code: acctCode,
+      account_name: accounts.get(acctCode) || '', memo,
+      debit: +debit.toFixed(2), credit: +credit.toFixed(2),
+      location_id, class_id, errors,
     });
   });
+
+  // 2) Group lines into entries by date (only lines with a usable date group).
+  const groups = new Map(); // dateISO -> { date, lines:[], rows:[] }
+  for (const ln of lines) {
+    const key = ln.date || ('__row' + ln.row); // ungrouped (bad date) lines become singletons
+    if (!groups.has(key)) groups.set(key, { date: ln.date, lines: [], rows: [] });
+    groups.get(key).lines.push(ln);
+    groups.get(key).rows.push(ln.row);
+  }
+
+  const entries = [];
+  for (const g of groups.values()) {
+    const lineErrors = g.lines.some(l => l.errors.length > 0);
+    const tDr = g.lines.reduce((s, l) => s + l.debit, 0);
+    const tCr = g.lines.reduce((s, l) => s + l.credit, 0);
+    const balanced = Math.abs(tDr - tCr) <= 0.005;
+    const memo = (g.lines.find(l => l.memo) || {}).memo || '';
+    const entryErrors = [];
+    if (!g.date) entryErrors.push('invalid or missing Date');
+    if (g.lines.length < 2) entryErrors.push('a journal entry needs at least 2 lines on the same date');
+    if (!balanced) entryErrors.push('does not balance (debits ' + tDr.toFixed(2) + ' \u2260 credits ' + tCr.toFixed(2) + ')');
+    entries.push({
+      date: g.date, memo, rows: g.rows,
+      lines: g.lines.map(l => ({ row: l.row, account_code: l.account_code, account_name: l.account_name, debit: l.debit, credit: l.credit, location_id: l.location_id, class_id: l.class_id, errors: l.errors })),
+      total_debit: +tDr.toFixed(2), total_credit: +tCr.toFixed(2),
+      valid: !lineErrors && entryErrors.length === 0,
+      errors: entryErrors,
+    });
+  }
+  entries.sort((a, b) => (a.date || '').localeCompare(b.date || '') || (a.rows[0] - b.rows[0]));
 
   const valid = entries.filter(e => e.valid).length;
   return {
     columns,
-    mapped: { date: colDate, memo: colMemo, debit: colDr, credit: colCr, amount: colAmt, line_description: colLineDesc, location: colLoc, class: colClass },
+    mapped: { date: colDate, account: colAcct, account_desc: colAcctDesc, debit: colDebit, credit: colCredit, memo: colMemo, location: colLoc, class: colClass },
     entries, total: entries.length, valid, invalid: entries.length - valid,
+    line_count: lines.length,
   };
 }
 
@@ -1942,13 +1943,18 @@ app.post('/api/entities/:eid/entries/bulk', auth, requireEntityAccess(), require
   if (!list.length) return res.status(400).json({ error: 'No entries to post' });
 
   const accounts = new Set(db.prepare('SELECT code FROM accounts WHERE entity_id=?').all(eid).map(a => String(a.code)));
-  // Re-validate server-side; never trust the client to have done it.
+  // Re-validate server-side; never trust the client. Each entry is { date, memo,
+  // lines:[{account_code, debit, credit, location_id?, class_id?}] } and must balance.
   for (const [i, e] of list.entries()) {
-    const amt = Number(e.amount);
-    if (!e.date || !e.memo) return res.status(400).json({ error: 'Entry ' + (i + 1) + ': missing date or memo' });
-    if (!accounts.has(String(e.debit_account)) || !accounts.has(String(e.credit_account)))
-      return res.status(400).json({ error: 'Entry ' + (i + 1) + ': debit/credit account not in chart of accounts' });
-    if (!(Math.abs(amt) > 0)) return res.status(400).json({ error: 'Entry ' + (i + 1) + ': amount must be non-zero' });
+    if (!e.date) return res.status(400).json({ error: 'Entry ' + (i + 1) + ': missing date' });
+    const lines = Array.isArray(e.lines) ? e.lines : [];
+    if (lines.length < 2) return res.status(400).json({ error: 'Entry ' + (i + 1) + ': needs at least 2 lines' });
+    let tDr = 0, tCr = 0;
+    for (const l of lines) {
+      if (!accounts.has(String(l.account_code))) return res.status(400).json({ error: 'Entry ' + (i + 1) + ': account ' + l.account_code + ' not in chart of accounts' });
+      tDr += Math.abs(Number(l.debit) || 0); tCr += Math.abs(Number(l.credit) || 0);
+    }
+    if (Math.abs(tDr - tCr) > 0.005) return res.status(400).json({ error: 'Entry ' + (i + 1) + ': does not balance' });
   }
 
   const posted = db.transaction(() => {
@@ -1958,11 +1964,10 @@ app.post('/api/entities/:eid/entries/bulk', auth, requireEntityAccess(), require
     const ids = [];
     for (const e of list) {
       num += 1;
-      const amt = +Number(e.amount).toFixed(2);
-      const desc = e.line_description || '';
-      const r = insEntry.run(eid, num, e.date, e.memo, req.user.name || req.user.email);
-      insLine.run(r.lastInsertRowid, String(e.debit_account), amt, 0, desc, null, e.class_id || null, e.location_id || null);
-      insLine.run(r.lastInsertRowid, String(e.credit_account), 0, amt, desc, null, e.class_id || null, e.location_id || null);
+      const r = insEntry.run(eid, num, e.date, e.memo || '', req.user.name || req.user.email);
+      for (const l of e.lines) {
+        insLine.run(r.lastInsertRowid, String(l.account_code), +Math.abs(Number(l.debit) || 0).toFixed(2), +Math.abs(Number(l.credit) || 0).toFixed(2), '', null, l.class_id || null, l.location_id || null);
+      }
       ids.push({ id: r.lastInsertRowid, entry_num: num });
     }
     return ids;
