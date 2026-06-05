@@ -204,7 +204,7 @@ export const api = {
     const fd = new FormData();
     fd.append('workbook', workbookFile);
     fd.append('newCurrent', JSON.stringify(newCurrent || []));
-    if (meta.invoiceIds && meta.invoiceIds.length) fd.append('invoiceIds', JSON.stringify(meta.invoiceIds));
+    if (meta.invoices && meta.invoices.length) fd.append('invoices', JSON.stringify(meta.invoices));
     if (meta.reqNumber != null && meta.reqNumber !== '') fd.append('reqNumber', String(meta.reqNumber));
     if (meta.asOfDate) fd.append('asOfDate', meta.asOfDate);
     const token = getToken();

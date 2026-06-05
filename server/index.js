@@ -3608,6 +3608,20 @@ app.get('/api/requisition/invoice/:id/download', (req, res) => {
   res.send(Buffer.from(f.file_blob));
 });
 
+// Purge orphaned requisition invoices (never included in a successful roll-forward,
+// i.e. req_number IS NULL). These are leftovers from older builds that saved every
+// read invoice; the current flow only persists invoices at roll-forward time.
+app.delete('/api/requisition/:entity_id/orphan-invoices', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  try {
+    const before = db.prepare('SELECT COUNT(*) c FROM requisition_invoice WHERE entity_id = ? AND req_number IS NULL').get(eid).c;
+    const info = db.prepare('DELETE FROM requisition_invoice WHERE entity_id = ? AND req_number IS NULL').run(eid);
+    res.json({ deleted: info.changes, matched: before });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── R4: Read one invoice PDF with Claude (Haiku) and pre-fill fields ─────────
 // Upload a single invoice (PDF or image). The model extracts vendor / bill
 // number / amount / invoice date; we then run the validated coding engine to
@@ -3676,37 +3690,15 @@ app.post('/api/requisition/:entity_id/read-invoice', ...reqGuards(), requireRole
 
   const amountNum = extracted.amount != null && extracted.amount !== '' ? Number(String(extracted.amount).replace(/[$,]/g, '')) : null;
 
-  // Persist the invoice (extracted fields + original bytes) immediately, so the
-  // packet can be regenerated later without re-uploading. req_number stays NULL
-  // until a roll-forward that includes this invoice succeeds.
+  // Do NOT persist here. Reading is exploratory — many invoices are read and then
+  // discarded during a session, so saving every one (with its file blob) wastes
+  // space. We return the extracted fields plus the original bytes (base64) so the
+  // client can hold them in the card and send only the kept invoices at
+  // roll-forward time, which is when they're persisted with a req_number.
   const finalAmount = Number.isFinite(amountNum) ? amountNum : null;
   const costCodeName = (prediction.coding && prediction.coding.cost_code_name) || null;
-  let invoiceId = null;
-  try {
-    const info = db.prepare(
-      'INSERT INTO requisition_invoice (entity_id, req_number, vendor, bill_number, amount, invoice_date, cost_code, cost_code_name, confidence, original_name, mime_type, file_blob, created_at) ' +
-      'VALUES (?, NULL, ?,?,?,?,?,?,?,?,?,?,?)'
-    ).run(
-      eid,
-      extracted.vendor || null,
-      extracted.bill_number || null,
-      finalAmount,
-      extracted.invoice_date || null,
-      prediction.cost_code,
-      costCodeName,
-      prediction.confidence,
-      req.file.originalname || null,
-      mime || null,
-      req.file.buffer,
-      new Date().toISOString()
-    );
-    invoiceId = info.lastInsertRowid;
-  } catch (e) {
-    return res.status(500).json({ error: 'Failed to save invoice: ' + e.message });
-  }
 
   res.json({
-    invoice_id: invoiceId,
     vendor: extracted.vendor || null,
     bill_number: extracted.bill_number || null,
     amount: finalAmount,
@@ -3716,6 +3708,10 @@ app.post('/api/requisition/:entity_id/read-invoice', ...reqGuards(), requireRole
     confidence: prediction.confidence,
     candidates: prediction.candidates || [],
     filename: req.file.originalname,
+    // Bytes echoed back so the client can resend at roll-forward (not stored server-side yet).
+    original_name: req.file.originalname || null,
+    mime_type: mime || null,
+    file_b64: b64,
   });
 });
 
@@ -3785,13 +3781,15 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
   if (req.body.reqNumber != null && req.body.reqNumber !== '') meta.reqNumber = req.body.reqNumber;
   if (req.body.asOfDate) meta.asOfDate = req.body.asOfDate;
 
-  // Optional: ids of the saved requisition_invoice rows that make up this period.
-  // On a successful roll-forward we stamp them with the new req_number so the
-  // invoice packet can later group them by requisition.
-  let invoiceIds = [];
+  // Invoices that make up this period, sent by the client (not previously stored).
+  // Each: { vendor, bill_number, amount, cost_code, cost_code_name, original_name,
+  // mime_type, file_b64 }. On a successful roll-forward we persist them with the
+  // new req_number and use their bytes to build the invoice packet. Order is the
+  // Current Invoice Log order the user arranged on screen.
+  let invoicesIn = [];
   try {
-    const parsed = JSON.parse(req.body.invoiceIds || '[]');
-    if (Array.isArray(parsed)) invoiceIds = parsed.map(n => parseInt(n)).filter(Number.isFinite);
+    const parsed = JSON.parse(req.body.invoices || '[]');
+    if (Array.isArray(parsed)) invoicesIn = parsed;
   } catch {}
 
   // Load the uploaded Req#N workbook twice: one mutable copy to roll forward,
@@ -3843,36 +3841,56 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
 
     const outBuf = await workbook.xlsx.writeBuffer();
 
-    // Stamp the saved invoices with the new requisition number (best-effort).
-    if (invoiceIds.length && meta.reqNumber != null && meta.reqNumber !== '') {
-      const rn = parseInt(meta.reqNumber);
-      if (Number.isFinite(rn)) {
-        try {
-          const upd = db.prepare('UPDATE requisition_invoice SET req_number = ? WHERE id = ? AND entity_id = ?');
-          const tx = db.transaction(() => { for (const iid of invoiceIds) upd.run(rn, iid, parseInt(req.params.entity_id)); });
-          tx();
-        } catch {}
-      }
+    // Persist this period's invoices now (roll-forward succeeded), stamped with
+    // the new requisition number. Build the in-memory rows used for the packet.
+    const eidInt = parseInt(req.params.entity_id);
+    const rn = (meta.reqNumber != null && meta.reqNumber !== '' && Number.isFinite(parseInt(meta.reqNumber))) ? parseInt(meta.reqNumber) : null;
+    let invoiceRows = [];
+    if (invoicesIn.length) {
+      const ins = db.prepare(
+        'INSERT INTO requisition_invoice (entity_id, req_number, vendor, bill_number, amount, invoice_date, cost_code, cost_code_name, confidence, original_name, mime_type, file_blob, created_at) ' +
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)'
+      );
+      const nowIso = new Date().toISOString();
+      const tx = db.transaction(() => {
+        for (const inv of invoicesIn) {
+          let blob = null;
+          try { if (inv.file_b64) blob = Buffer.from(inv.file_b64, 'base64'); } catch {}
+          const amt = inv.amount != null && inv.amount !== '' ? Number(String(inv.amount).replace(/[$,]/g, '')) : null;
+          ins.run(
+            eidInt, rn,
+            inv.vendor || null,
+            inv.bill_number || inv.bill || null,
+            Number.isFinite(amt) ? amt : null,
+            inv.invoice_date || null,
+            inv.cost_code || null,
+            inv.cost_code_name || null,
+            inv.confidence || null,
+            inv.original_name || inv.filename || null,
+            inv.mime_type || null,
+            blob,
+            nowIso
+          );
+          // Row used for packet building (keep bytes in memory; avoids a re-read).
+          invoiceRows.push({
+            original_name: inv.original_name || inv.filename || null,
+            mime_type: inv.mime_type || null,
+            file_blob: blob,
+            vendor: inv.vendor || null,
+            bill_number: inv.bill_number || inv.bill || null,
+            amount: Number.isFinite(amt) ? amt : null,
+            cost_code: inv.cost_code || null,
+            cost_code_name: inv.cost_code_name || null,
+          });
+        }
+      });
+      try { tx(); } catch (e) { console.error('requisition invoice persist failed:', e.message); }
     }
 
     // Auto-save the workbook + a merged invoice packet into the entity's
     // Workpapers under "<year>/Requisition Reports/<Month year>" (best-effort:
     // a save failure is logged but never blocks the user's download).
     try {
-      const eidInt = parseInt(req.params.entity_id);
-      let invoiceRows = [];
-      if (invoiceIds.length) {
-        const placeholders = invoiceIds.map(() => '?').join(',');
-        const fetched = db.prepare(
-          `SELECT id, original_name, mime_type, file_blob, vendor, bill_number, amount, cost_code, cost_code_name FROM requisition_invoice WHERE entity_id = ? AND id IN (${placeholders})`
-        ).all(eidInt, ...invoiceIds);
-        // Preserve the caller's order (= the Current Invoice Log row order the
-        // user arranged on screen). A bare `IN (...)` returns rows in arbitrary
-        // DB order, which would scramble the packet relative to the log; re-sort
-        // by the position of each id in invoiceIds so the packet matches the log.
-        const byId = new Map(fetched.map(r => [r.id, r]));
-        invoiceRows = invoiceIds.map(id => byId.get(id)).filter(Boolean);
-      }
       const entRow = db.prepare('SELECT name, display_id FROM entities WHERE id = ?').get(eidInt) || {};
       const packetPrefix = (entRow.display_id && entRow.display_id.trim()) || entRow.name || '';
       const saved = await saveRequisitionOutputs({

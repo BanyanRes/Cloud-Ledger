@@ -2173,7 +2173,6 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
       try{const r=await api.readRequisitionInvoice(entityId,f);
         setRfCards(cards=>[...cards,{
           _id:Date.now()+'-'+Math.random().toString(36).slice(2,7),
-          invoice_id:r.invoice_id||null,
           filename:r.filename||f.name,
           cost_code:r.cost_code||'',
           cost_code_name:r.cost_code_name||'',
@@ -2182,6 +2181,11 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
           amount:r.amount!=null?String(r.amount):'',
           date:r.invoice_date||'',
           confidence:r.confidence||'new',
+          // Original bytes echoed by read-invoice; held client-side and sent at
+          // roll-forward (invoices are NOT persisted server-side until then).
+          file_b64:r.file_b64||null,
+          original_name:r.original_name||r.filename||f.name,
+          mime_type:r.mime_type||f.type||null,
         }]);
       }catch(ex){setRfReadErr(ex.message);}
       finally{setRfReading(n=>Math.max(0,n-1));}
@@ -2196,10 +2200,16 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
       return {code:c.cost_code||undefined,name:c.cost_code_name||undefined,vendor:c.vendor||undefined,bill:c.bill||undefined,date:c.date||undefined,...(Number.isFinite(amount)?{amount}:{})};
     }).filter(x=>Number.isFinite(x.amount));
     if(!newCurrent.length){setRfErr('Add at least one invoice with an amount before rolling forward.');return;}
-    const invoiceIds=rfCards.map(c=>c.invoice_id).filter(Boolean);
+    // Send the kept invoices (with their original bytes) to be persisted now.
+    const invoices=rfCards.map(c=>({
+      vendor:c.vendor||null,bill_number:c.bill||null,
+      amount:c.amount!==''?c.amount:null,invoice_date:c.date||null,
+      cost_code:c.cost_code||null,cost_code_name:c.cost_code_name||null,confidence:c.confidence||null,
+      original_name:c.original_name||c.filename||null,mime_type:c.mime_type||null,file_b64:c.file_b64||null,
+    }));
     setRfBusy(true);setRfErr('');setRfDetail(null);setRfResult(null);
     try{
-      const {blob,filename,summary,workpaperFolder,workpaperSaved}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoiceIds});
+      const {blob,filename,summary,workpaperFolder,workpaperSaved}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoices});
       const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
       // Success: clear the working set (invoices/workbook/req#), keep the result banner.
       setReqState(cur=>({...cur,cards:[],file:null,reqNum:'',detail:null,result:{filename,summary,count:newCurrent.length,workpaperFolder,workpaperSaved}}));
