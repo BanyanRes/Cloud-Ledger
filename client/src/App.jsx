@@ -2109,7 +2109,6 @@ function Requisitions({entityId,entityName}){
   const tierStyle=conf=>conf==='high'?{color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder}
     :conf==='review'?{color:T.orange,background:T.orangeDim,border:'1px solid '+T.orange+'40'}
     :{color:T.textMuted,background:T.bgElevated,border:'1px solid '+T.border};
-  const badge=conf=><span style={{fontSize:9,fontWeight:700,borderRadius:4,padding:'2px 7px',textTransform:'uppercase',letterSpacing:'0.04em',...tierStyle(conf)}}>{conf}</span>;
 
   return(<div>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16}}>
@@ -2152,7 +2151,6 @@ function Requisitions({entityId,entityName}){
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <div style={{display:'flex',alignItems:'center',gap:8}}>
                 <span style={{fontSize:11,color:T.textMuted}}>#{idx+1}</span>
-                {badge(c.confidence)}
                 <span style={{fontSize:11,color:T.textMuted,maxWidth:240,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{c.filename}</span>
               </div>
               <button style={{...S.btnD,padding:'4px 10px',fontSize:11}} onClick={()=>removeCard(c._id)}>Remove</button>

@@ -43,14 +43,15 @@ function billSig(bill) {
 }
 
 // Build the in-memory history index for one entity from requisition_coding_history.
-// Recency weight is already baked into each history row's `weight`, so we just sum.
+// For split vendors we pick the MOST RECENT coding (highest req_number), so each
+// cost-code entry tracks last_req; weight is kept as a tiebreaker.
 // Returns:
-//   keyMap:    Map "<vendorNorm>|<billSig>" -> Map(cost_code -> {weight, sample})
-//   vendorMap: Map "<vendorNorm>"           -> Map(cost_code -> {weight, sample})
-// where sample carries the coding fields to copy onto a predicted line.
+//   keyMap:    Map "<vendorNorm>|<billSig>" -> Map(cost_code -> {weight, last_req, sample})
+//   vendorMap: Map "<vendorNorm>"           -> Map(cost_code -> {weight, last_req, sample})
+//   vendorTokens: Array of { norm, tokens:Set } for token-based (similar) matching.
 function buildHistoryIndex(db, entityId) {
   const rows = db.prepare(
-    'SELECT vendor_norm, bill_signature, cost_category, cost_code, bank_cost_category, gl_coding, cost_code_name, weight ' +
+    'SELECT vendor_norm, bill_signature, cost_category, cost_code, bank_cost_category, gl_coding, cost_code_name, weight, req_number ' +
     'FROM requisition_coding_history WHERE entity_id = ?'
   ).all(entityId);
 
@@ -65,6 +66,7 @@ function buildHistoryIndex(db, entityId) {
     if (!entry) {
       entry = {
         weight: 0,
+        last_req: -Infinity,
         sample: {
           cost_category: row.cost_category,
           cost_code: row.cost_code,
@@ -76,62 +78,122 @@ function buildHistoryIndex(db, entityId) {
       codes.set(cc, entry);
     }
     entry.weight += (row.weight || 1);
+    const rq = row.req_number != null ? Number(row.req_number) : null;
+    if (rq != null && Number.isFinite(rq) && rq > entry.last_req) {
+      entry.last_req = rq;
+      // Keep the sample from the most recent occurrence (coding fields can drift).
+      entry.sample = {
+        cost_category: row.cost_category,
+        cost_code: row.cost_code,
+        bank_cost_category: row.bank_cost_category,
+        gl_coding: row.gl_coding,
+        cost_code_name: row.cost_code_name,
+      };
+    }
   };
 
+  const vendorTokensMap = new Map(); // norm -> Set(tokens)
   for (const r of rows) {
     const v = r.vendor_norm || '';
     const sig = r.bill_signature || '';
     bump(keyMap, v + '|' + sig, r);
     bump(vendorMap, v, r);
+    if (v && !vendorTokensMap.has(v)) vendorTokensMap.set(v, tokenSet(v));
   }
-  return { keyMap, vendorMap };
+  const vendorTokens = Array.from(vendorTokensMap.entries()).map(([norm, tokens]) => ({ norm, tokens }));
+  return { keyMap, vendorMap, vendorTokens };
 }
 
-// Rank a Map(cost_code -> {weight, sample}) into [{cost_code, weight, sample}] desc.
+// Tokenize a normalized vendor string into a Set of word tokens (>=2 chars).
+function tokenSet(normalized) {
+  return new Set((String(normalized || '').match(/[a-z0-9]{2,}/g) || []));
+}
+
+// Token-overlap similarity between two token Sets: |intersection| / |smaller set|.
+// 1.0 means one set is a subset of the other (e.g. "mullins law group" vs
+// "mullins law group pllc" after suffix-strip, or any subset relationship).
+function tokenSimilarity(a, b) {
+  if (!a.size || !b.size) return 0;
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter++;
+  return inter / Math.min(a.size, b.size);
+}
+
+// Rank a Map(cost_code -> {weight, last_req, sample}) into a list.
+// For split vendors the MOST RECENT coding wins (highest last_req); weight is
+// the tiebreaker when two codes share the same most-recent requisition.
 function rankCodes(codes) {
   return Array.from(codes.values())
-    .map((e) => ({ cost_code: e.sample.cost_code, weight: e.weight, sample: e.sample }))
-    .sort((a, b) => b.weight - a.weight);
+    .map((e) => ({ cost_code: e.sample.cost_code, weight: e.weight, last_req: e.last_req, sample: e.sample }))
+    .sort((a, b) => (b.last_req - a.last_req) || (b.weight - a.weight));
 }
 
 // Predict the cost code for one invoice line.
 // `line` needs at least { vendor, bill_number }.
 // Returns { confidence, cost_code, coding, candidates } where:
-//   coding     = full coding fields to copy onto the line (null for 'new')
-//   candidates = ranked list of historical codings (for the review UI)
+//   coding     = full coding fields to copy onto the line (null when unmatched)
+//   candidates = ranked list of historical codings (most-recent first)
+// Matching is by normalized vendor, then by TOKEN SIMILARITY (so e.g. an extra
+// "PLLC"/"PC" token, a dropped word, or reordering still matches the same
+// vendor). When a vendor's history is split across cost codes, the most recent
+// coding is proposed. Every prediction is editable in the UI; nothing is final
+// until the user clicks Roll Forward & Download.
+const SIMILARITY_THRESHOLD = 0.6;
 function predict(line, index) {
   const v = normVendor(line.vendor);
   const sig = billSig(line.bill_number);
   const empty = { confidence: 'new', cost_code: null, coding: null, candidates: [] };
   if (!v) return empty;
 
-  // 1) Exact vendor + bill-signature match (best signal).
+  // 1) Exact vendor + bill-signature match (strongest signal).
   const keyCodes = index.keyMap.get(v + '|' + sig);
   if (keyCodes && keyCodes.size > 0) {
     const ranked = rankCodes(keyCodes);
-    const conf = keyCodes.size === 1 ? 'high' : 'review';
     return {
-      confidence: conf,
+      confidence: keyCodes.size === 1 ? 'high' : 'review',
       cost_code: ranked[0].cost_code,
       coding: ranked[0].sample,
       candidates: ranked.map((r) => r.sample),
     };
   }
 
-  // 2) Vendor-only fallback.
+  // 2) Exact vendor-only match.
   const vCodes = index.vendorMap.get(v);
   if (vCodes && vCodes.size > 0) {
     const ranked = rankCodes(vCodes);
-    const conf = vCodes.size === 1 ? 'high' : 'review';
     return {
-      confidence: conf,
+      confidence: vCodes.size === 1 ? 'high' : 'review',
       cost_code: ranked[0].cost_code,
       coding: ranked[0].sample,
       candidates: ranked.map((r) => r.sample),
     };
   }
 
-  // 3) Unseen vendor.
+  // 3) Similar (token-based) vendor match. Pick the historical vendor whose
+  // token set overlaps ours the most, above the threshold; ties broken by the
+  // larger overlap then by recency of its coding.
+  const myTokens = tokenSet(v);
+  if (myTokens.size && Array.isArray(index.vendorTokens)) {
+    let best = null, bestSim = 0;
+    for (const cand of index.vendorTokens) {
+      const sim = tokenSimilarity(myTokens, cand.tokens);
+      if (sim > bestSim) { bestSim = sim; best = cand; }
+    }
+    if (best && bestSim >= SIMILARITY_THRESHOLD) {
+      const codes = index.vendorMap.get(best.norm);
+      if (codes && codes.size > 0) {
+        const ranked = rankCodes(codes);
+        return {
+          confidence: 'review',
+          cost_code: ranked[0].cost_code,
+          coding: ranked[0].sample,
+          candidates: ranked.map((r) => r.sample),
+        };
+      }
+    }
+  }
+
+  // 4) Unseen vendor.
   return empty;
 }
 
