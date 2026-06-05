@@ -442,6 +442,11 @@ export default function App(){
   const[bsAsOf,setBsAsOf]=useState(today());
   const[isFrom,setIsFrom]=useState(fy_start());const[isTo,setIsTo]=useState(today());
   const[glFrom,setGlFrom]=useState(fy_start());const[glTo,setGlTo]=useState(today());const[glFilter,setGlFilter]=useState('');
+  // Requisition working set — lifted to App so uploaded invoices/coding survive
+  // navigation. Kept per-entity so switching entities shows the right set.
+  const[reqStateByEntity,setReqStateByEntity]=useState({});
+  const reqState=(activeEntity&&reqStateByEntity[activeEntity])||null;
+  const setReqState=updater=>{if(!activeEntity)return;setReqStateByEntity(prev=>{const cur=prev[activeEntity]||{cards:[],reqNum:'',asOf:today(),result:null,detail:null};const next=typeof updater==='function'?updater(cur):updater;return{...prev,[activeEntity]:next};});};
 
   useEffect(()=>{try{localStorage.setItem(SIDEBAR_KEY,String(sidebarCol));}catch{}},[sidebarCol]);
   useEffect(()=>{const t=api.getToken();if(t){api.me().then(u=>{if(u)setUser(u);}).catch(()=>api.clearToken()).finally(()=>setLoading(false));}else setLoading(false);},[]);
@@ -503,7 +508,7 @@ export default function App(){
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='users'&&<UserManagement currentUser={user}/>}
         {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
-        {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} canEdit={canEdit} reqState={reqState} setReqState={setReqState}/>}
       </>})()}</div></div>
     {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
@@ -2146,13 +2151,20 @@ function BankReconciliation({entityId,user,canEdit=true}){const[accounts,setAcco
 
 // ═══ Entity Management ═══
 // ═══ Requisitions (development-project coding engine) ═══
-function Requisitions({entityId,entityName,canEdit=true}){
+function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const[err,setErr]=useState('');
-  // roll-forward
-  const[rfFile,setRfFile]=useState(null);const[rfReqNum,setRfReqNum]=useState('');const[rfAsOf,setRfAsOf]=useState(today());
-  const[rfBusy,setRfBusy]=useState(false);const[rfErr,setRfErr]=useState('');const[rfDetail,setRfDetail]=useState(null);const[rfResult,setRfResult]=useState(null);
-  // invoice cards (read by Claude, then editable)
-  const[rfCards,setRfCards]=useState([]);const[rfReading,setRfReading]=useState(0);const[rfReadErr,setRfReadErr]=useState('');
+  // Persistent working set lifted to App (survives navigation), kept per-entity.
+  const rs=reqState||{cards:[],reqNum:'',asOf:today(),result:null,detail:null,file:null};
+  const rfCards=rs.cards, rfReqNum=rs.reqNum, rfAsOf=rs.asOf, rfResult=rs.result, rfDetail=rs.detail, rfFile=rs.file||null;
+  const setRfCards=updater=>setReqState(cur=>({...cur,cards:typeof updater==='function'?updater(cur.cards||[]):updater}));
+  const setRfReqNum=v=>setReqState(cur=>({...cur,reqNum:v}));
+  const setRfAsOf=v=>setReqState(cur=>({...cur,asOf:v}));
+  const setRfResult=v=>setReqState(cur=>({...cur,result:v}));
+  const setRfDetail=v=>setReqState(cur=>({...cur,detail:v}));
+  const setRfFile=v=>setReqState(cur=>({...cur,file:v}));
+  // Transient (mid-operation) state stays local.
+  const[rfBusy,setRfBusy]=useState(false);const[rfErr,setRfErr]=useState('');
+  const[rfReading,setRfReading]=useState(0);const[rfReadErr,setRfReadErr]=useState('');
 
   // Read each uploaded invoice with Claude and append an editable card.
   const onRfInvoices=async(e)=>{const files=[...e.target.files];e.target.value='';if(!files.length)return;
@@ -2189,9 +2201,13 @@ function Requisitions({entityId,entityName,canEdit=true}){
     try{
       const {blob,filename,summary,workpaperFolder,workpaperSaved}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoiceIds});
       const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
-      setRfResult({filename,summary,count:newCurrent.length,workpaperFolder,workpaperSaved});
+      // Success: clear the working set (invoices/workbook/req#), keep the result banner.
+      setReqState(cur=>({...cur,cards:[],file:null,reqNum:'',detail:null,result:{filename,summary,count:newCurrent.length,workpaperFolder,workpaperSaved}}));
     }catch(e){setRfErr(e.message);if(e.detail)setRfDetail(e.detail);}
     finally{setRfBusy(false);}};
+
+  // Explicit cancel/clear of the in-progress requisition working set.
+  const clearReq=()=>{if(!confirm('Clear the uploaded workbook and all invoices? This cannot be undone.'))return;setReqState({cards:[],reqNum:'',asOf:today(),result:null,detail:null,file:null});setRfErr('');setRfReadErr('');};
 
   const tierStyle=conf=>conf==='high'?{color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder}
     :conf==='review'?{color:T.orange,background:T.orangeDim,border:'1px solid '+T.orange+'40'}
@@ -2256,7 +2272,10 @@ function Requisitions({entityId,entityName,canEdit=true}){
         </div>}
 
         {rfErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'10px 0'}}>{rfErr}</div>}
-        <button style={{...S.btnP,marginTop:12}} disabled={rfBusy||rfCards.length===0} onClick={runRollForward}>{rfBusy?'Rolling forward...':'Roll Forward & Download'+(rfCards.length?' ('+rfCards.length+')':'')}</button>
+        <div style={{display:'flex',gap:10,marginTop:12,alignItems:'center'}}>
+          <button style={S.btnP} disabled={rfBusy||rfCards.length===0} onClick={runRollForward}>{rfBusy?'Rolling forward...':'Roll Forward & Download'+(rfCards.length?' ('+rfCards.length+')':'')}</button>
+          {(rfCards.length>0||rfFile)&&<button style={S.btnS} disabled={rfBusy} onClick={clearReq}>Cancel</button>}
+        </div>
       </div>
 
       {rfResult&&<div style={{...S.card,background:T.greenDim,borderColor:T.greenBorder}}>
