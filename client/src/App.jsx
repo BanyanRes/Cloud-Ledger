@@ -447,7 +447,10 @@ export default function App(){
   useEffect(()=>{const t=api.getToken();if(t){api.me().then(u=>{if(u)setUser(u);}).catch(()=>api.clearToken()).finally(()=>setLoading(false));}else setLoading(false);},[]);
   useEffect(()=>{if(user)api.getEntities().then(e=>{setEntities(e);if(e.length>0&&!activeEntity)setActiveEntity(e[0].id);});},[user]);
   const refreshEntities=useCallback(async()=>{const e=await api.getEntities();setEntities(e);return e;},[]);
-  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec'],Viewer:['reports']}[user.role]||[]).includes(s);};
+  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec'],Viewer:['entries','reports','coa','bankrec']}[user.role]||[]).includes(s);};
+  // Read-only users (Viewer) SEE the same sections as an Accountant but cannot edit.
+  // canEdit gates every write control; it must never be derived from mere visibility.
+  const canEdit = !!user && (user.role==='Admin' || user.role==='Accountant');
   if(loading)return<div style={{...S.app,display:'flex',alignItems:'center',justifyContent:'center'}}><div style={{color:T.textMuted}}>Loading...</div></div>;
   const _resetToken=(()=>{try{return new URLSearchParams(window.location.search).get('reset_token');}catch{return null;}})();
   if(_resetToken)return<ResetPasswordScreen token={_resetToken}/>;
@@ -477,7 +480,7 @@ export default function App(){
       <div style={{display:'flex',alignItems:'center',gap:10}}><Logo size={32}/>{!sidebarCol&&<div style={{fontSize:17,fontWeight:800,color:T.textBright}}>CloudLedger</div>}</div>
       <div style={{width:1,height:28,background:T.border}}/><EntityPicker entities={entities} activeId={activeEntity} onSelect={setActiveEntity} onManage={()=>setPage('entities')}/></div>
       <div style={{display:'flex',alignItems:'center',gap:10}}>
-        {canAccess('entries')&&activeEntity&&<button style={{...S.btnP,position:'relative'}} onClick={()=>setShowJE(true)}>+ Journal Entry{jeHasContent&&<span style={{position:'absolute',top:-3,right:-3,width:8,height:8,borderRadius:4,background:T.orange,border:'2px solid #fff'}}/>}</button>}
+        {canEdit&&activeEntity&&<button style={{...S.btnP,position:'relative'}} onClick={()=>setShowJE(true)}>+ Journal Entry{jeHasContent&&<span style={{position:'absolute',top:-3,right:-3,width:8,height:8,borderRadius:4,background:T.orange,border:'2px solid #fff'}}/>}</button>}
         <span style={{fontSize:13,fontWeight:500}}>{user.name}</span><span style={S.badge}>{user.role}</span>
         <button style={S.btnS} onClick={()=>setShowChangePw(true)}>Settings</button>
         <button style={S.btnS} onClick={()=>{api.clearToken();setUser(null);}}>Sign Out</button></div></div>
@@ -487,12 +490,12 @@ export default function App(){
           {sidebarCol?<span style={{fontSize:15}}>{n.icon}</span>:<span>{n.icon}  {n.label}</span>}</div>:null)}</div>
       <div style={S.main}>{(()=>{const en=entities.find(e=>e.id===activeEntity);const entityName=en?en.name:'';return<>
         {page==='dashboard'&&<Dashboard entityId={activeEntity} setActiveEntity={setActiveEntity} setPage={setPage} user={user} key={rk}/>}
-        {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)}/>}
-        {page==='coa'&&activeEntity&&<ChartOfAccounts entityId={activeEntity} canEdit={canAccess('coa')}/>}
-        {page==='dimensions'&&activeEntity&&dimsEnabled&&<DimensionsManager entityId={activeEntity} entityName={entityName} canEdit={canAccess('coa')} key={activeEntity+'-'+rk}/>}
+        {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)}/>}
+        {page==='coa'&&activeEntity&&<ChartOfAccounts entityId={activeEntity} canEdit={canEdit}/>}
+        {page==='dimensions'&&activeEntity&&dimsEnabled&&<DimensionsManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
-        {page==='banktxn'&&activeEntity&&<BankTransactions entityId={activeEntity} bankSelAcct={bankSelAcct} setBankSelAcct={setBankSelAcct} bankTxns={bankTxns} setBankTxns={setBankTxns} bankUploading={bankUploading} setBankUploading={setBankUploading} bankStatusFilter={bankStatusFilter} setBankStatusFilter={setBankStatusFilter}/>}
-        {page==='bankrec'&&activeEntity&&<BankReconciliation entityId={activeEntity} user={user}/>}
+        {page==='banktxn'&&activeEntity&&<BankTransactions entityId={activeEntity} canEdit={canEdit} bankSelAcct={bankSelAcct} setBankSelAcct={setBankSelAcct} bankTxns={bankTxns} setBankTxns={setBankTxns} bankUploading={bankUploading} setBankUploading={setBankUploading} bankStatusFilter={bankStatusFilter} setBankStatusFilter={setBankStatusFilter}/>}
+        {page==='bankrec'&&activeEntity&&<BankReconciliation entityId={activeEntity} user={user} canEdit={canEdit}/>}
         {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf}/>}
         {page==='bs'&&activeEntity&&<BalanceSheet entityId={activeEntity} entityName={entityName} asOf={bsAsOf} setAsOf={setBsAsOf}/>}
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo}/>}
@@ -500,7 +503,7 @@ export default function App(){
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='users'&&<UserManagement currentUser={user}/>}
         {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
-        {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
+        {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
       </>})()}</div></div>
     {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
@@ -1534,11 +1537,11 @@ function BulkJEModal({entityId,onClose,onPosted}){
 }
 
 // ═══ Journal List ═══
-function JournalList({entityId,entityName,dimsEnabled,onNewEntry}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');
+function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');
   const[editEntry,setEditEntry]=useState(null);const[showBulk,setShowBulk]=useState(false);
   const load=useCallback(async()=>{const[e,a]=await Promise.all([api.getEntries(entityId,from||undefined,to||undefined),api.getAccounts(entityId)]);setEntries(e);setAccounts(a);},[entityId,from,to]);
   useEffect(()=>{load();},[load]);const del=async id=>{if(!confirm('Delete this journal entry?'))return;await api.deleteEntry(entityId,id);load();};const acctName=code=>accounts.find(a=>a.code===code)?.name||'?';
-  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}><div><div style={S.h1}>Journal Entries</div><div style={S.sub}>{entityName} &middot; {entries.length} entries</div></div><div style={{display:'flex',gap:8}}><button style={S.btnS} onClick={()=>setShowBulk(true)}>Bulk Upload</button><button style={S.btnP} onClick={onNewEntry}>+ New Entry</button></div></div>
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}><div><div style={S.h1}>Journal Entries</div><div style={S.sub}>{entityName} &middot; {entries.length} entries{!canEdit&&' · read-only'}</div></div>{canEdit&&<div style={{display:'flex',gap:8}}><button style={S.btnS} onClick={()=>setShowBulk(true)}>Bulk Upload</button><button style={S.btnP} onClick={onNewEntry}>+ New Entry</button></div>}</div>
     <div style={S.filterBar}><div><label style={S.label}>From</label><input style={S.inputSm} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
       <div><label style={S.label}>To</label><input style={S.inputSm} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
       {(from||to)&&<button style={{...S.btnGhost,marginTop:14,color:T.red}} onClick={()=>{setFrom('');setTo('');}}>Clear</button>}</div>
@@ -1550,8 +1553,8 @@ function JournalList({entityId,entityName,dimsEnabled,onNewEntry}){const[entries
             {e.attachments?.length>0&&<span style={{fontSize:11,color:T.teal,fontWeight:500}}>({e.attachments.length} file{e.attachments.length>1?'s':''})</span>}</div>
           <div style={{display:'flex',alignItems:'center',gap:8}}>
             <span style={{fontSize:12,color:T.textDim}}>{e.created_by}</span>
-            <button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>setEditEntry(e)}>Edit</button>
-            <button style={{...S.btnD,padding:'5px 12px',fontSize:11}} onClick={()=>del(e.id)}>Delete</button></div></div>
+            {canEdit&&<button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>setEditEntry(e)}>Edit</button>}
+            {canEdit&&<button style={{...S.btnD,padding:'5px 12px',fontSize:11}} onClick={()=>del(e.id)}>Delete</button>}</div></div>
         <table style={{...S.table,tableLayout:'fixed',width:'100%'}}>
           <colgroup><col style={{width:'280px'}}/><col/><col style={{width:'140px'}}/><col style={{width:'140px'}}/></colgroup>
           <thead><tr><th style={S.th}>Account</th><th style={S.th}>Description</th><th style={S.thR}>Debit</th><th style={S.thR}>Credit</th></tr></thead>
@@ -1751,7 +1754,7 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClos
   </div></div>);
 }
 
-function BankTransactions({entityId,bankSelAcct:selAcct,setBankSelAcct:setSelAcct,bankTxns:txns,setBankTxns:setTxns,bankUploading:uploading,setBankUploading:setUploading,bankStatusFilter:statusFilter,setBankStatusFilter:setStatusFilter}){
+function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelAcct:setSelAcct,bankTxns:txns,setBankTxns:setTxns,bankUploading:uploading,setBankUploading:setUploading,bankStatusFilter:statusFilter,setBankStatusFilter:setStatusFilter}){
   const[accounts,setAccounts]=useState([]);const[bankAccts,setBankAccts]=useState([]);
   const[err,setErr]=useState('');const[msg,setMsg]=useState('');const[showAddAcct,setShowAddAcct]=useState(false);
   const[uploadProgress,setUploadProgress]=useState('');const[discarding,setDiscarding]=useState(false);
@@ -1798,7 +1801,7 @@ function BankTransactions({entityId,bankSelAcct:selAcct,setBankSelAcct:setSelAcc
     <div style={S.card}><div style={S.row}>
       <div style={{...S.col,flex:2}}><label style={S.label}>Bank Account</label><select style={S.select} value={selAcct} onChange={e=>changeAcct(e.target.value)}><option value="">Select bank account...</option>{bankAccts.map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></div>
       <div style={S.col}><label style={S.label}>Status</label><select style={S.select} value={statusFilter} onChange={e=>changeStatus(e.target.value)}><option value="">All</option><option value="pending">Pending</option><option value="coded">Coded</option><option value="posted">Posted</option></select></div>
-      {selAcct&&<div style={{display:'flex',gap:8,alignItems:'flex-end'}}>
+      {canEdit&&selAcct&&<div style={{display:'flex',gap:8,alignItems:'flex-end'}}>
         {uploading
           ?<div style={{display:'flex',alignItems:'center',gap:10,marginBottom:4}}>
             <div style={{width:16,height:16,border:'2px solid '+T.accent,borderTopColor:'transparent',borderRadius:'50%',animation:'spin 1s linear infinite'}}/>
@@ -1822,9 +1825,9 @@ function BankTransactions({entityId,bankSelAcct:selAcct,setBankSelAcct:setSelAcc
       <div style={{padding:'16px 20px',display:'flex',justifyContent:'space-between',alignItems:'center',borderBottom:'1px solid '+T.border}}>
         <div style={S.h2}>{filteredTxns.length} Transactions</div>
         <div style={{display:'flex',gap:10}}>
-          <button style={{...S.btnS,color:T.teal,borderColor:T.teal+'40'}} onClick={()=>setShowAddAcct(true)}>+ New Account</button>
-          {filteredTxns.some(t=>t.status!=='posted')&&<button style={{...S.btnD,padding:'8px 14px',fontSize:12}} disabled={discarding} onClick={discardAllUnposted}>{discarding?'Discarding...':'Discard '+filteredTxns.filter(t=>t.status!=='posted').length+' unposted'}</button>}
-          {filteredTxns.some(t=>t.status==='coded')&&<button style={S.btnP} onClick={postCoded}>Post {filteredTxns.filter(t=>t.status==='coded').length} to GL</button>}</div></div>
+          {canEdit&&<button style={{...S.btnS,color:T.teal,borderColor:T.teal+'40'}} onClick={()=>setShowAddAcct(true)}>+ New Account</button>}
+          {canEdit&&filteredTxns.some(t=>t.status!=='posted')&&<button style={{...S.btnD,padding:'8px 14px',fontSize:12}} disabled={discarding} onClick={discardAllUnposted}>{discarding?'Discarding...':'Discard '+filteredTxns.filter(t=>t.status!=='posted').length+' unposted'}</button>}
+          {canEdit&&filteredTxns.some(t=>t.status==='coded')&&<button style={S.btnP} onClick={postCoded}>Post {filteredTxns.filter(t=>t.status==='coded').length} to GL</button>}</div></div>
       <table style={{...S.table,tableLayout:'fixed',width:'100%'}}>
         <colgroup><col style={{width:colW.date}}/><col style={{width:colW.desc}}/><col style={{width:colW.amount}}/><col style={{width:colW.gl}}/><col style={{width:colW.memo}}/><col style={{width:colW.status}}/><col style={{width:36}}/></colgroup>
         <thead><tr>
@@ -1839,7 +1842,7 @@ function BankTransactions({entityId,bankSelAcct:selAcct,setBankSelAcct:setSelAcc
           <td style={{...S.td,color:T.textMuted,fontSize:12,borderRight:'1px solid '+T.borderLight}} title={t.date}>{t.date}</td>
           <td style={{...S.td,fontWeight:500,borderRight:'1px solid '+T.borderLight}} title={t.description}>{t.description}</td>
           <td style={{...S.tdR,fontSize:15,fontWeight:700,color:t.amount>=0?T.green:T.red,borderRight:'1px solid '+T.borderLight}}>{t.amount>=0?'+':''}{fmt(t.amount)}</td>
-          <td style={{...S.td,padding:'4px 6px',overflow:'visible',borderRight:'1px solid '+T.borderLight}}>{t.status==='posted'
+          <td style={{...S.td,padding:'4px 6px',overflow:'visible',borderRight:'1px solid '+T.borderLight}}>{(t.status==='posted'||!canEdit)
             ? (t.splits && t.splits.length>0
                 ? <span style={{fontSize:11,color:T.textDim}}>Split: {t.splits.length} accts</span>
                 : <span style={{fontSize:12,color:T.textDim}}>{t.account_code}</span>)
@@ -1849,12 +1852,12 @@ function BankTransactions({entityId,bankSelAcct:selAcct,setBankSelAcct:setSelAcc
                     <div style={{flex:1,minWidth:0}}><AccountAutocomplete accounts={accounts} value={t.account_code||''} exclude={selAcct} onChange={v=>codeTransaction(t.id,v,t.memo)} placeholder="Search GL account..."/></div>
                     <button style={{...S.btnGhost,fontSize:10,color:T.purple,padding:'4px 6px',whiteSpace:'nowrap'}} onClick={()=>setSplitTxn(t)} title="Split across multiple accounts">Split</button>
                   </div>)}</td>
-          <td style={{...S.td,padding:'4px 6px',overflow:'visible',borderRight:'1px solid '+T.borderLight}}>{t.status==='posted'?<span style={{fontSize:12,color:T.textDim}}>{t.memo}</span>:
+          <td style={{...S.td,padding:'4px 6px',overflow:'visible',borderRight:'1px solid '+T.borderLight}}>{(t.status==='posted'||!canEdit)?<span style={{fontSize:12,color:T.textDim}}>{t.memo}</span>:
             (t.splits && t.splits.length>0
               ? <span style={{fontSize:11,color:T.textDim,fontStyle:'italic'}}>(per split)</span>
               : <input style={S.inputSm} placeholder="Memo" value={t.memo||''} onChange={e=>{const v=e.target.value;setTxns(prev=>prev.map(x=>x.id===t.id?{...x,memo:v}:x));}} onBlur={()=>codeTransaction(t.id,t.account_code,t.memo)}/>)}</td>
           <td style={{...S.td,borderRight:'1px solid '+T.borderLight}}><span style={{fontSize:10,fontWeight:600,padding:'3px 8px',borderRadius:20,background:t.status==='posted'?T.greenDim:t.status==='coded'?T.accentDim:T.orangeDim,color:t.status==='posted'?T.green:t.status==='coded'?T.accent:T.orange}}>{t.status}</span></td>
-          <td style={S.td}>{t.status!=='posted'&&<button style={S.btnGhost} onClick={async()=>{await api.deleteBankTransaction(entityId,t.id);setTxns(prev=>prev.filter(x=>x.id!==t.id));}}>x</button>}</td>
+          <td style={S.td}>{canEdit&&t.status!=='posted'&&<button style={S.btnGhost} onClick={async()=>{await api.deleteBankTransaction(entityId,t.id);setTxns(prev=>prev.filter(x=>x.id!==t.id));}}>x</button>}</td>
         </tr>)}</tbody></table></div>}
     {selAcct&&filteredTxns.length===0&&!uploading&&<div style={{...S.card,textAlign:'center',padding:60,color:T.textDim}}>No transactions yet. Upload a bank statement above.</div>}
     {showAddAcct&&<QuickAddAccountModal entityId={entityId} onClose={()=>setShowAddAcct(false)} onCreated={a=>{setAccounts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)));if(a.bank_acct)setBankAccts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)));}}/>}
@@ -2098,7 +2101,7 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo}){const[bala
     </div>);}
 
 // ═══ Bank Reconciliation ═══
-function BankReconciliation({entityId,user}){const[accounts,setAccounts]=useState([]);const[entries,setEntries]=useState([]);const[recs,setRecs]=useState([]);
+function BankReconciliation({entityId,user,canEdit=true}){const[accounts,setAccounts]=useState([]);const[entries,setEntries]=useState([]);const[recs,setRecs]=useState([]);
   const[view,setView]=useState('list');const[selAcct,setSelAcct]=useState('');const[stmtDate,setStmtDate]=useState(today());const[stmtBal,setStmtBal]=useState('');
   const[cleared,setCleared]=useState({});const[checked,setChecked]=useState({});
   const[viewEntry,setViewEntry]=useState(null);
@@ -2132,7 +2135,7 @@ function BankReconciliation({entityId,user}){const[accounts,setAccounts]=useStat
     {viewEntry&&<EditJEModal entityId={entityId} entry={viewEntry} accounts={accounts} onClose={()=>setViewEntry(null)} onSaved={()=>{setViewEntry(null);load();}}/>}
     </div>);
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
-    <div><div style={S.h1}>Bank Reconciliation</div><div style={S.sub}>{recs.length} completed</div></div><button style={S.btnP} onClick={()=>setView('new')}>+ New Reconciliation</button></div>
+    <div><div style={S.h1}>Bank Reconciliation</div><div style={S.sub}>{recs.length} completed</div></div>{canEdit&&<button style={S.btnP} onClick={()=>setView('new')}>+ New Reconciliation</button>}</div>
     <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(240px,1fr))',gap:16,marginBottom:20}}>
       {bankAccts.map(a=>{const t=getTxns(a.code);const bal=t.reduce((s,x)=>s+x.amount,0);return<div key={a.code} style={{...S.card,padding:20}}>
         <div style={{fontWeight:700,color:T.textBright,fontSize:14,marginBottom:4}}>{a.name}</div><div style={{fontSize:12,color:T.textDim,marginBottom:12}}>{a.code}</div>
@@ -2143,7 +2146,7 @@ function BankReconciliation({entityId,user}){const[accounts,setAccounts]=useStat
 
 // ═══ Entity Management ═══
 // ═══ Requisitions (development-project coding engine) ═══
-function Requisitions({entityId,entityName}){
+function Requisitions({entityId,entityName,canEdit=true}){
   const[err,setErr]=useState('');
   // roll-forward
   const[rfFile,setRfFile]=useState(null);const[rfReqNum,setRfReqNum]=useState('');const[rfAsOf,setRfAsOf]=useState(today());
@@ -2198,6 +2201,8 @@ function Requisitions({entityId,entityName}){
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16}}>
       <div><div style={S.h1}>Requisitions</div><div style={S.sub}>{entityName} &mdash; roll forward to the next requisition</div></div>
     </div>
+    {!canEdit&&<div style={{...S.card,textAlign:'center',padding:50,color:T.textDim}}>The requisition roll-forward tool is read-only for your account. Contact an administrator if you need to run a requisition.</div>}
+    {canEdit&&<>
     {err&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:12}}>{err}</div>}
 
     <div>
@@ -2281,6 +2286,7 @@ function Requisitions({entityId,entityName}){
             <td style={{...S.td,fontSize:11,color:T.textMuted}}>{c.detail}</td></tr>)}</tbody></table>
       </div>}
     </div>
+    </>}
   </div>);}
 
 function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
