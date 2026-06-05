@@ -40,6 +40,11 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB max
 const memUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+// Roll-forward sends the period's invoices (including each PDF's base64 bytes) in
+// a large `invoices` text field. multer's default fieldSize is only 1MB, which
+// silently fails the request for a normal multi-invoice period. Allow a big text
+// field (and a comfortable file size for the workbook) on that route only.
+const reqRollUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024, fieldSize: 80 * 1024 * 1024, fields: 50 } });
 
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
@@ -3787,7 +3792,19 @@ function buildRollforwardFilename(originalName, reqNumber, asOfDate) {
 //
 // On success streams the rolled-forward .xlsx. On a required-check failure
 // returns 422 with the reconciliation detail so the caller can see what broke.
-app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole('Admin', 'Accountant'), memUpload.single('workbook'), async (req, res) => {
+app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res, next) => {
+  reqRollUpload.single('workbook')(req, res, (err) => {
+    if (err) {
+      const tooBig = err.code === 'LIMIT_FIELD_VALUE' || err.code === 'LIMIT_FILE_SIZE';
+      return res.status(tooBig ? 413 : 400).json({
+        error: tooBig
+          ? 'Upload too large: the combined invoices/workbook exceeded the size limit. Try rolling forward with fewer invoices at once, or contact support.'
+          : 'Upload failed: ' + err.message,
+      });
+    }
+    next();
+  });
+}, async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No workbook uploaded (field name: workbook)' });
 
   let newCurrent;
