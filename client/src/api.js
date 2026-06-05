@@ -78,6 +78,11 @@ export const api = {
   createEntry: (eid, data) => request('/entities/' + eid + '/entries', { method: 'POST', body: data }),
   updateEntry: (eid, id, data) => request('/entities/' + eid + '/entries/' + id, { method: 'PUT', body: data }),
   deleteEntry: (eid, id) => request('/entities/' + eid + '/entries/' + id, { method: 'DELETE' }),
+  bulkEntriesPreview: (eid, file) => {
+    const fd = new FormData(); fd.append('file', file);
+    return request('/entities/' + eid + '/entries/bulk/preview', { method: 'POST', body: fd });
+  },
+  bulkEntriesCommit: (eid, entries) => request('/entities/' + eid + '/entries/bulk', { method: 'POST', body: { entries } }),
 
   // Attachments
   uploadAttachments: (eid, entryId, files) => {

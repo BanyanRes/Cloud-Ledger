@@ -1793,6 +1793,184 @@ app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole(
   res.json({ id: result, entry_num: num });
 });
 
+// ─── Bulk journal-entry upload (one balanced entry per row) ──────────────────
+// Spreadsheet layout (header names matched case-insensitively, fuzzy):
+//   Date | Memo | Debit Account # | Credit Account # | Amount | Line Description?
+//   | Location? | Class?
+// Each row debits the debit account and credits the credit account by Amount,
+// so every row is a self-balancing entry. Required: date, debit acct, credit
+// acct, amount. Parses + validates into a preview; a separate confirm step posts.
+function parseBulkJE(buffer, eid) {
+  const { columns, rows } = glReadGrid(buffer);
+  const norm = c => String(c).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const pick = (cands) => {
+    for (const want of cands) {
+      const hit = columns.find(c => norm(c) === want);
+      if (hit) return hit;
+    }
+    // loose contains-match fallback
+    for (const want of cands) {
+      const hit = columns.find(c => norm(c).includes(want));
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const colDate   = pick(['date', 'postingdate', 'transactiondate', 'gldate']);
+  const colMemo   = pick(['memo', 'description', 'entrymemo', 'desc']);
+  const colDr     = pick(['debitaccount', 'debitacct', 'debitaccountnumber', 'dracct', 'draccount', 'debit']);
+  const colCr     = pick(['creditaccount', 'creditacct', 'creditaccountnumber', 'cracct', 'craccount', 'credit']);
+  const colAmt    = pick(['amount', 'amt', 'value']);
+  const colLineDesc = pick(['linedescription', 'linememo']);
+  const colLoc    = pick(['location', 'locationname', 'locationcode', 'deal']);
+  const colClass  = pick(['class', 'investor', 'investorclass', 'classname', 'classcode']);
+
+  const missing = [];
+  if (!colDate) missing.push('Date');
+  if (!colMemo) missing.push('Memo');
+  if (!colDr) missing.push('Debit Account #');
+  if (!colCr) missing.push('Credit Account #');
+  if (!colAmt) missing.push('Amount');
+  if (missing.length) {
+    return { error: 'Missing required column(s): ' + missing.join(', ') + '. Found columns: ' + columns.join(', ') };
+  }
+
+  // Lookups for validation.
+  const accounts = new Set(db.prepare('SELECT code FROM accounts WHERE entity_id=?').all(eid).map(a => String(a.code)));
+  const locRows = db.prepare('SELECT id, name, code FROM dim_locations WHERE entity_id=?').all(eid);
+  const classRows = db.prepare('SELECT id, name, code FROM dim_classes WHERE entity_id=?').all(eid);
+  const dimLookup = (rows) => {
+    const m = new Map();
+    for (const r of rows) {
+      if (r.name) m.set(String(r.name).toLowerCase().trim(), r.id);
+      if (r.code) m.set(String(r.code).toLowerCase().trim(), r.id);
+    }
+    return m;
+  };
+  const locMap = dimLookup(locRows);
+  const classMap = dimLookup(classRows);
+
+  const toISO = (v) => {
+    if (v instanceof Date && !isNaN(v)) {
+      return v.getFullYear() + '-' + String(v.getMonth() + 1).padStart(2, '0') + '-' + String(v.getDate()).padStart(2, '0');
+    }
+    const s = String(v == null ? '' : v).trim();
+    if (!s) return null;
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    const m = s.match(/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/); // MM/DD/YYYY
+    if (m) {
+      let [_, mo, da, yr] = m; if (yr.length === 2) yr = '20' + yr;
+      return yr + '-' + mo.padStart(2, '0') + '-' + da.padStart(2, '0');
+    }
+    const d = new Date(s);
+    if (!isNaN(d)) return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+    return null;
+  };
+
+  const entries = [];
+  rows.forEach((row, idx) => {
+    const rowNum = idx + 1;
+    const errors = [];
+    const dateISO = toISO(row[colDate]);
+    const memo = String(row[colMemo] == null ? '' : row[colMemo]).trim();
+    const drCode = String(row[colDr] == null ? '' : row[colDr]).trim().replace(/\.0$/, '');
+    const crCode = String(row[colCr] == null ? '' : row[colCr]).trim().replace(/\.0$/, '');
+    const amount = GL_NUM(row[colAmt]);
+    const lineDesc = colLineDesc ? String(row[colLineDesc] == null ? '' : row[colLineDesc]).trim() : '';
+
+    if (!dateISO) errors.push('invalid or missing Date');
+    if (!memo) errors.push('missing Memo');
+    if (!drCode) errors.push('missing Debit Account #');
+    else if (!accounts.has(drCode)) errors.push('debit account ' + drCode + ' not in chart of accounts');
+    if (!crCode) errors.push('missing Credit Account #');
+    else if (!accounts.has(crCode)) errors.push('credit account ' + crCode + ' not in chart of accounts');
+    if (!(Math.abs(amount) > 0)) errors.push('Amount must be a non-zero number');
+    if (drCode && crCode && drCode === crCode) errors.push('debit and credit accounts are the same');
+
+    let location_id = null, location_label = '';
+    if (colLoc) {
+      const raw = String(row[colLoc] == null ? '' : row[colLoc]).trim();
+      if (raw) {
+        const id = locMap.get(raw.toLowerCase());
+        if (id) { location_id = id; location_label = raw; }
+        else errors.push('location "' + raw + '" not found for this entity');
+      }
+    }
+    let class_id = null, class_label = '';
+    if (colClass) {
+      const raw = String(row[colClass] == null ? '' : row[colClass]).trim();
+      if (raw) {
+        const id = classMap.get(raw.toLowerCase());
+        if (id) { class_id = id; class_label = raw; }
+        else errors.push('class "' + raw + '" not found for this entity');
+      }
+    }
+
+    entries.push({
+      row: rowNum, date: dateISO, memo, debit_account: drCode, credit_account: crCode,
+      amount: +amount.toFixed(2), line_description: lineDesc,
+      location_id, location_label, class_id, class_label,
+      valid: errors.length === 0, errors,
+    });
+  });
+
+  const valid = entries.filter(e => e.valid).length;
+  return {
+    columns,
+    mapped: { date: colDate, memo: colMemo, debit: colDr, credit: colCr, amount: colAmt, line_description: colLineDesc, location: colLoc, class: colClass },
+    entries, total: entries.length, valid, invalid: entries.length - valid,
+  };
+}
+
+// Preview: parse the uploaded sheet and return validated rows (nothing posted).
+app.post('/api/entities/:eid/entries/bulk/preview', auth, requireEntityAccess(), requireRole('Admin','Accountant'), memUpload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  try {
+    const result = parseBulkJE(req.file.buffer, req.params.eid);
+    if (result.error) return res.status(400).json({ error: result.error });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: 'Failed to read spreadsheet: ' + e.message });
+  }
+});
+
+// Commit: post the confirmed entries. Body: { entries: [{date, memo, debit_account,
+// credit_account, amount, line_description, location_id, class_id}] }. Each becomes
+// one balanced 2-line journal entry. All-or-nothing within a single transaction.
+app.post('/api/entities/:eid/entries/bulk', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const eid = req.params.eid;
+  const list = Array.isArray(req.body && req.body.entries) ? req.body.entries : [];
+  if (!list.length) return res.status(400).json({ error: 'No entries to post' });
+
+  const accounts = new Set(db.prepare('SELECT code FROM accounts WHERE entity_id=?').all(eid).map(a => String(a.code)));
+  // Re-validate server-side; never trust the client to have done it.
+  for (const [i, e] of list.entries()) {
+    const amt = Number(e.amount);
+    if (!e.date || !e.memo) return res.status(400).json({ error: 'Entry ' + (i + 1) + ': missing date or memo' });
+    if (!accounts.has(String(e.debit_account)) || !accounts.has(String(e.credit_account)))
+      return res.status(400).json({ error: 'Entry ' + (i + 1) + ': debit/credit account not in chart of accounts' });
+    if (!(Math.abs(amt) > 0)) return res.status(400).json({ error: 'Entry ' + (i + 1) + ': amount must be non-zero' });
+  }
+
+  const posted = db.transaction(() => {
+    let num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id=?').get(eid).m || 0);
+    const insEntry = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)');
+    const insLine = db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?,?)');
+    const ids = [];
+    for (const e of list) {
+      num += 1;
+      const amt = +Number(e.amount).toFixed(2);
+      const desc = e.line_description || '';
+      const r = insEntry.run(eid, num, e.date, e.memo, req.user.name || req.user.email);
+      insLine.run(r.lastInsertRowid, String(e.debit_account), amt, 0, desc, null, e.class_id || null, e.location_id || null);
+      insLine.run(r.lastInsertRowid, String(e.credit_account), 0, amt, desc, null, e.class_id || null, e.location_id || null);
+      ids.push({ id: r.lastInsertRowid, entry_num: num });
+    }
+    return ids;
+  })();
+
+  res.json({ posted: posted.length, entries: posted });
+});
+
 app.delete('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const atts = db.prepare('SELECT filename FROM journal_attachments WHERE entry_id=?').all(req.params.id);
   atts.forEach(a => { try { fs.unlinkSync(path.join(UPLOAD_DIR, a.filename)); } catch {} });

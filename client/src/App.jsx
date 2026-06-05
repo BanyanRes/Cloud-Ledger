@@ -1450,12 +1450,82 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
     {showAddAcct&&<QuickAddAccountModal entityId={entityId} onClose={()=>setShowAddAcct(false)} onCreated={a=>setAccounts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)))}/>}
   </div></div>);}
 
+// ═══ Bulk Journal Entry Upload ═══
+// Upload an .xlsx/.csv where each row is one balanced entry
+// (Date, Memo, Debit Account #, Credit Account #, Amount [, Line Description, Location, Class]),
+// preview + validate, then post the valid rows.
+function BulkJEModal({entityId,onClose,onPosted}){
+  const[file,setFile]=useState(null);
+  const[preview,setPreview]=useState(null);// {entries, mapped, total, valid, invalid}
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const[posted,setPosted]=useState(null);
+  const doPreview=async(f)=>{
+    setErr('');setPreview(null);setBusy(true);
+    try{const r=await api.bulkEntriesPreview(entityId,f);setPreview(r);}
+    catch(e){setErr(e.message);}
+    finally{setBusy(false);}
+  };
+  const onPick=e=>{const f=e.target.files[0];e.target.value='';if(f){setFile(f);doPreview(f);}};
+  const commit=async()=>{
+    if(!preview)return;
+    const valid=preview.entries.filter(en=>en.valid).map(en=>({date:en.date,memo:en.memo,debit_account:en.debit_account,credit_account:en.credit_account,amount:en.amount,line_description:en.line_description,location_id:en.location_id,class_id:en.class_id}));
+    if(!valid.length){setErr('No valid entries to post.');return;}
+    setBusy(true);setErr('');
+    try{const r=await api.bulkEntriesCommit(entityId,valid);setPosted(r.posted);setTimeout(()=>onPosted(),900);}
+    catch(e){setErr(e.message);}
+    finally{setBusy(false);}
+  };
+  const validCount=preview?preview.entries.filter(e=>e.valid).length:0;
+  return(<div style={S.modal} onClick={()=>{if(!busy)onClose();}}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:900}} onClick={e=>e.stopPropagation()}>
+    <button style={S.modalClose} onClick={onClose}>&times;</button>
+    <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:6}}>Bulk Upload Journal Entries</div>
+    <div style={{fontSize:13,color:T.textMuted,marginBottom:16,lineHeight:1.6}}>Each row is one balanced entry. Required columns: <strong>Date</strong>, <strong>Memo</strong>, <strong>Debit Account #</strong>, <strong>Credit Account #</strong>, <strong>Amount</strong>. Optional: Line Description, Location, Class. Accepts .xlsx or .csv.</div>
+
+    <div style={{position:'relative',border:'1.5px dashed '+T.border,borderRadius:8,padding:'20px 16px',textAlign:'center',background:T.bgElevated,marginBottom:14}}>
+      <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:2}}>{file?file.name:'Click to choose a spreadsheet'}</div>
+      <div style={{fontSize:11,color:T.textMuted}}>{file?'Click again to choose a different file':'.xlsx or .csv'}</div>
+      <input type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" disabled={busy} style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:busy?'not-allowed':'pointer'}} onChange={onPick}/>
+    </div>
+
+    {busy&&!posted&&<div style={{fontSize:12,color:T.accent,margin:'8px 0'}}>Working&hellip;</div>}
+    {err&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:12}}>{err}</div>}
+    {posted!=null&&<div style={{fontSize:14,fontWeight:600,color:T.green,padding:12,background:T.greenDim,borderRadius:6,border:'1px solid '+T.greenBorder}}>Posted {posted} journal {posted===1?'entry':'entries'}. ✓</div>}
+
+    {preview&&posted==null&&<div>
+      <div style={{display:'flex',gap:16,alignItems:'center',marginBottom:12,fontSize:13}}>
+        <span style={{fontWeight:700,color:T.textBright}}>{preview.total} row{preview.total===1?'':'s'}</span>
+        <span style={{color:T.green,fontWeight:600}}>{preview.valid} valid</span>
+        {preview.invalid>0&&<span style={{color:T.red,fontWeight:600}}>{preview.invalid} with errors (will be skipped)</span>}
+      </div>
+      <div style={{maxHeight:340,overflow:'auto',border:'1px solid '+T.border,borderRadius:8}}>
+        <table style={{...S.table,width:'100%'}}>
+          <thead><tr><th style={S.th}>Row</th><th style={S.th}>Date</th><th style={S.th}>Memo</th><th style={S.th}>Dr</th><th style={S.th}>Cr</th><th style={S.thR}>Amount</th><th style={S.th}>Status</th></tr></thead>
+          <tbody>{preview.entries.map(en=><tr key={en.row} style={en.valid?{}:{background:T.redDim}}>
+            <td style={S.td}>{en.row}</td>
+            <td style={S.td}>{en.date||<span style={{color:T.red}}>—</span>}</td>
+            <td style={{...S.td,maxWidth:200,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={en.memo}>{en.memo}</td>
+            <td style={S.td}>{en.debit_account||'—'}</td>
+            <td style={S.td}>{en.credit_account||'—'}</td>
+            <td style={S.tdR}>{Number.isFinite(en.amount)?fmt(en.amount):'—'}</td>
+            <td style={S.td}>{en.valid?<span style={{color:T.green,fontWeight:600,fontSize:11}}>OK</span>:<span style={{color:T.red,fontSize:11}} title={en.errors.join('; ')}>{en.errors.join('; ')}</span>}</td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+      <div style={{display:'flex',gap:10,marginTop:16,justifyContent:'flex-end'}}>
+        <button style={S.btnS} onClick={onClose} disabled={busy}>Cancel</button>
+        <button style={{...S.btnP,opacity:validCount&&!busy?1:0.5}} disabled={!validCount||busy} onClick={commit}>{busy?'Posting…':'Post '+validCount+' '+(validCount===1?'Entry':'Entries')}</button>
+      </div>
+    </div>}
+  </div></div>);
+}
+
 // ═══ Journal List ═══
 function JournalList({entityId,entityName,dimsEnabled,onNewEntry}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');
-  const[editEntry,setEditEntry]=useState(null);
+  const[editEntry,setEditEntry]=useState(null);const[showBulk,setShowBulk]=useState(false);
   const load=useCallback(async()=>{const[e,a]=await Promise.all([api.getEntries(entityId,from||undefined,to||undefined),api.getAccounts(entityId)]);setEntries(e);setAccounts(a);},[entityId,from,to]);
   useEffect(()=>{load();},[load]);const del=async id=>{if(!confirm('Delete this journal entry?'))return;await api.deleteEntry(entityId,id);load();};const acctName=code=>accounts.find(a=>a.code===code)?.name||'?';
-  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}><div><div style={S.h1}>Journal Entries</div><div style={S.sub}>{entityName} &middot; {entries.length} entries</div></div><button style={S.btnP} onClick={onNewEntry}>+ New Entry</button></div>
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}><div><div style={S.h1}>Journal Entries</div><div style={S.sub}>{entityName} &middot; {entries.length} entries</div></div><div style={{display:'flex',gap:8}}><button style={S.btnS} onClick={()=>setShowBulk(true)}>Bulk Upload</button><button style={S.btnP} onClick={onNewEntry}>+ New Entry</button></div></div>
     <div style={S.filterBar}><div><label style={S.label}>From</label><input style={S.inputSm} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
       <div><label style={S.label}>To</label><input style={S.inputSm} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
       {(from||to)&&<button style={{...S.btnGhost,marginTop:14,color:T.red}} onClick={()=>{setFrom('');setTo('');}}>Clear</button>}</div>
@@ -1478,6 +1548,7 @@ function JournalList({entityId,entityName,dimsEnabled,onNewEntry}){const[entries
         {e.attachments?.length>0&&<div style={{marginTop:10,display:'flex',flexWrap:'wrap',gap:4}}>{e.attachments.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>)}</div>}
       </div>)}</div>}
     {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={load}/>}
+    {showBulk&&<BulkJEModal entityId={entityId} onClose={()=>setShowBulk(false)} onPosted={()=>{setShowBulk(false);load();}}/>}
   </div>);}
 
 // ═══ Dimensions (Locations & Classes) manager ═══
