@@ -128,7 +128,14 @@ function writeRowCells(ws, r, row) {
   put(COL.gl, row.gl);
   ws.getCell(r, COL.name).value = row.name || null;
   ws.getCell(r, COL.vendor).value = row.vendor || null;
-  put(COL.bill, row.bill);
+  // Bill number (invoice #) is an IDENTIFIER, not a quantity. When it happens to
+  // be all digits (e.g. 47302, 748203) and is stored as a numeric cell, Excel
+  // right-aligns it and renders "#####" whenever the column is too narrow — and
+  // it can never overflow into the next cell the way text does. Coerce it to a
+  // string (and tag the cell as text) so a numeric-looking invoice # displays in
+  // full, left-aligned, and preserves any leading zeros. Formula bills (rare)
+  // and blank/undefined are passed through untouched.
+  putBill(ws, r, row.bill);
   put(COL.amount, row.amount);
   put(COL.req, row.req);
   put(COL.date, row.date);
@@ -136,6 +143,18 @@ function writeRowCells(ws, r, row) {
   // which crowds the 10pt text once a row is rewritten (the original autofit
   // state is lost), so set an explicit height that comfortably fits the text.
   ws.getRow(r).height = DATA_ROW_HEIGHT;
+}
+
+// Write the bill/invoice-# cell as TEXT. exceljs treats a JS number as a numeric
+// cell (→ "#####" when narrow); a string with numFmt '@' is a genuine text cell
+// that overflows/wraps like any label. Pass through formula objects and leave
+// blank/undefined bills alone (don't stamp an empty string into a spacer).
+function putBill(ws, r, bill) {
+  if (bill === undefined || bill === null || bill === '') return;
+  const cell = ws.getCell(r, COL.bill);
+  if (typeof bill === 'object') { cell.value = bill; return; } // {formula,...} — leave as-is
+  cell.value = String(bill);
+  cell.numFmt = '@'; // Text format so a digits-only invoice # is never treated as a number
 }
 
 // Explicit data/subtotal row height (points). The invoice logs use 10pt Calibri;
