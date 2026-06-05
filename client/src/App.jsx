@@ -246,13 +246,13 @@ function QuickAddAccountModal({entityId,onClose,onCreated}){const[form,setForm]=
   </div></div>);}
 
 // ─── JE Modal — form state received from App (persists across open/close) ───
-function JournalEntryModal({entityId,isTurnkeyEntity,user,onClose,onPosted,form,setForm,pendingFiles,setPendingFiles}){
+function JournalEntryModal({entityId,isTurnkeyEntity,isShellEntity,user,onClose,onPosted,form,setForm,pendingFiles,setPendingFiles}){
   const[accounts,setAccounts]=useState([]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[posting,setPosting]=useState(false);const[posted,setPosted]=useState('');
   const[projects,setProjects]=useState([]);
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
   useEffect(()=>{api.getAccounts(entityId).then(setAccounts);api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
   const showProject=isTurnkeyEntity||projects.length>0;
-  const showLocation=locations.length>0;const showClass=classes.length>0;
+  const showLocation=isShellEntity&&locations.length>0;const showClass=isShellEntity&&classes.length>0;
   const addLine=()=>setForm(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:'',description:''}]}));
   const removeLine=i=>setForm(f=>({...f,lines:f.lines.filter((_,j)=>j!==i)}));
   const updateLine=(i,k,v)=>setForm(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,[k]:v}:l)}));
@@ -457,6 +457,7 @@ export default function App(){
   const _activeEnt = entities.find(e=>e.id===activeEntity);
   const isTurnkeyEntity = !!(_activeEnt && (_activeEnt.code==='TURNKEYR' || /turnkey\s*rail/i.test(_activeEnt.name||'')));
   const isDevEntity = !!(_activeEnt && _activeEnt.entity_type==='development');
+  const isShellEntity = !!(_activeEnt && _activeEnt.entity_type==='shell');
   const navItems=[
     {id:'dashboard',label:'Dashboard',icon:NI.dashboard,section:'reports'},
     {id:'d1',divider:1,label:'TRANSACTIONS'},{id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
@@ -485,12 +486,12 @@ export default function App(){
           {sidebarCol?<span style={{fontSize:15}}>{n.icon}</span>:<span>{n.icon}  {n.label}</span>}</div>:null)}</div>
       <div style={S.main}>{(()=>{const en=entities.find(e=>e.id===activeEntity);const entityName=en?en.name:'';return<>
         {page==='dashboard'&&<Dashboard entityId={activeEntity} setActiveEntity={setActiveEntity} setPage={setPage} user={user} key={rk}/>}
-        {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)}/>}
+        {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} isShellEntity={isShellEntity} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)}/>}
         {page==='coa'&&activeEntity&&<ChartOfAccounts entityId={activeEntity} canEdit={canAccess('coa')}/>}
-        {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
+        {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} isShellEntity={isShellEntity} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
         {page==='banktxn'&&activeEntity&&<BankTransactions entityId={activeEntity} bankSelAcct={bankSelAcct} setBankSelAcct={setBankSelAcct} bankTxns={bankTxns} setBankTxns={setBankTxns} bankUploading={bankUploading} setBankUploading={setBankUploading} bankStatusFilter={bankStatusFilter} setBankStatusFilter={setBankStatusFilter}/>}
         {page==='bankrec'&&activeEntity&&<BankReconciliation entityId={activeEntity} user={user}/>}
-        {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf}/>}
+        {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} isShellEntity={isShellEntity} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf}/>}
         {page==='bs'&&activeEntity&&<BalanceSheet entityId={activeEntity} entityName={entityName} asOf={bsAsOf} setAsOf={setBsAsOf}/>}
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo}/>}
         {page==='wip'&&activeEntity&&<WipSchedule entityName={entityName} asOf={wipAsOf} setAsOf={setWipAsOf}/>}
@@ -499,7 +500,7 @@ export default function App(){
         {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
       </>})()}</div></div>
-    {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
+    {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} isShellEntity={isShellEntity} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
   </div>);}
 
@@ -1370,12 +1371,12 @@ function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSum
   </div>);}
 
 // ═══ Edit JE Modal ═══
-function EditJEModal({entityId,entry,accounts:initAccounts,onClose,onSaved}){
+function EditJEModal({entityId,isShellEntity,entry,accounts:initAccounts,onClose,onSaved}){
   const[accounts,setAccounts]=useState(initAccounts||[]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[saving,setSaving]=useState(false);
   const[projects,setProjects]=useState([]);useEffect(()=>{api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));},[entityId]);const showProject=projects.length>0||(entry.lines||[]).some(l=>l.project_id);
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
   useEffect(()=>{api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
-  const showLocation=locations.length>0||(entry.lines||[]).some(l=>l.location_id);const showClass=classes.length>0||(entry.lines||[]).some(l=>l.class_id);
+  const showLocation=(isShellEntity&&locations.length>0)||(entry.lines||[]).some(l=>l.location_id);const showClass=(isShellEntity&&classes.length>0)||(entry.lines||[]).some(l=>l.class_id);
   const[form,setForm]=useState({date:entry.date,memo:entry.memo,lines:entry.lines.map(l=>({account_code:l.account_code,project_id:l.project_id||'',location_id:l.location_id||'',class_id:l.class_id||'',description:l.description||'',debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
   const[attachments,setAttachments]=useState(entry.attachments||[]);
   const[attUploading,setAttUploading]=useState(false);
@@ -1448,7 +1449,7 @@ function EditJEModal({entityId,entry,accounts:initAccounts,onClose,onSaved}){
   </div></div>);}
 
 // ═══ Journal List ═══
-function JournalList({entityId,entityName,onNewEntry}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');
+function JournalList({entityId,entityName,isShellEntity,onNewEntry}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');
   const[editEntry,setEditEntry]=useState(null);
   const load=useCallback(async()=>{const[e,a]=await Promise.all([api.getEntries(entityId,from||undefined,to||undefined),api.getAccounts(entityId)]);setEntries(e);setAccounts(a);},[entityId,from,to]);
   useEffect(()=>{load();},[load]);const del=async id=>{if(!confirm('Delete this journal entry?'))return;await api.deleteEntry(entityId,id);load();};const acctName=code=>accounts.find(a=>a.code===code)?.name||'?';
@@ -1474,7 +1475,7 @@ function JournalList({entityId,entityName,onNewEntry}){const[entries,setEntries]
             <td style={S.tdR}>{l.debit>0?fmt(l.debit):''}</td><td style={S.tdR}>{l.credit>0?fmt(l.credit):''}</td></tr>)}</tbody></table>
         {e.attachments?.length>0&&<div style={{marginTop:10,display:'flex',flexWrap:'wrap',gap:4}}>{e.attachments.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>)}</div>}
       </div>)}</div>}
-    {editEntry&&<EditJEModal entityId={entityId} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={load}/>}
+    {editEntry&&<EditJEModal entityId={entityId} isShellEntity={isShellEntity} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={load}/>}
   </div>);}
 
 // ═══ Chart of Accounts ═══
@@ -1512,7 +1513,7 @@ function ChartOfAccounts({entityId,canEdit}){const[accounts,setAccounts]=useStat
           <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={async()=>{try{await api.deleteAccount(entityId,a.code);load();}catch(e){alert(e.message);}}}>x</button></div></td>}</tr>)}</tbody></table></div></div>);}
 
 // ═══ General Ledger ═══
-function GeneralLedger({entityId,entityName,from,setFrom,to,setTo,filter,setFilter}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);
+function GeneralLedger({entityId,entityName,isShellEntity,from,setFrom,to,setTo,filter,setFilter}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);
   const[editEntry,setEditEntry]=useState(null);
   const reload=useCallback(()=>{Promise.all([api.getEntries(entityId,from||undefined,to||undefined),api.getAccounts(entityId)]).then(([e,a])=>{setEntries(e);setAccounts(a);});},[entityId,from,to]);
   useEffect(()=>{reload();},[reload]);
@@ -1531,7 +1532,7 @@ function GeneralLedger({entityId,entityName,from,setFrom,to,setTo,filter,setFilt
         <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:900}}><thead><tr><th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Memo</th><th style={S.thR}>Debit</th><th style={S.thR}>Credit</th><th style={S.thR}>Balance</th><th style={{...S.th,width:100}}>Docs</th></tr></thead>
           <tbody>{txns.map((t,i)=>{run+=dr?(t.debit-t.credit):(t.credit-t.debit);const atts=entryAtts[t.jeId];return<tr key={i}><td style={{...S.td,color:T.textMuted}}>{t.date}</td><td style={S.td}><button style={{background:'none',border:0,padding:0,color:T.accent,fontWeight:600,cursor:'pointer',fontSize:'inherit',fontFamily:'inherit'}} onClick={()=>{const e=entries.find(x=>x.id===t.jeId);if(e)setEditEntry(e);}}>JE-{String(t.jeNum).padStart(4,'0')}</button></td><td style={S.td} title={t.description||t.memo}>{t.description||t.memo}</td><td style={S.tdR}>{t.debit>0?fmt(t.debit):''}</td><td style={S.tdR}>{t.credit>0?fmt(t.credit):''}</td><td style={{...S.tdR,fontWeight:600,color:T.textBright}}>{fmt(run)}</td>
             <td style={S.td}>{atts?atts.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>):''}</td></tr>;})}</tbody></table></div>}</div>);})}
-    {editEntry&&<EditJEModal entityId={entityId} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={()=>{setEditEntry(null);reload();}}/>}
+    {editEntry&&<EditJEModal entityId={entityId} isShellEntity={isShellEntity} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={()=>{setEditEntry(null);reload();}}/>}
     </div>);}
 
 // ═══ Bank Transactions (state lifted to App for navigation persistence) ═══
@@ -1770,7 +1771,7 @@ function WipSchedule({entityName,asOf,setAsOf}){
   </div></div>);
 }
 
-function TrialBalance({entityId,entityName,asOf,setAsOf}){
+function TrialBalance({entityId,entityName,isShellEntity,asOf,setAsOf}){
   const[balances,setBalances]=useState([]);
   const[drillAcct,setDrillAcct]=useState(null);
   const[locations,setLocations]=useState([]);
@@ -1817,8 +1818,8 @@ function TrialBalance({entityId,entityName,asOf,setAsOf}){
   };
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
     <div style={S.filterBar}><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
-      <div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>
-      <div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div></div>
+      {isShellEntity&&<div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>}
+      {isShellEntity&&<div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div>}</div>
     <div style={{display:'flex',gap:8}}><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={doExport}>Export TB</button></div></div>
     <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Trial Balance{scopeLabel?(' — '+scopeLabel):''}</div><div style={{fontSize:13,color:T.textMuted}}>As of {asOf}{dimmed?' · dimension-tagged activity only':''}</div></div>
     <table style={{...S.table,tableLayout:'fixed',width:'100%'}}>
@@ -2178,7 +2179,7 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
     {showAdd&&<div style={{...S.card,borderColor:T.green+'40'}}>
       <div style={{fontSize:14,fontWeight:600,color:T.textBright,marginBottom:12}}>Create New Entity</div>
       <div style={S.row}><div style={{...S.col,flex:3}}><label style={S.label}>Entity Name</label><input style={S.input} placeholder="e.g. CLR Fund I LP" value={name} onChange={e=>setName(e.target.value)}/></div>
-        <div style={{...S.col,flex:2}}><label style={S.label}>Entity Type</label><select style={S.input} value={newType} onChange={e=>setNewType(e.target.value)}><option value="accounting">Accounting</option><option value="development">Development Project</option></select></div></div>
+        <div style={{...S.col,flex:2}}><label style={S.label}>Entity Type</label><select style={S.input} value={newType} onChange={e=>setNewType(e.target.value)}><option value="accounting">Accounting</option><option value="development">Development Project</option><option value="shell">Shell</option></select></div></div>
       {err&&<div style={S.err}>{err}</div>}
       <div style={{fontSize:11,color:T.textMuted,marginBottom:10}}>A default chart of accounts will be created. You can replace it by importing a trial balance from the entity row. Development-project entities unlock the Requisitions coding tools.</div>
       <button style={S.btnP} onClick={async()=>{if(!name.trim()){setErr('Name required');return;}try{await api.createEntity(name.trim(),newType);setName('');setNewType('accounting');setShowAdd(false);setErr('');refresh();}catch(e){setErr(e.message);}}}>Create Entity</button></div>}
@@ -2187,12 +2188,12 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
       {err&&<div style={S.err}>{err}</div>}<button style={{...S.btnP,marginTop:10}} onClick={async()=>{const names=bulkText.split('\n').map(l=>l.trim()).filter(Boolean);if(!names.length){setErr('None');return;}try{for(const n of names)await api.createEntity(n);setBulkText('');setBulk(false);refresh();}catch(e){setErr(e.message);}}}>Import</button></div>}
     <div style={{...S.cardFlush,overflowX:'auto'}}><table style={{...S.table,minWidth:980}}><thead><tr><th style={S.th}>Entity</th><th style={{...S.th,width:720,minWidth:720}}>Actions</th></tr></thead>
       <tbody>{entities.sort((a,b)=>a.name.localeCompare(b.name)).map(e=><tr key={e.id} style={e.id===activeEntity?{background:T.accentDim}:{}}>
-        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{e.name}{e.entity_type==='development'&&<span style={{marginLeft:8,fontSize:9,fontWeight:700,color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder,borderRadius:4,padding:'2px 6px',textTransform:'uppercase',letterSpacing:'0.05em',verticalAlign:'middle'}}>Dev Project</span>}</td>
+        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{e.name}{e.entity_type==='development'&&<span style={{marginLeft:8,fontSize:9,fontWeight:700,color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder,borderRadius:4,padding:'2px 6px',textTransform:'uppercase',letterSpacing:'0.05em',verticalAlign:'middle'}}>Dev Project</span>}{e.entity_type==='shell'&&<span style={{marginLeft:8,fontSize:9,fontWeight:700,color:T.teal,background:T.tealDim,border:'1px solid '+T.teal+'40',borderRadius:4,padding:'2px 6px',textTransform:'uppercase',letterSpacing:'0.05em',verticalAlign:'middle'}}>Shell</span>}</td>
         <td style={S.td}><div style={{display:'flex',gap:8,flexWrap:'nowrap',whiteSpace:'nowrap'}}>
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0}} onClick={()=>setActiveEntity(e.id)}>Select</button>
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0,color:T.accent,borderColor:T.accent+'40'}} onClick={()=>{setImporting(e.id);setImportMsg('');setImportErr('');}}>Import Trial Balance</button>
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0,color:T.accent,borderColor:T.accent+'40'}} onClick={()=>{resetGl();setGlEntity(e.id);}}>Import General Ledger Detail</button>
-          <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0}} disabled={typeBusy===e.id} title="Toggle between Accounting and Development Project" onClick={async()=>{const next=e.entity_type==='development'?'accounting':'development';if(!confirm('Set "'+e.name+'" to '+(next==='development'?'Development Project':'Accounting')+'?'))return;setTypeBusy(e.id);try{await api.updateEntity(e.id,{entity_type:next});await refresh();}catch(ex){alert(ex.message);}finally{setTypeBusy(null);}}}>{typeBusy===e.id?'...':e.entity_type==='development'?'Make Accounting':'Make Dev Project'}</button>
+          <select style={{...S.inputSm,padding:'5px 8px',fontSize:11,flexShrink:0,width:'auto'}} disabled={typeBusy===e.id} title="Entity type" value={e.entity_type||'accounting'} onChange={async(ev)=>{const next=ev.target.value;if(next===e.entity_type)return;if(!confirm('Set "'+e.name+'" to '+({accounting:'Accounting',development:'Development Project',shell:'Shell'}[next]||next)+'?'))return;setTypeBusy(e.id);try{await api.updateEntity(e.id,{entity_type:next});await refresh();}catch(ex){alert(ex.message);}finally{setTypeBusy(null);}}}><option value="accounting">Accounting</option><option value="development">Development Project</option><option value="shell">Shell</option></select>
           <button style={{...S.btnD,padding:'5px 12px',fontSize:11,flexShrink:0}} onClick={async()=>{if(!confirm('Delete entity '+e.name+' and all its data?'))return;await api.deleteEntity(e.id);const r=await refresh();if(activeEntity===e.id)setActiveEntity(r[0]?.id||null);}}>Delete</button>
         </div></td></tr>)}</tbody></table></div>
     {importing&&<div style={S.modal} onClick={()=>{if(!importBusy)setImporting(null);}}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:560}} onClick={ev=>ev.stopPropagation()}>

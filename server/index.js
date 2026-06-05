@@ -361,7 +361,7 @@ const jeCols = db.prepare("PRAGMA table_info(journal_entries)").all().map(c => c
 if (!jeCols.includes('updated_by')) db.exec("ALTER TABLE journal_entries ADD COLUMN updated_by TEXT");
 if (!jeCols.includes('updated_at')) db.exec("ALTER TABLE journal_entries ADD COLUMN updated_at TEXT");
 
-// Entity type: 'accounting' (default, standard ledger entity) | 'development'
+// Entity type: 'accounting' (default, standard ledger entity) | 'development' | 'shell' (tracks location + investor/class dimensions)
 // (real-estate development project; unlocks Requisition Report / Invoice Packet features)
 const entCols = db.prepare("PRAGMA table_info(entities)").all().map(c => c.name);
 if (!entCols.includes('entity_type')) {
@@ -893,7 +893,7 @@ app.get('/api/entities', auth, (req, res) => {
 });
 app.post('/api/entities', auth, requireRole('Admin','Accountant'), (req, res) => {
   const { name } = req.body; if (!name) return res.status(400).json({ error: 'Name required' });
-  const entityType = req.body.entity_type === 'development' ? 'development' : 'accounting';
+  const entityType = ['development','shell'].includes(req.body.entity_type) ? req.body.entity_type : 'accounting';
   // Auto-generate a code from the name (used internally for sorting/uniqueness)
   const baseCode = name.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8) || 'ENT';
   let code = baseCode; let n = 1;
@@ -913,7 +913,7 @@ app.put('/api/entities/:id', auth, requireRole('Admin','Accountant'), (req, res)
   if (!name) return res.status(400).json({ error: 'Name required' });
   let entityType = ent.entity_type;
   if (req.body.entity_type !== undefined) {
-    if (!['development','accounting'].includes(req.body.entity_type)) return res.status(400).json({ error: 'entity_type must be development or accounting' });
+    if (!['development','accounting','shell'].includes(req.body.entity_type)) return res.status(400).json({ error: 'entity_type must be development, accounting, or shell' });
     entityType = req.body.entity_type;
   }
   db.prepare('UPDATE entities SET name = ?, entity_type = ? WHERE id = ?').run(name, entityType, id);
