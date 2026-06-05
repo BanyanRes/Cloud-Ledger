@@ -2209,10 +2209,10 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     }));
     setRfBusy(true);setRfErr('');setRfDetail(null);setRfResult(null);
     try{
-      const {blob,filename,summary,workpaperFolder,workpaperSaved}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoices});
+      const {blob,filename,summary,failedChecks,workpaperFolder,workpaperSaved}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoices});
       const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
       // Success: clear the working set (invoices/workbook/req#), keep the result banner.
-      setReqState(cur=>({...cur,cards:[],file:null,reqNum:'',detail:null,result:{filename,summary,count:newCurrent.length,workpaperFolder,workpaperSaved}}));
+      setReqState(cur=>({...cur,cards:[],file:null,reqNum:'',detail:null,result:{filename,summary,failedChecks,count:newCurrent.length,workpaperFolder,workpaperSaved}}));
     }catch(e){setRfErr(e.message);if(e.detail)setRfDetail(e.detail);}
     finally{setRfBusy(false);}};
 
@@ -2296,6 +2296,16 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
             <div key={k} style={{flex:'1 1 120px',textAlign:'center'}}>
               <div style={{fontSize:22,fontWeight:700,color:k==='Required failed'&&v>0?T.red:T.textBright}}>{v!=null?v:'—'}</div>
               <div style={{fontSize:10,color:T.textMuted,marginTop:2,textTransform:'uppercase',letterSpacing:'0.05em'}}>{k}</div></div>)}
+        </div>}
+        {rfResult.failedChecks&&rfResult.failedChecks.length>0&&<div style={{marginTop:12,paddingTop:10,borderTop:'1px solid '+T.greenBorder}}>
+          <div style={{fontSize:11,fontWeight:700,color:T.orange,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:6}}>Advisory checks not evaluated / not passed</div>
+          <table style={S.table}><thead><tr><th style={S.th}>Check</th><th style={S.th}>Level</th><th style={S.thR}>Expected</th><th style={S.thR}>Actual</th><th style={S.th}>Detail</th></tr></thead>
+            <tbody>{rfResult.failedChecks.map((c,i)=><tr key={i}>
+              <td style={{...S.td,fontWeight:600,color:T.textBright}}>{c.id}</td>
+              <td style={S.td}>{c.level}</td>
+              <td style={S.tdR}>{c.expected!=null?Number(c.expected).toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</td>
+              <td style={S.tdR}>{c.actual!=null?Number(c.actual).toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</td>
+              <td style={{...S.td,fontSize:11,color:T.textMuted}}>{c.detail}</td></tr>)}</tbody></table>
         </div>}
         {rfResult.workpaperFolder&&<div style={{fontSize:12,color:T.text,marginTop:12,paddingTop:10,borderTop:'1px solid '+T.greenBorder}}>
           Saved to Workpapers: <strong>{rfResult.workpaperFolder}</strong>

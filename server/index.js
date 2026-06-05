@@ -3957,6 +3957,12 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
     // Expose the verification summary in a header so the client can confirm which
     // checks passed without parsing the binary body.
     res.setHeader('X-Reconcile-Summary', JSON.stringify(verification.finalResult ? verification.finalResult.summary : {}));
+    // Also expose any checks that didn't pass (e.g. advisory failures) so the
+    // client can show their detail on the success card. Header-safe: strip CR/LF.
+    try {
+      const failed = ((verification.finalResult && verification.finalResult.checks) || []).filter(c => !c.pass);
+      res.setHeader('X-Reconcile-Failed', JSON.stringify(failed).replace(/[\r\n]/g, ' '));
+    } catch {}
     res.send(Buffer.from(outBuf));
   } catch (e) {
     res.status(500).json({ error: 'Roll-forward error: ' + e.message });
