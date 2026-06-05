@@ -3527,6 +3527,39 @@ app.post('/api/requisition/:entity_id/read-invoice', ...reqGuards(), requireRole
   });
 });
 
+// Build the rolled-forward output filename from the prior workbook's name,
+// bumping the requisition number (#N -> #N+1, or to the supplied reqNumber) and
+// the embedded date to the As-of Date (preserving the original date's format:
+// separator and 2- vs 4-digit year). Returns a safe generic name if the prior
+// filename has no recognizable "#<num>" token to anchor on.
+function buildRollforwardFilename(originalName, reqNumber, asOfDate) {
+  const fallback = 'Requisition_Report' + (reqNumber ? '_' + String(reqNumber) : '') + '.xlsx';
+  if (!originalName || typeof originalName !== 'string') return fallback;
+  let base = originalName.replace(/\.[^.]+$/, '');// strip extension
+  const numRe = /#\s*(\d+)/;
+  if (!numRe.test(base)) return fallback;// no req-number anchor -> don't guess
+  // Replace the requisition number.
+  if (reqNumber != null && reqNumber !== '') {
+    base = base.replace(numRe, '#' + String(reqNumber));
+  }
+  // Replace an embedded date (MM.DD.YYYY or MM.DD.YY, also / or - separators)
+  // with the As-of Date, matching the original's separator and year width.
+  if (asOfDate) {
+    const d = new Date(asOfDate + 'T00:00:00');
+    if (!isNaN(d)) {
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const yyyy = String(d.getFullYear());
+      const dateRe = /(\d{1,2})([.\/-])(\d{1,2})\2(\d{4}|\d{2})(?!\d)/;
+      base = base.replace(dateRe, (m, _mo, sep, _da, yr) => {
+        const year = yr.length === 2 ? yyyy.slice(-2) : yyyy;
+        return mm + sep + dd + sep + year;
+      });
+    }
+  }
+  return base + '.xlsx';
+}
+
 // ─── R4: Roll-forward engine route ───────────────────────────────────────────
 // Produce Req#N+1 from an uploaded Req#N workbook + the new period's invoices.
 // The engine writes formulas but does not evaluate them; production has no
@@ -3662,7 +3695,12 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
       console.error('requisition workpaper save failed:', e.message);
     }
 
-    const fname = 'Requisition_Report' + (meta.reqNumber ? '_' + String(meta.reqNumber) : '') + '.xlsx';
+    // Build the output filename from the PRIOR workbook's name, bumping the
+    // requisition number and (if present) the embedded date to the As-of Date.
+    // e.g. "0005 B1 County Line SRN Requisition Report #11 01.31.2026.xlsx"
+    //   -> "0005 B1 County Line SRN Requisition Report #12 02.28.2026.xlsx"
+    // Falls back to the generic name if the prior name can't be parsed.
+    const fname = buildRollforwardFilename(req.file.originalname, meta.reqNumber, meta.asOfDate);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
     // Expose the verification summary in a header so the client can confirm which
