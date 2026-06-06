@@ -3568,7 +3568,43 @@ app.post('/api/requisition/:entity_id/seed-history', ...reqGuards(), requireRole
   res.json({ seeded_history: lines.length, seeded_coa: coa.length });
 });
 
-// Predict cost codes for a batch of invoice lines using the validated engine.
+// Cost-code -> cost-code-name catalog for an entity, used by the Requisition UI
+// to auto-fill the Cost Code Name when a code is typed. Primary source is the
+// curated requisition_coa_map (canonical spelling, seeded from prior workbooks);
+// if that is empty for this entity, fall back to distinct code/name pairs seen
+// on previously-saved requisition invoices so the field still auto-fills.
+app.get('/api/requisition/:entity_id/coa-map', ...reqGuards(), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const map = {};
+  const rows = db.prepare(
+    'SELECT cost_code, cost_code_name, cost_category, bank_cost_category, gl_coding ' +
+    'FROM requisition_coa_map WHERE entity_id = ? AND cost_code IS NOT NULL'
+  ).all(eid);
+  for (const r of rows) {
+    if (r.cost_code == null || r.cost_code === '') continue;
+    map[String(r.cost_code).trim()] = {
+      cost_code_name: r.cost_code_name || '',
+      cost_category: r.cost_category || '',
+      bank_cost_category: r.bank_cost_category || '',
+      gl_coding: r.gl_coding || '',
+    };
+  }
+  // Fallback: fill any codes not already in the curated map from invoice history,
+  // preferring the most recent name for a given code.
+  const inv = db.prepare(
+    'SELECT cost_code, cost_code_name FROM requisition_invoice ' +
+    'WHERE entity_id = ? AND cost_code IS NOT NULL AND cost_code_name IS NOT NULL ' +
+    'ORDER BY req_number DESC, id DESC'
+  ).all(eid);
+  for (const r of inv) {
+    const code = String(r.cost_code).trim();
+    if (!code || map[code]) continue;
+    map[code] = { cost_code_name: r.cost_code_name || '', cost_category: '', bank_cost_category: '', gl_coding: '' };
+  }
+  res.json({ map });
+});
+
+
 // Body: { lines: [{vendor, bill_number, amount?, invoice_date?, ...}] }.
 // Returns per-line { confidence, cost_code, coding, candidates } plus a summary.
 app.post('/api/requisition/:entity_id/predict', ...reqGuards(), (req, res) => {

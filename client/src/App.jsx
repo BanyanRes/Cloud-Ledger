@@ -2159,6 +2159,10 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   // Transient (mid-operation) state stays local.
   const[rfBusy,setRfBusy]=useState(false);const[rfErr,setRfErr]=useState('');
   const[rfReading,setRfReading]=useState(0);const[rfReadErr,setRfReadErr]=useState('');
+  // Cost-code -> name catalog (from requisition_coa_map / invoice history) used to
+  // auto-fill the Cost Code Name when a code is entered. Loaded per entity.
+  const[coaMap,setCoaMap]=useState({});
+  useEffect(()=>{let alive=true;(async()=>{try{const r=await api.getRequisitionCoaMap(entityId);if(alive)setCoaMap((r&&r.map)||{});}catch{if(alive)setCoaMap({});}})();return()=>{alive=false;};},[entityId]);
 
   // Read each uploaded invoice with Claude and append an editable card.
   const onRfInvoices=async(e)=>{const files=[...e.target.files];e.target.value='';if(!files.length)return;
@@ -2184,7 +2188,20 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
       }catch(ex){setRfReadErr(ex.message);}
       finally{setRfReading(n=>Math.max(0,n-1));}
     }};
-  const updateCard=(id,field,val)=>setRfCards(cards=>cards.map(c=>c._id===id?{...c,[field]:val}:c));
+  const updateCard=(id,field,val)=>setRfCards(cards=>cards.map(c=>{
+    if(c._id!==id)return c;
+    const next={...c,[field]:val};
+    // When the Cost Code changes, auto-fill the Cost Code Name from the catalog.
+    // Only overwrite the name if it's blank or still matches the previous code's
+    // catalog name (i.e. the user hasn't hand-edited it), so manual edits stick.
+    if(field==='cost_code'){
+      const hit=coaMap[String(val).trim()];
+      const prevAuto=coaMap[String(c.cost_code).trim()];
+      const nameIsAuto=!c.cost_code_name||(prevAuto&&c.cost_code_name===prevAuto.cost_code_name);
+      if(hit&&nameIsAuto)next.cost_code_name=hit.cost_code_name||'';
+    }
+    return next;
+  }));
   const removeCard=id=>setRfCards(cards=>cards.filter(c=>c._id!==id));
 
   const runRollForward=async(force=false)=>{

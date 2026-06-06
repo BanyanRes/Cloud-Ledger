@@ -188,6 +188,8 @@ export const api = {
 
   // Requisition (development-project coding engine)
   seedRequisitionHistory: (eid, body) => request('/requisition/' + eid + '/seed-history', { method: 'POST', body }),
+  // Cost-code -> {cost_code_name,...} catalog used to auto-fill the Cost Code Name field.
+  getRequisitionCoaMap: (eid) => request('/requisition/' + eid + '/coa-map'),
   predictRequisitionCoding: (eid, lines) => request('/requisition/' + eid + '/predict', { method: 'POST', body: { lines } }),
   // Download a stored invoice's original bytes (PDF/image) by its saved id.
   downloadRequisitionInvoice: (id) => API_BASE + '/requisition/invoice/' + id + '/download?token=' + encodeURIComponent(getToken() || ''),
