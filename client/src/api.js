@@ -123,6 +123,11 @@ export const api = {
   deleteClass: (eid, id) => request('/entities/' + eid + '/classes/' + id, { method: 'DELETE' }),
   setLocationKind: (eid, id, kind) => request('/entities/' + eid + '/locations/' + id, { method: 'PATCH', body: { kind } }),
   setClassKind: (eid, id, kind) => request('/entities/' + eid + '/classes/' + id, { method: 'PATCH', body: { kind } }),
+  // ── Accounts Receivable: customers ──
+  getArCustomers: (eid) => request('/entities/' + eid + '/ar/customers'),
+  createArCustomer: (eid, data) => request('/entities/' + eid + '/ar/customers', { method: 'POST', body: data }),
+  updateArCustomer: (eid, id, data) => request('/entities/' + eid + '/ar/customers/' + id, { method: 'PATCH', body: data }),
+  deleteArCustomer: (eid, id) => request('/entities/' + eid + '/ar/customers/' + id, { method: 'DELETE' }),
   getDimensionBalances: (eid, opts = {}) => {
     const p = [];
     if (opts.dim) p.push('dim=' + opts.dim);

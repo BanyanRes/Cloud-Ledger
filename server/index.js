@@ -464,6 +464,86 @@ if (!tcCols.includes('default_entity_id')) {
   console.log('[db migrate] turnkey_config.default_entity_id added');
 }
 
+// === Accounts Receivable (customer invoicing) schema ===
+db.exec(`
+  CREATE TABLE IF NOT EXISTS ar_customers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    email TEXT,
+    address TEXT,
+    terms_days INTEGER DEFAULT 30,
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(entity_id, name)
+  );
+  CREATE TABLE IF NOT EXISTS ar_invoice_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    customer_id INTEGER NOT NULL REFERENCES ar_customers(id) ON DELETE CASCADE,
+    memo TEXT,
+    frequency TEXT NOT NULL DEFAULT 'monthly',
+    day_of_month INTEGER DEFAULT 1,
+    next_run TEXT,
+    ar_account_code TEXT NOT NULL DEFAULT '11000',
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS ar_template_lines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id INTEGER NOT NULL REFERENCES ar_invoice_templates(id) ON DELETE CASCADE,
+    description TEXT NOT NULL,
+    qty REAL DEFAULT 1,
+    rate REAL DEFAULT 0,
+    revenue_account_code TEXT NOT NULL,
+    class_id INTEGER,
+    location_id INTEGER,
+    sort INTEGER DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS ar_invoices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    customer_id INTEGER REFERENCES ar_customers(id) ON DELETE SET NULL,
+    template_id INTEGER REFERENCES ar_invoice_templates(id) ON DELETE SET NULL,
+    invoice_num TEXT NOT NULL,
+    invoice_date TEXT NOT NULL,
+    due_date TEXT,
+    customer_name TEXT,
+    customer_email TEXT,
+    customer_address TEXT,
+    memo TEXT,
+    subtotal REAL DEFAULT 0,
+    total REAL DEFAULT 0,
+    ar_account_code TEXT,
+    status TEXT NOT NULL DEFAULT 'draft',
+    je_id INTEGER REFERENCES journal_entries(id) ON DELETE SET NULL,
+    pay_je_id INTEGER REFERENCES journal_entries(id) ON DELETE SET NULL,
+    pdf_file_id INTEGER,
+    sent_at TEXT,
+    paid_at TEXT,
+    created_by TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    UNIQUE(entity_id, invoice_num)
+  );
+  CREATE TABLE IF NOT EXISTS ar_invoice_lines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    invoice_id INTEGER NOT NULL REFERENCES ar_invoices(id) ON DELETE CASCADE,
+    description TEXT NOT NULL,
+    qty REAL DEFAULT 1,
+    rate REAL DEFAULT 0,
+    amount REAL DEFAULT 0,
+    revenue_account_code TEXT NOT NULL,
+    class_id INTEGER,
+    location_id INTEGER,
+    sort INTEGER DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS idx_ar_customers_ent ON ar_customers(entity_id);
+  CREATE INDEX IF NOT EXISTS idx_ar_templates_ent ON ar_invoice_templates(entity_id);
+  CREATE INDEX IF NOT EXISTS idx_ar_invoices_ent ON ar_invoices(entity_id);
+  CREATE INDEX IF NOT EXISTS idx_ar_invoices_status ON ar_invoices(entity_id, status);
+`);
+console.log('[db] AR schema ready');
+
 
 // === Bill.com integration helpers ===
 const cryptoMod = require('crypto');
@@ -1636,6 +1716,40 @@ app.delete('/api/entities/:eid/classes/:id', auth, requireEntityAccess(), requir
   const used = db.prepare('SELECT COUNT(*) AS n FROM journal_lines WHERE class_id = ?').get(req.params.id).n;
   if (used > 0) return res.status(409).json({ error: 'Class is used on ' + used + ' journal line(s); reassign or remove those first' });
   db.prepare('DELETE FROM dim_classes WHERE id = ? AND entity_id = ?').run(req.params.id, req.params.eid);
+  res.json({ success: true });
+});
+
+// ══════════════ Accounts Receivable: customers ══════════════
+app.get('/api/entities/:eid/ar/customers', auth, requireEntityAccess(), (req, res) =>
+  res.json(db.prepare('SELECT * FROM ar_customers WHERE entity_id = ? ORDER BY active DESC, name').all(req.params.eid)));
+
+app.post('/api/entities/:eid/ar/customers', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const name = (req.body.name || '').trim(); if (!name) return res.status(400).json({ error: 'Name required' });
+  const email = (req.body.email || '').trim() || null;
+  const address = (req.body.address || '').trim() || null;
+  const terms = Number.isFinite(+req.body.terms_days) ? +req.body.terms_days : 30;
+  try { const r = db.prepare('INSERT INTO ar_customers (entity_id, name, email, address, terms_days) VALUES (?, ?, ?, ?, ?)').run(req.params.eid, name, email, address, terms);
+    res.json(db.prepare('SELECT * FROM ar_customers WHERE id = ?').get(r.lastInsertRowid)); }
+  catch(e) { if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'A customer with that name already exists' }); throw e; }
+});
+
+app.patch('/api/entities/:eid/ar/customers/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const row = db.prepare('SELECT * FROM ar_customers WHERE id = ? AND entity_id = ?').get(req.params.id, req.params.eid);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  const name = req.body.name !== undefined ? (req.body.name || '').trim() : row.name; if (!name) return res.status(400).json({ error: 'Name required' });
+  const email = req.body.email !== undefined ? ((req.body.email || '').trim() || null) : row.email;
+  const address = req.body.address !== undefined ? ((req.body.address || '').trim() || null) : row.address;
+  const terms = req.body.terms_days !== undefined && Number.isFinite(+req.body.terms_days) ? +req.body.terms_days : row.terms_days;
+  const active = req.body.active !== undefined ? (req.body.active ? 1 : 0) : row.active;
+  try { db.prepare('UPDATE ar_customers SET name = ?, email = ?, address = ?, terms_days = ?, active = ? WHERE id = ? AND entity_id = ?').run(name, email, address, terms, active, req.params.id, req.params.eid);
+    res.json(db.prepare('SELECT * FROM ar_customers WHERE id = ?').get(req.params.id)); }
+  catch(e) { if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'A customer with that name already exists' }); throw e; }
+});
+
+app.delete('/api/entities/:eid/ar/customers/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const inv = db.prepare('SELECT COUNT(*) AS n FROM ar_invoices WHERE customer_id = ?').get(req.params.id).n;
+  if (inv > 0) return res.status(409).json({ error: 'Customer has ' + inv + ' invoice(s); deactivate instead of deleting' });
+  db.prepare('DELETE FROM ar_customers WHERE id = ? AND entity_id = ?').run(req.params.id, req.params.eid);
   res.json({ success: true });
 });
 

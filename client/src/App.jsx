@@ -467,6 +467,7 @@ export default function App(){
   const isDevEntity = !!(_activeEnt && _activeEnt.entity_type==='development');
   const isShellEntity = !!(_activeEnt && _activeEnt.entity_type==='shell');
   const dimsEnabled = !!_activeEnt && !isShellEntity;// location/class dimensions available on every entity EXCEPT shell
+  const arEnabled = !!_activeEnt && !isShellEntity;// AR / customer invoicing available on every entity EXCEPT shell
   const navItems=[
     {id:'dashboard',label:'Dashboard',icon:NI.dashboard,section:'reports'},
     {id:'d1',divider:1,label:'TRANSACTIONS'},{id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
@@ -475,6 +476,7 @@ export default function App(){
     {id:'d3',divider:1,label:'REPORTS'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
     ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
+    ...(arEnabled?[{id:'d3c',divider:1,label:'RECEIVABLES'},{id:'ar_customers',label:'Customers',icon:'👥',section:'coa'}]:[]),
     {id:'d4',divider:1,label:'ADMIN'},{id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},{id:'users',label:'Users',icon:NI.users,section:'all'},
     {id:'d5',divider:1,label:'INTEGRATIONS'},{id:'billcom',label:'Bill.com Setup',icon:'💳',section:'all'},
   ];
@@ -498,6 +500,7 @@ export default function App(){
         {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)}/>}
         {page==='coa'&&activeEntity&&<ChartOfAccounts entityId={activeEntity} canEdit={canEdit}/>}
         {page==='dimensions'&&activeEntity&&dimsEnabled&&<DimensionsManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='ar_customers'&&activeEntity&&arEnabled&&<CustomersManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
         {page==='banktxn'&&activeEntity&&<BankTransactions entityId={activeEntity} canEdit={canEdit} bankSelAcct={bankSelAcct} setBankSelAcct={setBankSelAcct} bankTxns={bankTxns} setBankTxns={setBankTxns} bankUploading={bankUploading} setBankUploading={setBankUploading} bankStatusFilter={bankStatusFilter} setBankStatusFilter={setBankStatusFilter}/>}
         {page==='bankrec'&&activeEntity&&<BankReconciliation entityId={activeEntity} user={user} canEdit={canEdit}/>}
@@ -1618,6 +1621,61 @@ function DimensionsManager({entityId,entityName,canEdit}){
         onUpdate={async(id,d)=>{await api.updateClass(entityId,id,d);await load();}}
         onDelete={async id=>{await api.deleteClass(entityId,id);await load();}}/>
     </div></div>);
+}
+
+// ═══ AR Customers manager ═══
+function CustomersManager({entityId,entityName,canEdit}){
+  const[customers,setCustomers]=useState([]);const[loading,setLoading]=useState(true);
+  const[showAdd,setShowAdd]=useState(false);
+  const blank={name:'',email:'',address:'',terms_days:30};
+  const[form,setForm]=useState(blank);const[err,setErr]=useState('');
+  const[editing,setEditing]=useState(null);const[editForm,setEditForm]=useState(blank);const[editErr,setEditErr]=useState('');
+  const load=useCallback(async()=>{setLoading(true);try{const c=await api.getArCustomers(entityId);setCustomers(c||[]);}finally{setLoading(false);}},[entityId]);
+  useEffect(()=>{load();},[load]);
+  const add=async()=>{if(!form.name.trim()){setErr('Name required');return;}try{await api.createArCustomer(entityId,{name:form.name.trim(),email:form.email.trim()||null,address:form.address.trim()||null,terms_days:+form.terms_days||30});setForm(blank);setShowAdd(false);setErr('');await load();}catch(e){setErr(e.message);}};
+  const startEdit=c=>{setEditing(c.id);setEditForm({name:c.name||'',email:c.email||'',address:c.address||'',terms_days:c.terms_days??30});setEditErr('');};
+  const save=async()=>{if(!editForm.name.trim()){setEditErr('Name required');return;}try{await api.updateArCustomer(entityId,editing,{name:editForm.name.trim(),email:editForm.email.trim()||null,address:editForm.address.trim()||null,terms_days:+editForm.terms_days||30});setEditing(null);await load();}catch(e){setEditErr(e.message);}};
+  const toggleActive=async c=>{try{await api.updateArCustomer(entityId,c.id,{active:c.active?0:1});await load();}catch(e){alert(e.message);}};
+  const del=async c=>{if(!confirm('Delete "'+c.name+'"? (Only possible if no invoices exist.)'))return;try{await api.deleteArCustomer(entityId,c.id);await load();}catch(e){alert(e.message);}};
+  return(<div><div style={{marginBottom:20,display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+    <div><div style={S.h1}>Customers</div><div style={S.sub}>{entityName} — bill-to parties for the invoices you send. Email here is where invoices go.</div></div>
+    {canEdit&&<button style={S.btnP} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add Customer'}</button>}</div>
+    {showAdd&&<div style={{...S.card,borderColor:T.green+'40',padding:16,marginBottom:16}}>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+        <div style={{flex:'1 1 220px'}}><label style={S.label}>Customer name</label><input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} autoFocus/></div>
+        <div style={{flex:'1 1 220px'}}><label style={S.label}>Email (invoice recipient)</label><input style={S.input} type="email" placeholder="ar@customer.com" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))}/></div>
+        <div style={{flex:'0 0 120px'}}><label style={S.label}>Terms (days)</label><input style={S.input} type="number" value={form.terms_days} onChange={e=>setForm(f=>({...f,terms_days:e.target.value}))}/></div>
+      </div>
+      <div style={{marginTop:10}}><label style={S.label}>Billing address (optional)</label><textarea style={{...S.input,minHeight:54,resize:'vertical'}} value={form.address} onChange={e=>setForm(f=>({...f,address:e.target.value}))}/></div>
+      <div style={{marginTop:12,display:'flex',justifyContent:'flex-end'}}><button style={S.btnP} onClick={add}>Add Customer</button></div>
+      {err&&<div style={{...S.err,marginTop:8,marginBottom:0}}>{err}</div>}</div>}
+    <div style={S.cardFlush}><table style={S.table}><thead><tr>
+      <th style={S.th}>Name</th><th style={S.th}>Email</th><th style={{...S.th,width:80,textAlign:'right'}}>Terms</th><th style={{...S.th,width:90}}>Status</th>{canEdit&&<th style={{...S.th,width:150}}>Actions</th>}</tr></thead>
+      <tbody>
+        {loading&&<tr><td colSpan={canEdit?5:4} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>Loading…</td></tr>}
+        {!loading&&customers.length===0&&<tr><td colSpan={canEdit?5:4} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>No customers yet — add one to start invoicing.</td></tr>}
+        {!loading&&customers.map(c=>editing===c.id?
+          <tr key={c.id} style={{background:T.accentDim}}>
+            <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))}/></td>
+            <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.email} onChange={e=>setEditForm(f=>({...f,email:e.target.value}))}/></td>
+            <td style={{padding:'6px 8px'}}><input style={{...S.input,textAlign:'right'}} type="number" value={editForm.terms_days} onChange={e=>setEditForm(f=>({...f,terms_days:e.target.value}))}/></td>
+            <td style={S.td}>—</td>
+            {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}><button style={{...S.btnGhost,color:T.green,fontSize:11}} onClick={save}>Save</button><button style={{...S.btnGhost,fontSize:11}} onClick={()=>setEditing(null)}>Cancel</button></div></td>}
+          </tr>
+          :<tr key={c.id} style={c.active?undefined:{opacity:0.5}}>
+            <td style={S.td} title={c.address||''}>{c.name}</td>
+            <td style={S.td}>{c.email||<span style={{color:T.textMuted}}>— no email —</span>}</td>
+            <td style={{...S.td,textAlign:'right'}}>Net {c.terms_days}</td>
+            <td style={S.td}>{c.active?<span style={{color:T.green,fontSize:12}}>Active</span>:<span style={{color:T.textMuted,fontSize:12}}>Inactive</span>}</td>
+            {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}>
+              <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>startEdit(c)}>Edit</button>
+              <button style={{...S.btnGhost,fontSize:11}} onClick={()=>toggleActive(c)}>{c.active?'Deactivate':'Reactivate'}</button>
+              <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={()=>del(c)}>x</button></div></td>}
+          </tr>)}
+      </tbody></table></div>
+    {editErr&&<div style={{...S.err,marginTop:8}}>{editErr}</div>}
+    <div style={{marginTop:14,fontSize:12,color:T.textMuted}}>Next: recurring invoice templates and one-click send are coming in the next update. For now this is where you manage who you bill.</div>
+  </div>);
 }
 
 // ═══ Chart of Accounts ═══
