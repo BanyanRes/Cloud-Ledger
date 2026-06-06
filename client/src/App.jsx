@@ -532,7 +532,7 @@ export default function App(){
         {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
         {page==='banktxn'&&activeEntity&&<BankTransactions entityId={activeEntity} canEdit={canEdit} bankSelAcct={bankSelAcct} setBankSelAcct={setBankSelAcct} bankTxns={bankTxns} setBankTxns={setBankTxns} bankUploading={bankUploading} setBankUploading={setBankUploading} bankStatusFilter={bankStatusFilter} setBankStatusFilter={setBankStatusFilter}/>}
         {page==='bankrec'&&activeEntity&&<BankReconciliation entityId={activeEntity} user={user} canEdit={canEdit}/>}
-        {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf}/>}
+        {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} isClrf={_activeEnt?.code==='COUNTYLI1'} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf}/>}
         {page==='bs'&&activeEntity&&<BalanceSheet entityId={activeEntity} entityName={entityName} asOf={bsAsOf} setAsOf={setBsAsOf}/>}
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo}/>}
         {page==='wip'&&activeEntity&&<WipSchedule entityName={entityName} asOf={wipAsOf} setAsOf={setWipAsOf}/>}
@@ -2037,7 +2037,7 @@ function WipSchedule({entityName,asOf,setAsOf}){
   </div></div>);
 }
 
-function TrialBalance({entityId,entityName,dimsEnabled,asOf,setAsOf}){
+function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf}){
   const[balances,setBalances]=useState([]);
   const[drillAcct,setDrillAcct]=useState(null);
   const[locations,setLocations]=useState([]);
@@ -2046,10 +2046,10 @@ function TrialBalance({entityId,entityName,dimsEnabled,asOf,setAsOf}){
   const[classId,setClassId]=useState('');// '' = all investors; otherwise a class_id (investor)
   const[projects,setProjects]=useState([]);
   const[projId,setProjId]=useState('');// '' = all; otherwise a project_id
-  // Entities that carry projects (e.g. imported from Intacct) filter by Project instead
-  // of Location/Investor. Auto-detected: present the Project filter when projects exist,
-  // and hide the Location/Investor filters for those entities.
-  const hasProjects=projects.length>0;
+  // Filter rule: only County Line Rail Fund uses Location/Investor dimensions.
+  // Every other entity filters by Project instead.
+  const showLocInv=dimsEnabled&&isClrf;
+  const showProj=dimsEnabled&&!isClrf;
   // Guard: while the user is editing the date input, asOf can briefly be '' or a partial string like '2026-'.
   // Avoid crashing the page on Invalid Date — fall back to today() until a complete YYYY-MM-DD is entered.
   const validAsOf=/^\d{4}-\d{2}-\d{2}$/.test(asOf)&&!isNaN(new Date(asOf+'T00:00:00').getTime())?asOf:today();
@@ -2092,9 +2092,9 @@ function TrialBalance({entityId,entityName,dimsEnabled,asOf,setAsOf}){
   };
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
     <div style={S.filterBar}><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
-      {dimsEnabled&&hasProjects&&<div><label style={S.label}>Project</label><select style={S.inputSm} value={projId} onChange={e=>setProjId(e.target.value)}><option value="">All (whole entity)</option>{projects.map(p=><option key={p.id} value={p.id}>{p.code&&p.code!==p.name?p.code+' — '+p.name:p.name}{p.line_count!=null?(' ('+p.line_count+')'):''}</option>)}</select></div>}
-      {dimsEnabled&&!hasProjects&&<div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>}
-      {dimsEnabled&&!hasProjects&&<div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div>}</div>
+      {showProj&&<div><label style={S.label}>Project</label><select style={S.inputSm} value={projId} onChange={e=>setProjId(e.target.value)}><option value="">All (whole entity)</option>{projects.map(p=><option key={p.id} value={p.id}>{p.code&&p.code!==p.name?p.code+' — '+p.name:p.name}{p.line_count!=null?(' ('+p.line_count+')'):''}</option>)}</select></div>}
+      {showLocInv&&<div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>}
+      {showLocInv&&<div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div>}</div>
     <div style={{display:'flex',gap:8}}><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={doExport}>Export TB</button></div></div>
     <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Trial Balance{scopeLabel?(' — '+scopeLabel):''}</div><div style={{fontSize:13,color:T.textMuted}}>As of {asOf}{dimmed?' · dimension-tagged activity only':''}</div></div>
     <table style={{...S.table,tableLayout:'fixed',width:'100%'}}>
