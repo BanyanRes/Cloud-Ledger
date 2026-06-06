@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from 'react';
 import { api } from './api';
 import * as XLSX from 'xlsx';
 
@@ -17,6 +17,18 @@ const blurAmt = v => { const t = String(v).trim(); return (t && t !== '.') ? par
 const today = () => new Date().toISOString().slice(0, 10);
 const fy_start = () => new Date().getFullYear() + '-01-01';
 const fmtSize = b => b > 1048576 ? (b/1048576).toFixed(1)+' MB' : (b/1024).toFixed(0)+' KB';
+// Entity-type grouping metadata, shared by Dashboard + Entity Management.
+const ENTITY_TYPES = [
+  { key:'accounting',  label:'Accounting',  icon:'📒' },
+  { key:'development', label:'Development', icon:'🏗️' },
+  { key:'shell',       label:'Shell',       icon:'🗂️' },
+];
+const entTypeOf = e => (e && e.entity_type) || 'accounting';
+const groupByType = list => {
+  const g = { accounting:[], development:[], shell:[] };
+  (list||[]).forEach(e => { (g[entTypeOf(e)] || (g[entTypeOf(e)]=[])).push(e); });
+  return g;
+};
 const acctLabel = (code, name) => code + ' - ' + name;
 function exportToExcel(data, fn) { const ws = XLSX.utils.aoa_to_sheet(data); ws['!cols'] = data[0].map((_, ci) => ({ wch: Math.min(Math.max(...data.map(r => String(r[ci]||'').length), 8)+2, 40) })); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); XLSX.writeFile(wb, fn); }
 const BLANK_JE = () => ({date:today(),memo:'',lines:[{account_code:'',debit:'',credit:'',description:''},{account_code:'',debit:'',credit:'',description:''}]});
@@ -1367,19 +1379,39 @@ function WorkpapersModal({entity, user, onClose}){
 }
 
 // ═══ Dashboard ═══
-function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSummary]=useState([]);useEffect(()=>{api.getSummary().then(setSummary);},[]);const curr=summary.find(e=>e.id===entityId);
+function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSummary]=useState([]);useEffect(()=>{api.getSummary().then(setSummary);},[]);
   const[wpEntity,setWpEntity]=useState(null);
+  const[open,setOpen]=useState({accounting:true,development:true,shell:true});
   const go=id=>{setActiveEntity(id);setPage('journal');};
-  return(<div><div style={S.h1}>Dashboard</div><div style={S.sub}>{summary.length} entities under management &middot; click a row to open, click the folder icon for workpapers</div>
-    <div style={S.cardFlush}><div style={{padding:'18px 20px'}}><div style={S.h2}>All Entities</div></div><table style={S.table}><thead><tr><th style={{...S.th,width:40}}></th><th style={S.th}>Entity</th><th style={S.thR}>Assets</th><th style={S.thR}>Liabilities</th><th style={S.thR}>Net Income</th><th style={S.thR}>JEs</th></tr></thead>
-      <tbody>{summary.sort((a,b)=>a.name.localeCompare(b.name)).map(e=><tr key={e.id} style={{cursor:'pointer',background:e.id===entityId?T.accentDim:'transparent',transition:'background 0.1s'}} onMouseEnter={ev=>{if(e.id!==entityId)ev.currentTarget.style.background=T.bgHover;}} onMouseLeave={ev=>{if(e.id!==entityId)ev.currentTarget.style.background='transparent';}}>
-        <td style={{...S.td,textAlign:'center',padding:'8px 6px'}} onClick={ev=>{ev.stopPropagation();setWpEntity(e);}} title="Open workpapers folder"><span style={{fontSize:18,cursor:'pointer',display:'inline-block',lineHeight:1}}>📁</span></td>
-        <td style={{...S.td,fontWeight:600,color:T.accent,textDecoration:'underline'}} onClick={()=>go(e.id)}>{e.name}</td>
-        <td style={S.tdR} onClick={()=>go(e.id)}>{fmt(e.assets)}</td>
-        <td style={S.tdR} onClick={()=>go(e.id)}>{fmt(e.liabilities)}</td>
-        <td style={{...S.tdR,color:e.net_income>=0?T.green:T.red,fontWeight:600}} onClick={()=>go(e.id)}>{fmt(e.net_income)}</td>
-        <td style={S.tdR} onClick={()=>go(e.id)}>{e.entry_count}</td>
-      </tr>)}</tbody></table></div>
+  const grouped=groupByType(summary);
+  const toggle=k=>setOpen(o=>({...o,[k]:!o[k]}));
+  const colSpan=6;
+  return(<div><div style={S.h1}>Dashboard</div><div style={S.sub}>{summary.length} entities under management &middot; grouped by type &middot; click a type to expand, a row to open, the folder for workpapers</div>
+    <div style={S.cardFlush}><table style={S.table}><thead><tr><th style={{...S.th,width:40}}></th><th style={S.th}>Entity</th><th style={S.thR}>Assets</th><th style={S.thR}>Liabilities</th><th style={S.thR}>Net Income</th><th style={S.thR}>JEs</th></tr></thead>
+      <tbody>
+        {ENTITY_TYPES.map(t=>{const rows=(grouped[t.key]||[]).slice().sort((a,b)=>a.name.localeCompare(b.name));
+          const agg=rows.reduce((s,e)=>({a:s.a+(e.assets||0),l:s.l+(e.liabilities||0),ni:s.ni+(e.net_income||0),je:s.je+(e.entry_count||0)}),{a:0,l:0,ni:0,je:0});
+          const isOpen=open[t.key];
+          return(<Fragment key={t.key}>
+            <tr style={{cursor:'pointer',background:T.bgElevated,borderTop:'2px solid '+T.border}} onClick={()=>toggle(t.key)}>
+              <td style={{...S.td,textAlign:'center',fontSize:12,color:T.textMuted}}>{isOpen?'▾':'▸'}</td>
+              <td style={{...S.td,fontWeight:700,color:T.textBright}}><span style={{marginRight:8}}>{t.icon}</span>{t.label}<span style={{marginLeft:8,fontSize:11,fontWeight:600,color:T.textMuted}}>({rows.length})</span></td>
+              <td style={{...S.tdR,color:T.textMuted,fontWeight:600}}>{fmt(agg.a)}</td>
+              <td style={{...S.tdR,color:T.textMuted,fontWeight:600}}>{fmt(agg.l)}</td>
+              <td style={{...S.tdR,color:T.textMuted,fontWeight:600}}>{fmt(agg.ni)}</td>
+              <td style={{...S.tdR,color:T.textMuted,fontWeight:600}}>{agg.je}</td>
+            </tr>
+            {isOpen&&rows.length===0&&<tr><td colSpan={colSpan} style={{...S.td,color:T.textMuted,padding:'10px 20px 10px 48px',fontSize:12}}>No {t.label.toLowerCase()} entities.</td></tr>}
+            {isOpen&&rows.map(e=><tr key={e.id} style={{cursor:'pointer',background:e.id===entityId?T.accentDim:'transparent',transition:'background 0.1s'}} onMouseEnter={ev=>{if(e.id!==entityId)ev.currentTarget.style.background=T.bgHover;}} onMouseLeave={ev=>{if(e.id!==entityId)ev.currentTarget.style.background='transparent';}}>
+              <td style={{...S.td,textAlign:'center',padding:'8px 6px'}} onClick={ev=>{ev.stopPropagation();setWpEntity(e);}} title="Open workpapers folder"><span style={{fontSize:18,cursor:'pointer',display:'inline-block',lineHeight:1}}>📁</span></td>
+              <td style={{...S.td,fontWeight:600,color:T.accent,textDecoration:'underline',paddingLeft:32}} onClick={()=>go(e.id)}>{e.display_id&&<span style={{marginRight:8,fontSize:11,fontWeight:700,color:T.textMuted,fontFamily:'monospace'}}>{e.display_id}</span>}{e.name}</td>
+              <td style={S.tdR} onClick={()=>go(e.id)}>{fmt(e.assets)}</td>
+              <td style={S.tdR} onClick={()=>go(e.id)}>{fmt(e.liabilities)}</td>
+              <td style={{...S.tdR,color:e.net_income>=0?T.green:T.red,fontWeight:600}} onClick={()=>go(e.id)}>{fmt(e.net_income)}</td>
+              <td style={S.tdR} onClick={()=>go(e.id)}>{e.entry_count}</td>
+            </tr>)}
+          </Fragment>);})}
+      </tbody></table></div>
     {wpEntity&&<WorkpapersModal entity={wpEntity} user={user} onClose={()=>setWpEntity(null)}/>}
   </div>);}
 
@@ -2446,6 +2478,7 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
   const[showAdd,setShowAdd]=useState(false);const[bulk,setBulk]=useState(false);
   const[name,setName]=useState('');const[newType,setNewType]=useState('accounting');const[newDisplayId,setNewDisplayId]=useState('');const[bulkText,setBulkText]=useState('');const[err,setErr]=useState('');
   const[typeBusy,setTypeBusy]=useState(null);// entity id whose type is being toggled
+  const[openType,setOpenType]=useState({accounting:true,development:true,shell:true});
   const[importing,setImporting]=useState(null);// entity id being imported into
   const[importAsOf,setImportAsOf]=useState('2024-12-31');const[importMsg,setImportMsg]=useState('');const[importErr,setImportErr]=useState('');const[importBusy,setImportBusy]=useState(false);
   const onTBFile=async e=>{const file=e.target.files[0];if(!file||!importing)return;e.target.value='';setImportBusy(true);setImportMsg('');setImportErr('');
@@ -2485,8 +2518,13 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
       <textarea style={{...S.input,height:160,fontFamily:'monospace',fontSize:12,resize:'vertical'}} value={bulkText} onChange={e=>setBulkText(e.target.value)}/>
       {err&&<div style={S.err}>{err}</div>}<button style={{...S.btnP,marginTop:10}} onClick={async()=>{const names=bulkText.split('\n').map(l=>l.trim()).filter(Boolean);if(!names.length){setErr('None');return;}try{for(const n of names)await api.createEntity(n);setBulkText('');setBulk(false);refresh();}catch(e){setErr(e.message);}}}>Import</button></div>}
     <div style={{...S.cardFlush,overflowX:'auto'}}><table style={{...S.table,minWidth:980}}><thead><tr><th style={S.th}>Entity</th><th style={{...S.th,width:720,minWidth:720}}>Actions</th></tr></thead>
-      <tbody>{entities.sort((a,b)=>a.name.localeCompare(b.name)).map(e=><tr key={e.id} style={e.id===activeEntity?{background:T.accentDim}:{}}>
-        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{e.display_id&&<span style={{marginRight:8,fontSize:11,fontWeight:700,color:T.textMuted,fontFamily:'monospace'}}>{e.display_id}</span>}{e.name}{e.entity_type==='development'&&<span style={{marginLeft:8,fontSize:9,fontWeight:700,color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder,borderRadius:4,padding:'2px 6px',textTransform:'uppercase',letterSpacing:'0.05em',verticalAlign:'middle'}}>Dev Project</span>}{e.entity_type==='shell'&&<span style={{marginLeft:8,fontSize:9,fontWeight:700,color:T.teal,background:T.tealDim,border:'1px solid '+T.teal+'40',borderRadius:4,padding:'2px 6px',textTransform:'uppercase',letterSpacing:'0.05em',verticalAlign:'middle'}}>Shell</span>}</td>
+      <tbody>{ENTITY_TYPES.map(t=>{const grp=entities.filter(e=>entTypeOf(e)===t.key).sort((a,b)=>a.name.localeCompare(b.name));const isOpen=openType[t.key];return(<Fragment key={t.key}>
+        <tr style={{cursor:'pointer',background:T.bgElevated,borderTop:'2px solid '+T.border}} onClick={()=>setOpenType(o=>({...o,[t.key]:!o[t.key]}))}>
+          <td colSpan={2} style={{...S.td,fontWeight:700,color:T.textBright}}><span style={{marginRight:6,fontSize:12,color:T.textMuted}}>{isOpen?'▾':'▸'}</span><span style={{marginRight:8}}>{t.icon}</span>{t.label}<span style={{marginLeft:8,fontSize:11,fontWeight:600,color:T.textMuted}}>({grp.length})</span></td>
+        </tr>
+        {isOpen&&grp.length===0&&<tr><td colSpan={2} style={{...S.td,color:T.textMuted,padding:'10px 20px 10px 44px',fontSize:12}}>No {t.label.toLowerCase()} entities.</td></tr>}
+        {isOpen&&grp.map(e=><tr key={e.id} style={e.id===activeEntity?{background:T.accentDim}:{}}>
+        <td style={{...S.td,fontWeight:600,color:T.textBright,paddingLeft:32}}>{e.display_id&&<span style={{marginRight:8,fontSize:11,fontWeight:700,color:T.textMuted,fontFamily:'monospace'}}>{e.display_id}</span>}{e.name}{e.entity_type==='development'&&<span style={{marginLeft:8,fontSize:9,fontWeight:700,color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder,borderRadius:4,padding:'2px 6px',textTransform:'uppercase',letterSpacing:'0.05em',verticalAlign:'middle'}}>Dev Project</span>}{e.entity_type==='shell'&&<span style={{marginLeft:8,fontSize:9,fontWeight:700,color:T.teal,background:T.tealDim,border:'1px solid '+T.teal+'40',borderRadius:4,padding:'2px 6px',textTransform:'uppercase',letterSpacing:'0.05em',verticalAlign:'middle'}}>Shell</span>}</td>
         <td style={S.td}><div style={{display:'flex',gap:8,flexWrap:'nowrap',whiteSpace:'nowrap'}}>
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0}} onClick={()=>setActiveEntity(e.id)}>Select</button>
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0,color:T.accent,borderColor:T.accent+'40'}} onClick={()=>{setImporting(e.id);setImportMsg('');setImportErr('');}}>Import Trial Balance</button>
@@ -2494,7 +2532,8 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
           <select style={{...S.inputSm,padding:'5px 8px',fontSize:11,flexShrink:0,width:'auto'}} disabled={typeBusy===e.id} title="Entity type" value={e.entity_type||'accounting'} onChange={async(ev)=>{const next=ev.target.value;if(next===e.entity_type)return;if(!confirm('Set "'+e.name+'" to '+({accounting:'Accounting',development:'Development Project',shell:'Shell'}[next]||next)+'?'))return;setTypeBusy(e.id);try{await api.updateEntity(e.id,{entity_type:next});await refresh();}catch(ex){alert(ex.message);}finally{setTypeBusy(null);}}}><option value="accounting">Accounting</option><option value="development">Development Project</option><option value="shell">Shell</option></select>
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0}} title="Set the short Entity ID used as the invoice-packet filename prefix" onClick={async()=>{const cur=e.display_id||'';const v=prompt('Entity ID for "'+e.name+'"\n(used as the invoice-packet filename prefix; leave blank to use the entity name):',cur);if(v===null)return;try{await api.updateEntity(e.id,{display_id:v.trim()});await refresh();}catch(ex){alert(ex.message);}}}>Edit ID</button>
           <button style={{...S.btnD,padding:'5px 12px',fontSize:11,flexShrink:0}} onClick={async()=>{if(!confirm('Delete entity '+e.name+' and all its data?'))return;await api.deleteEntity(e.id);const r=await refresh();if(activeEntity===e.id)setActiveEntity(r[0]?.id||null);}}>Delete</button>
-        </div></td></tr>)}</tbody></table></div>
+        </div></td></tr>)}
+      </Fragment>);})}</tbody></table></div>
     {importing&&<div style={S.modal} onClick={()=>{if(!importBusy)setImporting(null);}}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:560}} onClick={ev=>ev.stopPropagation()}>
       <button style={S.modalClose} onClick={()=>setImporting(null)}>&times;</button>
       <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:6}}>Import Trial Balance</div>
