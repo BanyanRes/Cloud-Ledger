@@ -39,7 +39,7 @@ const storage = multer.diskStorage({
   filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_'))
 });
 const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } }); // 20MB max
-const memUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+const memUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
 // Roll-forward sends the period's invoices (including each PDF's base64 bytes) in
 // a large `invoices` text field. multer's default fieldSize is only 1MB, which
 // silently fails the request for a normal multi-invoice period. Allow a big text
@@ -1296,7 +1296,66 @@ function looksFused(values) {
 
 const GL_NUM = s => { const raw = String(s == null ? '' : s).trim(); const neg = /^\(.*\)$/.test(raw); let v = parseFloat(raw.replace(/[,$()\s]/g, '')) || 0; return neg ? -Math.abs(v) : v; };
 
+// Sage Intacct's "General Ledger report" export is an HTML document with a .xls
+// extension, not a real spreadsheet — XLSX.read() chokes on the <!DOCTYPE>. It
+// lays out one big table: an account section-header row ("<code> - <name>
+// (Balance forward ...)"), then per-transaction rows, then a "Totals for ..."
+// row, repeated per account. We flatten it into standard rows the normal GL
+// mapper understands. Returns null if the buffer is not Intacct HTML.
+function glParseIntacctHtml(buffer) {
+  const text = buffer.toString('utf8');
+  const lower = text.slice(0, 4000).toLowerCase();
+  if (!(lower.includes('<html') || lower.includes('<!doctype') || lower.includes('<table'))) return null;
+  // Only treat as Intacct GL if the account-section "Balance forward" marker is present.
+  if (!/balance forward/i.test(text)) return null;
+  const stripTags = s => s.replace(/<[^>]+>/g, '');
+  const decode = s => s.replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<').replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#39;/gi, "'");
+  const clean = s => decode(stripTags(s)).replace(/\s+/g, ' ').trim();
+  // Scope to the report body so CSS/script before it can't pollute parsing.
+  const bodyAt = text.indexOf('report_body');
+  const scope = bodyAt >= 0 ? text.slice(bodyAt) : text;
+  const trRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
+  const HDR = /^(\S.*?)\s+-\s+([\s\S]*?)\s+\(Balance forward/i;
+  const out = [];
+  let cur = null; // {code, name}
+  let m;
+  while ((m = trRe.exec(scope))) {
+    const cells = []; let c;
+    tdRe.lastIndex = 0;
+    while ((c = tdRe.exec(m[1]))) cells.push(clean(c[1]));
+    if (!cells.length) continue;
+    // Account section header: 2 cells, first contains "Balance forward".
+    if (cells.length >= 2 && /balance forward/i.test(cells[0])) {
+      const hm = HDR.exec(cells[0]);
+      if (hm) cur = { code: hm[1].trim(), name: hm[2].trim() };
+      continue;
+    }
+    if (/^totals for/i.test(cells[0])) continue; // account subtotal
+    // Transaction row: 9 cells, first is a date, inside an account section.
+    if (cur && cells.length >= 9 && /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(cells[0])) {
+      out.push({
+        'Account Number': cur.code,
+        'Account Name': cur.name,
+        'Posted dt.': cells[0],
+        'Doc dt.': cells[1],
+        'Memo/Description': cells[3],
+        'Project': cells[4],
+        'JNL': cells[5],
+        'Debit': cells[6],
+        'Credit': cells[7],
+      });
+    }
+  }
+  if (!out.length) return null;
+  const columns = ['Account Number', 'Account Name', 'Posted dt.', 'Doc dt.', 'Memo/Description', 'Project', 'JNL', 'Debit', 'Credit'];
+  return { columns, rows: out };
+}
+
 function glReadGrid(buffer) {
+  // Intacct HTML GL export (.xls that's really HTML) — flatten it first.
+  const intacct = glParseIntacctHtml(buffer);
+  if (intacct) return intacct;
   const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
   const ws = wb.Sheets[wb.SheetNames[0]];
   // header:1 → array-of-arrays so we can tolerate junk/blank header rows and pick the
@@ -1329,7 +1388,7 @@ function glAutoMap(columns, rows) {
   const used = [];
   const push = c => { if (c) used.push(c); return c || null; };
   const acctNum  = push(find(['account number', 'account #', 'account code', 'acct number', 'acct code', 'gl account', 'account', 'acct', 'code'], used));
-  const date     = push(find(['transaction date', 'trans date', 'posting date', 'post date', 'date'], used));
+  const date     = push(find(['transaction date', 'trans date', 'posting date', 'post date', 'posted dt.', 'posted dt', 'doc dt.', 'date'], used));
   const debit    = push(find(['debit', 'dr'], used));
   const credit   = push(find(['credit', 'cr'], used));
   const acctName = push(find(['account name', 'account description', 'acct name', 'account title'], used));
@@ -1339,7 +1398,7 @@ function glAutoMap(columns, rows) {
   const running  = push(find(['running balance', 'balance', 'ending balance', 'cumulative'], used));
   // Analytical dimensions: class (investor) and location (deal/asset).
   const klass    = push(find(['item class', 'class', 'investor'], used));
-  const location = push(find(['location', 'deal', 'property', 'asset'], used));
+  const location = push(find(['location', 'deal', 'property', 'asset', 'project'], used));
   // Detect a fused code+name column when no separate name was found.
   let fused = false, fusedCol = null;
   if (acctNum) {
