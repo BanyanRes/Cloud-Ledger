@@ -1588,7 +1588,7 @@ function DimList({title,subtitle,items,canEdit,onCreate,onUpdate,onDelete}){
       <div style={{width:110}}><label style={S.label}>Code</label><input style={S.input} placeholder="(optional)" value={form.code} onChange={e=>setForm(f=>({...f,code:e.target.value}))}/></div>
       <div style={{flex:1}}><label style={S.label}>Name</label><input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter')add();}}/></div>
       <button style={S.btnP} onClick={add}>Add</button></div>{err&&<div style={{...S.err,marginTop:8,marginBottom:0}}>{err}</div>}</div>}
-    <div style={S.cardFlush}><table style={S.table}><thead><tr><th style={{...S.th,width:110}}>Code</th><th style={S.th}>Name</th><th style={{...S.thC,width:70}}>Lines</th>{canEdit&&<th style={{...S.th,width:90}}>Actions</th>}</tr></thead>
+    <div style={S.cardFlush}><table style={{...S.table,tableLayout:'fixed'}}><thead><tr><th style={{...S.th,width:90}}>Code</th><th style={S.th}>Name</th><th style={{...S.thC,width:60}}>Lines</th>{canEdit&&<th style={{...S.th,width:84}}>Actions</th>}</tr></thead>
       <tbody>{items.length===0&&<tr><td colSpan={canEdit?4:3} style={{...S.td,color:T.textMuted,textAlign:'center',padding:'18px'}}>None yet</td></tr>}
       {items.map(it=>editing===it.id?
         <tr key={it.id} style={{background:T.accentDim}}>
@@ -1600,7 +1600,7 @@ function DimList({title,subtitle,items,canEdit,onCreate,onUpdate,onDelete}){
         </tr>
         :<tr key={it.id}>
           <td style={{...S.td,color:T.textBright}}>{it.code||<span style={{color:T.textMuted}}>—</span>}</td>
-          <td style={S.td}>{it.name}</td>
+          <td style={S.td} title={it.name}>{it.name}</td>
           <td style={S.tdC}>{it.line_count>0?it.line_count:<span style={{color:T.textMuted}}>0</span>}</td>
           {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}>
             <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>startEdit(it)}>Edit</button>
