@@ -1715,7 +1715,7 @@ function DimensionsManager({entityId,entityName,canEdit}){
           const applyAll=confirm('Import '+projects.length+' project codes.\n\nOK = apply to ALL accounting & development entities (except County Line Rail Fund).\nCancel = this entity only.\n\nExisting codes are updated with the new name; new codes are added. Nothing is deleted.');
           const r=await api.bulkProjects(entityId,projects,applyAll);
           await load();
-          alert('Done. '+r.entities+' entit'+(r.entities===1?'y':'ies')+' updated · '+r.created+' created · '+r.updated+' renamed · '+r.skipped+' unchanged.');
+          alert('Done. '+r.entities+' entit'+(r.entities===1?'y':'ies')+' updated · '+r.created+' created · '+r.updated+' renamed · '+r.skipped+' unchanged'+(r.failed?(' · '+r.failed+' failed'):'')+'.');
         }}/>
     </div></div>);
 }

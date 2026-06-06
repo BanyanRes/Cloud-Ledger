@@ -1861,32 +1861,41 @@ app.post('/api/entities/:eid/projects/bulk', auth, requireRole('Admin','Accounta
   }
 
   const findByCode = db.prepare('SELECT id, name FROM dim_projects WHERE entity_id = ? AND code = ?');
-  const findByName = db.prepare('SELECT id FROM dim_projects WHERE entity_id = ? AND name = ?');
+  const nameOwner = db.prepare('SELECT id, code FROM dim_projects WHERE entity_id = ? AND name = ?');
   const updName = db.prepare('UPDATE dim_projects SET name = ?, code = ? WHERE id = ?');
   const ins = db.prepare("INSERT INTO dim_projects (entity_id, name, code, kind) VALUES (?, ?, ?, 'project')");
 
-  let created = 0, updated = 0, skipped = 0;
+  // dim_projects has UNIQUE(entity_id, name). The catalog legitimately reuses a name
+  // across different codes (e.g. "Entrada 1" is both code "Entrada 1" and "P-20100.001").
+  // Code is the real key, so when a name is already held by a DIFFERENT code we
+  // disambiguate by suffixing the code — both rows survive and the code stays primary.
+  // Every write is also wrapped so one bad row can never abort the whole batch.
+  let created = 0, updated = 0, skipped = 0, failed = 0;
   const perEntity = [];
-  const run = db.transaction(() => {
-    for (const ent of targets) {
-      let c = 0, u = 0, s = 0;
+  for (const ent of targets) {
+    let c = 0, u = 0, s = 0, f = 0;
+    const run = db.transaction(() => {
       for (const { code, name } of clean) {
-        const existing = findByCode.get(ent.id, code);
-        if (existing) {
-          if (existing.name !== name) { updName.run(name, code, existing.id); u++; } else s++;
-        } else {
-          // Name has a UNIQUE(entity_id,name) constraint. If a different code already
-          // holds this name, keep the existing row (rename would collide); otherwise insert.
-          const nameClash = findByName.get(ent.id, name);
-          if (nameClash) { s++; } else { ins.run(ent.id, name, code); c++; }
-        }
+        try {
+          const existing = findByCode.get(ent.id, code);
+          if (existing) {
+            if (existing.name === name) { s++; continue; }
+            const owner = nameOwner.get(ent.id, name);
+            const finalName = (owner && owner.id !== existing.id) ? (name + ' (' + code + ')') : name;
+            updName.run(finalName, code, existing.id); u++;
+          } else {
+            const owner = nameOwner.get(ent.id, name);
+            const finalName = owner ? (name + ' (' + code + ')') : name;
+            ins.run(ent.id, finalName, code); c++;
+          }
+        } catch (e) { f++; }
       }
-      created += c; updated += u; skipped += s;
-      perEntity.push({ entity_id: ent.id, entity: ent.name, created: c, updated: u, skipped: s });
-    }
-  });
-  run();
-  res.json({ ok: true, entities: targets.length, created, updated, skipped, perEntity });
+    });
+    run();
+    created += c; updated += u; skipped += s; failed += f;
+    perEntity.push({ entity_id: ent.id, entity: ent.name, created: c, updated: u, skipped: s, failed: f });
+  }
+  res.json({ ok: true, entities: targets.length, created, updated, skipped, failed, perEntity });
 });
 
 
