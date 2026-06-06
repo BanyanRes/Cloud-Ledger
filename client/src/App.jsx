@@ -2193,7 +2193,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const updateCard=(id,field,val)=>setRfCards(cards=>cards.map(c=>c._id===id?{...c,[field]:val}:c));
   const removeCard=id=>setRfCards(cards=>cards.filter(c=>c._id!==id));
 
-  const runRollForward=async()=>{
+  const runRollForward=async(force=false)=>{
     if(!rfFile){setRfErr('Upload the prior requisition workbook (.xlsx) first.');return;}
     const newCurrent=rfCards.map(c=>{
       const amount=c.amount!==''?parseFloat(String(c.amount).replace(/[$,]/g,'')):NaN;
@@ -2209,7 +2209,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     }));
     setRfBusy(true);setRfErr('');setRfDetail(null);setRfResult(null);
     try{
-      const {blob,filename,summary,failedChecks,workpaperFolder,workpaperSaved,packetFileId,packetFileName}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoices});
+      const {blob,filename,summary,failedChecks,workpaperFolder,workpaperSaved,packetFileId,packetFileName,forced}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoices,force});
       const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
       // Also download the invoice-packet PDF into the user's Downloads folder
       // (it is retained in Workpapers too). Fetch the saved entity-file as a blob
@@ -2227,7 +2227,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         }catch(pe){/* packet download is best-effort; the workbook already downloaded */}
       }
       // Success: clear the working set (invoices/workbook/req#), keep the result banner.
-      setReqState(cur=>({...cur,cards:[],file:null,reqNum:'',detail:null,result:{filename,summary,failedChecks,count:newCurrent.length,workpaperFolder,workpaperSaved}}));
+      setReqState(cur=>({...cur,cards:[],file:null,reqNum:'',detail:null,result:{filename,summary,failedChecks,count:newCurrent.length,workpaperFolder,workpaperSaved,forced}}));
     }catch(e){setRfErr(e.message);if(e.detail)setRfDetail(e.detail);}
     finally{setRfBusy(false);}};
 
@@ -2303,9 +2303,9 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         </div>
       </div>
 
-      {rfResult&&<div style={{...S.card,background:T.greenDim,borderColor:T.greenBorder}}>
-        <div style={{fontWeight:700,color:T.green,marginBottom:8}}>Roll-forward complete &mdash; {rfResult.filename} downloaded</div>
-        <div style={{fontSize:12,color:T.text,marginBottom:10}}>{rfResult.count} current-period invoice line{rfResult.count===1?'':'s'} folded forward. Reconciliation checks passed:</div>
+      {rfResult&&<div style={{...S.card,background:rfResult.forced?T.redDim:T.greenDim,borderColor:rfResult.forced?T.red+'40':T.greenBorder}}>
+        <div style={{fontWeight:700,color:rfResult.forced?T.red:T.green,marginBottom:8}}>{rfResult.forced?'Forced roll-forward':'Roll-forward complete'} &mdash; {rfResult.filename} downloaded</div>
+        <div style={{fontSize:12,color:T.text,marginBottom:10}}>{rfResult.count} current-period invoice line{rfResult.count===1?'':'s'} folded forward. {rfResult.forced?'This file was produced despite a failed required check \u2014 review and hand-correct the flagged lines below before relying on it.':'Reconciliation checks passed:'}</div>
         {rfResult.summary&&<div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
           {[['Checks',rfResult.summary.total],['Passed',rfResult.summary.passed],['Required failed',rfResult.summary.requiredFailed],['Advisory failed',rfResult.summary.recommendedFailed]].map(([k,v])=>
             <div key={k} style={{flex:'1 1 120px',textAlign:'center'}}>
@@ -2338,6 +2338,10 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
             <td style={S.tdR}>{c.expected!=null?Number(c.expected).toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</td>
             <td style={S.tdR}>{c.actual!=null?Number(c.actual).toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</td>
             <td style={{...S.td,fontSize:11,color:T.textMuted}}>{c.detail}</td></tr>)}</tbody></table>
+        <div style={{marginTop:12,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <button style={{...S.btnP,background:T.red,borderColor:T.red}} disabled={rfBusy} onClick={()=>runRollForward(true)}>{rfBusy?'Rolling forward...':'Force roll-forward & download anyway'}</button>
+          <span style={{fontSize:11,color:T.textMuted}}>Produces the file despite the failed check(s) so you can fix the flagged lines by hand. Any prepopulation beats starting from scratch.</span>
+        </div>
       </div>}
     </div>
     </>}

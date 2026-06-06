@@ -3850,6 +3850,14 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
   if (req.body.reqNumber != null && req.body.reqNumber !== '') meta.reqNumber = req.body.reqNumber;
   if (req.body.asOfDate) meta.asOfDate = req.body.asOfDate;
 
+  // Force flag: when set, a FAILED required reconciliation no longer blocks the
+  // download. The roll-forward still runs and is verified, but instead of a 422
+  // we stream the (imperfect) workbook + packet and surface which checks failed
+  // in the response headers so the user can fix them by hand. This trades a hard
+  // gate for "any prepopulation beats starting from scratch" — the user opts in
+  // explicitly (the client only sends force=true after seeing the failure).
+  const force = req.body.force === 'true' || req.body.force === '1' || req.body.force === true;
+
   // Invoices that make up this period, sent by the client (not previously stored).
   // Each: { vendor, bill_number, amount, cost_code, cost_code_name, original_name,
   // mime_type, file_b64 }. On a successful roll-forward we persist them with the
@@ -3897,7 +3905,7 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
       callClaude: null,
     });
 
-    if (!verification.ok) {
+    if (!verification.ok && !force) {
       return res.status(422).json({
         error: 'Roll-forward failed reconciliation',
         ok: false,
@@ -3907,6 +3915,10 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
         note: verification.note,
       });
     }
+    // When forced, we proceed past a failed required check. The failure detail is
+    // still exposed below via X-Reconcile-Summary / X-Reconcile-Failed so the
+    // user can see (and hand-correct) what didn't reconcile in the downloaded file.
+    const forcedPastFailure = !verification.ok && force;
 
     const outBuf = await workbook.xlsx.writeBuffer();
 
@@ -4001,6 +4013,9 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
       const failed = ((verification.finalResult && verification.finalResult.checks) || []).filter(c => !c.pass);
       res.setHeader('X-Reconcile-Failed', JSON.stringify(failed).replace(/[\r\n]/g, ' '));
     } catch {}
+    // Tell the client this download bypassed a failed required check, so it can
+    // flag the file as needing manual correction rather than presenting it as clean.
+    if (forcedPastFailure) res.setHeader('X-Reconcile-Forced', '1');
     res.send(Buffer.from(outBuf));
   } catch (e) {
     res.status(500).json({ error: 'Roll-forward error: ' + e.message });

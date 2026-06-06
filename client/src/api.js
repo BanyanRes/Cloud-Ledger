@@ -207,6 +207,9 @@ export const api = {
     if (meta.invoices && meta.invoices.length) fd.append('invoices', JSON.stringify(meta.invoices));
     if (meta.reqNumber != null && meta.reqNumber !== '') fd.append('reqNumber', String(meta.reqNumber));
     if (meta.asOfDate) fd.append('asOfDate', meta.asOfDate);
+    // force=true tells the server to download the rolled-forward file even if a
+    // required reconciliation check failed (the user opted in after seeing it).
+    if (meta.force) fd.append('force', 'true');
     const token = getToken();
     const res = await fetch(API_BASE + '/requisition/' + eid + '/rollforward', {
       method: 'POST',
@@ -229,11 +232,13 @@ export const api = {
     // also download the packet into the user's Downloads folder.
     const packetFileId = res.headers.get('x-packet-file-id') || '';
     const packetFileName = res.headers.get('x-packet-file-name') || '';
+    // '1' when the server downloaded despite a failed required check (force).
+    const forced = res.headers.get('x-reconcile-forced') === '1';
     const cd = res.headers.get('content-disposition') || '';
     const m = cd.match(/filename="?([^"]+)"?/);
     const filename = m ? m[1] : 'Requisition_Report.xlsx';
     const blob = await res.blob();
-    return { blob, filename, summary, failedChecks, workpaperFolder, workpaperSaved, packetFileId, packetFileName };
+    return { blob, filename, summary, failedChecks, workpaperFolder, workpaperSaved, packetFileId, packetFileName, forced };
   },
 
   setToken, getToken, clearToken,
