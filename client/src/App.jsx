@@ -366,6 +366,8 @@ function ResetPasswordScreen({token}){
 
 export default function App(){
   const[user,setUser]=useState(null);const[entities,setEntities]=useState([]);const[activeEntity,setActiveEntity]=useState(null);
+  // Workpapers modal openable from the header (any page), for the active entity.
+  const[wpEntity,setWpEntity]=useState(null);
   const[page,setPage]=useState('dashboard');const[loading,setLoading]=useState(true);
   // Back-button trap with diagnostic logging
   useEffect(()=>{
@@ -497,7 +499,8 @@ export default function App(){
     <div style={S.topBar}><div style={{display:'flex',alignItems:'center',gap:16}}>
       <button style={{...S.btnGhost,fontSize:18,padding:'4px 6px',color:T.textMuted}} onClick={()=>setSidebarCol(c=>!c)}>{sidebarCol?'\u2630':'\u2190'}</button>
       <div style={{display:'flex',alignItems:'center',gap:10}}><Logo size={32}/>{!sidebarCol&&<div style={{fontSize:17,fontWeight:800,color:T.textBright}}>CloudLedger</div>}</div>
-      <div style={{width:1,height:28,background:T.border}}/><EntityPicker entities={entities} activeId={activeEntity} onSelect={setActiveEntity} onManage={()=>setPage('entities')}/></div>
+      <div style={{width:1,height:28,background:T.border}}/><EntityPicker entities={entities} activeId={activeEntity} onSelect={setActiveEntity} onManage={()=>setPage('entities')}/>
+      {_activeEnt&&<button style={{...S.btnGhost,fontSize:18,padding:'4px 8px',lineHeight:1}} title={'Open '+_activeEnt.name+' Workpapers'} onClick={()=>setWpEntity(_activeEnt)}>📁</button>}</div>
       <div style={{display:'flex',alignItems:'center',gap:10}}>
         {canEdit&&activeEntity&&<button style={{...S.btnP,position:'relative'}} onClick={()=>setShowJE(true)}>+ Journal Entry{jeHasContent&&<span style={{position:'absolute',top:-3,right:-3,width:8,height:8,borderRadius:4,background:T.orange,border:'2px solid #fff'}}/>}</button>}
         <span style={{fontSize:13,fontWeight:500}}>{user.name}</span><span style={S.badge}>{user.role}</span>
@@ -527,6 +530,7 @@ export default function App(){
       </>})()}</div></div>
     {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
+    {wpEntity&&<WorkpapersModal entity={wpEntity} user={user} onClose={()=>setWpEntity(null)}/>}
   </div>);}
 
 // ═══ Spreadsheet Editor Modal ═══
