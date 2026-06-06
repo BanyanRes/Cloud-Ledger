@@ -126,6 +126,7 @@ export const api = {
   createProject: (eid, data) => request('/entities/' + eid + '/projects', { method: 'POST', body: data }),
   updateProject: (eid, id, data) => request('/entities/' + eid + '/projects/' + id, { method: 'PATCH', body: data }),
   deleteProject: (eid, id) => request('/entities/' + eid + '/projects/' + id, { method: 'DELETE' }),
+  bulkProjects: (eid, projects, applyAll) => request('/entities/' + eid + '/projects/bulk', { method: 'POST', body: { projects, apply_all: !!applyAll } }),
   setLocationKind: (eid, id, kind) => request('/entities/' + eid + '/locations/' + id, { method: 'PATCH', body: { kind } }),
   setClassKind: (eid, id, kind) => request('/entities/' + eid + '/classes/' + id, { method: 'PATCH', body: { kind } }),
   // ── Accounts Receivable: customers ──

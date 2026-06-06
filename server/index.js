@@ -1834,6 +1834,62 @@ app.delete('/api/entities/:eid/projects/:id', auth, requireEntityAccess(), requi
   res.json({ success: true });
 });
 
+// Bulk project catalog upsert. Body: { projects:[{code,name}], apply_all?:bool }.
+// Sync semantics: for each row, match by code within the entity — update the name
+// if the code exists, else create it. Never deletes (keeps journal_lines.project_id
+// links intact). apply_all fans the same catalog out to every non-CLRF accounting/
+// development entity (CLRF uses Location/Investor, not projects). County Line Rail
+// Fund (code COUNTYLI1) is always excluded.
+app.post('/api/entities/:eid/projects/bulk', auth, requireRole('Admin','Accountant'), (req, res) => {
+  const rows = Array.isArray(req.body.projects) ? req.body.projects : [];
+  const clean = rows
+    .map(r => ({ code: String(r.code == null ? '' : r.code).trim(), name: String(r.name == null ? '' : r.name).trim() }))
+    .filter(r => r.code && r.name);
+  if (!clean.length) return res.status(400).json({ error: 'No valid {code,name} rows provided' });
+
+  // Resolve target entities.
+  let targets;
+  if (req.body.apply_all) {
+    targets = db.prepare(
+      "SELECT id, name, code FROM entities WHERE entity_type IN ('accounting','development') AND code != 'COUNTYLI1'"
+    ).all();
+  } else {
+    const e = db.prepare('SELECT id, name, code FROM entities WHERE id = ?').get(req.params.eid);
+    if (!e) return res.status(404).json({ error: 'Entity not found' });
+    if (e.code === 'COUNTYLI1') return res.status(400).json({ error: 'County Line Rail Fund does not use projects' });
+    targets = [e];
+  }
+
+  const findByCode = db.prepare('SELECT id, name FROM dim_projects WHERE entity_id = ? AND code = ?');
+  const findByName = db.prepare('SELECT id FROM dim_projects WHERE entity_id = ? AND name = ?');
+  const updName = db.prepare('UPDATE dim_projects SET name = ?, code = ? WHERE id = ?');
+  const ins = db.prepare("INSERT INTO dim_projects (entity_id, name, code, kind) VALUES (?, ?, ?, 'project')");
+
+  let created = 0, updated = 0, skipped = 0;
+  const perEntity = [];
+  const run = db.transaction(() => {
+    for (const ent of targets) {
+      let c = 0, u = 0, s = 0;
+      for (const { code, name } of clean) {
+        const existing = findByCode.get(ent.id, code);
+        if (existing) {
+          if (existing.name !== name) { updName.run(name, code, existing.id); u++; } else s++;
+        } else {
+          // Name has a UNIQUE(entity_id,name) constraint. If a different code already
+          // holds this name, keep the existing row (rename would collide); otherwise insert.
+          const nameClash = findByName.get(ent.id, name);
+          if (nameClash) { s++; } else { ins.run(ent.id, name, code); c++; }
+        }
+      }
+      created += c; updated += u; skipped += s;
+      perEntity.push({ entity_id: ent.id, entity: ent.name, created: c, updated: u, skipped: s });
+    }
+  });
+  run();
+  res.json({ ok: true, entities: targets.length, created, updated, skipped, perEntity });
+});
+
+
 // ══════════════ Accounts Receivable: customers ══════════════
 app.get('/api/entities/:eid/ar/customers', auth, requireEntityAccess(), (req, res) =>
   res.json(db.prepare('SELECT * FROM ar_customers WHERE entity_id = ? ORDER BY active DESC, name').all(req.params.eid)));

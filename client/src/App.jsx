@@ -1638,29 +1638,54 @@ function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry}){
   </div>);}
 
 // ═══ Dimensions (Locations & Classes) manager ═══
-function DimList({title,subtitle,items,canEdit,onCreate,onUpdate,onDelete}){
+function DimList({title,subtitle,items,canEdit,onCreate,onUpdate,onDelete,onBulkUpload}){
   const[showAdd,setShowAdd]=useState(false);const[form,setForm]=useState({code:'',name:''});const[err,setErr]=useState('');
   const[editing,setEditing]=useState(null);const[editForm,setEditForm]=useState({code:'',name:''});const[editErr,setEditErr]=useState('');
+  const[uploading,setUploading]=useState(false);
+  const fileRef=useRef(null);
   const startEdit=it=>{setEditing(it.id);setEditForm({code:it.code||'',name:it.name||''});setEditErr('');};
   const add=async()=>{if(!form.name.trim()){setErr('Name required');return;}try{await onCreate({name:form.name.trim(),code:form.code.trim()||null});setForm({code:'',name:''});setShowAdd(false);setErr('');}catch(e){setErr(e.message);}};
   const save=async()=>{if(!editForm.name.trim()){setEditErr('Name required');return;}try{await onUpdate(editing,{name:editForm.name.trim(),code:editForm.code.trim()||null});setEditing(null);}catch(e){setEditErr(e.message);}};
   const del=async it=>{if(!confirm('Delete "'+it.name+'"?'))return;try{await onDelete(it.id);}catch(e){alert(e.message);}};
+  // Parse an uploaded xlsx/csv into [{code,name}] rows: looks for "code"/"name"
+  // header columns (case-insensitive); falls back to first two columns.
+  const onFile=async e=>{const file=e.target.files&&e.target.files[0];e.target.value='';if(!file||!onBulkUpload)return;
+    setUploading(true);
+    try{
+      const buf=await file.arrayBuffer();
+      const wb=XLSX.read(buf,{type:'array'});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''}).filter(r=>r&&r.some(c=>String(c).trim()));
+      if(!rows.length){alert('No rows found in the file.');return;}
+      const hdr=rows[0].map(c=>String(c).trim().toLowerCase());
+      let ci=hdr.findIndex(h=>/^(project )?code$/.test(h)); let ni=hdr.findIndex(h=>/name|description/.test(h));
+      let body;
+      if(ci>=0&&ni>=0){body=rows.slice(1);}else{ci=0;ni=1;body=rows.slice(/code|name|project/i.test(rows[0].join(' '))?1:0);}
+      const projects=body.map(r=>({code:String(r[ci]==null?'':r[ci]).trim(),name:String(r[ni]==null?'':r[ni]).trim()})).filter(r=>r.code&&r.name);
+      if(!projects.length){alert('Could not find Code and Name columns in the file.');return;}
+      await onBulkUpload(projects);
+    }catch(ex){alert('Import failed: '+ex.message);}finally{setUploading(false);}
+  };
   return(<div style={{flex:1,minWidth:340}}>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
       <div><div style={{fontSize:15,fontWeight:700,color:T.textBright}}>{title}</div><div style={{fontSize:12,color:T.textMuted}}>{subtitle||(items.length+' total')}</div></div>
-      {canEdit&&<button style={{...S.btnP,padding:'6px 12px',fontSize:12}} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add'}</button>}</div>
+      <div style={{display:'flex',gap:8}}>
+        {canEdit&&onBulkUpload&&<><input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{display:'none'}} onChange={onFile}/>
+          <button style={{...S.btnS,padding:'6px 12px',fontSize:12}} disabled={uploading} onClick={()=>fileRef.current&&fileRef.current.click()}>{uploading?'Importing…':'Import code → name'}</button></>}
+        {canEdit&&<button style={{...S.btnP,padding:'6px 12px',fontSize:12}} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add'}</button>}</div></div>
     {showAdd&&<div style={{...S.card,borderColor:T.green+'40',padding:14,marginBottom:12}}><div style={{display:'flex',gap:8,alignItems:'flex-end'}}>
+      {onBulkUpload&&<div style={{width:120}}><label style={S.label}>Code</label><input style={S.input} value={form.code} onChange={e=>setForm(f=>({...f,code:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter')add();}}/></div>}
       <div style={{flex:1}}><label style={S.label}>Name</label><input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter')add();}}/></div>
       <button style={S.btnP} onClick={add}>Add</button></div>{err&&<div style={{...S.err,marginTop:8,marginBottom:0}}>{err}</div>}</div>}
     <div style={S.cardFlush}><table style={{...S.table,tableLayout:'fixed'}}><thead><tr><th style={S.th}>Name</th>{canEdit&&<th style={{...S.th,width:84}}>Actions</th>}</tr></thead>
       <tbody>{items.length===0&&<tr><td colSpan={canEdit?2:1} style={{...S.td,color:T.textMuted,textAlign:'center',padding:'18px'}}>None yet</td></tr>}
       {items.map(it=>editing===it.id?
         <tr key={it.id} style={{background:T.accentDim}}>
-          <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter')save();}}/></td>
+          <td style={{padding:'6px 8px'}}><div style={{display:'flex',gap:6}}>{onBulkUpload&&<input style={{...S.input,width:110}} placeholder="Code" value={editForm.code} onChange={e=>setEditForm(f=>({...f,code:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter')save();}}/>}<input style={S.input} placeholder="Name" value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter')save();}}/></div></td>
           {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}><button style={{...S.btnGhost,color:T.green,fontSize:11}} onClick={save}>Save</button><button style={{...S.btnGhost,fontSize:11}} onClick={()=>setEditing(null)}>Cancel</button></div></td>}
         </tr>
         :<tr key={it.id}>
-          <td style={S.td} title={it.name}>{it.name}</td>
+          <td style={S.td} title={it.code&&it.code!==it.name?(it.code+' — '+it.name):it.name}>{it.code&&it.code!==it.name?<><span style={{color:T.textMuted,fontFamily:'monospace',fontSize:12}}>{it.code}</span>{'  '}{it.name}</>:it.name}</td>
           {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}>
             <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>startEdit(it)}>Edit</button>
             <button style={{...S.btnGhost,color:it.line_count>0?T.textMuted:T.red,fontSize:11}} title={it.line_count>0?'Used on '+it.line_count+' line(s) — cannot delete':'Delete'} onClick={()=>del(it)}>x</button></div></td>}
@@ -1685,7 +1710,13 @@ function DimensionsManager({entityId,entityName,canEdit}){
       <DimList title="Projects" subtitle={(projects.length)+' project'+(projects.length===1?'':'s')+' (Intacct project / QBO class)'} items={projects} canEdit={canEdit}
         onCreate={async d=>{await api.createProject(entityId,d);await load();}}
         onUpdate={async(id,d)=>{await api.updateProject(entityId,id,d);await load();}}
-        onDelete={async id=>{await api.deleteProject(entityId,id);await load();}}/>
+        onDelete={async id=>{await api.deleteProject(entityId,id);await load();}}
+        onBulkUpload={async projects=>{
+          const applyAll=confirm('Import '+projects.length+' project codes.\n\nOK = apply to ALL accounting & development entities (except County Line Rail Fund).\nCancel = this entity only.\n\nExisting codes are updated with the new name; new codes are added. Nothing is deleted.');
+          const r=await api.bulkProjects(entityId,projects,applyAll);
+          await load();
+          alert('Done. '+r.entities+' entit'+(r.entities===1?'y':'ies')+' updated · '+r.created+' created · '+r.updated+' renamed · '+r.skipped+' unchanged.');
+        }}/>
     </div></div>);
 }
 
