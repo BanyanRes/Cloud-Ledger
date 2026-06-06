@@ -1381,7 +1381,7 @@ function WorkpapersModal({entity, user, onClose}){
 // ═══ Dashboard ═══
 function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSummary]=useState([]);useEffect(()=>{api.getSummary().then(setSummary);},[]);
   const[wpEntity,setWpEntity]=useState(null);
-  const[open,setOpen]=useState({accounting:true,development:true,shell:true});
+  const[open,setOpen]=useState({accounting:false,development:false,shell:false});
   const go=id=>{setActiveEntity(id);setPage('journal');};
   const grouped=groupByType(summary);
   const toggle=k=>setOpen(o=>({...o,[k]:!o[k]}));
@@ -2478,7 +2478,7 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
   const[showAdd,setShowAdd]=useState(false);const[bulk,setBulk]=useState(false);
   const[name,setName]=useState('');const[newType,setNewType]=useState('accounting');const[newDisplayId,setNewDisplayId]=useState('');const[bulkText,setBulkText]=useState('');const[err,setErr]=useState('');
   const[typeBusy,setTypeBusy]=useState(null);// entity id whose type is being toggled
-  const[openType,setOpenType]=useState({accounting:true,development:true,shell:true});
+  const[openType,setOpenType]=useState({accounting:false,development:false,shell:false});
   const[importing,setImporting]=useState(null);// entity id being imported into
   const[importAsOf,setImportAsOf]=useState('2024-12-31');const[importMsg,setImportMsg]=useState('');const[importErr,setImportErr]=useState('');const[importBusy,setImportBusy]=useState(false);
   const onTBFile=async e=>{const file=e.target.files[0];if(!file||!importing)return;e.target.value='';setImportBusy(true);setImportMsg('');setImportErr('');
@@ -2517,7 +2517,7 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
     {bulk&&<div style={{...S.card,borderColor:T.accent+'40'}}><div style={{...S.h2,marginBottom:8}}>Bulk Import Entities</div><div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>One entity name per line</div>
       <textarea style={{...S.input,height:160,fontFamily:'monospace',fontSize:12,resize:'vertical'}} value={bulkText} onChange={e=>setBulkText(e.target.value)}/>
       {err&&<div style={S.err}>{err}</div>}<button style={{...S.btnP,marginTop:10}} onClick={async()=>{const names=bulkText.split('\n').map(l=>l.trim()).filter(Boolean);if(!names.length){setErr('None');return;}try{for(const n of names)await api.createEntity(n);setBulkText('');setBulk(false);refresh();}catch(e){setErr(e.message);}}}>Import</button></div>}
-    <div style={{...S.cardFlush,overflowX:'auto'}}><table style={{...S.table,minWidth:980}}><thead><tr><th style={S.th}>Entity</th><th style={{...S.th,width:720,minWidth:720}}>Actions</th></tr></thead>
+    <div style={{...S.cardFlush,overflowX:'auto'}}><table style={{...S.table,minWidth:1180}}><thead><tr><th style={{...S.th,minWidth:240}}>Entity</th><th style={{...S.th,width:760,minWidth:760}}>Actions</th></tr></thead>
       <tbody>{ENTITY_TYPES.map(t=>{const grp=entities.filter(e=>entTypeOf(e)===t.key).sort((a,b)=>a.name.localeCompare(b.name));const isOpen=openType[t.key];return(<Fragment key={t.key}>
         <tr style={{cursor:'pointer',background:T.bgElevated,borderTop:'2px solid '+T.border}} onClick={()=>setOpenType(o=>({...o,[t.key]:!o[t.key]}))}>
           <td colSpan={2} style={{...S.td,fontWeight:700,color:T.textBright}}><span style={{marginRight:6,fontSize:12,color:T.textMuted}}>{isOpen?'▾':'▸'}</span><span style={{marginRight:8}}>{t.icon}</span>{t.label}<span style={{marginLeft:8,fontSize:11,fontWeight:600,color:T.textMuted}}>({grp.length})</span></td>
