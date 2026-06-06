@@ -1672,11 +1672,17 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
         for (const nm of locationNames) { insLoc.run(eid, nm); locationId.set(nm, getLoc.get(eid, nm).id); }
       }
       if (projectNames.size) {
-        // Intacct project values are codes (e.g. P-10100.001) — store the value as
-        // both name and code so it's identifiable in the catalog and reports.
-        const insProj = db.prepare("INSERT OR IGNORE INTO dim_projects (entity_id, name, code, kind) VALUES (?, ?, ?, 'project')");
-        const getProj = db.prepare('SELECT id FROM dim_projects WHERE entity_id = ? AND name = ?');
-        for (const nm of projectNames) { insProj.run(eid, nm, nm); projectId.set(nm, getProj.get(eid, nm).id); }
+        // Intacct project values are codes (e.g. P-10100.001). Resolve against the
+        // existing project catalog BY CODE first so we reuse the catalog row (and its
+        // real name like "G&A") instead of creating a duplicate. Only when the code is
+        // genuinely new do we create a placeholder row (name = code) to be named later.
+        const getProjByCode = db.prepare('SELECT id FROM dim_projects WHERE entity_id = ? AND code = ?');
+        const insProjByCode = db.prepare("INSERT INTO dim_projects (entity_id, name, code, kind) VALUES (?, ?, ?, 'project')");
+        for (const nm of projectNames) {
+          const found = getProjByCode.get(eid, nm);
+          if (found) { projectId.set(nm, found.id); }
+          else { const r = insProjByCode.run(eid, nm, nm); projectId.set(nm, r.lastInsertRowid); }
+        }
       }
 
       let entryNum = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(eid).m || 0);
