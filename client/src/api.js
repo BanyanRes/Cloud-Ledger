@@ -110,17 +110,22 @@ export const api = {
     if (opts.to) p.push('to=' + opts.to);
     if (opts.location_id) p.push('location_id=' + opts.location_id);
     if (opts.class_id) p.push('class_id=' + opts.class_id);
+    if (opts.project_id) p.push('project_id=' + opts.project_id);
     if (opts.account_code) p.push('account_code=' + encodeURIComponent(opts.account_code));
     return request('/entities/' + eid + '/gl-detail' + (p.length ? '?' + p.join('&') : ''));
   },
   getClasses: (eid) => request('/entities/' + eid + '/classes'),
   getLocations: (eid) => request('/entities/' + eid + '/locations'),
+  getProjects: (eid) => request('/entities/' + eid + '/projects'),
   createLocation: (eid, data) => request('/entities/' + eid + '/locations', { method: 'POST', body: data }),
   updateLocation: (eid, id, data) => request('/entities/' + eid + '/locations/' + id, { method: 'PATCH', body: data }),
   deleteLocation: (eid, id) => request('/entities/' + eid + '/locations/' + id, { method: 'DELETE' }),
   createClass: (eid, data) => request('/entities/' + eid + '/classes', { method: 'POST', body: data }),
   updateClass: (eid, id, data) => request('/entities/' + eid + '/classes/' + id, { method: 'PATCH', body: data }),
   deleteClass: (eid, id) => request('/entities/' + eid + '/classes/' + id, { method: 'DELETE' }),
+  createProject: (eid, data) => request('/entities/' + eid + '/projects', { method: 'POST', body: data }),
+  updateProject: (eid, id, data) => request('/entities/' + eid + '/projects/' + id, { method: 'PATCH', body: data }),
+  deleteProject: (eid, id) => request('/entities/' + eid + '/projects/' + id, { method: 'DELETE' }),
   setLocationKind: (eid, id, kind) => request('/entities/' + eid + '/locations/' + id, { method: 'PATCH', body: { kind } }),
   setClassKind: (eid, id, kind) => request('/entities/' + eid + '/classes/' + id, { method: 'PATCH', body: { kind } }),
   // ── Accounts Receivable: customers ──

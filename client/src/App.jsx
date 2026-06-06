@@ -261,9 +261,12 @@ function QuickAddAccountModal({entityId,onClose,onCreated}){const[form,setForm]=
 function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,onPosted,form,setForm,pendingFiles,setPendingFiles}){
   const[accounts,setAccounts]=useState([]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[posting,setPosting]=useState(false);const[posted,setPosted]=useState('');
   const[projects,setProjects]=useState([]);
+  const[dimProjects,setDimProjects]=useState([]);
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
-  useEffect(()=>{api.getAccounts(entityId).then(setAccounts);api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
-  const showProject=isTurnkeyEntity||projects.length>0;
+  useEffect(()=>{api.getAccounts(entityId).then(setAccounts);api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>setDimProjects([]));api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
+  // Turnkey entities use the Turnkey project picker; other entities with dim_projects use the project dimension.
+  const useDimProjects=!isTurnkeyEntity&&dimProjects.length>0;
+  const showProject=isTurnkeyEntity||useDimProjects;
   const showLocation=dimsEnabled&&locations.length>0;const showClass=dimsEnabled&&classes.length>0;
   const addLine=()=>setForm(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:'',description:''}]}));
   const removeLine=i=>setForm(f=>({...f,lines:f.lines.filter((_,j)=>j!==i)}));
@@ -294,7 +297,7 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select account...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></td>
-        {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>updateLine(i,'project_id',e.target.value)}><option value="">— none —</option>{projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}</select></td>}
+        {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>updateLine(i,'project_id',e.target.value)}><option value="">— none —</option>{useDimProjects?dimProjects.map(pr=><option key={pr.id} value={pr.id}>{pr.code&&pr.code!==pr.name?pr.code+" — "+pr.name:pr.name}</option>):projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}</select></td>}
         {showLocation&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.location_id||''} onChange={e=>updateLine(i,'location_id',e.target.value)}><option value="">— none —</option>{locations.map(loc=><option key={loc.id} value={loc.id}>{loc.code?loc.code+" — ":""}{loc.name}</option>)}</select></td>}
         {showClass&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.class_id||''} onChange={e=>updateLine(i,'class_id',e.target.value)}><option value="">— none —</option>{classes.map(c=><option key={c.id} value={c.id}>{c.code?c.code+" — ":""}{c.name}</option>)}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} placeholder="(optional)" value={l.description||''} onChange={e=>updateLine(i,'description',e.target.value)}/></td>
@@ -485,7 +488,7 @@ export default function App(){
   const navItems=[
     {id:'dashboard',label:'Dashboard',icon:NI.dashboard,section:'reports'},
     {id:'d1',divider:1,label:'TRANSACTIONS'},{id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
-    {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},...(dimsEnabled?[{id:'dimensions',label:'Locations & Classes',icon:'🏷️',section:'coa'}]:[]),{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
+    {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},...(dimsEnabled?[{id:'dimensions',label:'Locations, Classes & Projects',icon:'🏷️',section:'coa'}]:[]),{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
     {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
     {id:'d3',divider:1,label:'REPORTS'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
@@ -1422,7 +1425,11 @@ function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSum
 // ═══ Edit JE Modal ═══
 function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,onSaved}){
   const[accounts,setAccounts]=useState(initAccounts||[]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[saving,setSaving]=useState(false);
-  const[projects,setProjects]=useState([]);useEffect(()=>{api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));},[entityId]);const showProject=projects.length>0||(entry.lines||[]).some(l=>l.project_id);
+  const[projects,setProjects]=useState([]);const[dimProjects,setDimProjects]=useState([]);
+  useEffect(()=>{api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>setDimProjects([]));},[entityId]);
+  // Turnkey projects take precedence; otherwise use the project dimension.
+  const useDimProjects=projects.length===0&&dimProjects.length>0;
+  const showProject=projects.length>0||dimProjects.length>0||(entry.lines||[]).some(l=>l.project_id);
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
   useEffect(()=>{api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
   const showLocation=(dimsEnabled&&locations.length>0)||(entry.lines||[]).some(l=>l.location_id);const showClass=(dimsEnabled&&classes.length>0)||(entry.lines||[]).some(l=>l.class_id);
@@ -1460,7 +1467,7 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></td>
-        {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>updateLine(i,'project_id',e.target.value)}><option value="">— none —</option>{projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}</select></td>}
+        {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>updateLine(i,'project_id',e.target.value)}><option value="">— none —</option>{useDimProjects?dimProjects.map(pr=><option key={pr.id} value={pr.id}>{pr.code&&pr.code!==pr.name?pr.code+" — "+pr.name:pr.name}</option>):projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}</select></td>}
         {showLocation&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.location_id||''} onChange={e=>updateLine(i,'location_id',e.target.value)}><option value="">— none —</option>{locations.map(loc=><option key={loc.id} value={loc.id}>{loc.code?loc.code+" — ":""}{loc.name}</option>)}</select></td>}
         {showClass&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.class_id||''} onChange={e=>updateLine(i,'class_id',e.target.value)}><option value="">— none —</option>{classes.map(c=><option key={c.id} value={c.id}>{c.code?c.code+" — ":""}{c.name}</option>)}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} value={l.description||''} placeholder="(optional)" onChange={e=>updateLine(i,'description',e.target.value)}/></td>
@@ -1603,7 +1610,7 @@ function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry}){
           <colgroup><col style={{width:'280px'}}/><col/><col style={{width:'140px'}}/><col style={{width:'140px'}}/></colgroup>
           <thead><tr><th style={S.th}>Account</th><th style={S.th}>Description</th><th style={S.thR}>Debit</th><th style={S.thR}>Credit</th></tr></thead>
           <tbody>{e.lines.map((l,i)=><tr key={i}><td style={S.td} title={acctLabel(l.account_code,acctName(l.account_code))}>{acctLabel(l.account_code,acctName(l.account_code))}</td>
-            <td style={{...S.td,color:T.textMuted,fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={l.description||''}>{l.description||''}</td>
+            <td style={{...S.td,color:T.textMuted,fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={[l.description||'',l.project_name?('Project: '+(l.project_code&&l.project_code!==l.project_name?l.project_code:l.project_name)):'',l.location_name?('Location: '+l.location_name):'',l.class_name?('Class: '+l.class_name):''].filter(Boolean).join('  ·  ')}>{l.description||''}{(l.project_name||l.location_name||l.class_name)&&<span style={{marginLeft:l.description?8:0,fontSize:10,color:T.accent}}>{[l.project_name?('▦ '+(l.project_code&&l.project_code!==l.project_name?l.project_code:l.project_name)):'',l.location_name,l.class_name].filter(Boolean).join(' · ')}</span>}</td>
             <td style={S.tdR}>{l.debit>0?fmt(l.debit):''}</td><td style={S.tdR}>{l.credit>0?fmt(l.credit):''}</td></tr>)}</tbody></table>
         {e.attachments?.length>0&&<div style={{marginTop:10,display:'flex',flexWrap:'wrap',gap:4}}>{e.attachments.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>)}</div>}
       </div>)}</div>}
@@ -1643,10 +1650,10 @@ function DimList({title,subtitle,items,canEdit,onCreate,onUpdate,onDelete}){
     {editErr&&<div style={{...S.err,marginTop:8}}>{editErr}</div>}</div>);
 }
 function DimensionsManager({entityId,entityName,canEdit}){
-  const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
-  const load=useCallback(async()=>{const[l,c]=await Promise.all([api.getLocations(entityId),api.getClasses(entityId)]);setLocations(l||[]);setClasses(c||[]);},[entityId]);
+  const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);const[projects,setProjects]=useState([]);
+  const load=useCallback(async()=>{const[l,c,p]=await Promise.all([api.getLocations(entityId),api.getClasses(entityId),api.getProjects(entityId)]);setLocations(l||[]);setClasses(c||[]);setProjects(p||[]);},[entityId]);
   useEffect(()=>{load();},[load]);
-  return(<div><div style={{marginBottom:20}}><div style={S.h1}>Locations & Classes</div><div style={S.sub}>{entityName} — dimensions you can tag on journal-entry lines and filter reports by</div></div>
+  return(<div><div style={{marginBottom:20}}><div style={S.h1}>Locations, Classes & Projects</div><div style={S.sub}>{entityName} — dimensions you can tag on journal-entry lines and filter reports by</div></div>
     <div style={{display:'flex',gap:24,flexWrap:'wrap',alignItems:'flex-start'}}>
       <DimList title="Locations" subtitle={(locations.length)+' location'+(locations.length===1?'':'s')+' (deals / properties)'} items={locations} canEdit={canEdit}
         onCreate={async d=>{await api.createLocation(entityId,d);await load();}}
@@ -1656,6 +1663,10 @@ function DimensionsManager({entityId,entityName,canEdit}){
         onCreate={async d=>{await api.createClass(entityId,d);await load();}}
         onUpdate={async(id,d)=>{await api.updateClass(entityId,id,d);await load();}}
         onDelete={async id=>{await api.deleteClass(entityId,id);await load();}}/>
+      <DimList title="Projects" subtitle={(projects.length)+' project'+(projects.length===1?'':'s')+' (Intacct project / QBO class)'} items={projects} canEdit={canEdit}
+        onCreate={async d=>{await api.createProject(entityId,d);await load();}}
+        onUpdate={async(id,d)=>{await api.updateProject(entityId,id,d);await load();}}
+        onDelete={async id=>{await api.deleteProject(entityId,id);await load();}}/>
     </div></div>);
 }
 
