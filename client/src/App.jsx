@@ -2163,6 +2163,30 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   // auto-fill the Cost Code Name when a code is entered. Loaded per entity.
   const[coaMap,setCoaMap]=useState({});
   useEffect(()=>{let alive=true;(async()=>{try{const r=await api.getRequisitionCoaMap(entityId);if(alive)setCoaMap((r&&r.map)||{});}catch{if(alive)setCoaMap({});}})();return()=>{alive=false;};},[entityId]);
+  // Cost-code -> name parsed straight from the uploaded prior workbook's
+  // "Prior Invoice Log" (col C = Cost Code #, col F = Cost Code Name). This is
+  // the most authoritative source for this requisition, so it takes precedence
+  // over the server catalog when auto-filling. Built when the workbook is chosen.
+  const[wbCoaMap,setWbCoaMap]=useState({});
+  const parseWorkbookCoaMap=async(file)=>{
+    try{
+      const buf=await file.arrayBuffer();
+      const wb=XLSX.read(buf,{type:'array'});
+      const ws=wb.Sheets['Prior Invoice Log'];
+      if(!ws){setWbCoaMap({});return;}
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,blankrows:false});
+      const m={};
+      // Data starts after the 2-row header; col C=index 2 (code), col F=index 5 (name).
+      for(const row of rows){
+        const code=row&&row[2]!=null?String(row[2]).trim():'';
+        const name=row&&row[5]!=null?String(row[5]).trim():'';
+        if(!code||!/\d/.test(code))continue;          // skip headers / subtotal rows (no numeric code)
+        if(/total/i.test(name))continue;               // skip "X Total" subtotal label rows
+        if(name&&!m[code])m[code]=name;                // first (top-most) name for a code wins
+      }
+      setWbCoaMap(m);
+    }catch{setWbCoaMap({});}
+  };
 
   // Read each uploaded invoice with Claude and append an editable card.
   const onRfInvoices=async(e)=>{const files=[...e.target.files];e.target.value='';if(!files.length)return;
@@ -2191,14 +2215,16 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const updateCard=(id,field,val)=>setRfCards(cards=>cards.map(c=>{
     if(c._id!==id)return c;
     const next={...c,[field]:val};
-    // When the Cost Code changes, auto-fill the Cost Code Name from the catalog.
-    // Only overwrite the name if it's blank or still matches the previous code's
-    // catalog name (i.e. the user hasn't hand-edited it), so manual edits stick.
+    // When the Cost Code changes, auto-fill the Cost Code Name. The uploaded
+    // prior workbook's Prior Invoice Log is the most authoritative source, so it
+    // wins; the server catalog is the fallback. Only overwrite the name if it's
+    // blank or still matches the previous code's auto value, so manual edits stick.
     if(field==='cost_code'){
-      const hit=coaMap[String(val).trim()];
-      const prevAuto=coaMap[String(c.cost_code).trim()];
-      const nameIsAuto=!c.cost_code_name||(prevAuto&&c.cost_code_name===prevAuto.cost_code_name);
-      if(hit&&nameIsAuto)next.cost_code_name=hit.cost_code_name||'';
+      const nameFor=code=>{const k=String(code).trim();if(wbCoaMap[k])return wbCoaMap[k];const h=coaMap[k];return h?(h.cost_code_name||''):'';};
+      const newName=nameFor(val);
+      const prevName=nameFor(c.cost_code);
+      const nameIsAuto=!c.cost_code_name||(prevName&&c.cost_code_name===prevName);
+      if(newName&&nameIsAuto)next.cost_code_name=newName;
     }
     return next;
   }));
@@ -2267,7 +2293,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
           <div style={{display:'flex',gap:10,alignItems:'center',marginTop:4}}>
             <div style={{position:'relative',display:'inline-block',overflow:'hidden'}}>
               <button style={{...S.btnS,pointerEvents:'none'}}>{rfFile?'Change file':'Choose .xlsx'}</button>
-              <input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:'pointer'}} onChange={e=>{const f=e.target.files[0];e.target.value='';if(f)setRfFile(f);}}/></div>
+              <input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:'pointer'}} onChange={e=>{const f=e.target.files[0];e.target.value='';if(f){setRfFile(f);parseWorkbookCoaMap(f);}}}/></div>
             <span style={{fontSize:12,color:rfFile?T.textBright:T.textMuted}}>{rfFile?rfFile.name:'No file selected'}</span>
           </div>
         </div>
