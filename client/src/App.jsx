@@ -492,7 +492,7 @@ export default function App(){
     <div style={S.body}><div style={S.sidebar(sidebarCol)}>
       {navItems.map(n=>n.divider?(!sidebarCol?<div key={n.id} style={S.navSection(sidebarCol)}>{n.label}</div>:<div key={n.id} style={{height:8}}/>)
         :(n.section==='all'?user.role==='Admin':canAccess(n.section))?<div key={n.id} style={S.navItem(page===n.id,sidebarCol)} onClick={()=>setPage(n.id)} title={n.label}>
-          {sidebarCol?<span style={{fontSize:15}}>{n.icon}</span>:<span>{n.icon}  {n.label}</span>}</div>:null)}</div>
+          {sidebarCol?<span style={{display:'inline-block',width:18,textAlign:'center',fontSize:15}}>{n.icon}</span>:<span><span style={{display:'inline-block',width:22,textAlign:'center',marginRight:8}}>{n.icon}</span>{n.label}</span>}</div>:null)}</div>
       <div style={S.main}>{(()=>{const en=entities.find(e=>e.id===activeEntity);const entityName=en?en.name:'';return<>
         {page==='dashboard'&&<Dashboard entityId={activeEntity} setActiveEntity={setActiveEntity} setPage={setPage} user={user} key={rk}/>}
         {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)}/>}
