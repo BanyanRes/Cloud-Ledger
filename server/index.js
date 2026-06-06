@@ -3589,16 +3589,21 @@ app.get('/api/requisition/:entity_id/coa-map', ...reqGuards(), (req, res) => {
       gl_coding: r.gl_coding || '',
     };
   }
-  // Fallback: fill any codes not already in the curated map from invoice history,
-  // preferring the most recent name for a given code.
+  // Fallback: fill in names from invoice history, preferring the most recent
+  // name for a given code. This also REPAIRS curated-map entries whose code is
+  // present but whose name is blank (the SRN map seeded codes with empty names),
+  // so a code still auto-fills its name when invoice history has one.
   const inv = db.prepare(
     'SELECT cost_code, cost_code_name FROM requisition_invoice ' +
-    'WHERE entity_id = ? AND cost_code IS NOT NULL AND cost_code_name IS NOT NULL ' +
+    "WHERE entity_id = ? AND cost_code IS NOT NULL AND TRIM(COALESCE(cost_code_name,'')) <> '' " +
     'ORDER BY req_number DESC, id DESC'
   ).all(eid);
   for (const r of inv) {
     const code = String(r.cost_code).trim();
-    if (!code || map[code]) continue;
+    if (!code) continue;
+    const existing = map[code];
+    if (existing && (existing.cost_code_name || '').trim() !== '') continue; // keep curated name
+    if (existing) { existing.cost_code_name = r.cost_code_name; continue; } // fill blank curated name
     map[code] = { cost_code_name: r.cost_code_name || '', cost_category: '', bank_cost_category: '', gl_coding: '' };
   }
   res.json({ map });
