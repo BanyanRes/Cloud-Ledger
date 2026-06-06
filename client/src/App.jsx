@@ -1585,19 +1585,16 @@ function DimList({title,subtitle,items,canEdit,onCreate,onUpdate,onDelete}){
       <div><div style={{fontSize:15,fontWeight:700,color:T.textBright}}>{title}</div><div style={{fontSize:12,color:T.textMuted}}>{subtitle||(items.length+' total')}</div></div>
       {canEdit&&<button style={{...S.btnP,padding:'6px 12px',fontSize:12}} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add'}</button>}</div>
     {showAdd&&<div style={{...S.card,borderColor:T.green+'40',padding:14,marginBottom:12}}><div style={{display:'flex',gap:8,alignItems:'flex-end'}}>
-      <div style={{width:110}}><label style={S.label}>Code</label><input style={S.input} placeholder="(optional)" value={form.code} onChange={e=>setForm(f=>({...f,code:e.target.value}))}/></div>
       <div style={{flex:1}}><label style={S.label}>Name</label><input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter')add();}}/></div>
       <button style={S.btnP} onClick={add}>Add</button></div>{err&&<div style={{...S.err,marginTop:8,marginBottom:0}}>{err}</div>}</div>}
-    <div style={S.cardFlush}><table style={{...S.table,tableLayout:'fixed'}}><thead><tr><th style={{...S.th,width:90}}>Code</th><th style={S.th}>Name</th>{canEdit&&<th style={{...S.th,width:84}}>Actions</th>}</tr></thead>
-      <tbody>{items.length===0&&<tr><td colSpan={canEdit?3:2} style={{...S.td,color:T.textMuted,textAlign:'center',padding:'18px'}}>None yet</td></tr>}
+    <div style={S.cardFlush}><table style={{...S.table,tableLayout:'fixed'}}><thead><tr><th style={S.th}>Name</th>{canEdit&&<th style={{...S.th,width:84}}>Actions</th>}</tr></thead>
+      <tbody>{items.length===0&&<tr><td colSpan={canEdit?2:1} style={{...S.td,color:T.textMuted,textAlign:'center',padding:'18px'}}>None yet</td></tr>}
       {items.map(it=>editing===it.id?
         <tr key={it.id} style={{background:T.accentDim}}>
-          <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.code} onChange={e=>setEditForm(f=>({...f,code:e.target.value}))} placeholder="(optional)"/></td>
           <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))} onKeyDown={e=>{if(e.key==='Enter')save();}}/></td>
           {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}><button style={{...S.btnGhost,color:T.green,fontSize:11}} onClick={save}>Save</button><button style={{...S.btnGhost,fontSize:11}} onClick={()=>setEditing(null)}>Cancel</button></div></td>}
         </tr>
         :<tr key={it.id}>
-          <td style={{...S.td,color:T.textBright}}>{it.code||<span style={{color:T.textMuted}}>—</span>}</td>
           <td style={S.td} title={it.name}>{it.name}</td>
           {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}>
             <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>startEdit(it)}>Edit</button>
