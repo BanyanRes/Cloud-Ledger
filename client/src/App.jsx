@@ -264,10 +264,20 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
   const[dimProjects,setDimProjects]=useState([]);
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
   useEffect(()=>{api.getAccounts(entityId).then(setAccounts);api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>setDimProjects([]));api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
-  // Turnkey entities use the Turnkey project picker; other entities with dim_projects use the project dimension.
-  const useDimProjects=!isTurnkeyEntity&&dimProjects.length>0;
+  // Turnkey entities use the Turnkey project picker; all other (non-shell) entities
+  // use the project dimension, and the field is always shown with an inline add.
+  const useDimProjects=!isTurnkeyEntity&&dimsEnabled;
   const showProject=isTurnkeyEntity||useDimProjects;
   const showLocation=dimsEnabled&&locations.length>0;const showClass=dimsEnabled&&classes.length>0;
+  // Inline "+ new project" from a JE line: prompt, create, refresh, select it on that line.
+  const addProjectInline=async(i)=>{
+    const name=(prompt('New project name or code (e.g. P-10100.001):')||'').trim();
+    if(!name) return;
+    try{ const p=await api.createProject(entityId,{name,code:name});
+      const list=await api.getProjects(entityId); setDimProjects(list||[]);
+      updateLine(i,'project_id',p.id);
+    }catch(e){ alert(e.message); }
+  };
   const addLine=()=>setForm(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:'',description:''}]}));
   const removeLine=i=>setForm(f=>({...f,lines:f.lines.filter((_,j)=>j!==i)}));
   const updateLine=(i,k,v)=>setForm(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,[k]:v}:l)}));
@@ -297,7 +307,7 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select account...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></td>
-        {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>updateLine(i,'project_id',e.target.value)}><option value="">— none —</option>{useDimProjects?dimProjects.map(pr=><option key={pr.id} value={pr.id}>{pr.code&&pr.code!==pr.name?pr.code+" — "+pr.name:pr.name}</option>):projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}</select></td>}
+        {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>{if(e.target.value==='__new__'){addProjectInline(i);}else{updateLine(i,'project_id',e.target.value);}}}><option value="">— none —</option>{useDimProjects?dimProjects.map(pr=><option key={pr.id} value={pr.id}>{pr.code&&pr.code!==pr.name?pr.code+" — "+pr.name:pr.name}</option>):projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</select></td>}
         {showLocation&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.location_id||''} onChange={e=>updateLine(i,'location_id',e.target.value)}><option value="">— none —</option>{locations.map(loc=><option key={loc.id} value={loc.id}>{loc.code?loc.code+" — ":""}{loc.name}</option>)}</select></td>}
         {showClass&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.class_id||''} onChange={e=>updateLine(i,'class_id',e.target.value)}><option value="">— none —</option>{classes.map(c=><option key={c.id} value={c.id}>{c.code?c.code+" — ":""}{c.name}</option>)}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} placeholder="(optional)" value={l.description||''} onChange={e=>updateLine(i,'description',e.target.value)}/></td>
@@ -1427,9 +1437,18 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
   const[accounts,setAccounts]=useState(initAccounts||[]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[saving,setSaving]=useState(false);
   const[projects,setProjects]=useState([]);const[dimProjects,setDimProjects]=useState([]);
   useEffect(()=>{api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>setDimProjects([]));},[entityId]);
-  // Turnkey projects take precedence; otherwise use the project dimension.
-  const useDimProjects=projects.length===0&&dimProjects.length>0;
-  const showProject=projects.length>0||dimProjects.length>0||(entry.lines||[]).some(l=>l.project_id);
+  // Turnkey projects take precedence; otherwise use the project dimension (always shown for non-Turnkey when dims are on).
+  const isTurnkeyHere=projects.length>0;
+  const useDimProjects=!isTurnkeyHere&&dimsEnabled;
+  const showProject=isTurnkeyHere||useDimProjects||(entry.lines||[]).some(l=>l.project_id);
+  const addProjectInline=async(i)=>{
+    const name=(prompt('New project name or code (e.g. P-10100.001):')||'').trim();
+    if(!name) return;
+    try{ const p=await api.createProject(entityId,{name,code:name});
+      const list=await api.getProjects(entityId); setDimProjects(list||[]);
+      updateLine(i,'project_id',p.id);
+    }catch(e){ alert(e.message); }
+  };
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
   useEffect(()=>{api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
   const showLocation=(dimsEnabled&&locations.length>0)||(entry.lines||[]).some(l=>l.location_id);const showClass=(dimsEnabled&&classes.length>0)||(entry.lines||[]).some(l=>l.class_id);
@@ -1467,7 +1486,7 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></td>
-        {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>updateLine(i,'project_id',e.target.value)}><option value="">— none —</option>{useDimProjects?dimProjects.map(pr=><option key={pr.id} value={pr.id}>{pr.code&&pr.code!==pr.name?pr.code+" — "+pr.name:pr.name}</option>):projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}</select></td>}
+        {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>{if(e.target.value==='__new__'){addProjectInline(i);}else{updateLine(i,'project_id',e.target.value);}}}><option value="">— none —</option>{useDimProjects?dimProjects.map(pr=><option key={pr.id} value={pr.id}>{pr.code&&pr.code!==pr.name?pr.code+" — "+pr.name:pr.name}</option>):projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</select></td>}
         {showLocation&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.location_id||''} onChange={e=>updateLine(i,'location_id',e.target.value)}><option value="">— none —</option>{locations.map(loc=><option key={loc.id} value={loc.id}>{loc.code?loc.code+" — ":""}{loc.name}</option>)}</select></td>}
         {showClass&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.class_id||''} onChange={e=>updateLine(i,'class_id',e.target.value)}><option value="">— none —</option>{classes.map(c=><option key={c.id} value={c.id}>{c.code?c.code+" — ":""}{c.name}</option>)}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} value={l.description||''} placeholder="(optional)" onChange={e=>updateLine(i,'description',e.target.value)}/></td>
