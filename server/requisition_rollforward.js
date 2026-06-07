@@ -250,6 +250,39 @@ function styleAmountCell(ws, r, { underline = false } = {}) {
   };
 }
 
+// Right-align a single cell, preserving everything else about its style
+// (numFmt, border, font, fill). Assigns a fresh complete `.style` object for the
+// same shared-style-registry reason described on styleAmountCell.
+function rightAlignCell(ws, r, col) {
+  const c = ws.getCell(r, col);
+  const prev = c.style || {};
+  c.style = {
+    numFmt: prev.numFmt,
+    alignment: { ...(prev.alignment || {}), horizontal: 'right' },
+    border: prev.border ? { ...prev.border } : {},
+    font: prev.font ? { ...prev.font } : undefined,
+    fill: prev.fill ? { ...prev.fill } : undefined,
+  };
+}
+
+// After a log sheet is prepared, right-align the numeric coding/amount columns —
+// cost code (C), GL coding (E), and amount/amount-paid (I) — so they read as
+// right-aligned numbers consistent down the column. Only touches rows that have
+// content in the column (skips blank spacers). The amount column is already
+// right-aligned by styleAmountCell; re-aligning it here is harmless and keeps
+// the intent in one place.
+function rightAlignNumericColumns(ws) {
+  if (!ws) return;
+  const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
+  for (let r = 3; r <= last; r++) {
+    for (const col of [COL.code, COL.gl, COL.amount]) {
+      const v = ws.getCell(r, col).value;
+      if (v === null || v === undefined || v === '') continue;
+      rightAlignCell(ws, r, col);
+    }
+  }
+}
+
 // Rebuild the Prior Log in `nextPriorWs` from prior groups + folded current rows.
 // Returns a map of useful landmarks (row of each group subtotal, grand total row,
 // and rows of specially-referenced lines) so callers can rewrite absolute refs.
@@ -492,8 +525,15 @@ function rollForward(workbook, newCurrent, meta = {}) {
   //     is no bold in the logs, matching the Current Invoice Log treatment.
   stripBold(priorWs);
 
+  // 2b. Right-align the numeric coding/amount columns on the prepared Prior Log:
+  //     cost code (C), GL coding (E), and amount paid (I).
+  rightAlignNumericColumns(priorWs);
+
   // 3. Replace Current Log with the incoming period's invoices (incl. dev fee).
   replaceCurrentLog(curWs, effectiveCurrent, meta);
+
+  // 3a. Right-align the same numeric columns on the Current Log.
+  rightAlignNumericColumns(curWs);
 
   // 4. Re-point absolute references by label (never by tracked row number).
   repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks });
