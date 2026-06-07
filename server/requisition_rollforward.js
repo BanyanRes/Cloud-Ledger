@@ -139,6 +139,10 @@ function writeRowCells(ws, r, row) {
   put(COL.amount, row.amount);
   put(COL.req, row.req);
   put(COL.date, row.date);
+  // Normalize the amount cell: comma/accounting numFmt, right-aligned, no stale
+  // top border. Guarantees data rows render with the comma style and never carry
+  // a leftover underline at a shifted row position.
+  styleAmountCell(ws, r, { underline: false });
   // Give the data row a comfortable height. The sheet's defaultRowHeight is 13pt
   // which crowds the 10pt text once a row is rewritten (the original autofit
   // state is lost), so set an explicit height that comfortably fits the text.
@@ -162,6 +166,35 @@ function putBill(ws, r, bill) {
 // rows are rewritten, so rewritten data and subtotal rows get this height.
 const DATA_ROW_HEIGHT = 15;
 
+// Canonical accounting (comma-style) number format for amount cells. Stamped
+// explicitly on every amount cell we write so the comma/parenthesis style is
+// guaranteed regardless of whatever style was inherited at a shifted row.
+const ACCT_FMT = '_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)';
+
+// Apply the canonical amount formatting to an amount cell: comma numFmt + right
+// alignment, and (default) NO top border. Pass underline=true to draw the single
+// thin rule used under each group's subtotal.
+//
+// IMPORTANT: exceljs de-duplicates cell styles through a shared style registry,
+// so many cells can point at ONE style record. Mutating individual props
+// (c.border = ..., c.numFmt = ...) on a cell that shares its style record bleeds
+// the change onto every sibling cell — which is exactly how the subtotal's
+// top-border rule leaked onto all the data rows. Assigning a brand-new complete
+// `.style` object instead forces exceljs to register a DISTINCT style for this
+// one cell, so the border/format never aliases. Font and fill are preserved from
+// the cell's current style so we only change numFmt/alignment/border.
+function styleAmountCell(ws, r, { underline = false } = {}) {
+  const c = ws.getCell(r, COL.amount);
+  const prev = c.style || {};
+  c.style = {
+    numFmt: ACCT_FMT,
+    alignment: { horizontal: 'right', vertical: 'middle' },
+    border: underline ? { top: { style: 'thin' } } : {},
+    font: prev.font ? { ...prev.font } : undefined,
+    fill: prev.fill ? { ...prev.fill } : undefined,
+  };
+}
+
 // Rebuild the Prior Log in `nextPriorWs` from prior groups + folded current rows.
 // Returns a map of useful landmarks (row of each group subtotal, grand total row,
 // and rows of specially-referenced lines) so callers can rewrite absolute refs.
@@ -182,6 +215,7 @@ function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
       const gtRow = r;
       nextPriorWs.getCell(gtRow, COL.name).value = g.subtotalName;
       nextPriorWs.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,I3:I${gtRow - 1})` };
+      styleAmountCell(nextPriorWs, gtRow, { underline: true });
       nextPriorWs.getRow(gtRow).height = DATA_ROW_HEIGHT;
       landmarks.grandTotalRow = gtRow;
       r = gtRow + 1;
@@ -204,18 +238,19 @@ function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
     }
     curByCode.delete(key);
     const dataEnd = r - 1;
-    // spacer
-    nextPriorWs.getCell(r, COL.amount).value = null; r++;
-    // subtotal
+    // spacer (clear any inherited style on the amount cell)
+    nextPriorWs.getCell(r, COL.amount).value = null; styleAmountCell(nextPriorWs, r, { underline: false }); r++;
+    // subtotal — single thin rule above the figure (one consistent convention)
     const subRow = r;
     nextPriorWs.getCell(subRow, COL.name).value = g.subtotalName || ((g.name || '') + ' Total');
     nextPriorWs.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,I${dataStart}:I${dataEnd + 1})` };
+    styleAmountCell(nextPriorWs, subRow, { underline: true });
     nextPriorWs.getRow(subRow).height = DATA_ROW_HEIGHT;
     if (g.code != null) landmarks.groupSubtotalRow[String(g.code)] = subRow;
     if (g.subtotalName) landmarks.byLabel[g.subtotalName.toLowerCase()] = subRow;
     r = subRow + 1;
     // spacer
-    nextPriorWs.getCell(r, COL.amount).value = null; r++;
+    nextPriorWs.getCell(r, COL.amount).value = null; styleAmountCell(nextPriorWs, r, { underline: false }); r++;
   }
 
   // Any current codes with no matching prior group are appended as new groups.
@@ -223,11 +258,12 @@ function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
     if (!rows.length) continue;
     const dataStart = r;
     for (const row of rows) { writeRowCells(nextPriorWs, r, row); r++; }
-    nextPriorWs.getCell(r, COL.amount).value = null; r++;
+    nextPriorWs.getCell(r, COL.amount).value = null; styleAmountCell(nextPriorWs, r, { underline: false }); r++;
     const subRow = r;
     const nm = (rows[0].name || ('Code ' + key)) + ' Total';
     nextPriorWs.getCell(subRow, COL.name).value = nm;
     nextPriorWs.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,I${dataStart}:I${r - 1})` };
+    styleAmountCell(nextPriorWs, subRow, { underline: true });
     if (key !== '__none__') landmarks.groupSubtotalRow[key] = subRow;
     r = subRow + 2;
   }
@@ -436,18 +472,20 @@ function replaceCurrentLog(ws, rows, meta) {
       });
       r++;
     }
-    ws.getCell(r, COL.amount).value = null; r++;            // spacer
+    ws.getCell(r, COL.amount).value = null; styleAmountCell(ws, r, { underline: false }); r++;            // spacer
     const subRow = r;
     ws.getCell(subRow, COL.name).value = (grp[0].name || ('Code ' + key)) + ' Total';
     ws.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,I${dataStart}:I${r - 1})` };
+    styleAmountCell(ws, subRow, { underline: true });
     ws.getRow(subRow).height = DATA_ROW_HEIGHT;
     r = subRow + 1;
-    ws.getCell(r, COL.amount).value = null; r++;            // spacer
+    ws.getCell(r, COL.amount).value = null; styleAmountCell(ws, r, { underline: false }); r++;            // spacer
   }
   // grand total
   const gtRow = r;
   ws.getCell(gtRow, COL.name).value = 'Grand Total';
   ws.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,I3:I${gtRow - 1})` };
+  styleAmountCell(ws, gtRow, { underline: true });
   ws.getRow(gtRow).height = DATA_ROW_HEIGHT;
 
   // Per request, the Current Invoice Log carries NO bold anywhere — header,
