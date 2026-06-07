@@ -498,7 +498,7 @@ export default function App(){
   const navItems=[
     {id:'dashboard',label:'Dashboard',icon:NI.dashboard,section:'reports'},
     {id:'d1',divider:1,label:'TRANSACTIONS'},{id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
-    {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},...(dimsEnabled?[{id:'dimensions',label:'Locations, Classes & Projects',icon:'🏷️',section:'coa'}]:[]),{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
+    {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},...(dimsEnabled?[{id:'dimensions',label:'Dimensions',icon:'🏷️',section:'coa'}]:[]),{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
     {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
     {id:'d3',divider:1,label:'REPORTS'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
@@ -1697,7 +1697,7 @@ function DimensionsManager({entityId,entityName,canEdit}){
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);const[projects,setProjects]=useState([]);
   const load=useCallback(async()=>{const[l,c,p]=await Promise.all([api.getLocations(entityId),api.getClasses(entityId),api.getProjects(entityId)]);setLocations(l||[]);setClasses(c||[]);setProjects(p||[]);},[entityId]);
   useEffect(()=>{load();},[load]);
-  return(<div><div style={{marginBottom:20}}><div style={S.h1}>Locations, Classes & Projects</div><div style={S.sub}>{entityName} — dimensions you can tag on journal-entry lines and filter reports by</div></div>
+  return(<div><div style={{marginBottom:20}}><div style={S.h1}>Dimensions</div><div style={S.sub}>{entityName} — dimensions you can tag on journal-entry lines and filter reports by</div></div>
     <div style={{display:'flex',gap:24,flexWrap:'wrap',alignItems:'flex-start'}}>
       <DimList title="Locations" subtitle={(locations.length)+' location'+(locations.length===1?'':'s')+' (deals / properties)'} items={locations} canEdit={canEdit}
         onCreate={async d=>{await api.createLocation(entityId,d);await load();}}
