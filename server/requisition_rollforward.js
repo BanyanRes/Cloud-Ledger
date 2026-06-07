@@ -54,6 +54,61 @@ function parseLogGroups(ws) {
   return groups;
 }
 
+// Resolve a row's numeric amount from a {formula,result} | number | null payload.
+function rowAmount(row) {
+  const a = row && row.amount;
+  if (a == null) return null;
+  if (typeof a === 'number') return a;
+  if (typeof a === 'object' && 'result' in a) return typeof a.result === 'number' ? a.result : null;
+  const n = Number(a);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Build a stable identity key for an invoice row: vendor + bill#. Used to detect
+// the same invoice appearing twice (e.g. once with the real amount under one
+// cost code, once as a $0 placeholder under another).
+function rowIdentity(row) {
+  const vendor = (row.vendor || '').toString().trim().toLowerCase();
+  let bill = row.bill;
+  if (bill && typeof bill === 'object') bill = bill.result != null ? bill.result : bill.formula;
+  bill = (bill == null ? '' : String(bill)).trim().toLowerCase();
+  if (!vendor && !bill) return null; // not enough to identify
+  return vendor + '||' + bill;
+}
+
+// Drop zero/blank-amount duplicate rows: when the SAME invoice (vendor + bill#)
+// appears more than once across the prior log and at least one copy carries a
+// real (non-zero) amount, the zero/blank copies are redundant placeholders and
+// are removed. The copy carrying the amount is always kept. This cleans up the
+// case where one invoice was coded to two cost codes — one real, one $0 — so the
+// rolled-forward log doesn't show an empty duplicate line. Mutates groups in
+// place and returns the number of rows dropped.
+function dropZeroDuplicateRows(groups) {
+  // First pass: which identities have a real (non-zero) amount somewhere?
+  const hasRealAmount = new Set();
+  for (const g of groups) {
+    for (const row of g.rows) {
+      const id = rowIdentity(row);
+      if (!id) continue;
+      const amt = rowAmount(row);
+      if (amt != null && amt !== 0) hasRealAmount.add(id);
+    }
+  }
+  // Second pass: drop zero/blank copies whose identity is covered by a real one.
+  let dropped = 0;
+  for (const g of groups) {
+    g.rows = g.rows.filter(row => {
+      const id = rowIdentity(row);
+      if (!id) return true;
+      const amt = rowAmount(row);
+      const isZeroish = amt == null || amt === 0;
+      if (isZeroish && hasRealAmount.has(id)) { dropped++; return false; }
+      return true;
+    });
+  }
+  return dropped;
+}
+
 // Capture the cell payloads we need to rewrite a row, preserving formulas.
 function readRowCells(ws, r) {
   const get = (col) => {
@@ -403,6 +458,11 @@ function rollForward(workbook, newCurrent, meta = {}) {
   const priorGroups = parseLogGroups(priorWs);
   const curByCode = currentRowsByCode(curWs);
 
+  // 1a. Clean up the prior log: drop zero/blank-amount duplicate rows where the
+  //     same invoice (vendor + bill#) also appears with a real amount elsewhere
+  //     (one invoice coded to two cost codes — one real, one $0 placeholder).
+  dropZeroDuplicateRows(priorGroups);
+
   // 1b. Auto-compute this period's Development Fee from the new invoices and the
   //     entity's Dev Fee tab, then append it as a Current-Log line. Drop any dev
   //     fee row the caller already included so we never double-count or go
@@ -426,6 +486,11 @@ function rollForward(workbook, newCurrent, meta = {}) {
 
   // 2. Rebuild Prior Log = prior groups + folded current rows.
   const landmarks = rebuildPriorLog(priorWs, priorGroups, curByCode);
+
+  // 2a. Strip bold from the Prior Invoice Log. The prior workbook's bold (on some
+  //     amounts/subtotals) survives a value-only rewrite; the report convention
+  //     is no bold in the logs, matching the Current Invoice Log treatment.
+  stripBold(priorWs);
 
   // 3. Replace Current Log with the incoming period's invoices (incl. dev fee).
   replaceCurrentLog(curWs, effectiveCurrent, meta);
