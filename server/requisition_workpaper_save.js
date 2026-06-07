@@ -57,12 +57,27 @@ function uniqueOriginalName(db, eid, folderPath, desiredName) {
 }
 
 // Write a buffer to WORKPAPERS_DIR/<eid>/<random> and insert an entity_files row.
-function saveBufferToWorkpapers(db, workpapersDir, eid, folderPath, originalName, mimeType, buffer, who) {
+function saveBufferToWorkpapers(db, workpapersDir, eid, folderPath, originalName, mimeType, buffer, who, opts = {}) {
   const entityDir = path.join(workpapersDir, String(eid));
   fs.mkdirSync(entityDir, { recursive: true });
   const storedName = crypto.randomBytes(16).toString('hex') + path.extname(originalName);
   fs.writeFileSync(path.join(entityDir, storedName), buffer);
-  const finalName = uniqueOriginalName(db, eid, folderPath, originalName);
+  // overwrite: re-running the roll-forward for the same period should REPLACE the
+  // prior output, not pile up timestamp-suffixed copies. Remove any existing rows
+  // (and their stored blobs) of the same name in this folder, then keep the name
+  // exactly as given. Without overwrite, fall back to a unique (timestamped) name.
+  let finalName = originalName;
+  if (opts.overwrite) {
+    const dupes = db.prepare(
+      'SELECT id, stored_filename FROM entity_files WHERE entity_id=? AND folder_path=? AND original_name=?'
+    ).all(eid, folderPath, originalName);
+    for (const d of dupes) {
+      try { fs.unlinkSync(path.join(entityDir, d.stored_filename)); } catch (_) {}
+      db.prepare('DELETE FROM entity_files WHERE id=?').run(d.id);
+    }
+  } else {
+    finalName = uniqueOriginalName(db, eid, folderPath, originalName);
+  }
   const info = db.prepare(
     'INSERT INTO entity_files (entity_id, folder_path, stored_filename, original_name, size, mime_type, uploaded_by) VALUES (?,?,?,?,?,?,?)'
   ).run(eid, folderPath, storedName, finalName, buffer.length, mimeType, who || 'system');
@@ -246,7 +261,7 @@ async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfD
           db, workpapersDir, eid, folderPath,
           workbookName,
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          workbookBuffer, who
+          workbookBuffer, who, { overwrite: true }
         );
       } catch (e) { result.errors.push('workbook: ' + e.message); }
     }
@@ -291,7 +306,7 @@ async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfD
           db, workpapersDir, eid, folderPath,
           packetName,
           'application/pdf',
-          packetBuf, who
+          packetBuf, who, { overwrite: true }
         );
       }
     } catch (e) { result.errors.push('packet: ' + e.message); }
