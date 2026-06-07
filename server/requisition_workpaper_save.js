@@ -226,7 +226,7 @@ function addOutline(doc, marks) {
 // Main entry. Saves the workbook and (if any invoices) the merged packet into
 // the period folder. Best-effort: never throws — returns a result summary so the
 // caller can log it without risking the user's download.
-async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfDate, workbookBuffer, invoices, devFee, who, packetPrefix }) {
+async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfDate, workbookBuffer, invoices, devFee, who, packetPrefix, workbookFilename }) {
   const result = { folder: null, workbook: null, packet: null, errors: [] };
   try {
     const folderPath = requisitionFolderPath(asOfDate);
@@ -234,12 +234,17 @@ async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfD
     ensureFolders(db, eid, folderPath, who);
 
     const reqLabel = reqNumber != null && reqNumber !== '' ? `Req ${reqNumber}` : 'Requisition';
+    // Prefer the caller-derived name (same as the download — e.g.
+    // "0005 B1 County Line SRN Requisition Report #12 02.28.2026.xlsx") so the
+    // saved workbook matches the prior report's naming convention. Only fall
+    // back to the bare label if no name was supplied.
+    const workbookName = (workbookFilename && String(workbookFilename).trim()) || `${reqLabel} Report.xlsx`;
 
     if (workbookBuffer && workbookBuffer.length) {
       try {
         result.workbook = saveBufferToWorkpapers(
           db, workpapersDir, eid, folderPath,
-          `${reqLabel} Report.xlsx`,
+          workbookName,
           'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
           workbookBuffer, who
         );

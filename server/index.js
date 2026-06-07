@@ -4317,6 +4317,15 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
       try { tx(); } catch (e) { console.error('requisition invoice persist failed:', e.message); }
     }
 
+    // Build the output filename from the PRIOR workbook's name, bumping the
+    // requisition number and (if present) the embedded date to the As-of Date.
+    // e.g. "0005 B1 County Line SRN Requisition Report #11 01.31.2026.xlsx"
+    //   -> "0005 B1 County Line SRN Requisition Report #12 02.28.2026.xlsx"
+    // Falls back to the generic name if the prior name can't be parsed.
+    // Derived up front so the Workpapers auto-save uses the SAME name as the
+    // download (otherwise the save fell back to a bare "Req N Report.xlsx").
+    const fname = buildRollforwardFilename(req.file.originalname, meta.reqNumber, meta.asOfDate);
+
     // Auto-save the workbook + a merged invoice packet into the entity's
     // Workpapers under "<year>/Requisition Reports/<Month year>" (best-effort:
     // a save failure is logged but never blocks the user's download).
@@ -4329,7 +4338,7 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
         workbookBuffer: Buffer.from(outBuf), invoices: invoiceRows,
         devFee: rfResult && rfResult.devFee && !rfResult.devFee.error ? rfResult.devFee : null,
         who: (req.user && (req.user.name || req.user.email)) || 'system',
-        packetPrefix,
+        packetPrefix, workbookFilename: fname,
       });
       if (saved.errors && saved.errors.length) console.error('requisition workpaper save:', saved.errors.join('; '));
       res.setHeader('X-Workpaper-Folder', saved.folder || '');
@@ -4345,12 +4354,7 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
       console.error('requisition workpaper save failed:', e.message);
     }
 
-    // Build the output filename from the PRIOR workbook's name, bumping the
-    // requisition number and (if present) the embedded date to the As-of Date.
-    // e.g. "0005 B1 County Line SRN Requisition Report #11 01.31.2026.xlsx"
-    //   -> "0005 B1 County Line SRN Requisition Report #12 02.28.2026.xlsx"
-    // Falls back to the generic name if the prior name can't be parsed.
-    const fname = buildRollforwardFilename(req.file.originalname, meta.reqNumber, meta.asOfDate);
+    // fname was derived above (shared with the Workpapers auto-save).
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
     // Expose the verification summary in a header so the client can confirm which
