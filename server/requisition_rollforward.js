@@ -250,35 +250,35 @@ function styleAmountCell(ws, r, { underline = false } = {}) {
   };
 }
 
-// Right-align a single cell, preserving everything else about its style
+// Horizontally align a single cell, preserving everything else about its style
 // (numFmt, border, font, fill). Assigns a fresh complete `.style` object for the
 // same shared-style-registry reason described on styleAmountCell.
-function rightAlignCell(ws, r, col) {
+function alignCell(ws, r, col, horizontal) {
   const c = ws.getCell(r, col);
   const prev = c.style || {};
   c.style = {
     numFmt: prev.numFmt,
-    alignment: { ...(prev.alignment || {}), horizontal: 'right' },
+    alignment: { ...(prev.alignment || {}), horizontal },
     border: prev.border ? { ...prev.border } : {},
     font: prev.font ? { ...prev.font } : undefined,
     fill: prev.fill ? { ...prev.fill } : undefined,
   };
 }
 
-// After a log sheet is prepared, right-align the numeric coding/amount columns —
-// cost code (C), GL coding (E), and amount/amount-paid (I) — so they read as
-// right-aligned numbers consistent down the column. Only touches rows that have
-// content in the column (skips blank spacers). The amount column is already
-// right-aligned by styleAmountCell; re-aligning it here is harmless and keeps
-// the intent in one place.
-function rightAlignNumericColumns(ws) {
+// After a log sheet is prepared, align the numeric coding/amount columns — cost
+// code (C), GL coding (E), and amount/amount-paid (I) — so they read
+// consistently down the column. Only touches rows that have content in the
+// column (skips blank spacers). GL and amount are right-aligned; the cost-code
+// column's horizontal alignment is configurable (`codeAlign`, default 'right')
+// so the Prior log can center it.
+function rightAlignNumericColumns(ws, { codeAlign = 'right' } = {}) {
   if (!ws) return;
   const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
   for (let r = 3; r <= last; r++) {
     for (const col of [COL.code, COL.gl, COL.amount]) {
       const v = ws.getCell(r, col).value;
       if (v === null || v === undefined || v === '') continue;
-      rightAlignCell(ws, r, col);
+      alignCell(ws, r, col, col === COL.code ? codeAlign : 'right');
     }
   }
 }
@@ -464,7 +464,7 @@ function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta }) {
       bankcat: t.bankcat != null ? t.bankcat : 'Development Fee',
       gl: t.gl != null ? t.gl : devCode,
       name: t.name || 'Development Fee',
-      vendor: t.vendor || 'Banyan Residential',
+      vendor: 'County Line Rail Interest',
       bill: billLabel,
       amount: fee,
       req: meta && meta.reqNumber ? 'Req#' + meta.reqNumber : undefined,
@@ -525,9 +525,9 @@ function rollForward(workbook, newCurrent, meta = {}) {
   //     is no bold in the logs, matching the Current Invoice Log treatment.
   stripBold(priorWs);
 
-  // 2b. Right-align the numeric coding/amount columns on the prepared Prior Log:
-  //     cost code (C), GL coding (E), and amount paid (I).
-  rightAlignNumericColumns(priorWs);
+  // 2b. Align the numeric coding/amount columns on the prepared Prior Log: cost
+  //     code (C) centered, GL coding (E) and amount paid (I) right-aligned.
+  rightAlignNumericColumns(priorWs, { codeAlign: 'center' });
 
   // 3. Replace Current Log with the incoming period's invoices (incl. dev fee).
   replaceCurrentLog(curWs, effectiveCurrent, meta);
