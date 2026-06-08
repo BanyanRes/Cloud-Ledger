@@ -543,11 +543,21 @@ function rollForward(workbook, newCurrent, meta = {}) {
   //     Subtotal/total rows are left to recompute from the updated data cells.
   const contingency = rollForwardContingency(b2a);
 
+  // 4c. Roll the Hard/Soft Cost Contingency Tables forward: each row's
+  //     "Requested Herein" (col E) folds into "Previously Requested" (col D) and
+  //     E clears. The "Total Requested" (F=D+E) and allocation rows recompute.
+  const hardCt = workbook.getWorksheet('Hard Cost Contingency Table');
+  const softCt = workbook.getWorksheet('Soft Cost Contingency Table');
+  const contingencyTables = {
+    hard: rollForwardContingencyTable(hardCt),
+    soft: rollForwardContingencyTable(softCt),
+  };
+
   // 5. Update titles (date / requisition number).
   if (meta.asOfDate && b2a.getCell('L1')) b2a.getCell('L1').value = meta.asOfDate;
   if (meta.reqNumber && b2a.getCell('B4')) b2a.getCell('B4').value = 'Requistion Report # ' + meta.reqNumber;
 
-  return { landmarks, devFee: devFeeInfo, contingency };
+  return { landmarks, devFee: devFeeInfo, contingency, contingencyTables };
 }
 
 // Write the new period invoices into the Current Log, grouped by cost code with
@@ -676,6 +686,66 @@ function rollForwardContingency(b2a) {
   return { moved };
 }
 function round2(n) { return Math.round(n * 100) / 100; }
+
+// Roll a Hard/Soft Cost Contingency Table forward one period.
+//
+// Layout (both tables share it):
+//   col C = Cost Category   col D = Contingency Previously Requested
+//   col E = Contingency Requested Herein   col F = Contingency Total Requested (=D+E)
+//   col G = Req #           col H = Notes
+//
+// On roll-forward, this period's "Requested Herein" (E) becomes next period's
+// "Previously Requested" (D): for every DATA row, D := D + E and E is cleared.
+// The row keeps its cost category, Req #, and notes. F (=D+E) recomputes itself.
+//
+// Only DATA rows are touched. The "Total..." / "Contingency Allocation" rows hold
+// SUBTOTAL/SUM formulas in D and E (cellNum returns null for cell-referencing
+// formulas) and are left alone so they recompute from the updated data cells.
+// A row qualifies only when its E is a literal value (plain number, or a cached
+// formula result like ='Budget to Actual'!F27 -> 9160); the herein cross-refs to
+// the B2A current-period draw resolve to numbers and fold in correctly. Rows with
+// no E activity are already historical and are skipped.
+function rollForwardContingencyTable(ws) {
+  if (!ws) return { moved: 0 };
+  const COL_C = 3, COL_D = 4, COL_E = 5;
+  let moved = 0;
+  const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
+  for (let r = 5; r <= last; r++) {
+    const dCell = ws.getCell(r, COL_D);
+    const eCell = ws.getCell(r, COL_E);
+
+    // Skip subtotal/total/allocation rows. These hold aggregate formulas in D
+    // and/or E — SUBTOTAL(...), SUM(...), or a cross-cell combo like =D22+E22 —
+    // and must recompute from the data cells, not be folded. A cached result on
+    // such a formula means cellNum returns a number (not null), so a result-based
+    // guard alone would wrongly fold them; instead, skip any row whose D or E is a
+    // formula that references other cells. A herein cross-ref like
+    // ='Budget to Actual'!F27 also references a cell, but it lives in E on a DATA
+    // row whose D is NOT a formula — so we only skip when EITHER cell carries a
+    // SUBTOTAL/SUM aggregate, or when BOTH D and E are formulas (the hallmark of a
+    // total row). A lone E cross-ref on an otherwise-plain row still folds.
+    const dF = cellFormula(dCell) || '';
+    const eF = cellFormula(eCell) || '';
+    const isAggregate = /SUBTOTAL|SUM/i.test(dF) || /SUBTOTAL|SUM/i.test(eF);
+    const bothFormula = !!dF && !!eF;
+    if (isAggregate || bothFormula) continue;
+
+    const eVal = cellNum(eCell);
+    if (eVal == null || eVal === 0) continue; // no herein activity to fold in
+
+    const dVal = cellNum(dCell) || 0;
+    // Fold herein into previously-requested as a resolved number. The herein
+    // cell may have been a cross-ref to the current period's B2A draw; once it's
+    // history it should be a fixed amount, not a live reference, so write a plain
+    // number rather than preserving the formula.
+    dCell.value = round2(dVal + eVal);
+    // Clear the herein column for the new period. Blank (null) rather than 0 so
+    // the row reads as "no activity this period" like the other historical rows.
+    eCell.value = null;
+    moved++;
+  }
+  return { moved };
+}
 
 // Re-point the cross-sheet absolute references that the roll-forward affects.
 // Each is resolved by LABEL against the freshly written sheets, so a shift in
