@@ -864,12 +864,14 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
     setMapSaving(false);
   };
 
-  const pushCoaToBillcom=async()=>{
+  const pushCoaToBillcom=async(scope='all')=>{
     if(!selectedEntity)return;
-    if(!window.confirm('Push all CloudLedger Expense accounts to Bill.com and auto-create mappings? Accounts already in Bill.com (by number or name) will be skipped.'))return;
+    const isAll=scope==='all';
+    const label=isAll?'all CloudLedger accounts (every type)':'CloudLedger Expense accounts';
+    if(!window.confirm('Push '+label+' to Bill.com and auto-create mappings? Accounts already in Bill.com (by number or name) will be skipped.'))return;
     setMapPushing(true);setMapMsg('');setMapErr('');
     try{
-      const r=await api.pushBillcomCoa(selectedEntity,{all_expenses:true});
+      const r=await api.pushBillcomCoa(selectedEntity, isAll?{all:true}:{all_expenses:true});
       const pushed=(r.pushed||[]).length;
       const mappedOnly=(r.mapped_only||[]).length;
       const skipped=(r.skipped_existing||[]).length;
@@ -1073,7 +1075,8 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
           </div>
           <div style={{display:'flex',gap:8}}>
             <button style={S.btnS} onClick={loadMapping} disabled={mapLoading||mapPushing}>{mapLoading?'Loading...':'Refresh from Bill.com'}</button>
-            <button style={S.btnS} onClick={pushCoaToBillcom} disabled={mapPushing||mapLoading||mapSaving} title="Create every CloudLedger Expense account in Bill.com and auto-map them">{mapPushing?'Pushing...':'Push CL COA to Bill.com'}</button>
+            <button style={S.btnS} onClick={()=>pushCoaToBillcom('all')} disabled={mapPushing||mapLoading||mapSaving} title="Create every CloudLedger account (all types) in Bill.com and auto-map them">{mapPushing?'Pushing...':'Push ALL CL accounts to Bill.com'}</button>
+            <button style={S.btnS} onClick={()=>pushCoaToBillcom('expenses')} disabled={mapPushing||mapLoading||mapSaving} title="Create only CloudLedger Expense accounts in Bill.com and auto-map them">{mapPushing?'Pushing...':'Push Expenses only'}</button>
             <button style={S.btnP} onClick={saveMappings} disabled={mapSaving||mapLoading}>{mapSaving?'Saving...':'Save Mappings'}</button>
           </div>
         </div>

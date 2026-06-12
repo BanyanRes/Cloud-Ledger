@@ -3446,10 +3446,14 @@ app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_i
   if (Array.isArray(body.codes) && body.codes.length > 0) {
     const placeholders = body.codes.map(function(){ return '?'; }).join(',');
     rows = db.prepare('SELECT code, name, type, subtype FROM accounts WHERE entity_id = ? AND code IN (' + placeholders + ')').all(entityId, ...body.codes);
+  } else if (body.all) {
+    // Every account regardless of type (asset/liability/income/equity/expense).
+    // mapType() below maps each CL type to the right Bill.com account type.
+    rows = db.prepare("SELECT code, name, type, subtype FROM accounts WHERE entity_id = ? ORDER BY code").all(entityId);
   } else if (body.all_expenses) {
     rows = db.prepare("SELECT code, name, type, subtype FROM accounts WHERE entity_id = ? AND type = 'Expense' ORDER BY code").all(entityId);
   } else {
-    return res.status(400).json({ error: 'Provide either codes:[...] or all_expenses:true' });
+    return res.status(400).json({ error: 'Provide codes:[...], all:true, or all_expenses:true' });
   }
   if (rows.length === 0) return res.status(404).json({ error: 'No matching CL accounts found' });
 
