@@ -3435,7 +3435,7 @@ app.put('/api/billcom/dimension-maps/:entity_id', auth, requireEntityAccess('ent
 });
 
 // Phase 5: Push CloudLedger COA to Bill.com and auto-create mappings.
-app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
+app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
   const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);

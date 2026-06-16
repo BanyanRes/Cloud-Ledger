@@ -479,7 +479,7 @@ export default function App(){
   useEffect(()=>{const t=api.getToken();if(t){api.me().then(u=>{if(u)setUser(u);}).catch(()=>api.clearToken()).finally(()=>setLoading(false));}else setLoading(false);},[]);
   useEffect(()=>{if(user)api.getEntities().then(e=>{setEntities(e);if(e.length>0&&!activeEntity)setActiveEntity(e[0].id);});},[user]);
   const refreshEntities=useCallback(async()=>{const e=await api.getEntities();setEntities(e);return e;},[]);
-  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec'],Viewer:['entries','reports','coa','bankrec']}[user.role]||[]).includes(s);};
+  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom'],Viewer:['entries','reports','coa','bankrec']}[user.role]||[]).includes(s);};
   // Read-only users (Viewer) SEE the same sections as an Accountant but cannot edit.
   // canEdit gates every write control; it must never be derived from mere visibility.
   const canEdit = !!user && (user.role==='Admin' || user.role==='Accountant');
@@ -505,7 +505,7 @@ export default function App(){
     ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
     ...(arEnabled?[{id:'d3c',divider:1,label:'RECEIVABLES'},{id:'ar_customers',label:'Customers',icon:'👥',section:'coa'}]:[]),
     {id:'d4',divider:1,label:'ADMIN'},{id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},{id:'users',label:'Users',icon:NI.users,section:'all'},
-    {id:'d5',divider:1,label:'INTEGRATIONS'},{id:'billcom',label:'Bill.com Setup',icon:'💳',section:'all'},
+    {id:'d5',divider:1,label:'INTEGRATIONS'},{id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
   ];
 
   return(<div style={S.app}>
