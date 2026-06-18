@@ -167,6 +167,9 @@ export const api = {
   codeBankTransaction: (eid, id, account_code, memo) => request('/entities/' + eid + '/bank-transactions/' + id, { method: 'PUT', body: { account_code, memo } }),
   splitBankTransaction: (eid, id, splits) => request('/entities/' + eid + '/bank-transactions/' + id + '/splits', { method: 'PUT', body: { splits } }),
   postBankTransactions: (eid, ids) => request('/entities/' + eid + '/bank-transactions/post', { method: 'POST', body: { transaction_ids: ids } }),
+  getBankMatchCandidates: (eid, id) => request('/entities/' + eid + '/bank-transactions/' + id + '/match-candidates'),
+  matchBankTransaction: (eid, id, je_id) => request('/entities/' + eid + '/bank-transactions/' + id + '/match', { method: 'POST', body: { je_id } }),
+  unmatchBankTransaction: (eid, id) => request('/entities/' + eid + '/bank-transactions/' + id + '/unmatch', { method: 'POST' }),
   deleteBankTransaction: (eid, id) => request('/entities/' + eid + '/bank-transactions/' + id, { method: 'DELETE' }),
   deleteBankBatch: (eid, batchId) => request('/entities/' + eid + '/bank-transactions/batch/' + batchId, { method: 'DELETE' }),
 

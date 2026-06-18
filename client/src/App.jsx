@@ -1884,6 +1884,51 @@ function GeneralLedger({entityId,entityName,dimsEnabled,from,setFrom,to,setTo,fi
 
 // ═══ Bank Transactions (state lifted to App for navigation persistence) ═══
 // ═══ Bank Transaction Split Modal ═══
+function BankMatchModal({txn, entityId, onClose, onMatched}){
+  const [cands, setCands] = useState(null);
+  const [err, setErr] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [sel, setSel] = useState(null);
+  useEffect(() => { (async () => {
+    try { const r = await api.getBankMatchCandidates(entityId, txn.id); setCands(r.candidates || []); }
+    catch (e) { setErr(e.message); setCands([]); }
+  })(); }, [entityId, txn.id]);
+  const confirm = async () => {
+    if (!sel) { setErr('Select a journal entry to match'); return; }
+    setSaving(true); setErr('');
+    try { await api.matchBankTransaction(entityId, txn.id, sel); onMatched(); }
+    catch (e) { setErr(e.message); } finally { setSaving(false); }
+  };
+  return (<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox, maxWidth: 760}} onClick={e => e.stopPropagation()}>
+    <button style={S.modalClose} onClick={onClose}>&times;</button>
+    <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Match to Existing Journal Entry</div>
+    <div style={{fontSize:12,color:T.textMuted,marginBottom:16}}>{txn.date} &middot; {txn.description}</div>
+    <div style={{...S.card,background:T.bgElevated,padding:12,marginBottom:14,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+      <div><div style={{fontSize:11,color:T.textMuted,fontWeight:600,textTransform:'uppercase',letterSpacing:0.4}}>Bank Amount</div>
+        <div style={{fontSize:22,fontWeight:700,color:txn.amount>=0?T.green:T.red,marginTop:2}}>{txn.amount>=0?'+':'-'}${fmt(Math.abs(txn.amount))}</div></div>
+      <div style={{textAlign:'right',fontSize:11,color:T.textMuted}}>Showing posted JEs that hit this bank account<br/>for {fmt(Math.abs(txn.amount))} within &plusmn;7 days</div>
+    </div>
+    {cands === null && <div style={{textAlign:'center',padding:40,color:T.textDim}}>Finding candidates&hellip;</div>}
+    {cands !== null && cands.length === 0 && <div style={{textAlign:'center',padding:40,color:T.textDim}}>No matching journal entries found within &plusmn;7 days.<br/>Code this transaction to an account instead, or post it to create a new JE.</div>}
+    {cands !== null && cands.length > 0 && <table style={{...S.table,marginBottom:14}}>
+      <thead><tr><th style={{...S.th,width:36}}></th><th style={S.th}>JE #</th><th style={S.th}>Date</th><th style={S.th}>Memo</th><th style={S.thR}>Amount</th><th style={{...S.thR,width:90}}>Day diff</th></tr></thead>
+      <tbody>{cands.map(c => { const cid = c.je_id; return <tr key={cid} style={{cursor:'pointer',background:sel===cid?T.tealDim:'transparent'}} onClick={()=>setSel(cid)}>
+        <td style={{...S.td,textAlign:'center'}}><input type="radio" checked={sel===cid} onChange={()=>setSel(cid)}/></td>
+        <td style={{...S.td,fontWeight:600,color:T.teal}}>#{c.entry_num||cid}</td>
+        <td style={{...S.td,color:T.textMuted,fontSize:12}}>{c.date}</td>
+        <td style={{...S.td}} title={c.memo}>{c.memo}</td>
+        <td style={{...S.tdR,fontFamily:'monospace'}}>${fmt(Math.abs(c.bank_net))}</td>
+        <td style={{...S.tdR,color:T.textMuted}}>{c.date_diff!=null?Math.abs(c.date_diff)+'d':''}</td>
+      </tr>; })}</tbody>
+    </table>}
+    {err && <div style={{...S.err,marginBottom:12}}>{err}</div>}
+    <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
+      <button style={S.btnS} onClick={onClose} disabled={saving}>Cancel</button>
+      <button style={{...S.btnP,opacity:(!sel||saving)?0.5:1}} onClick={confirm} disabled={!sel||saving}>{saving?'Matching...':'Confirm Match'}</button>
+    </div>
+  </div></div>);
+}
+
 function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClose, onSaved}){
   const target = Math.abs(txn.amount);
   const initialLines = (txn.splits && txn.splits.length > 0)
@@ -1963,6 +2008,7 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
   const[err,setErr]=useState('');const[msg,setMsg]=useState('');const[showAddAcct,setShowAddAcct]=useState(false);
   const[uploadProgress,setUploadProgress]=useState('');const[discarding,setDiscarding]=useState(false);
   const[splitTxn,setSplitTxn]=useState(null);
+  const[matchTxn,setMatchTxn]=useState(null);
   // Resizable column widths — persisted per-user in localStorage
   const BT_COLS_KEY='cl_bt_col_widths';
   const BT_DEFAULT_W={date:110,desc:260,amount:130,gl:280,memo:200,status:90};
@@ -2050,22 +2096,29 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
             ? (t.splits && t.splits.length>0
                 ? <span style={{fontSize:11,color:T.textDim}}>Split: {t.splits.length} accts</span>
                 : <span style={{fontSize:12,color:T.textDim}}>{t.account_code}</span>)
-            : (t.splits && t.splits.length>0
+            : (t.status==='matched'
+                ? <div style={{display:'flex',gap:6,alignItems:'center'}}>
+                    <span style={{flex:1,minWidth:0,fontSize:11,color:T.teal,fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}} title={'Matched to JE #'+(t.matched_entry_id||t.je_id)}>&#9656; JE #{t.matched_entry_id||t.je_id}</span>
+                    <button style={{...S.btnGhost,fontSize:10,color:T.red,padding:'4px 6px',whiteSpace:'nowrap'}} onClick={async()=>{try{await api.unmatchBankTransaction(entityId,t.id);reload();}catch(ex){setErr(ex.message);}}} title="Unlink from this journal entry">Unmatch</button>
+                  </div>
+                : t.splits && t.splits.length>0
                 ? <button style={{...S.btnS,padding:'5px 10px',fontSize:11,color:T.purple,borderColor:T.purple+'40',width:'100%',textAlign:'left'}} onClick={()=>setSplitTxn(t)} title={t.splits.map(s=>s.account_code+' $'+fmt(s.amount)).join(' | ')}>Split: {t.splits.length} accts &middot; ${fmt(t.splits.reduce((s,x)=>s+x.amount,0))}</button>
                 : <div style={{display:'flex',gap:4,alignItems:'center'}}>
                     <div style={{flex:1,minWidth:0}}><AccountAutocomplete accounts={accounts} value={t.account_code||''} exclude={selAcct} onChange={v=>codeTransaction(t.id,v,t.memo)} placeholder="Search GL account..."/></div>
+                    <button style={{...S.btnGhost,fontSize:10,color:T.teal,padding:'4px 6px',whiteSpace:'nowrap'}} onClick={()=>setMatchTxn(t)} title="Match to an existing journal entry">Match</button>
                     <button style={{...S.btnGhost,fontSize:10,color:T.purple,padding:'4px 6px',whiteSpace:'nowrap'}} onClick={()=>setSplitTxn(t)} title="Split across multiple accounts">Split</button>
                   </div>)}</td>
           <td style={{...S.td,padding:'4px 6px',overflow:'visible',borderRight:'1px solid '+T.borderLight}}>{(t.status==='posted'||!canEdit)?<span style={{fontSize:12,color:T.textDim}}>{t.memo}</span>:
             (t.splits && t.splits.length>0
               ? <span style={{fontSize:11,color:T.textDim,fontStyle:'italic'}}>(per split)</span>
               : <input style={S.inputSm} placeholder="Memo" value={t.memo||''} onChange={e=>{const v=e.target.value;setTxns(prev=>prev.map(x=>x.id===t.id?{...x,memo:v}:x));}} onBlur={()=>codeTransaction(t.id,t.account_code,t.memo)}/>)}</td>
-          <td style={{...S.td,borderRight:'1px solid '+T.borderLight}}><span style={{fontSize:10,fontWeight:600,padding:'3px 8px',borderRadius:20,background:t.status==='posted'?T.greenDim:t.status==='coded'?T.accentDim:T.orangeDim,color:t.status==='posted'?T.green:t.status==='coded'?T.accent:T.orange}}>{t.status}</span></td>
+          <td style={{...S.td,borderRight:'1px solid '+T.borderLight}}><span style={{fontSize:10,fontWeight:600,padding:'3px 8px',borderRadius:20,background:t.status==='posted'?T.greenDim:t.status==='matched'?T.tealDim:t.status==='coded'?T.accentDim:T.orangeDim,color:t.status==='posted'?T.green:t.status==='matched'?T.teal:t.status==='coded'?T.accent:T.orange}}>{t.status}</span></td>
           <td style={S.td}>{canEdit&&t.status!=='posted'&&<button style={S.btnGhost} onClick={async()=>{await api.deleteBankTransaction(entityId,t.id);setTxns(prev=>prev.filter(x=>x.id!==t.id));}}>x</button>}</td>
         </tr>)}</tbody></table></div>}
     {selAcct&&filteredTxns.length===0&&!uploading&&<div style={{...S.card,textAlign:'center',padding:60,color:T.textDim}}>No transactions yet. Upload a bank statement above.</div>}
     {showAddAcct&&<QuickAddAccountModal entityId={entityId} onClose={()=>setShowAddAcct(false)} onCreated={a=>{setAccounts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)));if(a.bank_acct)setBankAccts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)));}}/>}
     {splitTxn&&<SplitBankTransactionModal txn={splitTxn} accounts={accounts} excludeCode={selAcct} entityId={entityId} onClose={()=>setSplitTxn(null)} onSaved={()=>{setSplitTxn(null);loadTxns(selAcct,statusFilter);}}/>}
+    {matchTxn&&<BankMatchModal txn={matchTxn} entityId={entityId} onClose={()=>setMatchTxn(null)} onMatched={()=>{setMatchTxn(null);loadTxns(selAcct,statusFilter);}}/>}
   </div>);}
 
 // ═══ Reports ═══

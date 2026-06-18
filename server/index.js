@@ -384,6 +384,11 @@ if (!entCols.includes('display_id')) {
 const bcCfgCols = db.prepare("PRAGMA table_info(billcom_config)").all().map(c => c.name);
 if (!bcCfgCols.includes('default_cash_account')) db.exec("ALTER TABLE billcom_config ADD COLUMN default_cash_account TEXT");
 
+// Bank-transaction matching: link a bank line to an already-posted JE instead of
+// creating a new one. matched_entry_id holds the JE id; status becomes 'matched'.
+const btCols = db.prepare("PRAGMA table_info(bank_transactions)").all().map(c => c.name);
+if (!btCols.includes('matched_entry_id')) db.exec("ALTER TABLE bank_transactions ADD COLUMN matched_entry_id INTEGER");
+
 // === Turnkey Rail integration v2 migrations ===
 // Job costing: journal_lines.project_id tags each line to a Turnkey project,
 // so a SINGLE company entity can hold ALL projects with proper job-level cost
@@ -2676,6 +2681,65 @@ app.post('/api/entities/:eid/bank-transactions/post', auth, requireEntityAccess(
     }
   })();
   res.json({ posted: results.length, results });
+});
+
+// Bank matching (Q4): find already-posted JEs that a pending bank line could be
+// matched to, instead of creating a new JE. A candidate is a JE that hits this
+// bank account with a net effect on the bank line equal to the bank txn amount
+// (deposit => debit to bank; payment => credit to bank), dated within ±7 days,
+// and not already linked to another bank transaction. Exact amount, one-to-one.
+app.get('/api/entities/:eid/bank-transactions/:id/match-candidates', auth, requireEntityAccess(), (req, res) => {
+  const t = db.prepare('SELECT * FROM bank_transactions WHERE id=? AND entity_id=?').get(req.params.id, req.params.eid);
+  if (!t) return res.status(404).json({ error: 'Transaction not found' });
+  const WINDOW_DAYS = 7;
+  const lo = new Date(t.date); lo.setDate(lo.getDate() - WINDOW_DAYS);
+  const hi = new Date(t.date); hi.setDate(hi.getDate() + WINDOW_DAYS);
+  const loS = lo.toISOString().slice(0, 10), hiS = hi.toISOString().slice(0, 10);
+  const abs = +Math.abs(t.amount).toFixed(2);
+  // Net effect on the bank account line per JE = debit - credit. A deposit
+  // (amount>0) should have a positive bank-line net = abs; a payment, -abs.
+  const wantNet = t.amount > 0 ? abs : -abs;
+  // JE ids already linked to a bank txn (matched or posted) — exclude them.
+  const linked = new Set(db.prepare("SELECT je_id FROM bank_transactions WHERE entity_id=? AND je_id IS NOT NULL").all(req.params.eid).map(r => r.je_id)
+    .concat(db.prepare("SELECT matched_entry_id FROM bank_transactions WHERE entity_id=? AND matched_entry_id IS NOT NULL").all(req.params.eid).map(r => r.matched_entry_id)));
+  const rows = db.prepare(`
+    SELECT je.id, je.entry_num, je.date, je.memo,
+           SUM(jl.debit - jl.credit) AS bank_net
+    FROM journal_entries je
+    JOIN journal_lines jl ON jl.entry_id = je.id AND jl.account_code = ?
+    WHERE je.entity_id = ? AND je.date >= ? AND je.date <= ?
+    GROUP BY je.id
+  `).all(t.bank_account_code, req.params.eid, loS, hiS);
+  const candidates = rows
+    .filter(r => Math.abs((r.bank_net || 0) - wantNet) < 0.005 && !linked.has(r.id))
+    .map(r => ({ je_id: r.id, entry_num: r.entry_num, date: r.date, memo: r.memo, bank_net: +(r.bank_net || 0).toFixed(2),
+      date_diff: Math.round((new Date(r.date) - new Date(t.date)) / 86400000) }))
+    .sort((a, b) => Math.abs(a.date_diff) - Math.abs(b.date_diff));
+  res.json({ transaction: { id: t.id, date: t.date, amount: t.amount, description: t.description }, candidates });
+});
+
+// Match a bank transaction to an existing JE (no new JE created).
+app.post('/api/entities/:eid/bank-transactions/:id/match', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const { je_id } = req.body;
+  if (!je_id) return res.status(400).json({ error: 'je_id required' });
+  const t = db.prepare("SELECT * FROM bank_transactions WHERE id=? AND entity_id=?").get(req.params.id, req.params.eid);
+  if (!t) return res.status(404).json({ error: 'Transaction not found' });
+  if (t.status === 'posted') return res.status(400).json({ error: 'Already posted as its own JE' });
+  const je = db.prepare('SELECT id, entry_num FROM journal_entries WHERE id=? AND entity_id=?').get(je_id, req.params.eid);
+  if (!je) return res.status(404).json({ error: 'Journal entry not found' });
+  const already = db.prepare("SELECT id FROM bank_transactions WHERE entity_id=? AND id!=? AND (je_id=? OR matched_entry_id=?)").get(req.params.eid, req.params.id, je_id, je_id);
+  if (already) return res.status(400).json({ error: 'That JE is already linked to another bank transaction' });
+  db.prepare("UPDATE bank_transactions SET status='matched', matched_entry_id=?, je_id=? WHERE id=?").run(je_id, je_id, req.params.id);
+  res.json({ matched: true, je_id, entry_num: je.entry_num });
+});
+
+// Unmatch: revert a matched bank transaction back to pending.
+app.post('/api/entities/:eid/bank-transactions/:id/unmatch', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const t = db.prepare("SELECT * FROM bank_transactions WHERE id=? AND entity_id=?").get(req.params.id, req.params.eid);
+  if (!t) return res.status(404).json({ error: 'Transaction not found' });
+  if (t.status !== 'matched') return res.status(400).json({ error: 'Not a matched transaction' });
+  db.prepare("UPDATE bank_transactions SET status=?, matched_entry_id=NULL, je_id=NULL WHERE id=?").run(t.account_code ? 'coded' : 'pending', req.params.id);
+  res.json({ unmatched: true });
 });
 
 app.delete('/api/entities/:eid/bank-transactions/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
