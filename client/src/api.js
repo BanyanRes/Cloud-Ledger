@@ -143,6 +143,16 @@ export const api = {
     if (opts.as_of) p.push('as_of=' + opts.as_of);
     return request('/entities/' + eid + '/dimension-balances' + (p.length ? '?' + p.join('&') : ''));
   },
+  getPivot: (eid, opts = {}) => {
+    const p = [];
+    if (opts.dim) p.push('dim=' + opts.dim);
+    if (opts.accounts) p.push('accounts=' + encodeURIComponent(opts.accounts));
+    if (opts.account_prefix) p.push('account_prefix=' + encodeURIComponent(opts.account_prefix));
+    if (opts.from) p.push('from=' + opts.from);
+    if (opts.to) p.push('to=' + opts.to);
+    if (opts.as_of) p.push('as_of=' + opts.as_of);
+    return request('/entities/' + eid + '/pivot' + (p.length ? '?' + p.join('&') : ''));
+  },
   getSummary: () => request('/summary'),
 
   // Bank Transactions

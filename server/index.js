@@ -1986,6 +1986,57 @@ app.get('/api/entities/:eid/dimension-balances', auth, requireEntityAccess(), (r
   });
 });
 
+// Pivot report: dimension (class/location/project) × account matrix. Rows are
+// dimension members, columns are accounts, cells are the net (debit-credit) sum.
+// Used for PCAP-style letters: totals by investor class across contribution /
+// accumulated accounts. Accepts the same account selection (accounts=csv or
+// account_prefix) and as_of as dimension-balances.
+app.get('/api/entities/:eid/pivot', auth, requireEntityAccess(), (req, res) => {
+  const eid = req.params.eid;
+  const dim = req.query.dim === 'location' ? 'location' : req.query.dim === 'project' ? 'project' : 'class';
+  const dimTable = dim === 'class' ? 'dim_classes' : dim === 'project' ? 'dim_projects' : 'dim_locations';
+  const dimCol = dim === 'class' ? 'class_id' : dim === 'project' ? 'project_id' : 'location_id';
+  const params = [eid];
+  let acctClause = '';
+  if (req.query.accounts) {
+    const codes = String(req.query.accounts).split(',').map(s => s.trim()).filter(Boolean);
+    if (codes.length) { acctClause = ` AND jl.account_code IN (${codes.map(() => '?').join(',')})`; params.push(...codes); }
+  } else if (req.query.account_prefix) {
+    acctClause = ' AND jl.account_code LIKE ?'; params.push(String(req.query.account_prefix) + '%');
+  }
+  let dateClause = '';
+  if (req.query.from) { dateClause += ' AND je.date >= ?'; params.push(req.query.from); }
+  if (req.query.to) { dateClause += ' AND je.date <= ?'; params.push(req.query.to); }
+  else if (req.query.as_of) { dateClause += ' AND je.date <= ?'; params.push(req.query.as_of); }
+  const rows = db.prepare(`
+    SELECT d.id AS dim_id, d.name AS dim_name,
+           jl.account_code, a.name AS account_name, a.type AS account_type,
+           SUM(jl.debit - jl.credit) AS net
+    FROM journal_lines jl
+    JOIN journal_entries je ON jl.entry_id = je.id
+    JOIN ${dimTable} d ON d.id = jl.${dimCol}
+    LEFT JOIN accounts a ON a.entity_id = je.entity_id AND a.code = jl.account_code
+    WHERE je.entity_id = ?${acctClause}${dateClause}
+    GROUP BY d.id, jl.account_code
+  `).all(...params);
+  // Assemble columns (accounts seen) and a row per dimension member.
+  const colMap = new Map(); // code -> {code,name}
+  const rowMap = new Map(); // dim_id -> {id,name,cells:{code:net}, total}
+  for (const r of rows) {
+    if (!colMap.has(r.account_code)) colMap.set(r.account_code, { code: r.account_code, name: r.account_name || '' });
+    if (!rowMap.has(r.dim_id)) rowMap.set(r.dim_id, { id: r.dim_id, name: r.dim_name, cells: {}, total: 0 });
+    const net = +(r.net || 0).toFixed(2);
+    rowMap.get(r.dim_id).cells[r.account_code] = net;
+    rowMap.get(r.dim_id).total = +(rowMap.get(r.dim_id).total + net).toFixed(2);
+  }
+  const columns = [...colMap.values()].sort((a, b) => a.code.localeCompare(b.code));
+  const outRows = [...rowMap.values()].sort((a, b) => a.name.localeCompare(b.name));
+  // Column totals + grand total.
+  const colTotals = {}; let grand = 0;
+  for (const c of columns) { colTotals[c.code] = +outRows.reduce((s, r) => s + (r.cells[c.code] || 0), 0).toFixed(2); grand += colTotals[c.code]; }
+  res.json({ dimension: dim, columns, rows: outRows, column_totals: colTotals, grand_total: +grand.toFixed(2) });
+});
+
 app.post('/api/entities/:eid/accounts', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { code, name, type, subtype, bank_acct } = req.body; if (!code||!name||!type) return res.status(400).json({ error: 'Required' });
   try { const r = db.prepare('INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct) VALUES (?, ?, ?, ?, ?, ?)').run(req.params.eid, code, name, type, subtype||'', bank_acct?1:0);

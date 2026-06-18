@@ -519,6 +519,7 @@ export default function App(){
     {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},...(dimsEnabled?[{id:'dimensions',label:'Dimensions',icon:'🏷️',section:'coa'}]:[]),{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
     {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
     {id:'d3',divider:1,label:'REPORTS'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
+    {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
     ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
     ...(arEnabled?[{id:'d3c',divider:1,label:'RECEIVABLES'},{id:'ar_customers',label:'Customers',icon:'👥',section:'coa'}]:[]),
@@ -553,6 +554,8 @@ export default function App(){
         {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} isClrf={_activeEnt?.code==='COUNTYLI1'} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf}/>}
         {page==='bs'&&activeEntity&&<BalanceSheet entityId={activeEntity} entityName={entityName} asOf={bsAsOf} setAsOf={setBsAsOf}/>}
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo}/>}
+        {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
+        {page==='pivot'&&activeEntity&&dimsEnabled&&<PivotReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='wip'&&activeEntity&&<WipSchedule entityName={entityName} asOf={wipAsOf} setAsOf={setWipAsOf}/>}
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='users'&&<UserManagement currentUser={user}/>}
@@ -2309,6 +2312,125 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo}){const[bala
       <tr style={S.grandTotalRow}><td style={{...S.tdBold,fontSize:15}}>Net Income</td><td style={{...S.tdBold,textAlign:'right',fontSize:18,color:ni>=0?T.green:T.red}}>${fmt(ni)}</td></tr></tbody></table></div>
     {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={from} to={to} onClose={()=>setDrillAcct(null)}/>}
     </div>);}
+
+// ═══ Custom Detail Report (Q6: multi-account, grouped by class/location, with subtotals) ═══
+function CustomDetailReport({entityId,entityName,dimsEnabled}){
+  const[accounts,setAccounts]=useState([]);const[sel,setSel]=useState([]);const[acctSearch,setAcctSearch]=useState('');
+  const[from,setFrom]=useState('');const[to,setTo]=useState('');
+  const[groupBy,setGroupBy]=useState(dimsEnabled?'class':'none');
+  const[rows,setRows]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
+  useEffect(()=>{api.getAccounts(entityId).then(setAccounts).catch(()=>setAccounts([]));},[entityId]);
+  const toggle=code=>setSel(s=>s.includes(code)?s.filter(c=>c!==code):[...s,code]);
+  const filteredAccts=accounts.filter(a=>!acctSearch||acctLabel(a.code,a.name).toLowerCase().includes(acctSearch.toLowerCase()));
+  const run=async()=>{
+    if(!sel.length){setErr('Select at least one account');return;}
+    setLoading(true);setErr('');setRows(null);
+    try{
+      const all=await api.getGLDetail(entityId,{from:from||undefined,to:to||undefined});
+      const selSet=new Set(sel);
+      setRows((all.lines||all||[]).filter(l=>selSet.has(l.account_code)));
+    }catch(e){setErr(e.message);}finally{setLoading(false);}
+  };
+  const groupKey=l=>groupBy==='class'?(l.class_name||'(no class)'):groupBy==='location'?(l.location_name||'(no location)'):'All';
+  const groups=(()=>{if(!rows)return[];const m=new Map();rows.forEach(l=>{const k=groupKey(l);if(!m.has(k))m.set(k,[]);m.get(k).push(l);});return[...m.entries()].sort((a,b)=>a[0].localeCompare(b[0]));})();
+  const amt=l=>(l.debit||0)-(l.credit||0);
+  const grand=rows?rows.reduce((s,l)=>s+amt(l),0):0;
+  const doExport=()=>{
+    const d=[[entityName||'Custom Detail Report'],['Custom Detail Report'],['Period: '+(from||'Begin')+' to '+(to||today())],[]];
+    groups.forEach(([g,lines])=>{
+      if(groupBy!=='none')d.push([g]);
+      d.push([groupBy==='none'?'Group':'',('Account'),'Date','Type','Num','Description','Amount']);
+      let sub=0;lines.forEach(l=>{sub+=amt(l);d.push(['',l.account_code+' '+l.account_name,l.date,'Journal','JE-'+String(l.entry_num).padStart(4,'0'),l.description||l.memo||'',amt(l)]);});
+      d.push(['','','','','','Total for '+g,sub]);d.push([]);
+    });
+    d.push(['','','','','','GRAND TOTAL',grand]);
+    exportToExcel(d,'Custom_Detail_'+(to||today())+'.xlsx');
+  };
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Custom Detail Report</div><div style={S.sub}>Pick accounts, optionally group by class or location</div></div>{rows&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div>
+    <div style={S.card}>
+      <div style={{display:'flex',gap:24,flexWrap:'wrap'}}>
+        <div style={{flex:'1 1 320px',minWidth:280}}>
+          <label style={S.label}>Accounts ({sel.length} selected)</label>
+          <input style={{...S.inputSm,width:'100%',marginBottom:6}} placeholder="Search accounts..." value={acctSearch} onChange={e=>setAcctSearch(e.target.value)}/>
+          <div style={{maxHeight:200,overflowY:'auto',border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:6}}>
+            {filteredAccts.map(a=><label key={a.code} style={{display:'flex',alignItems:'center',gap:8,fontSize:12,padding:'3px 4px',cursor:'pointer'}}><input type="checkbox" checked={sel.includes(a.code)} onChange={()=>toggle(a.code)}/>{acctLabel(a.code,a.name)}</label>)}
+          </div>
+          <div style={{marginTop:4,display:'flex',gap:10}}><button style={{...S.btnGhost,fontSize:11,color:T.accent}} onClick={()=>setSel(filteredAccts.map(a=>a.code))}>Select all shown</button><button style={{...S.btnGhost,fontSize:11,color:T.textMuted}} onClick={()=>setSel([])}>Clear</button></div>
+        </div>
+        <div style={{flex:'0 0 200px'}}>
+          <div style={{marginBottom:10}}><label style={S.label}>From</label><input style={{...S.inputSm,width:'100%'}} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
+          <div style={{marginBottom:10}}><label style={S.label}>To</label><input style={{...S.inputSm,width:'100%'}} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
+          {dimsEnabled&&<div><label style={S.label}>Group by</label><select style={{...S.inputSm,width:'100%'}} value={groupBy} onChange={e=>setGroupBy(e.target.value)}><option value="none">No grouping</option><option value="class">Class / Investor</option><option value="location">Location</option></select></div>}
+        </div>
+      </div>
+      {err&&<div style={S.err}>{err}</div>}
+      <button style={{...S.btnP,marginTop:14}} onClick={run} disabled={loading}>{loading?'Running...':'Run Report'}</button>
+    </div>
+    {rows&&<div style={S.cardFlush}>
+      {groups.length===0?<div style={{padding:24,color:T.textDim}}>No activity for the selected accounts/period.</div>:
+      <table style={S.table}><thead><tr><th style={S.th}>Account</th><th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Description</th><th style={S.thR}>Amount</th></tr></thead>
+      <tbody>{groups.map(([g,lines])=>{const sub=lines.reduce((s,l)=>s+amt(l),0);return<Fragment key={g}>
+        {groupBy!=='none'&&<tr style={{background:T.bgElevated}}><td style={{...S.tdBold,color:T.textBright}} colSpan={5}>{g}</td></tr>}
+        {lines.map((l,i)=><tr key={i}><td style={S.td}>{l.account_code} {l.account_name}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.date}</td><td style={S.td}>JE-{String(l.entry_num).padStart(4,'0')}</td><td style={S.td}>{l.description||l.memo||''}</td><td style={{...S.tdR,color:amt(l)<0?T.red:T.textBright}}>{fmt(amt(l))}</td></tr>)}
+        {groupBy!=='none'&&<tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600}} colSpan={4}>Total for {g}</td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(sub)}</td></tr>}
+      </Fragment>;})}
+        <tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={4}>GRAND TOTAL</td><td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(grand)}</td></tr>
+      </tbody></table>}
+    </div>}
+  </div>);
+}
+
+// ═══ Pivot Summary Report (Q7: class × account matrix, totals by class — for PCAP) ═══
+function PivotReport({entityId,entityName}){
+  const[accounts,setAccounts]=useState([]);const[sel,setSel]=useState([]);const[acctSearch,setAcctSearch]=useState('');
+  const[dim,setDim]=useState('class');const[from,setFrom]=useState('');const[to,setTo]=useState('');
+  const[data,setData]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
+  useEffect(()=>{api.getAccounts(entityId).then(setAccounts).catch(()=>setAccounts([]));},[entityId]);
+  const toggle=code=>setSel(s=>s.includes(code)?s.filter(c=>c!==code):[...s,code]);
+  const filteredAccts=accounts.filter(a=>!acctSearch||acctLabel(a.code,a.name).toLowerCase().includes(acctSearch.toLowerCase()));
+  const run=async()=>{
+    if(!sel.length){setErr('Select at least one account');return;}
+    setLoading(true);setErr('');setData(null);
+    try{setData(await api.getPivot(entityId,{dim,accounts:sel.join(','),from:from||undefined,to:to||undefined}));}
+    catch(e){setErr(e.message);}finally{setLoading(false);}
+  };
+  const doExport=()=>{
+    if(!data)return;
+    const head=[dim==='class'?'Class / Investor':dim==='location'?'Location':'Project',...data.columns.map(c=>c.code+' '+c.name),'Total'];
+    const d=[[entityName||'Pivot Report'],['Pivot Summary by '+(dim==='class'?'Class':dim)],['Period: '+(from||'Begin')+' to '+(to||today())],[],head];
+    data.rows.forEach(r=>d.push([r.name,...data.columns.map(c=>r.cells[c.code]||0),r.total]));
+    d.push(['Total',...data.columns.map(c=>data.column_totals[c.code]||0),data.grand_total]);
+    exportToExcel(d,'Pivot_'+dim+'_'+(to||today())+'.xlsx');
+  };
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Pivot Summary</div><div style={S.sub}>Totals by class across selected accounts — for PCAP letters</div></div>{data&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div>
+    <div style={S.card}>
+      <div style={{display:'flex',gap:24,flexWrap:'wrap'}}>
+        <div style={{flex:'1 1 320px',minWidth:280}}>
+          <label style={S.label}>Accounts ({sel.length} selected)</label>
+          <input style={{...S.inputSm,width:'100%',marginBottom:6}} placeholder="Search accounts..." value={acctSearch} onChange={e=>setAcctSearch(e.target.value)}/>
+          <div style={{maxHeight:200,overflowY:'auto',border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:6}}>
+            {filteredAccts.map(a=><label key={a.code} style={{display:'flex',alignItems:'center',gap:8,fontSize:12,padding:'3px 4px',cursor:'pointer'}}><input type="checkbox" checked={sel.includes(a.code)} onChange={()=>toggle(a.code)}/>{acctLabel(a.code,a.name)}</label>)}
+          </div>
+          <div style={{marginTop:4,display:'flex',gap:10}}><button style={{...S.btnGhost,fontSize:11,color:T.accent}} onClick={()=>setSel(filteredAccts.map(a=>a.code))}>Select all shown</button><button style={{...S.btnGhost,fontSize:11,color:T.textMuted}} onClick={()=>setSel([])}>Clear</button></div>
+        </div>
+        <div style={{flex:'0 0 200px'}}>
+          <div style={{marginBottom:10}}><label style={S.label}>Pivot by</label><select style={{...S.inputSm,width:'100%'}} value={dim} onChange={e=>setDim(e.target.value)}><option value="class">Class / Investor</option><option value="location">Location</option><option value="project">Project</option></select></div>
+          <div style={{marginBottom:10}}><label style={S.label}>From</label><input style={{...S.inputSm,width:'100%'}} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
+          <div><label style={S.label}>To</label><input style={{...S.inputSm,width:'100%'}} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
+        </div>
+      </div>
+      {err&&<div style={S.err}>{err}</div>}
+      <button style={{...S.btnP,marginTop:14}} onClick={run} disabled={loading}>{loading?'Running...':'Run Pivot'}</button>
+    </div>
+    {data&&<div style={{...S.cardFlush,overflowX:'auto'}}>
+      {data.rows.length===0?<div style={{padding:24,color:T.textDim}}>No activity for the selected accounts/period.</div>:
+      <table style={S.table}><thead><tr><th style={{...S.th,position:'sticky',left:0,background:T.bgCard}}>{dim==='class'?'Class / Investor':dim==='location'?'Location':'Project'}</th>{data.columns.map(c=><th key={c.code} style={S.thR} title={c.code+' '+c.name}>{c.name||c.code}</th>)}<th style={S.thR}>Total</th></tr></thead>
+      <tbody>{data.rows.map(r=><tr key={r.id}><td style={{...S.td,position:'sticky',left:0,background:T.bgCard,fontWeight:500}}>{r.name}</td>{data.columns.map(c=><td key={c.code} style={S.tdR}>{r.cells[c.code]?fmt(r.cells[c.code]):''}</td>)}<td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(r.total)}</td></tr>)}
+        <tr style={S.grandTotalRow}><td style={{...S.tdBold,position:'sticky',left:0,background:T.bgCard}}>Total</td>{data.columns.map(c=><td key={c.code} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(data.column_totals[c.code]||0)}</td>)}<td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(data.grand_total)}</td></tr>
+      </tbody></table>}
+    </div>}
+  </div>);
+}
 
 // ═══ Bank Reconciliation Report (QBO-style summary + detail, printable) ═══
 function ReconciliationReportModal({entityId,rec,onClose}){
