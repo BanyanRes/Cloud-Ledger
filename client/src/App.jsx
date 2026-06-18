@@ -281,6 +281,26 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
   const addLine=()=>setForm(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:'',description:''}]}));
   const removeLine=i=>setForm(f=>({...f,lines:f.lines.filter((_,j)=>j!==i)}));
   const updateLine=(i,k,v)=>setForm(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,[k]:v}:l)}));
+  // Single "Dimensions" column: one dropdown per line that lists every applicable
+  // dimension value (Project / Location / Class) and lets the user pick exactly ONE.
+  // The selected option's value is a tagged string ("project:ID" | "location:ID" |
+  // "class:ID"); applying it sets that one dimension and clears the other two so a
+  // line never carries more than one dimension at a time.
+  const showDims=showProject||showLocation||showClass;
+  const projOpts=useDimProjects
+    ?dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}))
+    :projects.map(pr=>({v:'project:'+pr.turnkey_project_id,label:'Project — '+pr.project_code+' — '+pr.project_name}));
+  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
+  const clsOpts=classes.map(c=>({v:'class:'+c.id,label:'Class — '+(c.code?c.code+' — ':'')+c.name}));
+  const lineDimValue=l=>l.project_id?'project:'+l.project_id:l.location_id?'location:'+l.location_id:l.class_id?'class:'+l.class_id:'';
+  const setLineDim=(i,val)=>{
+    if(val==='__new__'){addProjectInline(i);return;}
+    const[kind,id]=val?val.split(':'):['',''];
+    setForm(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,
+      project_id:kind==='project'?id:null,
+      location_id:kind==='location'?id:null,
+      class_id:kind==='class'?id:null}:l)}));
+  };
   const tDr=form.lines.reduce((s,l)=>s+parseAmt(l.debit),0);const tCr=form.lines.reduce((s,l)=>s+parseAmt(l.credit),0);const bal=Math.abs(tDr-tCr)<0.005&&tDr>0;
   const discard=()=>{setForm(BLANK_JE());setPendingFiles([]);};
   const onFilesSelected=e=>{const files=Array.from(e.target.files);if(files.length>0)setPendingFiles(p=>[...p,...files]);e.target.value='';};
@@ -292,7 +312,7 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
     catch(e){setErr(e.message);}finally{setPosting(false);}};
   const hasContent=form.memo||form.lines.some(l=>l.account_code||l.debit||l.credit)||pendingFiles.length>0;
 
-  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:980,width:'94%',resize:'both',overflow:'auto',minWidth:560,minHeight:360}} onClick={e=>e.stopPropagation()}>
+  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,width:'90vw',maxWidth:'96vw',height:'auto',maxHeight:'95vh',resize:'both',overflow:'auto',minWidth:560,minHeight:360}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
       <div style={{fontSize:18,fontWeight:700,color:T.textBright}}>New Journal Entry</div>
@@ -303,18 +323,16 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo / Description</label><input style={S.input} placeholder="What is this entry for?" value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
-    <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th>{showProject&&<th style={{...S.th,width:170}}>Project</th>}{showLocation&&<th style={{...S.th,width:150}}>Location</th>}{showClass&&<th style={{...S.th,width:150}}>Class</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
+    <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th>{showDims&&<th style={{...S.th,width:240}}>Dimension</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} title={l.account_code?acctLabel(l.account_code,(accounts.find(a=>a.code===l.account_code)||{}).name||''):''} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select account...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code} title={acctLabel(a.code,a.name)}>{acctLabel(a.code,a.name)}</option>)}</select></td>
-        {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>{if(e.target.value==='__new__'){addProjectInline(i);}else{updateLine(i,'project_id',e.target.value);}}}><option value="">— none —</option>{useDimProjects?dimProjects.map(pr=><option key={pr.id} value={pr.id}>{pr.code&&pr.code!==pr.name?pr.code+" — "+pr.name:pr.name}</option>):projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</select></td>}
-        {showLocation&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.location_id||''} onChange={e=>updateLine(i,'location_id',e.target.value)}><option value="">— none —</option>{locations.map(loc=><option key={loc.id} value={loc.id}>{loc.code?loc.code+" — ":""}{loc.name}</option>)}</select></td>}
-        {showClass&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.class_id||''} onChange={e=>updateLine(i,'class_id',e.target.value)}><option value="">— none —</option>{classes.map(c=><option key={c.id} value={c.id}>{c.code?c.code+" — ":""}{c.name}</option>)}</select></td>}
+        {showDims&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={lineDimValue(l)} onChange={e=>setLineDim(i,e.target.value)}><option value="">— none —</option>{showProject&&<optgroup label="Project">{projOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</optgroup>}{showLocation&&<optgroup label="Location">{locOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}{showClass&&<optgroup label="Class">{clsOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} placeholder="(optional)" value={l.description||''} onChange={e=>updateLine(i,'description',e.target.value)}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'debit',f);}} onBlur={e=>updateLine(i,'debit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.credit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'credit',f);}} onBlur={e=>updateLine(i,'credit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px',borderBottom:'1px solid '+T.borderLight,textAlign:'center'}}>{form.lines.length>2&&<button style={S.btnGhost} onClick={()=>removeLine(i)}>&times;</button>}</td></tr>)}
-      <tr style={{background:T.bgElevated}}><td colSpan={2+(showProject?1:0)+(showLocation?1:0)+(showClass?1:0)} style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
+      <tr style={{background:T.bgElevated}}><td colSpan={2+(showDims?1:0)} style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
     <div style={{border:'1px solid '+(pendingFiles.length>0?T.teal+'40':T.border),borderRadius:T.radiusSm,padding:16,marginBottom:16,background:pendingFiles.length>0?T.tealDim:'#fff'}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:pendingFiles.length>0?12:0}}>
         <span style={{fontSize:12,fontWeight:600,color:pendingFiles.length>0?T.teal:T.textMuted}}>{pendingFiles.length>0?pendingFiles.length+' file(s) attached':'No attachments'}</span>
@@ -1463,6 +1481,22 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
   const addLine=()=>setForm(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:'',description:''}]}));
   const removeLine=i=>setForm(f=>({...f,lines:f.lines.filter((_,j)=>j!==i)}));
   const updateLine=(i,k,v)=>setForm(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,[k]:v}:l)}));
+  // Single "Dimensions" dropdown per line — pick exactly one of Project/Location/Class.
+  const showDims=showProject||showLocation||showClass;
+  const projOpts=useDimProjects
+    ?dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}))
+    :projects.map(pr=>({v:'project:'+pr.turnkey_project_id,label:'Project — '+pr.project_code+' — '+pr.project_name}));
+  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
+  const clsOpts=classes.map(c=>({v:'class:'+c.id,label:'Class — '+(c.code?c.code+' — ':'')+c.name}));
+  const lineDimValue=l=>l.project_id?'project:'+l.project_id:l.location_id?'location:'+l.location_id:l.class_id?'class:'+l.class_id:'';
+  const setLineDim=(i,val)=>{
+    if(val==='__new__'){addProjectInline(i);return;}
+    const[kind,id]=val?val.split(':'):['',''];
+    setForm(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,
+      project_id:kind==='project'?id:'',
+      location_id:kind==='location'?id:'',
+      class_id:kind==='class'?id:''}:l)}));
+  };
   const tDr=form.lines.reduce((s,l)=>s+parseAmt(l.debit),0);const tCr=form.lines.reduce((s,l)=>s+parseAmt(l.credit),0);const bal=Math.abs(tDr-tCr)<0.005&&tDr>0;
   const save=async()=>{if(!form.date||!form.memo.trim()){setErr('Date and memo required');return;}if(form.lines.some(l=>!l.account_code)){setErr('All lines need an account');return;}if(!bal){setErr('Must balance');return;}
     setSaving(true);setErr('');try{await api.updateEntry(entityId,entry.id,{date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null}))});
@@ -1472,7 +1506,7 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
     catch(ex){setErr(ex.message);}finally{setAttUploading(false);if(attInputRef.current)attInputRef.current.value='';}};
   const deleteAtt=async a=>{if(!confirm('Delete '+a.original_name+'?'))return;try{await api.deleteAttachment(a.id);setAttachments(p=>p.filter(x=>x.id!==a.id));}catch(ex){setErr(ex.message);}};
   const fmtPst=ts=>ts?new Date(ts+(ts.includes('Z')||ts.includes('+')?'':'Z')).toLocaleString('en-US',{timeZone:'America/Los_Angeles',year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true,timeZoneName:'short'}):'';
-  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:960,width:'94%',resize:'both',overflow:'auto',minWidth:560,minHeight:360}} onClick={e=>e.stopPropagation()}>
+  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,width:'90vw',maxWidth:'96vw',height:'auto',maxHeight:'95vh',resize:'both',overflow:'auto',minWidth:560,minHeight:360}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Edit JE-{String(entry.entry_num).padStart(4,'0')}</div>
     {(entry.created_by||entry.created_at)&&<div style={{fontSize:11,color:T.textMuted,marginBottom:2}}>
@@ -1485,18 +1519,16 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo</label><input style={S.input} value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
-    <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th>{showProject&&<th style={{...S.th,width:170}}>Project</th>}{showLocation&&<th style={{...S.th,width:150}}>Location</th>}{showClass&&<th style={{...S.th,width:150}}>Class</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
+    <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th>{showDims&&<th style={{...S.th,width:240}}>Dimension</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} title={l.account_code?acctLabel(l.account_code,(accounts.find(a=>a.code===l.account_code)||{}).name||''):''} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code} title={acctLabel(a.code,a.name)}>{acctLabel(a.code,a.name)}</option>)}</select></td>
-        {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>{if(e.target.value==='__new__'){addProjectInline(i);}else{updateLine(i,'project_id',e.target.value);}}}><option value="">— none —</option>{useDimProjects?dimProjects.map(pr=><option key={pr.id} value={pr.id}>{pr.code&&pr.code!==pr.name?pr.code+" — "+pr.name:pr.name}</option>):projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</select></td>}
-        {showLocation&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.location_id||''} onChange={e=>updateLine(i,'location_id',e.target.value)}><option value="">— none —</option>{locations.map(loc=><option key={loc.id} value={loc.id}>{loc.code?loc.code+" — ":""}{loc.name}</option>)}</select></td>}
-        {showClass&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.class_id||''} onChange={e=>updateLine(i,'class_id',e.target.value)}><option value="">— none —</option>{classes.map(c=><option key={c.id} value={c.id}>{c.code?c.code+" — ":""}{c.name}</option>)}</select></td>}
+        {showDims&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={lineDimValue(l)} onChange={e=>setLineDim(i,e.target.value)}><option value="">— none —</option>{showProject&&<optgroup label="Project">{projOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</optgroup>}{showLocation&&<optgroup label="Location">{locOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}{showClass&&<optgroup label="Class">{clsOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} value={l.description||''} placeholder="(optional)" onChange={e=>updateLine(i,'description',e.target.value)}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'debit',f);}} onBlur={e=>updateLine(i,'debit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} value={l.credit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'credit',f);}} onBlur={e=>updateLine(i,'credit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px',borderBottom:'1px solid '+T.borderLight,textAlign:'center'}}>{form.lines.length>2&&<button style={S.btnGhost} onClick={()=>removeLine(i)}>&times;</button>}</td></tr>)}
-      <tr style={{background:T.bgElevated}}><td colSpan={2+(showProject?1:0)+(showLocation?1:0)+(showClass?1:0)} style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
+      <tr style={{background:T.bgElevated}}><td colSpan={2+(showDims?1:0)} style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
     {/* Attachments */}
     <div style={{marginBottom:16}}>
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
