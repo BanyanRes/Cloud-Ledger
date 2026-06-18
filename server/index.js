@@ -1237,6 +1237,7 @@ app.post('/api/entities/:eid/import-tb', auth, requireEntityAccess(), requireRol
 // (latest import wins), so the two never double-count.
 
 // Account type from a numeric code prefix — same convention as the TB importer.
+function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function glTypeFromCode(codeStr) {
   const digits = String(codeStr).replace(/[^0-9]/g, '');
   const n = parseInt(digits, 10);
@@ -2871,6 +2872,102 @@ app.post('/api/entities/:eid/reconciliations', auth, requireEntityAccess(), requ
     if (cleared_keys) for (const k of cleared_keys) { const [eid,li]=k.split('-').map(Number); db.prepare('INSERT OR IGNORE INTO cleared_items (entity_id, account_code, entry_id, line_index, reconciliation_id) VALUES (?,?,?,?,?)').run(req.params.eid, account_code, eid, li, r.lastInsertRowid); }
     return r.lastInsertRowid;
   })(); res.json({ id: result });
+});
+
+// Bank reconciliation report — QBO-style summary + cleared/uncleared detail for a
+// single completed reconciliation. Assembled from the stored reconciliation row,
+// its cleared_items, and the account's journal lines. Returns structured JSON the
+// client renders as a printable report.
+app.get('/api/entities/:eid/reconciliations/:id/report', auth, requireEntityAccess(), (req, res) => {
+  const eid = req.params.eid;
+  const rec = db.prepare('SELECT * FROM reconciliations WHERE id=? AND entity_id=?').get(req.params.id, eid);
+  if (!rec) return res.status(404).json({ error: 'Reconciliation not found' });
+  const entity = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
+  const acct = db.prepare('SELECT code, name FROM accounts WHERE entity_id=? AND code=?').get(eid, rec.account_code);
+
+  // All journal lines hitting this bank account (signed: debit - credit, since a
+  // bank account is an Asset). Each carries the entry date, number, and memo.
+  const lineRows = db.prepare(`
+    SELECT je.id AS entry_id, je.entry_num, je.date, je.memo,
+           jl.id AS line_id, jl.debit, jl.credit,
+           (SELECT COUNT(*) FROM journal_lines x WHERE x.entry_id=je.id AND x.id<=jl.id) - 1 AS line_index
+    FROM journal_lines jl
+    JOIN journal_entries je ON jl.entry_id = je.id
+    WHERE je.entity_id = ? AND jl.account_code = ?
+    ORDER BY je.date, je.id, jl.id
+  `).all(eid, rec.account_code);
+
+  // Which (entry_id,line_index) were cleared as part of THIS reconciliation.
+  const clearedSet = new Set(
+    db.prepare('SELECT entry_id, line_index FROM cleared_items WHERE reconciliation_id=?')
+      .all(req.params.id).map(c => c.entry_id + '-' + c.line_index)
+  );
+
+  const mapLine = (r) => ({
+    date: r.date,
+    type: 'Journal',
+    ref_no: r.entry_num,
+    payee: r.memo || '',
+    amount: round2((r.debit || 0) - (r.credit || 0)),
+  });
+
+  const clearedLines = lineRows.filter(r => clearedSet.has(r.entry_id + '-' + r.line_index)).map(mapLine);
+  const paymentsCleared = clearedLines.filter(l => l.amount < 0).sort((a,b)=> (a.date<b.date?-1:a.date>b.date?1:b.amount-a.amount));
+  const depositsCleared = clearedLines.filter(l => l.amount > 0).sort((a,b)=> (a.date<b.date?-1:a.date>b.date?1:a.amount-b.amount));
+
+  // Uncleared = lines on/before statement date not cleared in any reconciliation,
+  // and lines dated after the statement date (cleared or not), mirroring QBO's
+  // "uncleared transactions after <date>" register reconciliation.
+  const everCleared = new Set(
+    db.prepare('SELECT entry_id, line_index FROM cleared_items WHERE entity_id=? AND account_code=?')
+      .all(eid, rec.account_code).map(c => c.entry_id + '-' + c.line_index)
+  );
+  const afterDate = lineRows.filter(r => r.date > rec.statement_date);
+  const clearedAfter = afterDate.filter(r => everCleared.has(r.entry_id + '-' + r.line_index)).map(mapLine);
+  const unclearedAfter = afterDate.filter(r => !everCleared.has(r.entry_id + '-' + r.line_index)).map(mapLine);
+  const unclearedThrough = lineRows
+    .filter(r => r.date <= rec.statement_date && !everCleared.has(r.entry_id + '-' + r.line_index))
+    .map(mapLine);
+
+  const sum = (arr) => round2(arr.reduce((s, l) => s + l.amount, 0));
+  const paymentsTotal = sum(paymentsCleared);
+  const depositsTotal = sum(depositsCleared);
+  const endingBalance = round2(rec.statement_balance);
+  const beginningBalance = round2(endingBalance - depositsTotal - paymentsTotal);
+  const registerAtStmt = round2(rec.book_balance);
+  const clearedAfterTotal = sum(clearedAfter);
+  const unclearedAfterTotal = sum(unclearedAfter);
+  const registerAsOfReport = round2(registerAtStmt + clearedAfterTotal + unclearedAfterTotal);
+
+  res.json({
+    entity_name: entity ? entity.name : '',
+    account_code: rec.account_code,
+    account_name: acct ? acct.name : '',
+    statement_date: rec.statement_date,
+    reconciled_on: rec.completed_at,
+    reconciled_by: rec.completed_by,
+    summary: {
+      beginning_balance: beginningBalance,
+      payments_count: paymentsCleared.length,
+      payments_total: paymentsTotal,
+      deposits_count: depositsCleared.length,
+      deposits_total: depositsTotal,
+      ending_balance: endingBalance,
+      register_at_statement_date: registerAtStmt,
+      cleared_after_count: clearedAfter.length,
+      cleared_after_total: clearedAfterTotal,
+      uncleared_after_count: unclearedAfter.length,
+      uncleared_after_total: unclearedAfterTotal,
+      uncleared_through_count: unclearedThrough.length,
+      uncleared_through_total: sum(unclearedThrough),
+      register_as_of_report: registerAsOfReport,
+    },
+    payments_cleared: paymentsCleared,
+    deposits_cleared: depositsCleared,
+    uncleared_through: unclearedThrough,
+    cleared_after: clearedAfter,
+    uncleared_after: unclearedAfter,
+  });
 });
 
 // ═══ Summary ═══

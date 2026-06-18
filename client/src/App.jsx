@@ -292,7 +292,7 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
     catch(e){setErr(e.message);}finally{setPosting(false);}};
   const hasContent=form.memo||form.lines.some(l=>l.account_code||l.debit||l.credit)||pendingFiles.length>0;
 
-  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:980}} onClick={e=>e.stopPropagation()}>
+  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:980,width:'94%',resize:'both',overflow:'auto',minWidth:560,minHeight:360}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
       <div style={{fontSize:18,fontWeight:700,color:T.textBright}}>New Journal Entry</div>
@@ -305,8 +305,8 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo / Description</label><input style={S.input} placeholder="What is this entry for?" value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
     <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th>{showProject&&<th style={{...S.th,width:170}}>Project</th>}{showLocation&&<th style={{...S.th,width:150}}>Location</th>}{showClass&&<th style={{...S.th,width:150}}>Class</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
-        <select style={S.select} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select account...</option>
-          {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></td>
+        <select style={S.select} title={l.account_code?acctLabel(l.account_code,(accounts.find(a=>a.code===l.account_code)||{}).name||''):''} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select account...</option>
+          {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code} title={acctLabel(a.code,a.name)}>{acctLabel(a.code,a.name)}</option>)}</select></td>
         {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>{if(e.target.value==='__new__'){addProjectInline(i);}else{updateLine(i,'project_id',e.target.value);}}}><option value="">— none —</option>{useDimProjects?dimProjects.map(pr=><option key={pr.id} value={pr.id}>{pr.code&&pr.code!==pr.name?pr.code+" — "+pr.name:pr.name}</option>):projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</select></td>}
         {showLocation&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.location_id||''} onChange={e=>updateLine(i,'location_id',e.target.value)}><option value="">— none —</option>{locations.map(loc=><option key={loc.id} value={loc.id}>{loc.code?loc.code+" — ":""}{loc.name}</option>)}</select></td>}
         {showClass&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.class_id||''} onChange={e=>updateLine(i,'class_id',e.target.value)}><option value="">— none —</option>{classes.map(c=><option key={c.id} value={c.id}>{c.code?c.code+" — ":""}{c.name}</option>)}</select></td>}
@@ -1472,7 +1472,7 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
     catch(ex){setErr(ex.message);}finally{setAttUploading(false);if(attInputRef.current)attInputRef.current.value='';}};
   const deleteAtt=async a=>{if(!confirm('Delete '+a.original_name+'?'))return;try{await api.deleteAttachment(a.id);setAttachments(p=>p.filter(x=>x.id!==a.id));}catch(ex){setErr(ex.message);}};
   const fmtPst=ts=>ts?new Date(ts+(ts.includes('Z')||ts.includes('+')?'':'Z')).toLocaleString('en-US',{timeZone:'America/Los_Angeles',year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true,timeZoneName:'short'}):'';
-  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:960}} onClick={e=>e.stopPropagation()}>
+  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:960,width:'94%',resize:'both',overflow:'auto',minWidth:560,minHeight:360}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Edit JE-{String(entry.entry_num).padStart(4,'0')}</div>
     {(entry.created_by||entry.created_at)&&<div style={{fontSize:11,color:T.textMuted,marginBottom:2}}>
@@ -1487,8 +1487,8 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo</label><input style={S.input} value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
     <div style={{...S.cardFlush,marginBottom:16}}><table style={S.table}><thead><tr><th style={S.th}>Account</th>{showProject&&<th style={{...S.th,width:170}}>Project</th>}{showLocation&&<th style={{...S.th,width:150}}>Location</th>}{showClass&&<th style={{...S.th,width:150}}>Class</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
-        <select style={S.select} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select...</option>
-          {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></td>
+        <select style={S.select} title={l.account_code?acctLabel(l.account_code,(accounts.find(a=>a.code===l.account_code)||{}).name||''):''} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select...</option>
+          {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code} title={acctLabel(a.code,a.name)}>{acctLabel(a.code,a.name)}</option>)}</select></td>
         {showProject&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.project_id||''} onChange={e=>{if(e.target.value==='__new__'){addProjectInline(i);}else{updateLine(i,'project_id',e.target.value);}}}><option value="">— none —</option>{useDimProjects?dimProjects.map(pr=><option key={pr.id} value={pr.id}>{pr.code&&pr.code!==pr.name?pr.code+" — "+pr.name:pr.name}</option>):projects.map(pr=><option key={pr.turnkey_project_id} value={pr.turnkey_project_id}>{pr.project_code} — {pr.project_name}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</select></td>}
         {showLocation&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.location_id||''} onChange={e=>updateLine(i,'location_id',e.target.value)}><option value="">— none —</option>{locations.map(loc=><option key={loc.id} value={loc.id}>{loc.code?loc.code+" — ":""}{loc.name}</option>)}</select></td>}
         {showClass&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={l.class_id||''} onChange={e=>updateLine(i,'class_id',e.target.value)}><option value="">— none —</option>{classes.map(c=><option key={c.id} value={c.id}>{c.code?c.code+" — ":""}{c.name}</option>)}</select></td>}
@@ -2266,11 +2266,108 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo}){const[bala
     {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={from} to={to} onClose={()=>setDrillAcct(null)}/>}
     </div>);}
 
+// ═══ Bank Reconciliation Report (QBO-style summary + detail, printable) ═══
+function ReconciliationReportModal({entityId,rec,onClose}){
+  const[data,setData]=useState(null);const[err,setErr]=useState('');const[loading,setLoading]=useState(true);
+  useEffect(()=>{let alive=true;(async()=>{try{const d=await api.getReconciliationReport(entityId,rec.id);if(alive)setData(d);}catch(e){if(alive)setErr(e.message);}finally{if(alive)setLoading(false);}})();return()=>{alive=false;};},[entityId,rec.id]);
+  const money=n=>{const v=Math.abs(Number(n)||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});return (Number(n)||0)<0?'-'+v:v;};
+  const print=()=>{
+    const el=document.getElementById('cl-recon-report');if(!el)return;
+    const w=window.open('','_blank');if(!w)return;
+    w.document.write('<html><head><title>Bank Reconciliation Report</title><style>'+
+      'body{font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#111;margin:32px;}'+
+      'h1{font-size:16px;margin:0 0 2px;}h2{font-size:13px;margin:20px 0 6px;border-bottom:1px solid #ccc;padding-bottom:3px;}'+
+      '.muted{color:#555;font-size:11px;}table{width:100%;border-collapse:collapse;margin-top:4px;}'+
+      'th,td{text-align:left;padding:4px 6px;font-size:11px;}th{border-bottom:1px solid #999;}'+
+      'td.r,th.r{text-align:right;}tr.sub td{border-top:1px solid #999;font-weight:bold;}'+
+      '.sumrow{display:flex;justify-content:space-between;max-width:520px;padding:3px 0;}'+
+      '.sumrow.total{border-top:1px solid #999;font-weight:bold;margin-top:4px;padding-top:6px;}'+
+      '</style></head><body>'+el.innerHTML+'</body></html>');
+    w.document.close();w.focus();setTimeout(()=>{w.print();},250);
+  };
+  const csv=()=>{
+    if(!data)return;
+    const rows=[];
+    rows.push(['Bank Reconciliation Report']);
+    rows.push([data.entity_name]);
+    rows.push([data.account_code+' '+data.account_name+', Period Ending '+data.statement_date]);
+    rows.push(['Reconciled on',(data.reconciled_on||'').replace('T',' '),'Reconciled by',data.reconciled_by||'']);
+    rows.push([]);
+    rows.push(['Summary','USD']);
+    const s=data.summary;
+    rows.push(['Statement beginning balance',s.beginning_balance]);
+    rows.push(['Checks and payments cleared ('+s.payments_count+')',s.payments_total]);
+    rows.push(['Deposits and other credits cleared ('+s.deposits_count+')',s.deposits_total]);
+    rows.push(['Statement ending balance',s.ending_balance]);
+    rows.push(['Register balance as of '+data.statement_date,s.register_at_statement_date]);
+    rows.push(['Cleared transactions after '+data.statement_date+' ('+s.cleared_after_count+')',s.cleared_after_total]);
+    rows.push(['Uncleared transactions after '+data.statement_date+' ('+s.uncleared_after_count+')',s.uncleared_after_total]);
+    rows.push(['Register balance as of report date',s.register_as_of_report]);
+    const sec=(title,list)=>{rows.push([]);rows.push([title]);rows.push(['DATE','TYPE','REF NO.','PAYEE','AMOUNT (USD)']);list.forEach(l=>rows.push([l.date,l.type,l.ref_no,l.payee,l.amount]));};
+    sec('Checks and payments cleared ('+data.payments_cleared.length+')',data.payments_cleared);
+    sec('Deposits and other credits cleared ('+data.deposits_cleared.length+')',data.deposits_cleared);
+    if(data.uncleared_through.length) sec('Uncleared transactions as of '+data.statement_date+' ('+data.uncleared_through.length+')',data.uncleared_through);
+    const out=rows.map(r=>r.map(c=>{const v=c==null?'':String(c);return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;}).join(',')).join('\n');
+    const blob=new Blob([out],{type:'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download=(data.account_code||'account')+' Bank Recon '+data.statement_date+'.csv';document.body.appendChild(a);a.click();a.remove();
+  };
+  const SumRow=({label,val,total})=> <div className={'sumrow'+(total?' total':'')} style={{display:'flex',justifyContent:'space-between',maxWidth:520,padding:total?'6px 0 3px':'3px 0',borderTop:total?'1px solid #999':'none',fontWeight:total?700:400,marginTop:total?4:0}}><span>{label}</span><span>{money(val)}</span></div>;
+  const DetailTable=({list})=>(
+    <table style={{width:'100%',borderCollapse:'collapse',marginTop:4}}><thead><tr>
+      <th style={{textAlign:'left',padding:'4px 6px',borderBottom:'1px solid #999',fontSize:11}}>DATE</th>
+      <th style={{textAlign:'left',padding:'4px 6px',borderBottom:'1px solid #999',fontSize:11}}>TYPE</th>
+      <th style={{textAlign:'left',padding:'4px 6px',borderBottom:'1px solid #999',fontSize:11}}>REF NO.</th>
+      <th style={{textAlign:'left',padding:'4px 6px',borderBottom:'1px solid #999',fontSize:11}}>PAYEE</th>
+      <th style={{textAlign:'right',padding:'4px 6px',borderBottom:'1px solid #999',fontSize:11}}>AMOUNT (USD)</th>
+    </tr></thead><tbody>
+      {list.map((l,i)=><tr key={i}><td style={{padding:'4px 6px',fontSize:11}}>{l.date}</td><td style={{padding:'4px 6px',fontSize:11}}>{l.type}</td><td style={{padding:'4px 6px',fontSize:11}}>{l.ref_no}</td><td style={{padding:'4px 6px',fontSize:11}}>{l.payee}</td><td style={{padding:'4px 6px',fontSize:11,textAlign:'right'}}>{money(l.amount)}</td></tr>)}
+      {list.length===0&&<tr><td colSpan={5} style={{padding:'8px 6px',fontSize:11,color:'#888'}}>None</td></tr>}
+    </tbody></table>
+  );
+  return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:880,maxHeight:'92vh',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
+    <button style={S.modalClose} onClick={onClose}>&times;</button>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,paddingRight:40}}>
+      <div style={{fontSize:18,fontWeight:700,color:T.textBright}}>Reconciliation Report</div>
+      <div style={{display:'flex',gap:8}}>{data&&<><button style={S.btnS} onClick={csv}>Download CSV</button><button style={S.btnP} onClick={print}>Print / PDF</button></>}</div>
+    </div>
+    {loading&&<div style={{padding:40,textAlign:'center',color:T.textDim}}>Loading…</div>}
+    {err&&<div style={{padding:16,color:T.red,fontSize:13}}>{err}</div>}
+    {data&&<div style={{overflowY:'auto'}}><div id="cl-recon-report" style={{background:'#fff',color:'#111',padding:24,borderRadius:8,border:'1px solid '+T.border}}>
+      <h1 style={{fontSize:16,margin:'0 0 2px'}}>{data.entity_name}</h1>
+      <div style={{fontWeight:600}}>{data.account_code} {data.account_name}, Period Ending {data.statement_date}</div>
+      <div style={{fontSize:15,fontWeight:700,margin:'10px 0 2px'}}>RECONCILIATION REPORT</div>
+      <div className="muted" style={{color:'#555',fontSize:11}}>Reconciled on: {(data.reconciled_on||'').replace('T',' ').slice(0,19)}</div>
+      <div className="muted" style={{color:'#555',fontSize:11}}>Reconciled by: {data.reconciled_by}</div>
+      <div className="muted" style={{color:'#555',fontSize:11,marginTop:4}}>Any changes made to transactions after this date aren't included in this report.</div>
+
+      <h2 style={{fontSize:13,margin:'20px 0 6px',borderBottom:'1px solid #ccc',paddingBottom:3}}>Summary <span style={{float:'right'}}>USD</span></h2>
+      <SumRow label="Statement beginning balance" val={data.summary.beginning_balance}/>
+      <SumRow label={'Checks and payments cleared ('+data.summary.payments_count+')'} val={data.summary.payments_total}/>
+      <SumRow label={'Deposits and other credits cleared ('+data.summary.deposits_count+')'} val={data.summary.deposits_total}/>
+      <SumRow label="Statement ending balance" val={data.summary.ending_balance} total/>
+      <div style={{height:10}}/>
+      <SumRow label={'Register balance as of '+data.statement_date} val={data.summary.register_at_statement_date}/>
+      <SumRow label={'Cleared transactions after '+data.statement_date+' ('+data.summary.cleared_after_count+')'} val={data.summary.cleared_after_total}/>
+      <SumRow label={'Uncleared transactions after '+data.statement_date+' ('+data.summary.uncleared_after_count+')'} val={data.summary.uncleared_after_total}/>
+      <SumRow label="Register balance as of report date" val={data.summary.register_as_of_report} total/>
+
+      <h2 style={{fontSize:13,margin:'20px 0 6px',borderBottom:'1px solid #ccc',paddingBottom:3}}>Details</h2>
+      <div style={{fontWeight:700,fontSize:12,marginTop:8}}>Checks and payments cleared ({data.payments_cleared.length})</div>
+      <DetailTable list={data.payments_cleared}/>
+      <div style={{fontWeight:700,fontSize:12,marginTop:16}}>Deposits and other credits cleared ({data.deposits_cleared.length})</div>
+      <DetailTable list={data.deposits_cleared}/>
+      {data.uncleared_through.length>0&&<><div style={{fontWeight:700,fontSize:12,marginTop:16}}>Uncleared transactions as of {data.statement_date} ({data.uncleared_through.length})</div>
+      <DetailTable list={data.uncleared_through}/></>}
+    </div></div>}
+  </div></div>);
+}
+
 // ═══ Bank Reconciliation ═══
 function BankReconciliation({entityId,user,canEdit=true}){const[accounts,setAccounts]=useState([]);const[entries,setEntries]=useState([]);const[recs,setRecs]=useState([]);
   const[view,setView]=useState('list');const[selAcct,setSelAcct]=useState('');const[stmtDate,setStmtDate]=useState(today());const[stmtBal,setStmtBal]=useState('');
   const[cleared,setCleared]=useState({});const[checked,setChecked]=useState({});
   const[viewEntry,setViewEntry]=useState(null);
+  const[reportRec,setReportRec]=useState(null);
   const load=useCallback(async()=>{const[a,e,r]=await Promise.all([api.getAccounts(entityId),api.getEntries(entityId),api.getReconciliations(entityId)]);setAccounts(a);setEntries(e);setRecs(r);},[entityId]);
   useEffect(()=>{load();},[load]);
   const bankAccts=accounts.filter(a=>a.bank_acct||(['cash','bank','checking','savings'].some(w=>a.name.toLowerCase().includes(w))&&a.type==='Asset'));
@@ -2307,8 +2404,10 @@ function BankReconciliation({entityId,user,canEdit=true}){const[accounts,setAcco
         <div style={{fontWeight:700,color:T.textBright,fontSize:14,marginBottom:4}}>{a.name}</div><div style={{fontSize:12,color:T.textDim,marginBottom:12}}>{a.code}</div>
         <div style={{fontSize:24,fontWeight:700,color:T.textBright}}>${fmt(bal)}</div></div>;})}</div>
     <div style={S.cardFlush}><div style={{padding:'16px 20px'}}><div style={S.h2}>History</div></div>{recs.length===0?<div style={{padding:40,textAlign:'center',color:T.textDim}}>No reconciliations yet</div>:
-      <table style={S.table}><thead><tr><th style={S.th}>Date</th><th style={S.th}>Account</th><th style={S.thR}>Statement</th><th style={S.thR}>Book</th><th style={S.thR}>Cleared</th><th style={S.th}>By</th></tr></thead>
-        <tbody>{recs.map(r=><tr key={r.id}><td style={S.td}>{r.statement_date}</td><td style={S.td}>{r.account_code}</td><td style={S.tdR}>${fmt(r.statement_balance)}</td><td style={S.tdR}>${fmt(r.book_balance)}</td><td style={S.tdR}>{r.cleared_count}</td><td style={S.td}>{r.completed_by}</td></tr>)}</tbody></table>}</div></div>);}
+      <table style={S.table}><thead><tr><th style={S.th}>Date</th><th style={S.th}>Account</th><th style={S.thR}>Statement</th><th style={S.thR}>Book</th><th style={S.thR}>Cleared</th><th style={S.th}>By</th><th style={S.th}></th></tr></thead>
+        <tbody>{recs.map(r=><tr key={r.id}><td style={S.td}>{r.statement_date}</td><td style={S.td}>{r.account_code}</td><td style={S.tdR}>${fmt(r.statement_balance)}</td><td style={S.tdR}>${fmt(r.book_balance)}</td><td style={S.tdR}>{r.cleared_count}</td><td style={S.td}>{r.completed_by}</td><td style={S.td}><button style={{...S.btnS,padding:'4px 12px',fontSize:11}} onClick={()=>setReportRec(r)}>Report</button></td></tr>)}</tbody></table>}</div>
+    {reportRec&&<ReconciliationReportModal entityId={entityId} rec={reportRec} onClose={()=>setReportRec(null)}/>}
+    </div>);}
 
 // ═══ Entity Management ═══
 // ═══ Requisitions (development-project coding engine) ═══

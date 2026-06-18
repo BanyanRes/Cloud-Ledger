@@ -164,6 +164,7 @@ export const api = {
   getReconciliations: (eid) => request('/entities/' + eid + '/reconciliations'),
   getCleared: (eid, code) => request('/entities/' + eid + '/cleared/' + code),
   createReconciliation: (eid, data) => request('/entities/' + eid + '/reconciliations', { method: 'POST', body: data }),
+  getReconciliationReport: (eid, id) => request('/entities/' + eid + '/reconciliations/' + id + '/report'),
 
   // Entity Workpapers
   getEntityFiles: (eid) => request('/entities/' + eid + '/files'),
