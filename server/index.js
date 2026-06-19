@@ -4085,6 +4085,14 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   } catch (e) {
     return res.status(502).json({ error: 'Failed to fetch bills: ' + e.message });
   }
+  // Bill.com's /bills list can echo a non-advancing nextPage token, so the
+  // paginator may return the same bills multiple times. Dedupe by id before
+  // bucketing — otherwise totals are inflated by the repeat factor.
+  {
+    const byId = new Map();
+    for (const b of bills) { const id = b && b.id; if (id != null && !byId.has(String(id))) byId.set(String(id), b); }
+    bills = Array.from(byId.values());
+  }
   try {
     vendors = await billcomListVendors({ ...listArgs, maxItems: 5000 });
   } catch (e) {
