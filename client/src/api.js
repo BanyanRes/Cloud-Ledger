@@ -210,6 +210,7 @@ export const api = {
   syncBillcom: (entityId) => request('/billcom/sync/' + entityId, { method: 'POST' }),
   pushBillcomCoa: (entityId, body) => request('/billcom/push-coa/' + entityId, { method: 'POST', body }),
   getBillcomSyncLog: (entityId, limit) => request('/billcom/sync-log/' + entityId + (limit ? '?limit=' + limit : '')),
+  getApAging: (entityId, asOf) => request('/billcom/ap-aging/' + entityId + (asOf ? '?as_of=' + asOf : '')),
 
   // Requisition (development-project coding engine)
   seedRequisitionHistory: (eid, body) => request('/requisition/' + eid + '/seed-history', { method: 'POST', body }),

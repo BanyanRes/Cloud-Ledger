@@ -738,6 +738,12 @@ async function billcomGetById({ sessionId, devKey, baseUrl, resourcePath, id }) 
   return json;
 }
 
+// Paginated vendor list -> used to resolve vendorId on bills to a display name
+// for the AP Aging report. Mirrors billcomListV3 pagination/error handling.
+async function billcomListVendors(args) {
+  return billcomListV3({ ...args, resourcePath: '/vendors' });
+}
+
 
 // One-time recovery: earlier versions of the replace endpoint accidentally saved files
 // to WORKPAPERS_DIR root (or to an "undefined" subdir) instead of WORKPAPERS_DIR/<entity_id>/.
@@ -4044,6 +4050,145 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
 
   result.missing_mappings = Array.from(missingMap.values());
   res.json(result);
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// AP Aging Detail (Q5 / Weaver) — read open bills straight from Bill.com and
+// bucket by days past due. Read-only: no JEs are written. Available to
+// Accountant + Admin. The MFA/BDC_1361 block only affects payment *sync*;
+// reading bills works. Buckets match Weaver's sample: current, 1-30, 31-60,
+// 61-90, 91+ (relative to as_of, default today).
+// ───────────────────────────────────────────────────────────────────────────
+app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+
+  const asOf = String((req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of)) ? req.query.as_of : new Date().toISOString().slice(0, 10));
+
+  let session, devKey;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) {
+    return res.status(502).json({ error: 'Bill.com login failed: ' + e.message });
+  }
+  if (!session.sessionId) return res.status(502).json({ error: 'Bill.com login returned no sessionId' });
+  const listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+
+  let bills, vendors;
+  try {
+    bills = await billcomListBills({ ...listArgs, maxItems: 2000 });
+  } catch (e) {
+    return res.status(502).json({ error: 'Failed to fetch bills: ' + e.message });
+  }
+  try {
+    vendors = await billcomListVendors({ ...listArgs, maxItems: 5000 });
+  } catch (e) {
+    vendors = []; // vendor names are best-effort; fall back to id if the list fails
+  }
+
+  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
+  const vendorName = new Map();
+  for (const v of vendors) {
+    const vid = String(pick(v, 'id') || '');
+    const nm = pick(v, 'name', 'vendorName', 'companyName', 'displayName');
+    if (vid && nm) vendorName.set(vid, nm);
+  }
+  // Location names: bill line jobId -> the billcom_job_name stored on the
+  // location map at connection time (no dependency on the dim table's shape).
+  const locNameByJob = new Map();
+  try {
+    const locRows = db.prepare(
+      'SELECT billcom_job_id AS job, billcom_job_name AS name FROM billcom_location_map WHERE entity_id = ?'
+    ).all(entityId);
+    for (const r of locRows) if (r.job != null && r.name) locNameByJob.set(String(r.job), r.name);
+  } catch (e) { /* location labels are best-effort */ }
+
+  // A bill is "open" if it still has an unpaid balance. Bill.com exposes the
+  // remaining amount under a few possible names; fall back to amount when the
+  // payment status says nothing has been paid.
+  const openAmountOf = (b) => {
+    const due = pick(b, 'amountDue', 'amount_due', 'openAmount', 'open_amount', 'dueAmount', 'remainingAmount', 'balance');
+    if (due != null) return Number(due);
+    const amt = Number(pick(b, 'amount', 'invoiceAmount', 'totalAmount') || 0);
+    const paid = Number(pick(b, 'paidAmount', 'paid_amount') || 0);
+    return amt - paid;
+  };
+  const isOpen = (b) => {
+    const p = String(pick(b, 'paymentStatus', 'status') || '').toUpperCase();
+    if (p === 'PAID' || p === 'VOID' || p === 'VOIDED') return false;
+    return openAmountOf(b) > 0.005;
+  };
+
+  const buckets = ['current', 'd1_30', 'd31_60', 'd61_90', 'd91_plus'];
+  const bucketOf = (daysPastDue) => {
+    if (daysPastDue <= 0) return 'current';
+    if (daysPastDue <= 30) return 'd1_30';
+    if (daysPastDue <= 60) return 'd31_60';
+    if (daysPastDue <= 90) return 'd61_90';
+    return 'd91_plus';
+  };
+  const dayDiff = (a, b) => Math.round((Date.parse(a) - Date.parse(b)) / 86400000);
+
+  const byVendor = new Map(); // vendorKey -> { vendor, rows:[], subtotal:{...} }
+  const emptyBuckets = () => ({ current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d91_plus: 0, total: 0 });
+  const grand = emptyBuckets();
+
+  for (const b of bills) {
+    if (!isOpen(b)) continue;
+    const amount = openAmountOf(b);
+    if (!(amount > 0.005)) continue;
+
+    const billId = String(pick(b, 'id') || '');
+    const invDate = pick(b, 'invoiceDate', 'invoice_date') || pick(pick(b, 'invoice') || {}, 'invoiceDate', 'invoice_date');
+    const dueDate = pick(b, 'dueDate', 'due_date') || invDate;
+    const num = pick(b, 'invoiceNumber', 'invoice_number') || pick(pick(b, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || billId;
+    const vid = String(pick(b, 'vendorId', 'vendor_id') || (pick(b, 'vendor') || {}).id || '');
+    const vname = vendorName.get(vid) || pick(pick(b, 'vendor') || {}, 'name') || ('Vendor ' + (vid || '?'));
+
+    // Location: derive from the first line item carrying a jobId we can name.
+    let location = '';
+    const lines = pick(b, 'lineItems', 'line_items', 'billLineItems') || [];
+    if (Array.isArray(lines)) {
+      for (const li of lines) {
+        const cls = pick(li, 'classifications') || {};
+        const job = String(pick(li, 'jobId') || pick(cls, 'jobId') || '');
+        if (job && locNameByJob.has(job)) { location = locNameByJob.get(job); break; }
+      }
+    }
+
+    const dpd = dueDate ? dayDiff(asOf, dueDate) : 0;
+    const bk = bucketOf(dpd);
+
+    if (!byVendor.has(vid)) byVendor.set(vid, { vendor: vname, vendor_id: vid, rows: [], subtotal: emptyBuckets() });
+    const grp = byVendor.get(vid);
+    const row = {
+      date: invDate || '', type: 'Bill', num: String(num), vendor: vname,
+      location, due_date: dueDate || '', past_due_days: Math.max(0, dpd),
+      amount, bucket: bk,
+    };
+    grp.rows.push(row);
+    grp.subtotal[bk] += amount; grp.subtotal.total += amount;
+    grand[bk] += amount; grand.total += amount;
+  }
+
+  const vendorsOut = Array.from(byVendor.values())
+    .sort((a, b) => a.vendor.localeCompare(b.vendor))
+    .map(g => ({ ...g, rows: g.rows.sort((x, y) => String(x.due_date).localeCompare(String(y.due_date))) }));
+
+  res.json({
+    entity_id: entityId,
+    as_of: asOf,
+    bucket_labels: { current: 'Current', d1_30: '1-30', d31_60: '31-60', d61_90: '61-90', d91_plus: '91+' },
+    bucket_order: buckets,
+    vendors: vendorsOut,
+    grand_total: grand,
+    bill_count: vendorsOut.reduce((n, g) => n + g.rows.length, 0),
+  });
 });
 // ═══════════════════════════════════════════════════════════════════════════
 // Requisition / Invoice-Packet API (development-project entities only)

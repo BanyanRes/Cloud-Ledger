@@ -519,7 +519,7 @@ export default function App(){
     {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},...(dimsEnabled?[{id:'dimensions',label:'Dimensions',icon:'🏷️',section:'coa'}]:[]),{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
     {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
     {id:'d3',divider:1,label:'REPORTS'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
-    {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),
+    {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),{id:'apaging',label:'AP Aging',icon:'⏳',section:'reports'},
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
     ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
     ...(arEnabled?[{id:'d3c',divider:1,label:'RECEIVABLES'},{id:'ar_customers',label:'Customers',icon:'👥',section:'coa'}]:[]),
@@ -556,6 +556,7 @@ export default function App(){
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo}/>}
         {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
         {page==='pivot'&&activeEntity&&dimsEnabled&&<PivotReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
+        {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='wip'&&activeEntity&&<WipSchedule entityName={entityName} asOf={wipAsOf} setAsOf={setWipAsOf}/>}
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='users'&&<UserManagement currentUser={user}/>}
@@ -2480,6 +2481,60 @@ function PivotReport({entityId,entityName}){
       <table style={S.table}><thead><tr><th style={{...S.th,position:'sticky',left:0,background:T.bgCard}}>{dim==='class'?'Class / Investor':dim==='location'?'Location':'Project'}</th>{data.columns.map(c=><th key={c.code} style={S.thR} title={c.code+' '+c.name}>{c.name||c.code}</th>)}<th style={S.thR}>Total</th></tr></thead>
       <tbody>{data.rows.map(r=><tr key={r.id}><td style={{...S.td,position:'sticky',left:0,background:T.bgCard,fontWeight:500}}>{r.name}</td>{data.columns.map(c=><td key={c.code} style={S.tdR}>{r.cells[c.code]?fmt(r.cells[c.code]):''}</td>)}<td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(r.total)}</td></tr>)}
         <tr style={S.grandTotalRow}><td style={{...S.tdBold,position:'sticky',left:0,background:T.bgCard}}>Total</td>{data.columns.map(c=><td key={c.code} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(data.column_totals[c.code]||0)}</td>)}<td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(data.grand_total)}</td></tr>
+      </tbody></table>}
+    </div>}
+  </div>);
+}
+
+// ═══ AP Aging Detail (Q5: open bills from Bill.com, bucketed by days past due) ═══
+function ApAgingReport({entityId,entityName}){
+  const[asOf,setAsOf]=useState(today());
+  const[data,setData]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
+  const BK=['current','d1_30','d31_60','d61_90','d91_plus'];
+  const run=async()=>{
+    setLoading(true);setErr('');setData(null);
+    try{setData(await api.getApAging(entityId,asOf||undefined));}
+    catch(e){setErr(e.message);}finally{setLoading(false);}
+  };
+  const lbl=d=>data?data.bucket_labels[d]:d;
+  const doExport=()=>{
+    if(!data)return;
+    const head=['Date','Type','Num','Vendor','Location','Due Date','Past Due (days)','Current','1-30','31-60','61-90','91+','Amount'];
+    const d=[[entityName||'AP Aging Detail'],['A/P Aging Detail'],['As of '+data.as_of],[],head];
+    data.vendors.forEach(g=>{
+      g.rows.forEach(r=>d.push([r.date,r.type,r.num,r.vendor,r.location,r.due_date,r.past_due_days,
+        r.bucket==='current'?r.amount:'',r.bucket==='d1_30'?r.amount:'',r.bucket==='d31_60'?r.amount:'',r.bucket==='d61_90'?r.amount:'',r.bucket==='d91_plus'?r.amount:'',r.amount]));
+      d.push(['Total '+g.vendor,'','','','','','',g.subtotal.current,g.subtotal.d1_30,g.subtotal.d31_60,g.subtotal.d61_90,g.subtotal.d91_plus,g.subtotal.total]);
+    });
+    const gt=data.grand_total;
+    d.push(['TOTAL','','','','','','',gt.current,gt.d1_30,gt.d31_60,gt.d61_90,gt.d91_plus,gt.total]);
+    exportToExcel(d,'AP_Aging_'+data.as_of+'.xlsx');
+  };
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>A/P Aging Detail</div><div style={S.sub}>Open bills from Bill.com, bucketed by days past due</div></div>{data&&data.bill_count>0&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div>
+    <div style={S.card}>
+      <div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div style={{flex:'0 0 180px'}}><label style={S.label}>As of date</label><input style={{...S.inputSm,width:'100%'}} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
+        <button style={{...S.btnP}} onClick={run} disabled={loading}>{loading?'Loading from Bill.com...':'Run Aging'}</button>
+      </div>
+      {err&&<div style={S.err}>{err}</div>}
+    </div>
+    {data&&<div style={{...S.cardFlush,overflowX:'auto'}}>
+      {data.bill_count===0?<div style={{padding:24,color:T.textDim}}>No open bills as of {data.as_of}.</div>:
+      <table style={S.table}><thead><tr>
+        <th style={S.th}>Date</th><th style={S.th}>Type</th><th style={S.th}>Num</th><th style={S.th}>Location</th><th style={S.th}>Due Date</th><th style={S.thR}>Past Due</th>
+        {BK.map(b=><th key={b} style={S.thR}>{lbl(b)}</th>)}<th style={S.thR}>Amount</th>
+      </tr></thead>
+      <tbody>{data.vendors.map(g=><Fragment key={g.vendor_id||g.vendor}>
+        <tr><td colSpan={6+BK.length+1} style={{...S.td,fontWeight:700,color:T.textBright,background:T.bgElevated}}>{g.vendor}</td></tr>
+        {g.rows.map((r,i)=><tr key={i}>
+          <td style={S.td}>{r.date}</td><td style={S.td}>{r.type}</td><td style={S.td}>{r.num}</td><td style={S.td}>{r.location}</td><td style={S.td}>{r.due_date}</td><td style={S.tdR}>{r.past_due_days||''}</td>
+          {BK.map(b=><td key={b} style={S.tdR}>{r.bucket===b?fmt(r.amount):''}</td>)}<td style={{...S.tdR,fontWeight:600}}>{fmt(r.amount)}</td>
+        </tr>)}
+        <tr style={{background:T.bgElevated}}><td colSpan={6} style={{...S.td,fontWeight:600,fontStyle:'italic'}}>Total {g.vendor}</td>
+          {BK.map(b=><td key={b} style={{...S.tdR,fontWeight:600}}>{g.subtotal[b]?fmt(g.subtotal[b]):''}</td>)}<td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(g.subtotal.total)}</td></tr>
+      </Fragment>)}
+        <tr style={S.grandTotalRow}><td colSpan={6} style={S.tdBold}>TOTAL</td>
+          {BK.map(b=><td key={b} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(data.grand_total[b]||0)}</td>)}<td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(data.grand_total.total)}</td></tr>
       </tbody></table>}
     </div>}
   </div>);
