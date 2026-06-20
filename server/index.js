@@ -3754,6 +3754,31 @@ app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_i
   res.json(out);
 });
 
+// TEMP DEBUG: test start-offset pagination on /bills. Remove later.
+app.get('/api/billcom/_debug-start/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'no config' });
+  let session, devKey;
+  try { const password = billcomDecrypt(cfg.password_enc); devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
+  const base = cfg.api_base_url || "https://gateway.prod.bill.com/connect/v3";
+  const hdr = { sessionId: session.sessionId, devKey, Accept: "application/json" };
+  const pages=[]; let start=0; const max=100; let total=0; let lastDates=null;
+  for (let i=0;i<12;i++){
+    const u = base + "/bills?max="+max+"&start="+start;
+    let j; try { const r=await billcomFetch(u,{method:"GET",headers:hdr},20000); j=await r.json(); } catch(e){ pages.push({start, err:e.message}); break; }
+    const results = j.results||[];
+    const dates = results.map(x=>x.invoiceDate||(x.invoice&&x.invoice.invoiceDate)).filter(Boolean).sort();
+    pages.push({ start, count: results.length, minDate: dates[0], maxDate: dates[dates.length-1] });
+    total += results.length;
+    if (results.length < max) break;
+    start += max;
+  }
+  res.json({ entity_id: entityId, totalFetched: total, pages });
+});
+
 // Phase 3: Bill.com sync (bills + payments -> JEs)
 app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   const entityId = parseInt(req.params.entity_id);
