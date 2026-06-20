@@ -4258,6 +4258,36 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
 
 
 
+// TEMP DEBUG: test multi-condition dueDate window filter syntax for v3 /bills. Remove later.
+app.get('/api/billcom/_debug-window/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'no config' });
+  let session, devKey;
+  try { const password = billcomDecrypt(cfg.password_enc); devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
+  const base = cfg.api_base_url || "https://gateway.prod.bill.com/connect/v3";
+  const hdr = { sessionId: session.sessionId, devKey, Accept: "application/json" };
+  const out = {};
+  // Variant A: two filters joined by comma (common v3 AND syntax)
+  const variants = [
+    ["comma_two", "filters=" + encodeURIComponent("dueDate:gte:2026-04-01") + "&filters=" + encodeURIComponent("dueDate:lt:2026-05-01")],
+    ["comma_in_one", "filters=" + encodeURIComponent("dueDate:gte:2026-04-01,dueDate:lt:2026-05-01")],
+    ["semicolon", "filters=" + encodeURIComponent("dueDate:gte:2026-04-01;dueDate:lt:2026-05-01")],
+    ["single_gte_only", "filters=" + encodeURIComponent("dueDate:gte:2026-04-01")],
+  ];
+  for (const [name, qs] of variants){
+    const u = base + "/bills?max=100&" + qs;
+    try { const r = await billcomFetch(u, {method:"GET",headers:hdr}, 20000); const j = await r.json();
+      const results = j.results||[];
+      const dd = results.map(x=>x.dueDate).filter(Boolean).sort();
+      const inv = results.map(x=>x.invoiceDate||(x.invoice&&x.invoice.invoiceDate)).filter(Boolean).sort();
+      out[name] = { status:r.status, count:results.length, dueMin:dd[0], dueMax:dd[dd.length-1], invMin:inv[0], invMax:inv[inv.length-1], err: r.status!==200? JSON.stringify(j).slice(0,150):undefined };
+    } catch(e){ out[name] = { err:e.message }; }
+  }
+  res.json(out);
+});
 // ═══════════════════════════════════════════════════════════════════════════
 // Requisition / Invoice-Packet API (development-project entities only)
 // Every route is gated: auth → entity access → development-entity check.
