@@ -115,6 +115,10 @@ export const api = {
     return request('/entities/' + eid + '/gl-detail' + (p.length ? '?' + p.join('&') : ''));
   },
   getClasses: (eid) => request('/entities/' + eid + '/classes'),
+  getCommitments: (eid) => request('/entities/' + eid + '/commitments'),
+  createCommitment: (eid, body) => request('/entities/' + eid + '/commitments', { method: 'POST', body }),
+  updateCommitment: (eid, id, body) => request('/entities/' + eid + '/commitments/' + id, { method: 'PATCH', body }),
+  deleteCommitment: (eid, id) => request('/entities/' + eid + '/commitments/' + id, { method: 'DELETE' }),
   getLocations: (eid) => request('/entities/' + eid + '/locations'),
   getProjects: (eid) => request('/entities/' + eid + '/projects'),
   createLocation: (eid, data) => request('/entities/' + eid + '/locations', { method: 'POST', body: data }),

@@ -568,7 +568,7 @@ export default function App(){
     {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},...(dimsEnabled?[{id:'dimensions',label:'Dimensions',icon:'🏷️',section:'coa'}]:[]),{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
     {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
     {id:'d3',divider:1,label:'REPORTS'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
-    {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),{id:'apaging',label:'AP Aging',icon:'⏳',section:'reports'},
+    {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),{id:'apaging',label:'AP Aging',icon:'⏳',section:'reports'},{id:'commitments',label:'Commitments',icon:'🤝',section:'reports'},
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
     ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
     ...(arEnabled?[{id:'d3c',divider:1,label:'RECEIVABLES'},{id:'ar_customers',label:'Customers',icon:'👥',section:'coa'}]:[]),
@@ -606,6 +606,7 @@ export default function App(){
         {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
         {page==='pivot'&&activeEntity&&dimsEnabled&&<PivotReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
+        {page==='commitments'&&activeEntity&&<CommitmentsPage entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wip'&&activeEntity&&<WipSchedule entityName={entityName} asOf={wipAsOf} setAsOf={setWipAsOf}/>}
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='users'&&<UserManagement currentUser={user}/>}
@@ -2599,6 +2600,58 @@ function ApAgingReport({entityId,entityName}){
           {BK.map(b=><td key={b} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(data.grand_total[b]||0)}</td>)}<td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(data.grand_total.total)}</td></tr>
       </tbody></table>}
     </div>}
+  </div>);
+}
+
+// ═══ Investor Commitments (informational capital register; never posts to GL) ═══
+function CommitmentsPage({entityId,entityName,canEdit=true}){
+  const[data,setData]=useState(null);const[classes,setClasses]=useState([]);const[err,setErr]=useState('');const[loading,setLoading]=useState(true);
+  const[showAdd,setShowAdd]=useState(false);const[form,setForm]=useState({class_id:'',commitment_amount:'',called_amount:'',commit_date:'',notes:''});
+  const[editId,setEditId]=useState(null);const[editForm,setEditForm]=useState({});
+  const load=useCallback(async()=>{setLoading(true);setErr('');try{const[d,c]=await Promise.all([api.getCommitments(entityId),api.getClasses(entityId)]);setData(d);setClasses(c||[]);}catch(e){setErr(e.message);}finally{setLoading(false);}},[entityId]);
+  useEffect(()=>{load();},[load]);
+  const pct=v=>(v*100).toFixed(2)+'%';
+  const committedClassIds=new Set((data?.investors||[]).map(i=>i.class_id));
+  const availClasses=classes.filter(c=>!committedClassIds.has(c.id)||c.id===Number(form.class_id));
+  const add=async()=>{if(!form.class_id){setErr('Pick an investor');return;}try{await api.createCommitment(entityId,{class_id:Number(form.class_id),commitment_amount:Number(form.commitment_amount||0),called_amount:Number(form.called_amount||0),commit_date:form.commit_date||null,notes:form.notes||null});setShowAdd(false);setForm({class_id:'',commitment_amount:'',called_amount:'',commit_date:'',notes:''});load();}catch(e){setErr(e.message);}};
+  const startEdit=i=>{setEditId(i.id);setEditForm({commitment_amount:i.commitment_amount,called_amount:i.called_amount,commit_date:i.commit_date||'',notes:i.notes||''});};
+  const saveEdit=async()=>{try{await api.updateCommitment(entityId,editId,{commitment_amount:Number(editForm.commitment_amount||0),called_amount:Number(editForm.called_amount||0),commit_date:editForm.commit_date||null,notes:editForm.notes||null});setEditId(null);load();}catch(e){setErr(e.message);}};
+  const del=async i=>{if(!confirm('Remove commitment for '+i.investor+'?'))return;try{await api.deleteCommitment(entityId,i.id);load();}catch(e){setErr(e.message);}};
+  const doExport=()=>{if(!data)return;const d=[[entityName||'Investor Commitments'],['Investor Commitments'],[],['Investor','Code','Commitment','Called to Date','Uncalled','% Called','Ownership %','Commit Date','Notes']];
+    data.investors.forEach(i=>d.push([i.investor,i.investor_code||'',i.commitment_amount,i.called_amount,i.uncalled_amount,i.pct_called,i.ownership_pct,i.commit_date||'',i.notes||'']));
+    const t=data.totals;d.push(['Total','',t.commitment_amount,t.called_amount,t.uncalled_amount,'','','','']);
+    exportToExcel(d,'Investor_Commitments.xlsx');};
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+    <div><div style={S.h1}>Investor Commitments</div><div style={S.sub}>Capital commitments by investor &middot; informational only (does not post to the GL)</div></div>
+    <div style={{display:'flex',gap:8}}>{data&&data.investors.length>0&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}{canEdit&&<button style={S.btnP} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add Commitment'}</button>}</div></div>
+    {showAdd&&<div style={{...S.card,borderColor:T.green+'40'}}>
+      <div style={S.row}>
+        <div style={{...S.col,flex:2}}><label style={S.label}>Investor (class)</label><select style={S.select} value={form.class_id} onChange={e=>setForm(f=>({...f,class_id:e.target.value}))}><option value=''>Select investor…</option>{availClasses.map(c=><option key={c.id} value={c.id}>{c.code?c.code+' — ':''}{c.name}</option>)}</select></div>
+        <div style={S.col}><label style={S.label}>Commitment</label><input style={{...S.input,textAlign:'right'}} value={form.commitment_amount} onChange={e=>setForm(f=>({...f,commitment_amount:e.target.value}))} placeholder='0.00'/></div>
+        <div style={S.col}><label style={S.label}>Called to date</label><input style={{...S.input,textAlign:'right'}} value={form.called_amount} onChange={e=>setForm(f=>({...f,called_amount:e.target.value}))} placeholder='0.00'/></div>
+        <div style={S.col}><label style={S.label}>Commit date</label><input style={S.input} type='date' value={form.commit_date} onChange={e=>setForm(f=>({...f,commit_date:e.target.value}))}/></div></div>
+      <div style={{marginBottom:12}}><label style={S.label}>Notes</label><input style={S.input} value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} placeholder='(optional)'/></div>
+      {err&&<div style={S.err}>{err}</div>}<button style={S.btnP} onClick={add}>Add Commitment</button></div>}
+    {loading?<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Loading…</div>:
+     err&&!showAdd?<div style={S.err}>{err}</div>:
+     !data||data.investors.length===0?<div style={{...S.card,textAlign:'center',padding:50,color:T.textDim}}>No commitments recorded yet.</div>:
+     <div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+       <th style={S.th}>Investor</th><th style={S.thR}>Commitment</th><th style={S.thR}>Called to Date</th><th style={S.thR}>Uncalled</th><th style={S.thR}>% Called</th><th style={S.thR}>Ownership %</th><th style={S.th}>Commit Date</th>{canEdit&&<th style={{...S.th,width:120}}>Actions</th>}</tr></thead>
+       <tbody>{data.investors.map(i=>editId===i.id?(<tr key={i.id} style={{background:T.accentDim}}>
+         <td style={S.td}>{i.investor}</td>
+         <td style={S.tdR}><input style={{...S.input,textAlign:'right',padding:'4px 8px'}} value={editForm.commitment_amount} onChange={e=>setEditForm(f=>({...f,commitment_amount:e.target.value}))}/></td>
+         <td style={S.tdR}><input style={{...S.input,textAlign:'right',padding:'4px 8px'}} value={editForm.called_amount} onChange={e=>setEditForm(f=>({...f,called_amount:e.target.value}))}/></td>
+         <td style={{...S.tdR,color:T.textDim}}>{fmt((Number(editForm.commitment_amount)||0)-(Number(editForm.called_amount)||0))}</td>
+         <td style={S.tdR}>—</td><td style={S.tdR}>—</td>
+         <td style={S.td}><input style={{...S.input,padding:'4px 8px'}} type='date' value={editForm.commit_date} onChange={e=>setEditForm(f=>({...f,commit_date:e.target.value}))}/></td>
+         <td style={S.td}><div style={{display:'flex',gap:6}}><button style={{...S.btnGhost,color:T.green,fontSize:11}} onClick={saveEdit}>Save</button><button style={{...S.btnGhost,fontSize:11}} onClick={()=>setEditId(null)}>Cancel</button></div></td></tr>):(
+       <tr key={i.id}><td style={{...S.td,fontWeight:600,color:T.textBright}}>{i.investor}{i.investor_code&&<span style={{color:T.textDim,fontWeight:400,marginLeft:6,fontSize:11}}>{i.investor_code}</span>}</td>
+         <td style={S.tdR}>{fmt(i.commitment_amount)}</td><td style={S.tdR}>{fmt(i.called_amount)}</td>
+         <td style={{...S.tdR,fontWeight:600,color:i.uncalled_amount>0.005?T.textBright:T.textDim}}>{fmt(i.uncalled_amount)}</td>
+         <td style={S.tdR}>{pct(i.pct_called)}</td><td style={S.tdR}>{pct(i.ownership_pct)}</td><td style={S.td}>{i.commit_date||''}</td>
+         {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}><button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>startEdit(i)}>Edit</button><button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={()=>del(i)}>x</button></div></td>}</tr>))}
+         <tr style={S.grandTotalRow}><td style={S.tdBold}>Total</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(data.totals.commitment_amount)}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(data.totals.called_amount)}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(data.totals.uncalled_amount)}</td><td style={S.tdR}></td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>100.00%</td><td style={S.td}></td>{canEdit&&<td style={S.td}></td>}</tr>
+       </tbody></table></div>}
   </div>);
 }
 

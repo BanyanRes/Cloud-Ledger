@@ -433,6 +433,22 @@ db.exec(`
     kind TEXT DEFAULT 'project',
     UNIQUE(entity_id, name)
   );
+  -- Investor capital commitments (informational only; never posts to the GL).
+  -- Links to dim_classes (kind='investor'). Tracks committed + called-to-date;
+  -- uncalled and ownership % are computed on read.
+  CREATE TABLE IF NOT EXISTS investor_commitments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    class_id INTEGER NOT NULL REFERENCES dim_classes(id) ON DELETE CASCADE,
+    commitment_amount REAL NOT NULL DEFAULT 0,
+    called_amount REAL NOT NULL DEFAULT 0,
+    commit_date TEXT,
+    notes TEXT,
+    created_at TEXT,
+    updated_at TEXT,
+    UNIQUE(entity_id, class_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_invcommit_entity ON investor_commitments(entity_id);
 `);
 if (!jlCols.includes('class_id')) {
   db.exec("ALTER TABLE journal_lines ADD COLUMN class_id INTEGER");
@@ -1861,6 +1877,64 @@ app.delete('/api/entities/:eid/classes/:id', auth, requireEntityAccess(), requir
   const used = db.prepare('SELECT COUNT(*) AS n FROM journal_lines WHERE class_id = ?').get(req.params.id).n;
   if (used > 0) return res.status(409).json({ error: 'Class is used on ' + used + ' journal line(s); reassign or remove those first' });
   db.prepare('DELETE FROM dim_classes WHERE id = ? AND entity_id = ?').run(req.params.id, req.params.eid);
+  res.json({ success: true });
+});
+
+// ── Investor commitments (informational; never posts to GL). Linked to dim_classes
+//    (kind='investor'). Uncalled = commitment - called; pct_called and ownership_pct
+//    (commitment / total commitments) are computed on read. ──
+app.get('/api/entities/:eid/commitments', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const rows = db.prepare(`SELECT ic.id, ic.class_id, c.name AS investor, c.code AS investor_code,
+      ic.commitment_amount, ic.called_amount, ic.commit_date, ic.notes
+    FROM investor_commitments ic JOIN dim_classes c ON c.id = ic.class_id
+    WHERE ic.entity_id = ? ORDER BY c.name`).all(req.params.eid);
+  const totalCommit = rows.reduce((s2, r) => s2 + (r.commitment_amount || 0), 0);
+  const out = rows.map(r => {
+    const uncalled = (r.commitment_amount || 0) - (r.called_amount || 0);
+    return {
+      ...r,
+      uncalled_amount: uncalled,
+      pct_called: r.commitment_amount ? (r.called_amount || 0) / r.commitment_amount : 0,
+      ownership_pct: totalCommit ? (r.commitment_amount || 0) / totalCommit : 0,
+    };
+  });
+  const totals = {
+    commitment_amount: totalCommit,
+    called_amount: rows.reduce((s2, r) => s2 + (r.called_amount || 0), 0),
+    uncalled_amount: rows.reduce((s2, r) => s2 + ((r.commitment_amount || 0) - (r.called_amount || 0)), 0),
+  };
+  res.json({ entity_id: parseInt(req.params.eid), investors: out, totals });
+});
+app.post('/api/entities/:eid/commitments', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const classId = parseInt(req.body.class_id);
+  if (!classId) return res.status(400).json({ error: 'class_id (investor) is required' });
+  const cls = db.prepare('SELECT id FROM dim_classes WHERE id = ? AND entity_id = ?').get(classId, req.params.eid);
+  if (!cls) return res.status(400).json({ error: 'Investor class not found in this entity' });
+  const commitment = Number(req.body.commitment_amount || 0);
+  const called = Number(req.body.called_amount || 0);
+  const now = new Date().toISOString();
+  try {
+    const r = db.prepare(`INSERT INTO investor_commitments (entity_id, class_id, commitment_amount, called_amount, commit_date, notes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(req.params.eid, classId, commitment, called, req.body.commit_date || null, req.body.notes || null, now, now);
+    res.json({ id: r.lastInsertRowid });
+  } catch (e) {
+    if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'This investor already has a commitment row; edit it instead' });
+    throw e;
+  }
+});
+app.patch('/api/entities/:eid/commitments/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const row = db.prepare('SELECT * FROM investor_commitments WHERE id = ? AND entity_id = ?').get(req.params.id, req.params.eid);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  const commitment = req.body.commitment_amount !== undefined ? Number(req.body.commitment_amount) : row.commitment_amount;
+  const called = req.body.called_amount !== undefined ? Number(req.body.called_amount) : row.called_amount;
+  const commitDate = req.body.commit_date !== undefined ? (req.body.commit_date || null) : row.commit_date;
+  const notes = req.body.notes !== undefined ? (req.body.notes || null) : row.notes;
+  db.prepare('UPDATE investor_commitments SET commitment_amount = ?, called_amount = ?, commit_date = ?, notes = ?, updated_at = ? WHERE id = ? AND entity_id = ?')
+    .run(commitment, called, commitDate, notes, new Date().toISOString(), req.params.id, req.params.eid);
+  res.json({ success: true });
+});
+app.delete('/api/entities/:eid/commitments/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  db.prepare('DELETE FROM investor_commitments WHERE id = ? AND entity_id = ?').run(req.params.id, req.params.eid);
   res.json({ success: true });
 });
 
