@@ -4100,6 +4100,45 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   }
 
   const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
+
+  // Payment-status read: the /bills list can lag in flipping paymentStatus to
+  // PAID after a disbursement clears, so a fully-paid bill may still echo an
+  // open balance and inflate the aging. Cross-check against /payments and net
+  // out per-bill amounts — but ONLY for COMPLETED (PAID) payments, so the report
+  // ties to GL cash-out. Scheduled/processing payments are intentionally NOT
+  // netted; those bills stay shown as open exposure. Best-effort: if the
+  // payments list fails, we fall back to bill-level status alone.
+  const paidByBillId = new Map(); // billId -> sum of completed payment amounts
+  let paymentsConsidered = 0, paymentsApplied = 0;
+  try {
+    let payments = await billcomListPayments({ ...listArgs, maxItems: 2000 });
+    { // dedupe by id (same non-advancing-nextPage guard as bills)
+      const byId = new Map();
+      for (const p of payments) { const id = p && p.id; if (id != null && !byId.has(String(id))) byId.set(String(id), p); }
+      payments = Array.from(byId.values());
+    }
+    const isCompleted = (pay) => String(pick(pay, 'paymentStatus', 'status') || '').toUpperCase() === 'PAID';
+    for (const pay of payments) {
+      paymentsConsidered++;
+      if (!isCompleted(pay)) continue; // PAID only — conservative, GL-tie-out
+      // A payment can settle multiple bills; v3 exposes the breakdown under a
+      // few possible names. Fall back to a single billId+amount when absent.
+      const billPays = pick(pay, 'billPays', 'billPayments', 'billpays', 'bills') || null;
+      if (Array.isArray(billPays) && billPays.length) {
+        for (const bp of billPays) {
+          const bid = String(pick(bp, 'billId', 'bill_id', 'id') || '');
+          const amt = Number(pick(bp, 'amount', 'paidAmount', 'paymentAmount') || 0);
+          if (bid && amt > 0) { paidByBillId.set(bid, (paidByBillId.get(bid) || 0) + amt); paymentsApplied++; }
+        }
+      } else {
+        const bid = String(pick(pay, 'billId', 'bill_id') || '');
+        const amt = Number(pick(pay, 'amount', 'paymentAmount', 'totalAmount') || 0);
+        if (bid && amt > 0) { paidByBillId.set(bid, (paidByBillId.get(bid) || 0) + amt); paymentsApplied++; }
+      }
+    }
+  } catch (e) {
+    console.log('[ap-aging] payments read failed, using bill-level status only: ' + e.message);
+  }
   const vendorName = new Map();
   for (const v of vendors) {
     const vid = String(pick(v, 'id') || '');
@@ -4126,10 +4165,16 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
     const paid = Number(pick(b, 'paidAmount', 'paid_amount') || 0);
     return amt - paid;
   };
+  // Open amount net of COMPLETED payments cross-referenced from /payments.
+  const netOpenOf = (b) => {
+    const billId = String(pick(b, 'id') || '');
+    const paid = paidByBillId.get(billId) || 0;
+    return openAmountOf(b) - paid;
+  };
   const isOpen = (b) => {
     const p = String(pick(b, 'paymentStatus', 'status') || '').toUpperCase();
     if (p === 'PAID' || p === 'VOID' || p === 'VOIDED') return false;
-    return openAmountOf(b) > 0.005;
+    return netOpenOf(b) > 0.005;
   };
 
   const buckets = ['current', 'd1_30', 'd31_60', 'd61_90', 'd91_plus'];
@@ -4148,8 +4193,9 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
 
   for (const b of bills) {
     if (!isOpen(b)) continue;
-    const amount = openAmountOf(b);
+    const amount = netOpenOf(b);
     if (!(amount > 0.005)) continue;
+    const paymentApplied = paidByBillId.get(String(pick(b, 'id') || '')) || 0;
 
     const billId = String(pick(b, 'id') || '');
     const invDate = pick(b, 'invoiceDate', 'invoice_date') || pick(pick(b, 'invoice') || {}, 'invoiceDate', 'invoice_date');
@@ -4177,7 +4223,7 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
     const row = {
       date: invDate || '', type: 'Bill', num: String(num), vendor: vname,
       location, due_date: dueDate || '', past_due_days: Math.max(0, dpd),
-      amount, bucket: bk,
+      amount, payment_applied: paymentApplied, bucket: bk,
     };
     grp.rows.push(row);
     grp.subtotal[bk] += amount; grp.subtotal.total += amount;
@@ -4196,7 +4242,52 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
     vendors: vendorsOut,
     grand_total: grand,
     bill_count: vendorsOut.reduce((n, g) => n + g.rows.length, 0),
+    payments_considered: paymentsConsidered,
+    payments_applied: paymentsApplied,
   });
+});
+
+// TEMP DEBUG: dump raw Bill.com bills + payments (key fields) for AP roll-forward analysis. Remove later.
+app.get('/api/billcom/_debug-payments/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
+  let session, devKey;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
+  const listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+  const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
+  let bills = [], payments = [], vendors = [];
+  try { bills = await billcomListBills({ ...listArgs, maxItems: 2000 }); } catch (e) { bills = [{ err: e.message }]; }
+  try { payments = await billcomListPayments({ ...listArgs, maxItems: 2000 }); } catch (e) { payments = [{ err: e.message }]; }
+  try { vendors = await billcomListVendors({ ...listArgs, maxItems: 5000 }); } catch (e) { vendors = []; }
+  const dedupe = (arr) => { const m = new Map(); for (const x of arr) { const id = x && x.id; if (id != null && !m.has(String(id))) m.set(String(id), x); } return Array.from(m.values()); };
+  bills = dedupe(bills); payments = dedupe(payments);
+  const vname = new Map(); for (const v of vendors) { const id = String(pick(v, 'id') || ''); const n = pick(v, 'name', 'vendorName', 'companyName'); if (id && n) vname.set(id, n); }
+  const billsOut = bills.map(b => ({
+    id: pick(b, 'id'),
+    num: pick(b, 'invoiceNumber', 'invoice_number') || pick(pick(b, 'invoice') || {}, 'invoiceNumber'),
+    vendor: vname.get(String(pick(b, 'vendorId', 'vendor_id') || (pick(b, 'vendor') || {}).id || '')) || null,
+    invoiceDate: pick(b, 'invoiceDate', 'invoice_date') || pick(pick(b, 'invoice') || {}, 'invoiceDate'),
+    dueDate: pick(b, 'dueDate', 'due_date'),
+    amount: pick(b, 'amount', 'invoiceAmount', 'totalAmount'),
+    paidAmount: pick(b, 'paidAmount', 'paid_amount'),
+    amountDue: pick(b, 'amountDue', 'openAmount', 'dueAmount', 'balance'),
+    paymentStatus: pick(b, 'paymentStatus', 'status'),
+  }));
+  const paysOut = payments.map(p => ({
+    id: pick(p, 'id'),
+    status: pick(p, 'paymentStatus', 'status'),
+    processDate: pick(p, 'processDate', 'paymentDate', 'createdTime', 'sentDate'),
+    amount: pick(p, 'amount', 'totalAmount', 'paymentAmount'),
+    billPays: (pick(p, 'billPays', 'billPayments', 'billpays', 'bills') || []).map(bp => ({
+      billId: pick(bp, 'billId', 'bill_id', 'id'), amount: pick(bp, 'amount', 'paidAmount'),
+    })),
+  }));
+  res.json({ entity_id: entityId, bill_count: billsOut.length, payment_count: paysOut.length, bills: billsOut, payments: paysOut });
 });
 // ═══════════════════════════════════════════════════════════════════════════
 // Requisition / Invoice-Packet API (development-project entities only)
