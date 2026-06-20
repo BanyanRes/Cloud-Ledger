@@ -3779,6 +3779,33 @@ app.get('/api/billcom/_debug-start/:entity_id', auth, requireEntityAccess('entit
   res.json({ entity_id: entityId, totalFetched: total, pages });
 });
 
+// TEMP DEBUG: test /bills with date filter (v3 filters param). Remove later.
+app.get('/api/billcom/_debug-filter/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'no config' });
+  let session, devKey;
+  try { const password = billcomDecrypt(cfg.password_enc); devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
+  const base = cfg.api_base_url || "https://gateway.prod.bill.com/connect/v3";
+  const hdr = { sessionId: session.sessionId, devKey, Accept: "application/json" };
+  const out={};
+  const tries = [
+    ["filter_invoiceDate_gt_2026", base+"/bills?max=100&filters=invoiceDate%3E2026-01-01"],
+    ["filter_dueDate_gt_2026", base+"/bills?max=100&filters=dueDate%3E2026-01-01"],
+    ["sort_param", base+"/bills?max=5&sort=invoiceDate:desc"],
+    ["paymentStatus_open", base+"/bills?max=100&filters=paymentStatus%3D1"],
+  ];
+  for (const [name,u] of tries){
+    try { const r=await billcomFetch(u,{method:"GET",headers:hdr},20000); const j=await r.json();
+      const results=j.results||[]; const dates=results.map(x=>x.invoiceDate||(x.invoice&&x.invoice.invoiceDate)).filter(Boolean).sort();
+      out[name]={status:r.status, count:results.length, minDate:dates[0], maxDate:dates[dates.length-1], errBody: r.status!==200 ? JSON.stringify(j).slice(0,200): undefined};
+    } catch(e){ out[name]={err:e.message}; }
+  }
+  res.json(out);
+});
+
 // Phase 3: Bill.com sync (bills + payments -> JEs)
 app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   const entityId = parseInt(req.params.entity_id);
