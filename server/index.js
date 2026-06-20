@@ -4333,7 +4333,8 @@ app.get('/api/billcom/_debug-rollfwd/:entity_id', auth, requireEntityAccess('ent
       paymentStatus: pick(hit,"paymentStatus","status"), paidAmount: pick(hit,"paidAmount"), amountDue: pick(hit,"amountDue","openAmount","balance"),
       invoiceDate: pick(hit,"invoiceDate")||pick(pick(hit,"invoice")||{},"invoiceDate"), dueDate: pick(hit,"dueDate") };
   });
-  res.json({ entity_id: entityId, totalBills: bills.length, windows: windowInfo, baselineMatch: matched, foundCount: matched.filter(x=>x.found).length });
+  const raw = bills.map(b=>({ num: billNum(b), vendor: vname.get(String(pick(b,"vendorId","vendor_id")||""))||null, inv: pick(b,"invoiceDate")||pick(pick(b,"invoice")||{},"invoiceDate"), amt: pick(b,"amount","invoiceAmount"), status: pick(b,"paymentStatus","status") }));
+  res.json({ entity_id: entityId, totalBills: bills.length, windows: windowInfo, baselineMatch: matched, foundCount: matched.filter(x=>x.found).length, raw });
 });
 // ═══════════════════════════════════════════════════════════════════════════
 // Requisition / Invoice-Packet API (development-project entities only)
