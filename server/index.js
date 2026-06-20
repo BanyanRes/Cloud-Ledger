@@ -3754,57 +3754,9 @@ app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_i
   res.json(out);
 });
 
-// TEMP DEBUG: test start-offset pagination on /bills. Remove later.
-app.get('/api/billcom/_debug-start/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'no config' });
-  let session, devKey;
-  try { const password = billcomDecrypt(cfg.password_enc); devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
-  const base = cfg.api_base_url || "https://gateway.prod.bill.com/connect/v3";
-  const hdr = { sessionId: session.sessionId, devKey, Accept: "application/json" };
-  const pages=[]; let start=0; const max=100; let total=0; let lastDates=null;
-  for (let i=0;i<12;i++){
-    const u = base + "/bills?max="+max+"&start="+start;
-    let j; try { const r=await billcomFetch(u,{method:"GET",headers:hdr},20000); j=await r.json(); } catch(e){ pages.push({start, err:e.message}); break; }
-    const results = j.results||[];
-    const dates = results.map(x=>x.invoiceDate||(x.invoice&&x.invoice.invoiceDate)).filter(Boolean).sort();
-    pages.push({ start, count: results.length, minDate: dates[0], maxDate: dates[dates.length-1] });
-    total += results.length;
-    if (results.length < max) break;
-    start += max;
-  }
-  res.json({ entity_id: entityId, totalFetched: total, pages });
-});
 
-// TEMP DEBUG: test /bills with date filter (v3 filters param). Remove later.
-app.get('/api/billcom/_debug-filter/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'no config' });
-  let session, devKey;
-  try { const password = billcomDecrypt(cfg.password_enc); devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
-  const base = cfg.api_base_url || "https://gateway.prod.bill.com/connect/v3";
-  const hdr = { sessionId: session.sessionId, devKey, Accept: "application/json" };
-  const out={};
-  const tries = [
-    ["filter_invoiceDate_gt_2026", base+"/bills?max=100&filters=invoiceDate%3E2026-01-01"],
-    ["filter_dueDate_gt_2026", base+"/bills?max=100&filters=dueDate%3E2026-01-01"],
-    ["sort_param", base+"/bills?max=5&sort=invoiceDate:desc"],
-    ["paymentStatus_open", base+"/bills?max=100&filters=paymentStatus%3D1"],
-  ];
-  for (const [name,u] of tries){
-    try { const r=await billcomFetch(u,{method:"GET",headers:hdr},20000); const j=await r.json();
-      const results=j.results||[]; const dates=results.map(x=>x.invoiceDate||(x.invoice&&x.invoice.invoiceDate)).filter(Boolean).sort();
-      out[name]={status:r.status, count:results.length, minDate:dates[0], maxDate:dates[dates.length-1], errBody: r.status!==200 ? JSON.stringify(j).slice(0,200): undefined};
-    } catch(e){ out[name]={err:e.message}; }
-  }
-  res.json(out);
-});
+
+
 
 // Phase 3: Bill.com sync (bills + payments -> JEs)
 app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
@@ -4299,164 +4251,13 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   });
 });
 
-// TEMP DEBUG: dump raw Bill.com bills + payments (key fields) for AP roll-forward analysis. Remove later.
-app.get('/api/billcom/_debug-payments/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
-  let session, devKey;
-  try {
-    const password = billcomDecrypt(cfg.password_enc);
-    devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
-  const listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
-  const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
-  let bills = [], payments = [], vendors = [];
-  try { bills = await billcomListBills({ ...listArgs, maxItems: 2000 }); } catch (e) { bills = [{ err: e.message }]; }
-  try { payments = await billcomListPayments({ ...listArgs, maxItems: 2000 }); } catch (e) { payments = [{ err: e.message }]; }
-  try { vendors = await billcomListVendors({ ...listArgs, maxItems: 5000 }); } catch (e) { vendors = []; }
-  const dedupe = (arr) => { const m = new Map(); for (const x of arr) { const id = x && x.id; if (id != null && !m.has(String(id))) m.set(String(id), x); } return Array.from(m.values()); };
-  bills = dedupe(bills); payments = dedupe(payments);
-  const vname = new Map(); for (const v of vendors) { const id = String(pick(v, 'id') || ''); const n = pick(v, 'name', 'vendorName', 'companyName'); if (id && n) vname.set(id, n); }
-  const billsOut = bills.map(b => ({
-    id: pick(b, 'id'),
-    num: pick(b, 'invoiceNumber', 'invoice_number') || pick(pick(b, 'invoice') || {}, 'invoiceNumber'),
-    vendor: vname.get(String(pick(b, 'vendorId', 'vendor_id') || (pick(b, 'vendor') || {}).id || '')) || null,
-    invoiceDate: pick(b, 'invoiceDate', 'invoice_date') || pick(pick(b, 'invoice') || {}, 'invoiceDate'),
-    dueDate: pick(b, 'dueDate', 'due_date'),
-    amount: pick(b, 'amount', 'invoiceAmount', 'totalAmount'),
-    paidAmount: pick(b, 'paidAmount', 'paid_amount'),
-    amountDue: pick(b, 'amountDue', 'openAmount', 'dueAmount', 'balance'),
-    paymentStatus: pick(b, 'paymentStatus', 'status'),
-  }));
-  const paysOut = payments.map(p => ({
-    id: pick(p, 'id'),
-    status: pick(p, 'paymentStatus', 'status'),
-    processDate: pick(p, 'processDate', 'paymentDate', 'createdTime', 'sentDate'),
-    amount: pick(p, 'amount', 'totalAmount', 'paymentAmount'),
-    billPays: (pick(p, 'billPays', 'billPayments', 'billpays', 'bills') || []).map(bp => ({
-      billId: pick(bp, 'billId', 'bill_id', 'id'), amount: pick(bp, 'amount', 'paidAmount'),
-    })),
-  }));
-  res.json({ entity_id: entityId, bill_count: billsOut.length, payment_count: paysOut.length, bills: billsOut, payments: paysOut });
-});
 
-// TEMP DEBUG: raw first-page envelope of /bills to inspect pagination + try sort. Remove later.
-app.get('/api/billcom/_debug-raw/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'no config' });
-  let session, devKey;
-  try {
-    const password = billcomDecrypt(cfg.password_enc);
-    devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
-  const base = cfg.api_base_url || "https://gateway.prod.bill.com/connect/v3";
-  const hdr = { sessionId: session.sessionId, devKey, Accept: "application/json" };
-  const out = {};
-  // raw page 1, default order
-  try {
-    const u1 = base + "/bills?max=100";
-    const r1 = await billcomFetch(u1, { method:"GET", headers:hdr }, 20000);
-    const j1 = await r1.json();
-    out.page1 = { envelopeKeys: Object.keys(j1), nextPage: j1.nextPage, count: (j1.results||j1||[]).length, firstDate: (j1.results||[])[0] && ((j1.results[0].invoiceDate)||(j1.results[0].invoice&&j1.results[0].invoice.invoiceDate)) };
-    // try page 2 with returned nextPage
-    if (j1.nextPage) {
-      const u2 = base + "/bills?max=100&nextPage=" + encodeURIComponent(j1.nextPage);
-      const r2 = await billcomFetch(u2, { method:"GET", headers:hdr }, 20000);
-      const j2 = await r2.json();
-      out.page2 = { nextPage: j2.nextPage, count: (j2.results||[]).length, sameAsPage1: JSON.stringify((j2.results||[]).map(x=>x.id)) === JSON.stringify((j1.results||[]).map(x=>x.id)) };
-    }
-  } catch (e) { out.pageErr = e.message; }
-  // try sort newest-first (v3 supports sort param)
-  try {
-    const us = base + "/bills?max=5&sort=invoiceDate%20desc";
-    const rs = await billcomFetch(us, { method:"GET", headers:hdr }, 20000);
-    const js = await rs.json();
-    out.sortDesc = { ok: rs.status===200, status: rs.status, count:(js.results||[]).length, firstDates:(js.results||[]).map(x=>x.invoiceDate||(x.invoice&&x.invoice.invoiceDate)) };
-  } catch (e) { out.sortErr = e.message; }
-  res.json(out);
-});
 
-// TEMP DEBUG: nail down v3 filters syntax (field:operator:value). Remove later.
-app.get('/api/billcom/_debug-filter2/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'no config' });
-  let session, devKey;
-  try { const password = billcomDecrypt(cfg.password_enc); devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
-  const base = cfg.api_base_url || "https://gateway.prod.bill.com/connect/v3";
-  const hdr = { sessionId: session.sessionId, devKey, Accept: "application/json" };
-  const out={};
-  // field:operator:value, fully pre-encoded
-  const enc = (v)=>encodeURIComponent(v);
-  const tries = [
-    ["inv_gt", "invoiceDate:gt:2026-01-01"],
-    ["inv_ge", "invoiceDate:ge:2026-01-01"],
-    ["due_gt", "dueDate:gt:2026-01-01"],
-    ["pstatus_eq1", "paymentStatus:eq:1"],
-    ["created_gt", "createdTime:gt:2026-01-01"],
-  ];
-  for (const [name,filt] of tries){
-    const u = base + "/bills?max=100&filters=" + enc(filt);
-    try { const r=await billcomFetch(u,{method:"GET",headers:hdr},20000); const j=await r.json();
-      const results=j.results||[]; const dates=results.map(x=>x.invoiceDate||(x.invoice&&x.invoice.invoiceDate)).filter(Boolean).sort();
-      out[name]={filter:filt, status:r.status, count:results.length, minDate:dates[0], maxDate:dates[dates.length-1], err: r.status!==200? JSON.stringify(j).slice(0,160):undefined};
-    } catch(e){ out[name]={filter:filt, err:e.message}; }
-  }
-  const sorts = [["sort_inv_desc","invoiceDate:desc"],["sort_created_desc","createdTime:desc"]];
-  for (const [name,sv] of sorts){
-    const u = base + "/bills?max=5&sort=" + encodeURIComponent(sv);
-    try { const r=await billcomFetch(u,{method:"GET",headers:hdr},20000); const j=await r.json();
-      const results=j.results||[]; out[name]={sort:sv, status:r.status, count:results.length, firstDates:results.map(x=>x.invoiceDate||(x.invoice&&x.invoice.invoiceDate)), err:r.status!==200?JSON.stringify(j).slice(0,160):undefined};
-    } catch(e){ out[name]={sort:sv, err:e.message}; }
-  }
-  res.json(out);
-});
 
-// TEMP DEBUG: pull 2026 bills via dueDate filter + their payment status. Remove later.
-app.get('/api/billcom/_debug-open/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'no config' });
-  let session, devKey;
-  try { const password = billcomDecrypt(cfg.password_enc); devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
-  const base = cfg.api_base_url || "https://gateway.prod.bill.com/connect/v3";
-  const hdr = { sessionId: session.sessionId, devKey, Accept: "application/json" };
-  const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
-  // Pull all bills with dueDate after 2025-06-01, paginating by start offset
-  let bills=[]; let start=0; const max=100;
-  for (let i=0;i<10;i++){
-    const after = (req.query.after && /^d{4}-d{2}-d{2}$/.test(req.query.after)) ? req.query.after : "2025-06-01";
-    const u = base + "/bills?max="+max+"&start="+start+"&filters="+encodeURIComponent("dueDate:gt:"+after);
-    let j; try { const r=await billcomFetch(u,{method:"GET",headers:hdr},20000); j=await r.json(); } catch(e){ break; }
-    const results=j.results||[]; bills.push(...results);
-    if (results.length<max) break; start+=max;
-  }
-  // dedupe
-  { const m=new Map(); for(const b of bills){const id=b&&b.id; if(id!=null&&!m.has(String(id)))m.set(String(id),b);} bills=Array.from(m.values()); }
-  // vendors for name resolution
-  let vendors=[]; try{ let vs=0; for(let i=0;i<60;i++){ const u=base+"/vendors?max=100&start="+vs; const r=await billcomFetch(u,{method:"GET",headers:hdr},15000); const j=await r.json(); const rr=j.results||[]; vendors.push(...rr); if(rr.length<100)break; vs+=100; } }catch(e){}
-  const vname=new Map(); for(const v of vendors){const id=String(pick(v,"id")||"");const n=pick(v,"name","vendorName","companyName"); if(id&&n)vname.set(id,n);}
-  const out = bills.map(b=>({
-    id: pick(b,"id"),
-    num: pick(b,"invoiceNumber","invoice_number") || pick(pick(b,"invoice")||{},"invoiceNumber"),
-    vendor: vname.get(String(pick(b,"vendorId","vendor_id")||(pick(b,"vendor")||{}).id||""))||null,
-    invoiceDate: pick(b,"invoiceDate") || pick(pick(b,"invoice")||{},"invoiceDate"),
-    dueDate: pick(b,"dueDate"),
-    amount: pick(b,"amount","invoiceAmount"),
-    paidAmount: pick(b,"paidAmount"),
-    amountDue: pick(b,"amountDue","openAmount","dueAmount","balance"),
-    paymentStatus: pick(b,"paymentStatus","status"),
-  }));
-  res.json({ entity_id: entityId, count: out.length, bills: out });
-});
+
+
+
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Requisition / Invoice-Packet API (development-project entities only)
 // Every route is gated: auth → entity access → development-entity check.
