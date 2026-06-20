@@ -4288,6 +4288,53 @@ app.get('/api/billcom/_debug-window/:entity_id', auth, requireEntityAccess('enti
   }
   res.json(out);
 });
+
+// TEMP DEBUG: window-paginate bills by dueDate month windows; match baseline invoices; report payment status. Remove later.
+app.get('/api/billcom/_debug-rollfwd/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'no config' });
+  let session, devKey;
+  try { const password = billcomDecrypt(cfg.password_enc); devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
+  const base = cfg.api_base_url || "https://gateway.prod.bill.com/connect/v3";
+  const hdr = { sessionId: session.sessionId, devKey, Accept: "application/json" };
+  const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
+  // Walk monthly dueDate windows from 2025-12 through 2026-08
+  const monthStarts = [];
+  let y=2025,m=12;
+  for (let i=0;i<10;i++){ const mm=String(m).padStart(2,"0"); monthStarts.push(y+"-"+mm+"-01"); m++; if(m>12){m=1;y++;} }
+  const addMonth = (d)=>{ const [Y,M]=d.split("-"); let yy=+Y, mm=+M+1; if(mm>12){mm=1;yy++;} return yy+"-"+String(mm).padStart(2,"0")+"-01"; };
+  let bills=[]; const windowInfo=[];
+  for (const start of monthStarts){
+    const end = addMonth(start);
+    const filt = "dueDate:gte:"+start+",dueDate:lt:"+end;
+    const u = base + "/bills?max=100&filters=" + encodeURIComponent(filt);
+    try { const r=await billcomFetch(u,{method:"GET",headers:hdr},20000); const j=await r.json(); const rr=j.results||[];
+      windowInfo.push({window:start, count:rr.length, capped: rr.length>=100}); bills.push(...rr);
+    } catch(e){ windowInfo.push({window:start, err:e.message}); }
+  }
+  { const mp=new Map(); for(const b of bills){const id=b&&b.id; if(id!=null&&!mp.has(String(id)))mp.set(String(id),b);} bills=Array.from(mp.values()); }
+  // vendor names
+  let vendors=[]; try{ const u=base+"/vendors?max=100"; const r=await billcomFetch(u,{method:"GET",headers:hdr},15000); const j=await r.json(); vendors=j.results||[]; }catch(e){}
+  const vname=new Map(); for(const v of vendors){const id=String(pick(v,"id")||"");const n=pick(v,"name","vendorName","companyName"); if(id&&n)vname.set(id,n);}
+  const norm=x=>String(x||"").trim().toLowerCase();
+  const baseline = [
+    {num:"REIMB-112025-CLRF",amt:976.20},{num:"REIM-022026-CLRFD",amt:447.59},{num:"CC-122025-CLRFD",amt:14281.58},
+    {num:"L261096016",amt:3675},{num:"19241",amt:5700},{num:"19399",amt:2475},{num:"22373",amt:2429.52},
+    {num:"835428",amt:514},{num:"03/31/2026",amt:21213.92},{num:"22366",amt:2433.22},{num:"03.2026 CC",amt:8324.06},
+  ];
+  const billNum = b => pick(b,"invoiceNumber","invoice_number") || pick(pick(b,"invoice")||{},"invoiceNumber");
+  const matched = baseline.map(bl=>{
+    const hit = bills.find(b=> norm(billNum(b))===norm(bl.num));
+    if(!hit) return {num:bl.num, amt:bl.amt, found:false};
+    return {num:bl.num, vendor: vname.get(String(pick(hit,"vendorId","vendor_id")||""))||null, amt:bl.amt,
+      paymentStatus: pick(hit,"paymentStatus","status"), paidAmount: pick(hit,"paidAmount"), amountDue: pick(hit,"amountDue","openAmount","balance"),
+      invoiceDate: pick(hit,"invoiceDate")||pick(pick(hit,"invoice")||{},"invoiceDate"), dueDate: pick(hit,"dueDate") };
+  });
+  res.json({ entity_id: entityId, totalBills: bills.length, windows: windowInfo, baselineMatch: matched, foundCount: matched.filter(x=>x.found).length });
+});
 // ═══════════════════════════════════════════════════════════════════════════
 // Requisition / Invoice-Packet API (development-project entities only)
 // Every route is gated: auth → entity access → development-entity check.
