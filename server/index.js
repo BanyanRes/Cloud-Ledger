@@ -4433,7 +4433,8 @@ app.get('/api/billcom/_debug-open/:entity_id', auth, requireEntityAccess('entity
   // Pull all bills with dueDate after 2025-06-01, paginating by start offset
   let bills=[]; let start=0; const max=100;
   for (let i=0;i<10;i++){
-    const u = base + "/bills?max="+max+"&start="+start+"&filters="+encodeURIComponent("dueDate:gt:2025-06-01");
+    const after = (req.query.after && /^d{4}-d{2}-d{2}$/.test(req.query.after)) ? req.query.after : "2025-06-01";
+    const u = base + "/bills?max="+max+"&start="+start+"&filters="+encodeURIComponent("dueDate:gt:"+after);
     let j; try { const r=await billcomFetch(u,{method:"GET",headers:hdr},20000); j=await r.json(); } catch(e){ break; }
     const results=j.results||[]; bills.push(...results);
     if (results.length<max) break; start+=max;
