@@ -1649,16 +1649,18 @@ function BulkJEModal({entityId,onClose,onPosted}){
 }
 
 // ═══ Journal List ═══
-function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');
+function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');const[q,setQ]=useState('');
   const[editEntry,setEditEntry]=useState(null);const[showBulk,setShowBulk]=useState(false);
   const load=useCallback(async()=>{const[e,a]=await Promise.all([api.getEntries(entityId,from||undefined,to||undefined),api.getAccounts(entityId)]);setEntries(e);setAccounts(a);},[entityId,from,to]);
   useEffect(()=>{load();},[load]);const del=async id=>{if(!confirm('Delete this journal entry?'))return;await api.deleteEntry(entityId,id);load();};const acctName=code=>accounts.find(a=>a.code===code)?.name||'?';
-  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}><div><div style={S.h1}>Journal Entries</div><div style={S.sub}>{entityName} &middot; {entries.length} entries{!canEdit&&' · read-only'}</div></div>{canEdit&&<div style={{display:'flex',gap:8}}><button style={S.btnS} onClick={()=>setShowBulk(true)}>Bulk Upload</button><button style={S.btnP} onClick={onNewEntry}>+ New Entry</button></div>}</div>
+  const shown=entries.filter(e=>{const t=q.trim().toLowerCase();if(!t)return true;const jeNum='je-'+String(e.entry_num).padStart(4,'0');if(jeNum.includes(t)||String(e.entry_num).includes(t))return true;if((e.date||'').toLowerCase().includes(t))return true;if((e.memo||'').toLowerCase().includes(t))return true;return (e.lines||[]).some(l=>(l.account_code||'').toLowerCase().includes(t)||(acctName(l.account_code)||'').toLowerCase().includes(t)||(l.description||'').toLowerCase().includes(t)||(l.class_name||'').toLowerCase().includes(t)||(l.location_name||'').toLowerCase().includes(t)||(l.project_name||'').toLowerCase().includes(t));});
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}><div><div style={S.h1}>Journal Entries</div><div style={S.sub}>{entityName} &middot; {q?shown.length+' of '+entries.length:entries.length} entries{!canEdit&&' · read-only'}</div></div>{canEdit&&<div style={{display:'flex',gap:8}}><button style={S.btnS} onClick={()=>setShowBulk(true)}>Bulk Upload</button><button style={S.btnP} onClick={onNewEntry}>+ New Entry</button></div>}</div>
     <div style={S.filterBar}><div><label style={S.label}>From</label><input style={S.inputSm} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
       <div><label style={S.label}>To</label><input style={S.inputSm} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
-      {(from||to)&&<button style={{...S.btnGhost,marginTop:14,color:T.red}} onClick={()=>{setFrom('');setTo('');}}>Clear</button>}</div>
-    {entries.length===0?<div style={{...S.card,textAlign:'center',padding:60,color:T.textDim}}>No entries found</div>:
-      <div style={{display:'flex',flexDirection:'column',gap:8}}>{entries.map(e=><div key={e.id} style={{...S.card,padding:14,marginBottom:0}}>
+      <div style={{flex:1,minWidth:200}}><label style={S.label}>Search</label><input style={{...S.inputSm,width:'100%'}} placeholder="JE#, memo, date, account, description..." value={q} onChange={e=>setQ(e.target.value)}/></div>
+      {(from||to||q)&&<button style={{...S.btnGhost,marginTop:14,color:T.red}} onClick={()=>{setFrom('');setTo('');setQ('');}}>Clear</button>}</div>
+    {shown.length===0?<div style={{...S.card,textAlign:'center',padding:60,color:T.textDim}}>No entries found</div>:
+      <div style={{display:'flex',flexDirection:'column',gap:8}}>{shown.map(e=><div key={e.id} style={{...S.card,padding:14,marginBottom:0}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
           <div style={{display:'flex',alignItems:'center',gap:14}}><span style={{fontWeight:700,color:T.accent,fontSize:14}}>JE-{String(e.entry_num).padStart(4,'0')}</span>
             <span style={{color:T.textMuted}}>{e.date}</span><span style={{fontWeight:500}}>{e.memo}</span>
@@ -1818,7 +1820,7 @@ function CustomersManager({entityId,entityName,canEdit}){
 }
 
 // ═══ Chart of Accounts ═══
-function ChartOfAccounts({entityId,entityName,canEdit}){const[accounts,setAccounts]=useState([]);const[showAdd,setShowAdd]=useState(false);
+function ChartOfAccounts({entityId,entityName,canEdit}){const[accounts,setAccounts]=useState([]);const[showAdd,setShowAdd]=useState(false);const[q,setQ]=useState('');
   const[form,setForm]=useState({code:'',name:'',type:'Asset',subtype:'',bank_acct:false});const[err,setErr]=useState('');
   const[editing,setEditing]=useState(null);const[editForm,setEditForm]=useState({});const[editErr,setEditErr]=useState('');
   const[balByCode,setBalByCode]=useState({});const[drillAcct,setDrillAcct]=useState(null);
@@ -1832,7 +1834,10 @@ function ChartOfAccounts({entityId,entityName,canEdit}){const[accounts,setAccoun
   const saveEdit=async()=>{if(!editForm.new_code||!editForm.name){setEditErr('Code and name required');return;}
     try{await api.updateAccount(entityId,editing,editForm);setEditing(null);load();}catch(e){setEditErr(e.message);}};
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}><div><div style={S.h1}>Chart of Accounts</div><div style={S.sub}>{accounts.length} accounts</div></div>
-    {canEdit&&<button style={S.btnP} onClick={()=>setShowAdd(!showAdd)}>{showAdd?'Cancel':'+ Add Account'}</button>}</div>
+    <div style={{display:'flex',alignItems:'center',gap:10}}>
+      <input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search code, name, or type..." style={{...S.inputSm,width:260,padding:'8px 12px'}}/>
+      {canEdit&&<button style={S.btnP} onClick={()=>setShowAdd(!showAdd)}>{showAdd?'Cancel':'+ Add Account'}</button>}
+    </div></div>
     {showAdd&&<div style={{...S.card,borderColor:T.green+'40'}}><div style={S.row}>
       <div style={S.col}><label style={S.label}>Code</label><input style={S.input} placeholder="e.g. 61500" value={form.code} onChange={e=>setForm(f=>({...f,code:e.target.value}))}/></div>
       <div style={{...S.col,flex:2}}><label style={S.label}>Name</label><input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/></div>
@@ -1850,14 +1855,14 @@ function ChartOfAccounts({entityId,entityName,canEdit}){const[accounts,setAccoun
       {editForm.new_code!==editing&&<div style={{fontSize:11,color:T.orange,marginBottom:8}}>Changing code from {editing} to {editForm.new_code} will update all journal entries, bank transactions, and reconciliations.</div>}
       <div style={{display:'flex',gap:10}}><button style={S.btnP} onClick={saveEdit}>Save Changes</button><button style={S.btnS} onClick={()=>setEditing(null)}>Cancel</button></div></div>}
     <div style={S.cardFlush}><table style={S.table}><thead><tr><th style={S.th}>Code</th><th style={S.th}>Name</th><th style={S.th}>Type</th><th style={S.thC}>Bank</th><th style={S.thR}>Balance (as of {asOf})</th>{canEdit&&<th style={{...S.th,width:80}}>Actions</th>}</tr></thead>
-      <tbody>{accounts.map(a=><tr key={a.code} style={editing===a.code?{background:T.accentDim}:{cursor:'pointer'}} onClick={e=>{if(e.target.closest('button'))return;setDrillAcct({code:a.code,name:a.name,type:a.type,balance:balByCode[a.code]||0});}}>
+      <tbody>{accounts.filter(a=>{const t=q.trim().toLowerCase();if(!t)return true;return (a.code||'').toLowerCase().includes(t)||(a.name||'').toLowerCase().includes(t)||(a.type||'').toLowerCase().includes(t);}).map(a=><tr key={a.code} style={editing===a.code?{background:T.accentDim}:{cursor:'pointer'}} onClick={e=>{if(e.target.closest('button'))return;setDrillAcct({code:a.code,name:a.name,type:a.type,balance:balByCode[a.code]||0});}}>
         <td style={{...S.td,color:T.textBright}}>{a.code}</td><td style={S.td}>{a.name}</td><td style={S.td}><span style={S.tag(a.type)}>{a.type}</span></td>
         <td style={S.tdC}>{a.bank_acct?<span style={{color:T.green}}>Yes</span>:''}</td>
         <td style={{...S.tdR,fontWeight:600,color:T.textBright}}>{fmt(balByCode[a.code]||0)}</td>
         {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}>
           <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>startEdit(a)}>Edit</button>
           <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={async()=>{try{await api.deleteAccount(entityId,a.code);load();}catch(e){alert(e.message);}}}>x</button></div></td>}</tr>)}</tbody></table></div>
-    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={yearAgo} to={asOf} onClose={()=>setDrillAcct(null)}/>}
+    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={yearAgo} to={asOf} onClose={()=>setDrillAcct(null)} onChanged={load}/>}
     </div>);}
 
 // ═══ General Ledger ═══
@@ -2240,12 +2245,15 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf}){
         <td style={amtStyle} onClick={()=>r.cr>0&&setDrillAcct(r)} title={r.cr>0?'Click for 12-month detail':''}>{r.cr>0?<span style={{color:T.accent,borderBottom:'1px dotted '+T.accent+'80'}}>{fmt(r.cr)}</span>:''}</td></tr>)}
         <tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={3}>Total</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td></tr></tbody></table>
     <div style={{textAlign:'center',marginTop:14,fontSize:13,fontWeight:600,color:Math.abs(tDr-tCr)<0.005?T.green:T.red}}>{Math.abs(tDr-tCr)<0.005?'In balance':'Off by $'+fmt(tDr-tCr)}</div></div>
-    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillFrom} to={asOf} onClose={()=>setDrillAcct(null)}/>}
+    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillFrom} to={asOf} onClose={()=>setDrillAcct(null)} onChanged={reload}/>}
   </div>);
 }
 
 // ═══ Account Drill-Down Modal (12-month GL detail from TB) ═══
-function AccountDrillDownModal({entityId,entityName,acct,from,to,onClose}){
+function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp,onClose,onChanged}){
+  const[reloadKey,setReloadKey]=useState(0);
+  const[from,setFrom]=useState(fromProp);
+  const[to,setTo]=useState(toProp);
   const[lines,setLines]=useState([]);
   const[begBal,setBegBal]=useState(0);
   const[loading,setLoading]=useState(true);
@@ -2253,24 +2261,29 @@ function AccountDrillDownModal({entityId,entityName,acct,from,to,onClose}){
   const[allEntries,setAllEntries]=useState([]);
   const[allAccounts,setAllAccounts]=useState([]);
   const[viewEntry,setViewEntry]=useState(null);
+  // Beginning balance is the account balance as of the day before 'from', fetched
+  // directly so the window can be any custom range (not just trailing-12mo).
+  const prevDay=(d)=>{const x=new Date(d+'T00:00:00');x.setDate(x.getDate()-1);return x.toISOString().slice(0,10);};
   useEffect(()=>{
+    if(!/^d{4}-d{2}-d{2}$/.test(from)||!/^d{4}-d{2}-d{2}$/.test(to))return;
     (async()=>{
       setLoading(true);setErr('');
       try{
-        const[entries,accts]=await Promise.all([api.getEntries(entityId,from,to),api.getAccounts(entityId)]);
+        const[entries,accts,begBalances]=await Promise.all([
+          api.getEntries(entityId,from,to),
+          api.getAccounts(entityId),
+          api.getBalances(entityId,{as_of:prevDay(from)})
+        ]);
         setAllEntries(entries);setAllAccounts(accts);
         const txns=[];
         entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code)txns.push({date:e.date,entry_num:e.entry_num,jeId:e.id,memo:e.memo,debit:l.debit||0,credit:l.credit||0,created_by:e.created_by,created_at:e.created_at});});});
         txns.sort((a,b)=>a.date.localeCompare(b.date)||a.entry_num-b.entry_num);
-        const windowDr=txns.reduce((s,t)=>s+t.debit,0);
-        const windowCr=txns.reduce((s,t)=>s+t.credit,0);
-        const isDr=acct.type==='Asset'||acct.type==='Expense';
-        const netWindow=isDr?(windowDr-windowCr):(windowCr-windowDr);
-        setBegBal(acct.balance-netWindow);
+        const bb=(begBalances||[]).find(x=>x.code===acct.code);
+        setBegBal(bb?bb.balance:0);
         setLines(txns);
       }catch(e){setErr(e.message);}finally{setLoading(false);}
     })();
-  },[entityId,acct.code,acct.balance,acct.type,from,to]);
+  },[entityId,acct.code,acct.type,from,to,reloadKey]);
   const openJE=jeId=>{const e=allEntries.find(x=>x.id===jeId);if(e)setViewEntry(e);};
   const isDr=acct.type==='Asset'||acct.type==='Expense';
   let running=begBal;
@@ -2285,7 +2298,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from,to,onClose}){
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14,gap:16}}>
       <div><div style={{fontSize:18,fontWeight:700,color:T.textBright}}>{acct.code} &mdash; {acct.name}</div>
-        <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Trailing 12 months &middot; {from} to {to}</div>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginTop:6}}><label style={{fontSize:11,color:T.textMuted}}>From</label><input type="date" value={from} max={to} onChange={e=>setFrom(e.target.value)} style={{...S.inputSm,padding:'4px 8px',fontSize:12}}/><label style={{fontSize:11,color:T.textMuted}}>To</label><input type="date" value={to} min={from} onChange={e=>setTo(e.target.value)} style={{...S.inputSm,padding:'4px 8px',fontSize:12}}/><button onClick={()=>{setFrom(fromProp);setTo(toProp);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'4px 8px',cursor:'pointer'}}>Reset</button></div>
         <div style={{marginTop:6}}><span style={S.tag(acct.type)}>{acct.type}</span></div></div>
       <button style={S.btnExport} onClick={doExport}>Export Excel</button>
     </div>
@@ -2318,16 +2331,16 @@ function AccountDrillDownModal({entityId,entityName,acct,from,to,onClose}){
              <td style={{...S.tdBold,textAlign:'right'}}>${fmt(totalCr)}</td>
              <td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>${fmt(running)}</td></tr>
          </tbody></table></div>}
-    {viewEntry&&<EditJEModal entityId={entityId} entry={viewEntry} accounts={allAccounts} onClose={()=>setViewEntry(null)} onSaved={()=>setViewEntry(null)}/>}
+    {viewEntry&&<EditJEModal entityId={entityId} entry={viewEntry} accounts={allAccounts} onClose={()=>setViewEntry(null)} onSaved={()=>{setViewEntry(null);setReloadKey(k=>k+1);onChanged&&onChanged();}}/>}
   </div></div>);
 }
 
-function BalanceSheet({entityId,entityName,asOf,setAsOf}){const[balances,setBalances]=useState([]);const[drillAcct,setDrillAcct]=useState(null);
+function BalanceSheet({entityId,entityName,asOf,setAsOf}){const[balances,setBalances]=useState([]);const[drillAcct,setDrillAcct]=useState(null);const[rk,setRk]=useState(0);
   // Guard: while the user is editing the date input, asOf can briefly be '' or a partial string like '2026-'.
   const validAsOf=/^\d{4}-\d{2}-\d{2}$/.test(asOf)&&!isNaN(new Date(asOf+'T00:00:00').getTime())?asOf:today();
   const fyS=validAsOf.slice(0,4)+'-01-01';
   const drillFrom=useMemo(()=>{const d=new Date(validAsOf+'T00:00:00');d.setFullYear(d.getFullYear()-1);d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);},[validAsOf]);
-  useEffect(()=>{api.getBalances(entityId,{as_of:validAsOf,close_pl_before:fyS}).then(setBalances);},[entityId,validAsOf,fyS]);
+  useEffect(()=>{api.getBalances(entityId,{as_of:validAsOf,close_pl_before:fyS}).then(setBalances);},[entityId,validAsOf,fyS,rk]);
   const get=t=>balances.filter(b=>b.type===t&&Math.abs(b.balance)>0.005);const sum=t=>get(t).reduce((s,b)=>s+b.balance,0);
   const ni=sum('Revenue')-sum('Expense');const tA=sum('Asset');const tLE=sum('Liability')+sum('Equity')+ni;
   const doExport=()=>{const d=[[entityName||'Balance Sheet'],['Balance Sheet'],['As of '+asOf],[]];[['Assets','Asset'],['Liabilities','Liability'],['Equity','Equity']].forEach(([t,ty])=>{d.push([t,'']);get(ty).forEach(b=>d.push(['  '+b.name,b.balance]));if(ty==='Equity'&&Math.abs(ni)>0.005)d.push(['  Net Income (current period)',ni]);d.push(['Total '+t,ty==='Equity'?sum(ty)+ni:sum(ty)]);d.push([]);});d.push(['Total L+E',tLE]);exportToExcel(d,'BS_'+asOf+'.xlsx');};
@@ -2342,11 +2355,11 @@ function BalanceSheet({entityId,entityName,asOf,setAsOf}){const[balances,setBala
       <Sec title="Liabilities" type="Liability" total={sum('Liability')}/><tr><td colSpan={2} style={{padding:4}}/></tr><Sec title="Equity" type="Equity" total={sum('Equity')+ni}/>
       <tr style={S.grandTotalRow}><td style={S.tdBold}>Total Liabilities + Equity</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tLE)}</td></tr></tbody></table>
     <div style={{textAlign:'center',marginTop:14,fontSize:13,fontWeight:600,color:Math.abs(tA-tLE)<0.005?T.green:T.red}}>{Math.abs(tA-tLE)<0.005?'A = L + E':'Off by $'+fmt(tA-tLE)}</div></div>
-    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillFrom} to={asOf} onClose={()=>setDrillAcct(null)}/>}
+    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillFrom} to={asOf} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
     </div>);}
 
-function IncomeStatement({entityId,entityName,from,setFrom,to,setTo}){const[balances,setBalances]=useState([]);const[drillAcct,setDrillAcct]=useState(null);
-  useEffect(()=>{api.getBalances(entityId,{from,to}).then(setBalances);},[entityId,from,to]);
+function IncomeStatement({entityId,entityName,from,setFrom,to,setTo}){const[balances,setBalances]=useState([]);const[drillAcct,setDrillAcct]=useState(null);const[rk,setRk]=useState(0);
+  useEffect(()=>{api.getBalances(entityId,{from,to}).then(setBalances);},[entityId,from,to,rk]);
   const get=t=>balances.filter(b=>b.type===t&&Math.abs(b.balance)>0.005);const sum=arr=>arr.reduce((s,b)=>s+b.balance,0);
   const rev=get('Revenue');const cogs=get('Expense').filter(b=>b.subtype==='COGS');const opex=get('Expense').filter(b=>b.subtype==='Operating Expense');const other=get('Expense').filter(b=>b.subtype!=='COGS'&&b.subtype!=='Operating Expense');
   const tRev=sum(rev);const gp=tRev-sum(cogs);const oi=gp-sum(opex);const ni=oi-sum(other);
@@ -2364,7 +2377,7 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo}){const[bala
       <tr style={{background:T.bgElevated}}><td style={{...S.td,fontWeight:700,color:T.textBright}}>Operating Income</td><td style={{...S.tdR,fontWeight:700,color:T.textBright,fontSize:15}}>${fmt(oi)}</td></tr>
       {other.length>0&&<Sec title="Other Expenses" items={other} total={sum(other)}/>}
       <tr style={S.grandTotalRow}><td style={{...S.tdBold,fontSize:15}}>Net Income</td><td style={{...S.tdBold,textAlign:'right',fontSize:18,color:ni>=0?T.green:T.red}}>${fmt(ni)}</td></tr></tbody></table></div>
-    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={from} to={to} onClose={()=>setDrillAcct(null)}/>}
+    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={from} to={to} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
     </div>);}
 
 // ═══ Custom Detail Report (Q6: multi-account, grouped by class/location, with subtotals) ═══
