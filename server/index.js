@@ -4379,6 +4379,44 @@ app.get('/api/billcom/_debug-raw/:entity_id', auth, requireEntityAccess('entity_
   } catch (e) { out.sortErr = e.message; }
   res.json(out);
 });
+
+// TEMP DEBUG: nail down v3 filters syntax (field:operator:value). Remove later.
+app.get('/api/billcom/_debug-filter2/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'no config' });
+  let session, devKey;
+  try { const password = billcomDecrypt(cfg.password_enc); devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
+  const base = cfg.api_base_url || "https://gateway.prod.bill.com/connect/v3";
+  const hdr = { sessionId: session.sessionId, devKey, Accept: "application/json" };
+  const out={};
+  // field:operator:value, fully pre-encoded
+  const enc = (v)=>encodeURIComponent(v);
+  const tries = [
+    ["inv_gt", "invoiceDate:gt:2026-01-01"],
+    ["inv_ge", "invoiceDate:ge:2026-01-01"],
+    ["due_gt", "dueDate:gt:2026-01-01"],
+    ["pstatus_eq1", "paymentStatus:eq:1"],
+    ["created_gt", "createdTime:gt:2026-01-01"],
+  ];
+  for (const [name,filt] of tries){
+    const u = base + "/bills?max=100&filters=" + enc(filt);
+    try { const r=await billcomFetch(u,{method:"GET",headers:hdr},20000); const j=await r.json();
+      const results=j.results||[]; const dates=results.map(x=>x.invoiceDate||(x.invoice&&x.invoice.invoiceDate)).filter(Boolean).sort();
+      out[name]={filter:filt, status:r.status, count:results.length, minDate:dates[0], maxDate:dates[dates.length-1], err: r.status!==200? JSON.stringify(j).slice(0,160):undefined};
+    } catch(e){ out[name]={filter:filt, err:e.message}; }
+  }
+  const sorts = [["sort_inv_desc","invoiceDate:desc"],["sort_created_desc","createdTime:desc"]];
+  for (const [name,sv] of sorts){
+    const u = base + "/bills?max=5&sort=" + encodeURIComponent(sv);
+    try { const r=await billcomFetch(u,{method:"GET",headers:hdr},20000); const j=await r.json();
+      const results=j.results||[]; out[name]={sort:sv, status:r.status, count:results.length, firstDates:results.map(x=>x.invoiceDate||(x.invoice&&x.invoice.invoiceDate)), err:r.status!==200?JSON.stringify(j).slice(0,160):undefined};
+    } catch(e){ out[name]={sort:sv, err:e.message}; }
+  }
+  res.json(out);
+});
 // ═══════════════════════════════════════════════════════════════════════════
 // Requisition / Invoice-Packet API (development-project entities only)
 // Every route is gated: auth → entity access → development-entity check.
