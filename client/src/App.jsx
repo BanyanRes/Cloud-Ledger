@@ -355,6 +355,55 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
   </div></div>);}
 
 // ─── Entity Picker ───
+function GlobalSearch({entities,activeEntity,onSelectEntity,onGo}){
+  const[open,setOpen]=useState(false);
+  const[q,setQ]=useState("");
+  const[accounts,setAccounts]=useState([]);
+  const[entries,setEntries]=useState([]);
+  const[loaded,setLoaded]=useState(false);
+  // Lazy-load the active entity's accounts + recent entries the first time the box opens.
+  useEffect(()=>{
+    if(!open||!activeEntity||loaded)return;
+    let cancelled=false;
+    (async()=>{
+      try{
+        const[a,e]=await Promise.all([api.getAccounts(activeEntity).catch(()=>[]),api.getEntries(activeEntity).catch(()=>[])]);
+        if(!cancelled){setAccounts(a||[]);setEntries(e||[]);setLoaded(true);}
+      }catch{ if(!cancelled)setLoaded(true); }
+    })();
+    return()=>{cancelled=true;};
+  },[open,activeEntity,loaded]);
+  // Reset the cached data when the active entity changes.
+  useEffect(()=>{setLoaded(false);setAccounts([]);setEntries([]);},[activeEntity]);
+  const t=q.trim().toLowerCase();
+  const entHits = t? entities.filter(e=>(e.name||"").toLowerCase().includes(t)||(e.code||"").toLowerCase().includes(t)).slice(0,6):[];
+  const acctHits = t? accounts.filter(a=>(a.code||"").toLowerCase().includes(t)||(a.name||"").toLowerCase().includes(t)).slice(0,6):[];
+  const jeHits = t? entries.filter(e=>{
+    const jn="je-"+String(e.entry_num).padStart(4,"0");
+    if(jn.includes(t)||String(e.entry_num).includes(t))return true;
+    if((e.date||"").toLowerCase().includes(t))return true;
+    if((e.memo||"").toLowerCase().includes(t))return true;
+    return (e.lines||[]).some(l=>(l.account_code||"").toLowerCase().includes(t)||(l.description||"").toLowerCase().includes(t));
+  }).slice(0,6):[];
+  const close=()=>{setOpen(false);setQ("");};
+  const pickEntity=(id)=>{onSelectEntity(id);onGo("dashboard");close();};
+  const pickAccount=()=>{onGo("coa");close();};
+  const pickJE=()=>{onGo("journal");close();};
+  const Row=({children,onClick})=>(<div onClick={onClick} style={{padding:"8px 14px",cursor:"pointer",fontSize:13,borderRadius:6}} onMouseEnter={e=>e.currentTarget.style.background=T.bgElevated} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>{children}</div>);
+  const Hdr=({children})=>(<div style={{padding:"8px 14px 4px",fontSize:10,fontWeight:700,letterSpacing:"0.06em",textTransform:"uppercase",color:T.textDim}}>{children}</div>);
+  const hasAny=entHits.length||acctHits.length||jeHits.length;
+  return(<div style={{position:"relative"}}>
+    <input value={q} onFocus={()=>setOpen(true)} onChange={e=>{setQ(e.target.value);setOpen(true);}} placeholder="Search everything…"
+      style={{width:240,padding:"7px 12px",borderRadius:T.radiusSm,border:"1px solid "+T.border,background:T.bgElevated,fontSize:13,color:T.textBright}}/>
+    {open&&q&&<><div style={{position:"fixed",inset:0,zIndex:50}} onClick={close}/>
+      <div style={{position:"absolute",top:"100%",left:0,marginTop:6,width:360,maxHeight:420,overflowY:"auto",background:"#fff",border:"1px solid "+T.border,borderRadius:T.radius,boxShadow:T.shadowLg,zIndex:100,padding:"6px 0"}}>
+        {!hasAny&&<div style={{padding:"16px 14px",fontSize:13,color:T.textDim}}>{loaded?"No matches":"Searching…"}</div>}
+        {entHits.length>0&&<><Hdr>Entities</Hdr>{entHits.map(e=><Row key={"e"+e.id} onClick={()=>pickEntity(e.id)}><span style={{fontWeight:600,color:T.textBright}}>{e.name}</span>{e.code&&<span style={{color:T.textDim,marginLeft:6,fontSize:11}}>{e.code}</span>}</Row>)}</>}
+        {acctHits.length>0&&<><Hdr>Accounts (current entity)</Hdr>{acctHits.map(a=><Row key={"a"+a.code} onClick={pickAccount}><span style={{color:T.accent,fontWeight:600}}>{a.code}</span><span style={{marginLeft:8}}>{a.name}</span><span style={{...S.tag(a.type),marginLeft:8,transform:"scale(0.85)"}}>{a.type}</span></Row>)}</>}
+        {jeHits.length>0&&<><Hdr>Journal Entries (current entity)</Hdr>{jeHits.map(e=><Row key={"j"+e.id} onClick={pickJE}><span style={{color:T.accent,fontWeight:600}}>JE-{String(e.entry_num).padStart(4,"0")}</span><span style={{color:T.textMuted,marginLeft:8}}>{e.date}</span><span style={{marginLeft:8}}>{e.memo}</span></Row>)}</>}
+      </div></>}
+  </div>);
+}
 function EntityPicker({entities,activeId,onSelect,onManage}){const[open,setOpen]=useState(false);const[search,setSearch]=useState('');const active=entities.find(e=>e.id===activeId);
   const filtered=entities.filter(e=>e.name.toLowerCase().includes(search.toLowerCase()));
   return(<div style={{position:'relative'}}><div style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',padding:'6px 14px',borderRadius:T.radiusSm,background:T.bgElevated,border:'1px solid '+T.border}} onClick={()=>setOpen(!open)}>
@@ -531,7 +580,7 @@ export default function App(){
     <div style={S.topBar}><div style={{display:'flex',alignItems:'center',gap:16}}>
       <button style={{...S.btnGhost,fontSize:18,padding:'4px 6px',color:T.textMuted}} onClick={()=>setSidebarCol(c=>!c)}>{sidebarCol?'\u2630':'\u2190'}</button>
       <div style={{display:'flex',alignItems:'center',gap:10}}><Logo size={32}/>{!sidebarCol&&<div style={{fontSize:17,fontWeight:800,color:T.textBright}}>CloudLedger</div>}</div>
-      <div style={{width:1,height:28,background:T.border}}/><EntityPicker entities={entities} activeId={activeEntity} onSelect={setActiveEntity} onManage={()=>setPage('entities')}/>
+      <div style={{width:1,height:28,background:T.border}}/><EntityPicker entities={entities} activeId={activeEntity} onSelect={setActiveEntity} onManage={()=>setPage('entities')}/>{entities.length>0&&<GlobalSearch entities={entities} activeEntity={activeEntity} onSelectEntity={setActiveEntity} onGo={setPage}/>}
       {_activeEnt&&<button style={{...S.btnGhost,fontSize:18,padding:'4px 8px',lineHeight:1}} title={'Open '+_activeEnt.name+' Workpapers'} onClick={()=>setWpEntity(_activeEnt)}>📁</button>}</div>
       <div style={{display:'flex',alignItems:'center',gap:10}}>
         {canEdit&&activeEntity&&<button style={{...S.btnP,position:'relative'}} onClick={()=>setShowJE(true)}>+ Journal Entry{jeHasContent&&<span style={{position:'absolute',top:-3,right:-3,width:8,height:8,borderRadius:4,background:T.orange,border:'2px solid #fff'}}/>}</button>}
