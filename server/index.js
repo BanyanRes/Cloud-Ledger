@@ -4417,6 +4417,45 @@ app.get('/api/billcom/_debug-filter2/:entity_id', auth, requireEntityAccess('ent
   }
   res.json(out);
 });
+
+// TEMP DEBUG: pull 2026 bills via dueDate filter + their payment status. Remove later.
+app.get('/api/billcom/_debug-open/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'no config' });
+  let session, devKey;
+  try { const password = billcomDecrypt(cfg.password_enc); devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
+  const base = cfg.api_base_url || "https://gateway.prod.bill.com/connect/v3";
+  const hdr = { sessionId: session.sessionId, devKey, Accept: "application/json" };
+  const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
+  // Pull all bills with dueDate after 2025-06-01, paginating by start offset
+  let bills=[]; let start=0; const max=100;
+  for (let i=0;i<10;i++){
+    const u = base + "/bills?max="+max+"&start="+start+"&filters="+encodeURIComponent("dueDate:gt:2025-06-01");
+    let j; try { const r=await billcomFetch(u,{method:"GET",headers:hdr},20000); j=await r.json(); } catch(e){ break; }
+    const results=j.results||[]; bills.push(...results);
+    if (results.length<max) break; start+=max;
+  }
+  // dedupe
+  { const m=new Map(); for(const b of bills){const id=b&&b.id; if(id!=null&&!m.has(String(id)))m.set(String(id),b);} bills=Array.from(m.values()); }
+  // vendors for name resolution
+  let vendors=[]; try{ let vs=0; for(let i=0;i<60;i++){ const u=base+"/vendors?max=100&start="+vs; const r=await billcomFetch(u,{method:"GET",headers:hdr},15000); const j=await r.json(); const rr=j.results||[]; vendors.push(...rr); if(rr.length<100)break; vs+=100; } }catch(e){}
+  const vname=new Map(); for(const v of vendors){const id=String(pick(v,"id")||"");const n=pick(v,"name","vendorName","companyName"); if(id&&n)vname.set(id,n);}
+  const out = bills.map(b=>({
+    id: pick(b,"id"),
+    num: pick(b,"invoiceNumber","invoice_number") || pick(pick(b,"invoice")||{},"invoiceNumber"),
+    vendor: vname.get(String(pick(b,"vendorId","vendor_id")||(pick(b,"vendor")||{}).id||""))||null,
+    invoiceDate: pick(b,"invoiceDate") || pick(pick(b,"invoice")||{},"invoiceDate"),
+    dueDate: pick(b,"dueDate"),
+    amount: pick(b,"amount","invoiceAmount"),
+    paidAmount: pick(b,"paidAmount"),
+    amountDue: pick(b,"amountDue","openAmount","dueAmount","balance"),
+    paymentStatus: pick(b,"paymentStatus","status"),
+  }));
+  res.json({ entity_id: entityId, count: out.length, bills: out });
+});
 // ═══════════════════════════════════════════════════════════════════════════
 // Requisition / Invoice-Packet API (development-project entities only)
 // Every route is gated: auth → entity access → development-entity check.
