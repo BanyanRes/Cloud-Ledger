@@ -4289,6 +4289,44 @@ app.get('/api/billcom/_debug-payments/:entity_id', auth, requireEntityAccess('en
   }));
   res.json({ entity_id: entityId, bill_count: billsOut.length, payment_count: paysOut.length, bills: billsOut, payments: paysOut });
 });
+
+// TEMP DEBUG: raw first-page envelope of /bills to inspect pagination + try sort. Remove later.
+app.get('/api/billcom/_debug-raw/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'no config' });
+  let session, devKey;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login: ' + e.message }); }
+  const base = cfg.api_base_url || "https://gateway.prod.bill.com/connect/v3";
+  const hdr = { sessionId: session.sessionId, devKey, Accept: "application/json" };
+  const out = {};
+  // raw page 1, default order
+  try {
+    const u1 = base + "/bills?max=100";
+    const r1 = await billcomFetch(u1, { method:"GET", headers:hdr }, 20000);
+    const j1 = await r1.json();
+    out.page1 = { envelopeKeys: Object.keys(j1), nextPage: j1.nextPage, count: (j1.results||j1||[]).length, firstDate: (j1.results||[])[0] && ((j1.results[0].invoiceDate)||(j1.results[0].invoice&&j1.results[0].invoice.invoiceDate)) };
+    // try page 2 with returned nextPage
+    if (j1.nextPage) {
+      const u2 = base + "/bills?max=100&nextPage=" + encodeURIComponent(j1.nextPage);
+      const r2 = await billcomFetch(u2, { method:"GET", headers:hdr }, 20000);
+      const j2 = await r2.json();
+      out.page2 = { nextPage: j2.nextPage, count: (j2.results||[]).length, sameAsPage1: JSON.stringify((j2.results||[]).map(x=>x.id)) === JSON.stringify((j1.results||[]).map(x=>x.id)) };
+    }
+  } catch (e) { out.pageErr = e.message; }
+  // try sort newest-first (v3 supports sort param)
+  try {
+    const us = base + "/bills?max=5&sort=invoiceDate%20desc";
+    const rs = await billcomFetch(us, { method:"GET", headers:hdr }, 20000);
+    const js = await rs.json();
+    out.sortDesc = { ok: rs.status===200, status: rs.status, count:(js.results||[]).length, firstDates:(js.results||[]).map(x=>x.invoiceDate||(x.invoice&&x.invoice.invoiceDate)) };
+  } catch (e) { out.sortErr = e.message; }
+  res.json(out);
+});
 // ═══════════════════════════════════════════════════════════════════════════
 // Requisition / Invoice-Packet API (development-project entities only)
 // Every route is gated: auth → entity access → development-entity check.
