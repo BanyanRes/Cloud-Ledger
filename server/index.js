@@ -449,6 +449,22 @@ db.exec(`
     UNIQUE(entity_id, class_id)
   );
   CREATE INDEX IF NOT EXISTS idx_invcommit_entity ON investor_commitments(entity_id);
+  -- Saved/memorized report configurations (QBO-style). Shared per entity:
+  -- every user with access to the entity sees all of its saved reports.
+  -- config_json holds the report-specific settings (accounts, group-by, dates, etc.).
+  CREATE TABLE IF NOT EXISTS memorized_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    report_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    created_by INTEGER,
+    created_by_name TEXT,
+    created_at TEXT,
+    updated_at TEXT,
+    UNIQUE(entity_id, report_type, name)
+  );
+  CREATE INDEX IF NOT EXISTS idx_memrep_entity ON memorized_reports(entity_id);
 `);
 if (!jlCols.includes('class_id')) {
   db.exec("ALTER TABLE journal_lines ADD COLUMN class_id INTEGER");
@@ -1935,6 +1951,48 @@ app.patch('/api/entities/:eid/commitments/:id', auth, requireEntityAccess(), req
 });
 app.delete('/api/entities/:eid/commitments/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   db.prepare('DELETE FROM investor_commitments WHERE id = ? AND entity_id = ?').run(req.params.id, req.params.eid);
+  res.json({ success: true });
+});
+
+// ── Memorized reports (saved report configurations; shared per entity). ──
+app.get('/api/entities/:eid/memorized-reports', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const rows = db.prepare(`SELECT id, report_type, name, config_json, created_by, created_by_name, created_at, updated_at
+    FROM memorized_reports WHERE entity_id = ? ORDER BY report_type, name`).all(req.params.eid);
+  res.json(rows.map(r => ({ ...r, config: (() => { try { return JSON.parse(r.config_json); } catch { return {}; } })() })));
+});
+app.post('/api/entities/:eid/memorized-reports', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const name = (req.body.name || '').trim();
+  const reportType = (req.body.report_type || '').trim();
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  if (!reportType) return res.status(400).json({ error: 'report_type is required' });
+  const configJson = JSON.stringify(req.body.config || {});
+  const now = new Date().toISOString();
+  try {
+    const r = db.prepare(`INSERT INTO memorized_reports (entity_id, report_type, name, config_json, created_by, created_by_name, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(req.params.eid, reportType, name, configJson, req.user.id, req.user.name || null, now, now);
+    res.json({ id: r.lastInsertRowid });
+  } catch (e) {
+    if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'A saved report of this type already has that name; pick another name' });
+    throw e;
+  }
+});
+app.patch('/api/entities/:eid/memorized-reports/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const row = db.prepare('SELECT * FROM memorized_reports WHERE id = ? AND entity_id = ?').get(req.params.id, req.params.eid);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  const name = req.body.name !== undefined ? (req.body.name || '').trim() : row.name;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  const configJson = req.body.config !== undefined ? JSON.stringify(req.body.config) : row.config_json;
+  try {
+    db.prepare('UPDATE memorized_reports SET name = ?, config_json = ?, updated_at = ? WHERE id = ? AND entity_id = ?')
+      .run(name, configJson, new Date().toISOString(), req.params.id, req.params.eid);
+    res.json({ success: true });
+  } catch (e) {
+    if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'A saved report of this type already has that name; pick another name' });
+    throw e;
+  }
+});
+app.delete('/api/entities/:eid/memorized-reports/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  db.prepare('DELETE FROM memorized_reports WHERE id = ? AND entity_id = ?').run(req.params.id, req.params.eid);
   res.json({ success: true });
 });
 

@@ -515,7 +515,7 @@ export default function App(){
     document.addEventListener('mousedown', onDown);
     return () => { document.removeEventListener('mousedown', onDown); if (styleEl.parentNode) styleEl.parentNode.removeChild(styleEl); };
   }, []);
-  const[showJE,setShowJE]=useState(false);const[showChangePw,setShowChangePw]=useState(false);const[rk,setRk]=useState(0);
+  const[showJE,setShowJE]=useState(false);const[showChangePw,setShowChangePw]=useState(false);const[rk,setRk]=useState(0);const[pendingReportConfig,setPendingReportConfig]=useState(null);
   const[sidebarCol,setSidebarCol]=useState(()=>{try{return localStorage.getItem(SIDEBAR_KEY)==='true';}catch{return false;}});
   // JE form state lives in App — survives modal close, cleared only on post/discard
   const[jeForm,setJeForm]=useState(BLANK_JE());const[jePendingFiles,setJePendingFiles]=useState([]);
@@ -568,7 +568,7 @@ export default function App(){
     {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},...(dimsEnabled?[{id:'dimensions',label:'Dimensions',icon:'🏷️',section:'coa'}]:[]),{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
     {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
     {id:'d3',divider:1,label:'REPORTS'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
-    {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),{id:'apaging',label:'AP Aging',icon:'⏳',section:'reports'},{id:'commitments',label:'Commitments',icon:'🤝',section:'reports'},
+    {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),{id:'apaging',label:'AP Aging',icon:'⏳',section:'reports'},{id:'commitments',label:'Commitments',icon:'🤝',section:'reports'},{id:'memorized',label:'Memorized Reports',icon:'★',section:'reports'},
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
     ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
     ...(arEnabled?[{id:'d3c',divider:1,label:'RECEIVABLES'},{id:'ar_customers',label:'Customers',icon:'👥',section:'coa'}]:[]),
@@ -600,13 +600,14 @@ export default function App(){
         {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
         {page==='banktxn'&&activeEntity&&<BankTransactions entityId={activeEntity} canEdit={canEdit} bankSelAcct={bankSelAcct} setBankSelAcct={setBankSelAcct} bankTxns={bankTxns} setBankTxns={setBankTxns} bankUploading={bankUploading} setBankUploading={setBankUploading} bankStatusFilter={bankStatusFilter} setBankStatusFilter={setBankStatusFilter}/>}
         {page==='bankrec'&&activeEntity&&<BankReconciliation entityId={activeEntity} user={user} canEdit={canEdit}/>}
-        {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} isClrf={_activeEnt?.code==='COUNTYLI1'} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf}/>}
-        {page==='bs'&&activeEntity&&<BalanceSheet entityId={activeEntity} entityName={entityName} asOf={bsAsOf} setAsOf={setBsAsOf}/>}
-        {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo}/>}
-        {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
-        {page==='pivot'&&activeEntity&&dimsEnabled&&<PivotReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
-        {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
+        {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} isClrf={_activeEnt?.code==='COUNTYLI1'} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf} canEdit={canEdit}/>}
+        {page==='bs'&&activeEntity&&<BalanceSheet entityId={activeEntity} entityName={entityName} asOf={bsAsOf} setAsOf={setBsAsOf} canEdit={canEdit}/>}
+        {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo} canEdit={canEdit}/>}
+        {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='customdetail'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
+        {page==='pivot'&&activeEntity&&dimsEnabled&&<PivotReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='pivot'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
+        {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='commitments'&&activeEntity&&<CommitmentsPage entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='memorized'&&activeEntity&&<MemorizedReportsPage entityId={activeEntity} entityName={entityName} canEdit={canEdit} onOpen={(r)=>{const c=r.config||{};if(r.report_type==='trial'&&c.asOf)setTbAsOf(c.asOf);else if(r.report_type==='bs'&&c.asOf)setBsAsOf(c.asOf);else if(r.report_type==='is'){if(c.from)setIsFrom(c.from);if(c.to)setIsTo(c.to);}else setPendingReportConfig({type:r.report_type,config:c});setPage(r.report_type==='drilldown'?'coa':r.report_type);}} key={activeEntity+'-'+rk}/>}
         {page==='wip'&&activeEntity&&<WipSchedule entityName={entityName} asOf={wipAsOf} setAsOf={setWipAsOf}/>}
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='users'&&<UserManagement currentUser={user}/>}
@@ -2227,7 +2228,7 @@ function WipSchedule({entityName,asOf,setAsOf}){
   </div></div>);
 }
 
-function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf}){
+function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEdit=true}){
   const[balances,setBalances]=useState([]);
   const[drillAcct,setDrillAcct]=useState(null);
   const[locations,setLocations]=useState([]);
@@ -2285,7 +2286,7 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf}){
       {showProj&&<div><label style={S.label}>Project</label><select style={S.inputSm} value={projId} onChange={e=>setProjId(e.target.value)}><option value="">All (whole entity)</option>{projects.map(p=><option key={p.id} value={p.id}>{p.code&&p.code!==p.name?p.code+' — '+p.name:p.name}{p.line_count!=null?(' ('+p.line_count+')'):''}</option>)}</select></div>}
       {showLocInv&&<div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>}
       {showLocInv&&<div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div>}</div>
-    <div style={{display:'flex',gap:8}}><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={doExport}>Export TB</button></div></div>
+    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='trial' currentConfig={{asOf}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={doExport}>Export TB</button></div></div>
     <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Trial Balance{scopeLabel?(' — '+scopeLabel):''}</div><div style={{fontSize:13,color:T.textMuted}}>As of {asOf}{dimmed?' · dimension-tagged activity only':''}</div></div>
     <table style={{...S.table,tableLayout:'fixed',width:'100%'}}>
       <colgroup><col style={{width:'90px'}}/><col/><col style={{width:'120px'}}/><col style={{width:'160px'}}/><col style={{width:'160px'}}/></colgroup>
@@ -2385,7 +2386,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
   </div></div>);
 }
 
-function BalanceSheet({entityId,entityName,asOf,setAsOf}){const[balances,setBalances]=useState([]);const[drillAcct,setDrillAcct]=useState(null);const[rk,setRk]=useState(0);
+function BalanceSheet({entityId,entityName,asOf,setAsOf,canEdit=true}){const[balances,setBalances]=useState([]);const[drillAcct,setDrillAcct]=useState(null);const[rk,setRk]=useState(0);
   // Guard: while the user is editing the date input, asOf can briefly be '' or a partial string like '2026-'.
   const validAsOf=/^\d{4}-\d{2}-\d{2}$/.test(asOf)&&!isNaN(new Date(asOf+'T00:00:00').getTime())?asOf:today();
   const fyS=validAsOf.slice(0,4)+'-01-01';
@@ -2399,7 +2400,7 @@ function BalanceSheet({entityId,entityName,asOf,setAsOf}){const[balances,setBala
     <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>${fmt(total)}</td></tr></>);
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
     <div style={S.filterBar}><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div></div>
-    <button style={S.btnExport} onClick={doExport}>Export Excel</button></div>
+    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='bs' currentConfig={{asOf}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExport}>Export Excel</button></div></div>
     <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Balance Sheet</div><div style={{fontSize:13,color:T.textMuted}}>As of {asOf}</div></div>
     <table style={{...S.table,maxWidth:580,margin:'0 auto'}}><tbody><Sec title="Assets" type="Asset" total={tA}/><tr><td colSpan={2} style={{padding:8}}/></tr>
       <Sec title="Liabilities" type="Liability" total={sum('Liability')}/><tr><td colSpan={2} style={{padding:4}}/></tr><Sec title="Equity" type="Equity" total={sum('Equity')+ni}/>
@@ -2408,7 +2409,7 @@ function BalanceSheet({entityId,entityName,asOf,setAsOf}){const[balances,setBala
     {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillFrom} to={asOf} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
     </div>);}
 
-function IncomeStatement({entityId,entityName,from,setFrom,to,setTo}){const[balances,setBalances]=useState([]);const[drillAcct,setDrillAcct]=useState(null);const[rk,setRk]=useState(0);
+function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true}){const[balances,setBalances]=useState([]);const[drillAcct,setDrillAcct]=useState(null);const[rk,setRk]=useState(0);
   useEffect(()=>{api.getBalances(entityId,{from,to}).then(setBalances);},[entityId,from,to,rk]);
   const get=t=>balances.filter(b=>b.type===t&&Math.abs(b.balance)>0.005);const sum=arr=>arr.reduce((s,b)=>s+b.balance,0);
   const rev=get('Revenue');const cogs=get('Expense').filter(b=>b.subtype==='COGS');const opex=get('Expense').filter(b=>b.subtype==='Operating Expense');const other=get('Expense').filter(b=>b.subtype!=='COGS'&&b.subtype!=='Operating Expense');
@@ -2419,7 +2420,7 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo}){const[bala
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
     <div style={S.filterBar}><div><label style={S.label}>From</label><input style={S.inputSm} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
       <div><label style={S.label}>To</label><input style={S.inputSm} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div></div>
-    <button style={S.btnExport} onClick={doExport}>Export Excel</button></div>
+    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='is' currentConfig={{from,to}} onApply={(c)=>{if(c.from)setFrom(c.from);if(c.to)setTo(c.to);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExport}>Export Excel</button></div></div>
     <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Income Statement</div><div style={{fontSize:13,color:T.textMuted}}>Period: {from} to {to}</div></div>
     <table style={{...S.table,maxWidth:580,margin:'0 auto'}}><tbody><Sec title="Revenue" items={rev} total={tRev}/>
       {cogs.length>0&&<><Sec title="Cost of Goods Sold" items={cogs} total={sum(cogs)}/><tr style={{background:T.bgElevated}}><td style={{...S.td,fontWeight:700,color:T.textBright}}>Gross Profit</td><td style={{...S.tdR,fontWeight:700,color:T.textBright,fontSize:15}}>${fmt(gp)}</td></tr></>}
@@ -2431,12 +2432,14 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo}){const[bala
     </div>);}
 
 // ═══ Custom Detail Report (Q6: multi-account, grouped by class/location, with subtotals) ═══
-function CustomDetailReport({entityId,entityName,dimsEnabled}){
+function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendingConfig,clearPending}){
   const[accounts,setAccounts]=useState([]);const[sel,setSel]=useState([]);const[acctSearch,setAcctSearch]=useState('');
   const[from,setFrom]=useState('');const[to,setTo]=useState('');
   const[groupBy,setGroupBy]=useState(dimsEnabled?'class':'none');
   const[rows,setRows]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
   useEffect(()=>{api.getAccounts(entityId).then(setAccounts).catch(()=>setAccounts([]));},[entityId]);
+  useEffect(()=>{if(pendingConfig){if(pendingConfig.sel)setSel(pendingConfig.sel);setFrom(pendingConfig.from||'');setTo(pendingConfig.to||'');if(pendingConfig.groupBy)setGroupBy(pendingConfig.groupBy);clearPending&&clearPending();}},[]);
+  useEffect(()=>{if(pendingConfig){if(pendingConfig.sel)setSel(pendingConfig.sel);if(pendingConfig.dim)setDim(pendingConfig.dim);setFrom(pendingConfig.from||'');setTo(pendingConfig.to||'');clearPending&&clearPending();}},[]);
   const toggle=code=>setSel(s=>s.includes(code)?s.filter(c=>c!==code):[...s,code]);
   const filteredAccts=accounts.filter(a=>!acctSearch||acctLabel(a.code,a.name).toLowerCase().includes(acctSearch.toLowerCase()));
   const run=async()=>{
@@ -2463,7 +2466,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled}){
     d.push(['','','','','','GRAND TOTAL',grand]);
     exportToExcel(d,'Custom_Detail_'+(to||today())+'.xlsx');
   };
-  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Custom Detail Report</div><div style={S.sub}>Pick accounts, optionally group by class or location</div></div>{rows&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div>
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Custom Detail Report</div><div style={S.sub}>Pick accounts, optionally group by class or location</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='customdetail' currentConfig={{sel,from,to,groupBy}} onApply={(c)=>{setSel(c.sel||[]);setFrom(c.from||'');setTo(c.to||'');if(c.groupBy)setGroupBy(c.groupBy);}} canEdit={canEdit}/>{rows&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
     <div style={S.card}>
       <div style={{display:'flex',gap:24,flexWrap:'wrap'}}>
         <div style={{flex:'1 1 320px',minWidth:280}}>
@@ -2498,7 +2501,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled}){
 }
 
 // ═══ Pivot Summary Report (Q7: class × account matrix, totals by class — for PCAP) ═══
-function PivotReport({entityId,entityName}){
+function PivotReport({entityId,entityName,canEdit=true,pendingConfig,clearPending}){
   const[accounts,setAccounts]=useState([]);const[sel,setSel]=useState([]);const[acctSearch,setAcctSearch]=useState('');
   const[dim,setDim]=useState('class');const[from,setFrom]=useState('');const[to,setTo]=useState('');
   const[data,setData]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
@@ -2519,7 +2522,7 @@ function PivotReport({entityId,entityName}){
     d.push(['Total',...data.columns.map(c=>data.column_totals[c.code]||0),data.grand_total]);
     exportToExcel(d,'Pivot_'+dim+'_'+(to||today())+'.xlsx');
   };
-  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Pivot Summary</div><div style={S.sub}>Totals by class across selected accounts — for PCAP letters</div></div>{data&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div>
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Pivot Summary</div><div style={S.sub}>Totals by class across selected accounts — for PCAP letters</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='pivot' currentConfig={{sel,dim,from,to}} onApply={(c)=>{setSel(c.sel||[]);setDim(c.dim||'class');setFrom(c.from||'');setTo(c.to||'');}} canEdit={canEdit}/>{data&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
     <div style={S.card}>
       <div style={{display:'flex',gap:24,flexWrap:'wrap'}}>
         <div style={{flex:'1 1 320px',minWidth:280}}>
@@ -2550,8 +2553,9 @@ function PivotReport({entityId,entityName}){
 }
 
 // ═══ AP Aging Detail (Q5: open bills from Bill.com, bucketed by days past due) ═══
-function ApAgingReport({entityId,entityName}){
+function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPending}){
   const[asOf,setAsOf]=useState(today());
+  useEffect(()=>{if(pendingConfig){if(pendingConfig.asOf)setAsOf(pendingConfig.asOf);clearPending&&clearPending();}},[]);
   const[data,setData]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
   const BK=['current','d1_30','d31_60','d61_90','d91_plus'];
   const run=async()=>{
@@ -2573,7 +2577,7 @@ function ApAgingReport({entityId,entityName}){
     d.push(['TOTAL','','','','','','',gt.current,gt.d1_30,gt.d31_60,gt.d61_90,gt.d91_plus,gt.total]);
     exportToExcel(d,'AP_Aging_'+data.as_of+'.xlsx');
   };
-  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>A/P Aging Detail</div><div style={S.sub}>Open bills from Bill.com, bucketed by days past due</div></div>{data&&data.bill_count>0&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div>
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>A/P Aging Detail</div><div style={S.sub}>Open bills from Bill.com, bucketed by days past due</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='apaging' currentConfig={{asOf}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);}} canEdit={canEdit}/>{data&&data.bill_count>0&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
     <div style={S.card}>
       <div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
         <div style={{flex:'0 0 180px'}}><label style={S.label}>As of date</label><input style={{...S.inputSm,width:'100%'}} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
@@ -2600,6 +2604,58 @@ function ApAgingReport({entityId,entityName}){
           {BK.map(b=><td key={b} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(data.grand_total[b]||0)}</td>)}<td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(data.grand_total.total)}</td></tr>
       </tbody></table>}
     </div>}
+  </div>);
+}
+
+// ═══ Memorized Reports (saved report configurations; shared per entity) ═══
+// MemorizeBar renders on each configurable report: a Save button + a dropdown
+// of that report's saved configs. onApply restores a saved config's settings.
+function MemorizeBar({entityId,reportType,currentConfig,onApply,canEdit=true}){
+  const[saved,setSaved]=useState([]);const[open,setOpen]=useState(false);const[saving,setSaving]=useState(false);const[err,setErr]=useState('');
+  const load=useCallback(()=>{api.getMemorizedReports(entityId).then(all=>setSaved(all.filter(r=>r.report_type===reportType))).catch(()=>{});},[entityId,reportType]);
+  useEffect(()=>{load();},[load]);
+  const save=async()=>{const name=prompt('Save this report view as:');if(!name||!name.trim())return;setSaving(true);setErr('');try{await api.createMemorizedReport(entityId,{report_type:reportType,name:name.trim(),config:currentConfig});load();}catch(e){setErr(e.message);alert(e.message);}finally{setSaving(false);}};
+  const run=(r)=>{onApply(r.config||{});setOpen(false);};
+  const del=async(r,e)=>{e.stopPropagation();if(!confirm('Delete saved report "'+r.name+'"?'))return;try{await api.deleteMemorizedReport(entityId,r.id);load();}catch(ex){alert(ex.message);}};
+  return(<div style={{position:'relative',display:'inline-flex',gap:8,alignItems:'center'}}>
+    {saved.length>0&&<div style={{position:'relative'}}>
+      <button style={{...S.btnGhost,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:'7px 12px',fontSize:12}} onClick={()=>setOpen(!open)}>★ Saved ({saved.length}) ▾</button>
+      {open&&<><div style={{position:'fixed',inset:0,zIndex:50}} onClick={()=>setOpen(false)}/>
+        <div style={{position:'absolute',top:'100%',right:0,marginTop:6,width:280,maxHeight:340,overflowY:'auto',background:'#fff',border:'1px solid '+T.border,borderRadius:T.radius,boxShadow:T.shadowLg,zIndex:100,padding:'6px 0'}}>
+          {saved.map(r=><div key={r.id} onClick={()=>run(r)} style={{padding:'8px 14px',cursor:'pointer',fontSize:13,display:'flex',justifyContent:'space-between',alignItems:'center'}} onMouseEnter={e=>e.currentTarget.style.background=T.bgElevated} onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+            <span><span style={{fontWeight:600,color:T.textBright}}>{r.name}</span>{r.created_by_name&&<span style={{color:T.textDim,fontSize:11,marginLeft:6}}>· {r.created_by_name}</span>}</span>
+            {canEdit&&<button style={{background:'none',border:'none',color:T.red,cursor:'pointer',fontSize:14}} onClick={e=>del(r,e)}>×</button>}</div>)}
+        </div></>}
+    </div>}
+    {canEdit&&<button style={{...S.btnGhost,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:'7px 12px',fontSize:12}} disabled={saving} onClick={save}>{saving?'Saving…':'★ Save view'}</button>}
+  </div>);
+}
+
+// Dedicated page listing all memorized reports for the entity, grouped by type.
+function MemorizedReportsPage({entityId,entityName,canEdit=true,onOpen}){
+  const[rows,setRows]=useState(null);const[err,setErr]=useState('');
+  const TYPE_LABELS={customdetail:'Custom Detail',pivot:'Pivot Summary',apaging:'AP Aging',drilldown:'Account Drilldown',bs:'Balance Sheet',is:'Income Statement',trial:'Trial Balance'};
+  const load=useCallback(()=>{setErr('');api.getMemorizedReports(entityId).then(setRows).catch(e=>setErr(e.message));},[entityId]);
+  useEffect(()=>{load();},[load]);
+  const del=async(r)=>{if(!confirm('Delete saved report "'+r.name+'"?'))return;try{await api.deleteMemorizedReport(entityId,r.id);load();}catch(ex){alert(ex.message);}};
+  const groups={};(rows||[]).forEach(r=>{(groups[r.report_type]=groups[r.report_type]||[]).push(r);});
+  return(<div><div style={{marginBottom:8}}><div style={S.h1}>Memorized Reports</div><div style={S.sub}>Saved report views for {entityName} · shared with everyone on this entity</div></div>
+    {err&&<div style={S.err}>{err}</div>}
+    {rows&&rows.length===0?<div style={{...S.card,textAlign:'center',padding:50,color:T.textDim}}>No saved reports yet. Open any report (Custom Detail, Pivot, AP Aging, etc.), set it up the way you like, and click "★ Save view".</div>:
+     !rows?<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Loading…</div>:
+     <div style={{display:'flex',flexDirection:'column',gap:18}}>{Object.keys(groups).map(tp=><div key={tp}>
+       <div style={{fontSize:12,fontWeight:700,letterSpacing:'0.05em',textTransform:'uppercase',color:T.textDim,marginBottom:8}}>{TYPE_LABELS[tp]||tp}</div>
+       <div style={{...S.cardFlush}}><table style={S.table}><thead><tr><th style={S.th}>Name</th><th style={S.th}>Saved by</th><th style={S.th}>Saved</th><th style={{...S.th,width:160}}>Actions</th></tr></thead>
+         <tbody>{groups[tp].map(r=><tr key={r.id}>
+           <td style={{...S.td,fontWeight:600,color:T.textBright}}>{r.name}</td>
+           <td style={{...S.td,color:T.textMuted}}>{r.created_by_name||'—'}</td>
+           <td style={{...S.td,color:T.textMuted}}>{(r.created_at||'').slice(0,10)}</td>
+           <td style={S.td}><div style={{display:'flex',gap:8}}>
+             <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>onOpen&&onOpen(r)}>Open</button>
+             {canEdit&&<button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={()=>del(r)}>Delete</button>}
+           </div></td></tr>)}
+         </tbody></table></div>
+     </div>)}</div>}
   </div>);
 }
 
