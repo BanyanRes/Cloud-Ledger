@@ -4267,11 +4267,22 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
 
   // ── 3. FIFO net: apply debits (payments/relief) against the oldest open
   //    credits (bills), so what remains are the genuinely open items as of date.
+  //    A payment may post before its bill is imported (interleaving in the GL),
+  //    so any debit not fully absorbed by the current queue is CARRIED FORWARD
+  //    and relieves later credits. Without this carry-forward the netting
+  //    discards over-relief and overstates open AP — the open total must equal
+  //    the GL balance (credits − debits) exactly.
   const openItems = []; // { line_id, entry_id, entry_num, date, memo, description, amount }
   let creditQueue = []; // FIFO of open credit slices
+  let unappliedDebit = 0; // payment carried forward to relieve future bills
   for (const l of glLines) {
     if ((l.credit || 0) > 0.005) {
-      creditQueue.push({ ...l, remaining: l.credit });
+      let remaining = l.credit;
+      if (unappliedDebit > 0.005) {
+        const take = Math.min(remaining, unappliedDebit);
+        remaining -= take; unappliedDebit -= take;
+      }
+      if (remaining > 0.005) creditQueue.push({ ...l, remaining });
     }
     if ((l.debit || 0) > 0.005) {
       let pay = l.debit;
@@ -4281,7 +4292,7 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
         head.remaining -= take; pay -= take;
         if (head.remaining <= 0.005) creditQueue.shift();
       }
-      // any payment beyond open credits (over-relief) just reduces balance; ignored for item list
+      if (pay > 0.005) unappliedDebit += pay; // carry forward to later bills
     }
   }
   for (const c of creditQueue) {
