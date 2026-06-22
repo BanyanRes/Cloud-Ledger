@@ -2557,6 +2557,7 @@ function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPend
   const[asOf,setAsOf]=useState(today());
   useEffect(()=>{if(pendingConfig){if(pendingConfig.asOf)setAsOf(pendingConfig.asOf);clearPending&&clearPending();}},[]);
   const[data,setData]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
+  const[viewEntry,setViewEntry]=useState(null);
   const BK=['current','d1_30','d31_60','d61_90','d91_plus'];
   const run=async()=>{
     setLoading(true);setErr('');setData(null);
@@ -2564,46 +2565,68 @@ function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPend
     catch(e){setErr(e.message);}finally{setLoading(false);}
   };
   const lbl=d=>data?data.bucket_labels[d]:d;
+  const COLS=6; // Date, Type, Num, Vendor, Due Date, Past Due
+  const ncols=COLS+BK.length+2; // + GL + Amount
   const doExport=()=>{
     if(!data)return;
-    const head=['Date','Type','Num','Vendor','Location','Due Date','Past Due (days)','Current','1-30','31-60','61-90','91+','Amount'];
-    const d=[[entityName||'AP Aging Detail'],['A/P Aging Detail'],['As of '+data.as_of],[],head];
+    const head=['Date','Type','Num','Vendor','Due Date','Past Due (days)','Current','1-30','31-60','61-90','91+','GL','Amount'];
+    const d=[[entityName||'AP Aging Detail'],['A/P Aging Detail — built from GL '+(data.ap_account||'202000')],['As of '+data.as_of],[],head];
     data.vendors.forEach(g=>{
-      g.rows.forEach(r=>d.push([r.date,r.type,r.num,r.vendor,r.location,r.due_date,r.past_due_days,
-        r.bucket==='current'?r.amount:'',r.bucket==='d1_30'?r.amount:'',r.bucket==='d31_60'?r.amount:'',r.bucket==='d61_90'?r.amount:'',r.bucket==='d91_plus'?r.amount:'',r.amount]));
-      d.push(['Total '+g.vendor,'','','','','','',g.subtotal.current,g.subtotal.d1_30,g.subtotal.d31_60,g.subtotal.d61_90,g.subtotal.d91_plus,g.subtotal.total]);
+      g.rows.forEach(r=>d.push([r.date,r.type,r.num,r.vendor,r.due_date,r.past_due_days,
+        r.bucket==='current'?r.amount:'',r.bucket==='d1_30'?r.amount:'',r.bucket==='d31_60'?r.amount:'',r.bucket==='d61_90'?r.amount:'',r.bucket==='d91_plus'?r.amount:'','',r.amount]));
+      d.push(['Total '+g.vendor,'','','','','',g.subtotal.current,g.subtotal.d1_30,g.subtotal.d31_60,g.subtotal.d61_90,g.subtotal.d91_plus,'',g.subtotal.total]);
     });
+    if((data.gl_rows||[]).length){
+      d.push([]);d.push(['GL ENTRIES (imported / non-Bill.com — not aged)']);
+      data.gl_rows.forEach(r=>d.push([r.date,'GL','JE-'+String(r.entry_num).padStart(4,'0'),'',(r.memo||''),'','','','','','',r.amount,r.amount]));
+      d.push(['Total GL Entries','','','','','','','','','','',data.gl_total,data.gl_total]);
+    }
     const gt=data.grand_total;
-    d.push(['TOTAL','','','','','','',gt.current,gt.d1_30,gt.d31_60,gt.d61_90,gt.d91_plus,gt.total]);
+    d.push(['TOTAL','','','','','',gt.current,gt.d1_30,gt.d31_60,gt.d61_90,gt.d91_plus,gt.gl,gt.total]);
+    d.push(['Reconciliation vs GL '+(data.ap_account||'202000')+' ('+fmt(data.gl_balance)+')','','','','','','','','','','','',data.recon_diff]);
     exportToExcel(d,'AP_Aging_'+data.as_of+'.xlsx');
   };
-  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>A/P Aging Detail</div><div style={S.sub}>Open bills from Bill.com, bucketed by days past due</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='apaging' currentConfig={{asOf}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);}} canEdit={canEdit}/>{data&&data.bill_count>0&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
+  const hasAnything=data&&(data.bill_count>0||(data.gl_rows&&data.gl_rows.length>0));
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>A/P Aging Detail</div><div style={S.sub}>Built from GL account {data?data.ap_account:'202000'} &middot; ties to the book{data&&data.billcom_error?' · Bill.com enrich error: '+data.billcom_error:''}</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='apaging' currentConfig={{asOf}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);}} canEdit={canEdit}/>{hasAnything&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
     <div style={S.card}>
       <div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
         <div style={{flex:'0 0 180px'}}><label style={S.label}>As of date</label><input style={{...S.inputSm,width:'100%'}} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
-        <button style={{...S.btnP}} onClick={run} disabled={loading}>{loading?'Loading from Bill.com...':'Run Aging'}</button>
+        <button style={{...S.btnP}} onClick={run} disabled={loading}>{loading?'Building from GL…':'Run Aging'}</button>
       </div>
       {err&&<div style={S.err}>{err}</div>}
     </div>
     {data&&<div style={{...S.cardFlush,overflowX:'auto'}}>
-      {data.bill_count===0?<div style={{padding:24,color:T.textDim}}>No open bills as of {data.as_of}.</div>:
+      {!hasAnything?<div style={{padding:24,color:T.textDim}}>No open A/P as of {data.as_of}.</div>:
       <table style={S.table}><thead><tr>
-        <th style={S.th}>Date</th><th style={S.th}>Type</th><th style={S.th}>Num</th><th style={S.th}>Location</th><th style={S.th}>Due Date</th><th style={S.thR}>Past Due</th>
-        {BK.map(b=><th key={b} style={S.thR}>{lbl(b)}</th>)}<th style={S.thR}>Amount</th>
+        <th style={S.th}>Date</th><th style={S.th}>Type</th><th style={S.th}>Num</th><th style={S.th}>Vendor</th><th style={S.th}>Due Date</th><th style={S.thR}>Past Due</th>
+        {BK.map(b=><th key={b} style={S.thR}>{lbl(b)}</th>)}<th style={{...S.thR,color:T.accent}}>GL</th><th style={S.thR}>Amount</th>
       </tr></thead>
-      <tbody>{data.vendors.map(g=><Fragment key={g.vendor_id||g.vendor}>
-        <tr><td colSpan={6+BK.length+1} style={{...S.td,fontWeight:700,color:T.textBright,background:T.bgElevated}}>{g.vendor}</td></tr>
+      <tbody>{data.vendors.map(g=><Fragment key={g.vendor}>
+        <tr><td colSpan={ncols} style={{...S.td,fontWeight:700,color:T.textBright,background:T.bgElevated}}>{g.vendor}</td></tr>
         {g.rows.map((r,i)=><tr key={i}>
-          <td style={S.td}>{r.date}</td><td style={S.td}>{r.type}</td><td style={S.td}>{r.num}</td><td style={S.td}>{r.location}</td><td style={S.td}>{r.due_date}</td><td style={S.tdR}>{r.past_due_days||''}</td>
-          {BK.map(b=><td key={b} style={S.tdR}>{r.bucket===b?fmt(r.amount):''}</td>)}<td style={{...S.tdR,fontWeight:600}}>{fmt(r.amount)}</td>
+          <td style={S.td}>{r.date}</td><td style={S.td}>{r.type}</td><td style={S.td}>{r.num}</td><td style={S.td}>{r.vendor}</td><td style={S.td}>{r.due_date}</td><td style={S.tdR}>{r.past_due_days||''}</td>
+          {BK.map(b=><td key={b} style={S.tdR}>{r.bucket===b?fmt(r.amount):''}</td>)}<td style={S.tdR}></td><td style={{...S.tdR,fontWeight:600}}>{fmt(r.amount)}</td>
         </tr>)}
-        <tr style={{background:T.bgElevated}}><td colSpan={6} style={{...S.td,fontWeight:600,fontStyle:'italic'}}>Total {g.vendor}</td>
-          {BK.map(b=><td key={b} style={{...S.tdR,fontWeight:600}}>{g.subtotal[b]?fmt(g.subtotal[b]):''}</td>)}<td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(g.subtotal.total)}</td></tr>
+        <tr style={{background:T.bgElevated}}><td colSpan={COLS} style={{...S.td,fontWeight:600,fontStyle:'italic'}}>Total {g.vendor}</td>
+          {BK.map(b=><td key={b} style={{...S.tdR,fontWeight:600}}>{g.subtotal[b]?fmt(g.subtotal[b]):''}</td>)}<td style={S.tdR}></td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(g.subtotal.total)}</td></tr>
       </Fragment>)}
-        <tr style={S.grandTotalRow}><td colSpan={6} style={S.tdBold}>TOTAL</td>
-          {BK.map(b=><td key={b} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(data.grand_total[b]||0)}</td>)}<td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(data.grand_total.total)}</td></tr>
+        {data.gl_rows&&data.gl_rows.length>0&&<Fragment>
+          <tr><td colSpan={ncols} style={{...S.td,fontWeight:700,color:T.accent,background:T.accentDim}}>GL ENTRIES <span style={{fontWeight:400,color:T.textMuted}}>— imported / non-Bill.com &middot; not aged</span></td></tr>
+          {data.gl_rows.map((r,i)=><tr key={'gl'+i} onClick={()=>setViewEntry({id:r.entry_id})} style={{cursor:'pointer'}}>
+            <td style={S.td}>{r.date}</td><td style={S.td}>GL</td><td style={{...S.td,color:T.accent}}>JE-{String(r.entry_num).padStart(4,'0')}</td><td style={{...S.td,color:T.textMuted}} colSpan={3}>{r.memo}{r.description?' · '+r.description:''}</td>
+            {BK.map(b=><td key={b} style={S.tdR}></td>)}<td style={{...S.tdR,fontWeight:600,color:T.accent}}>{fmt(r.amount)}</td><td style={{...S.tdR,fontWeight:600}}>{fmt(r.amount)}</td>
+          </tr>)}
+          <tr style={{background:T.accentDim}}><td colSpan={COLS} style={{...S.td,fontWeight:600,fontStyle:'italic'}}>Total GL Entries</td>
+            {BK.map(b=><td key={b} style={S.tdR}></td>)}<td style={{...S.tdR,fontWeight:700,color:T.accent}}>{fmt(data.gl_total)}</td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(data.gl_total)}</td></tr>
+        </Fragment>}
+        <tr style={S.grandTotalRow}><td colSpan={COLS} style={S.tdBold}>TOTAL</td>
+          {BK.map(b=><td key={b} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(data.grand_total[b]||0)}</td>)}<td style={{...S.tdR,fontWeight:700,color:T.accent}}>{fmt(data.grand_total.gl||0)}</td><td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(data.grand_total.total)}</td></tr>
+        <tr><td colSpan={ncols} style={{...S.td,textAlign:'right',background:Math.abs(data.recon_diff)<0.005?'#f3faf5':'#fdf2f4',color:Math.abs(data.recon_diff)<0.005?T.green:T.red,fontWeight:600}}>
+          Reconciliation vs GL {data.ap_account||'202000'} ({fmt(data.gl_balance)}): {Math.abs(data.recon_diff)<0.005?fmt(0)+' ✓':fmt(data.recon_diff)+' — does not tie'}
+        </td></tr>
       </tbody></table>}
     </div>}
+    {viewEntry&&<EditJEModal entityId={entityId} entry={viewEntry} accounts={[]} onClose={()=>setViewEntry(null)} onSaved={()=>{setViewEntry(null);run();}}/>}
   </div>);
 }
 

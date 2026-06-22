@@ -4237,188 +4237,149 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
 
   const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
-
+  const apAccount = (cfg && cfg.default_ap_account) ? String(cfg.default_ap_account) : '202000';
   const asOf = String((req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of)) ? req.query.as_of : new Date().toISOString().slice(0, 10));
 
-  let session, devKey;
-  try {
-    const password = billcomDecrypt(cfg.password_enc);
-    devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) {
-    return res.status(502).json({ error: 'Bill.com login failed: ' + e.message });
-  }
-  if (!session.sessionId) return res.status(502).json({ error: 'Bill.com login returned no sessionId' });
-  const listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+  // ── 1. Pull all GL activity on the AP account through the as-of date. This is
+  //    the authoritative AP record: credits = bills, debits = payments/relief.
+  //    The report is built from here so it ALWAYS ties to the GL balance.
+  const glLines = db.prepare(
+    `SELECT jl.id AS line_id, je.id AS entry_id, je.entry_num, je.date, je.memo,
+            jl.debit, jl.credit, jl.description
+       FROM journal_lines jl JOIN journal_entries je ON jl.entry_id = je.id
+      WHERE je.entity_id = ? AND jl.account_code = ? AND je.date <= ?
+      ORDER BY je.date ASC, je.entry_num ASC, jl.id ASC`
+  ).all(entityId, apAccount, asOf);
 
-  let bills, vendors;
-  try {
-    bills = await billcomListBills({ ...listArgs, maxItems: 2000 });
-  } catch (e) {
-    return res.status(502).json({ error: 'Failed to fetch bills: ' + e.message });
-  }
-  // Bill.com's /bills list can echo a non-advancing nextPage token, so the
-  // paginator may return the same bills multiple times. Dedupe by id before
-  // bucketing — otherwise totals are inflated by the repeat factor.
-  {
-    const byId = new Map();
-    for (const b of bills) { const id = b && b.id; if (id != null && !byId.has(String(id))) byId.set(String(id), b); }
-    bills = Array.from(byId.values());
-  }
-  try {
-    vendors = await billcomListVendors({ ...listArgs, maxItems: 5000 });
-  } catch (e) {
-    vendors = []; // vendor names are best-effort; fall back to id if the list fails
-  }
+  const glBalance = glLines.reduce((s, l) => s + (l.credit || 0) - (l.debit || 0), 0);
 
-  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
-
-  // Payment-status read: the /bills list can lag in flipping paymentStatus to
-  // PAID after a disbursement clears, so a fully-paid bill may still echo an
-  // open balance and inflate the aging. Cross-check against /payments and net
-  // out per-bill amounts — but ONLY for COMPLETED (PAID) payments, so the report
-  // ties to GL cash-out. Scheduled/processing payments are intentionally NOT
-  // netted; those bills stay shown as open exposure. Best-effort: if the
-  // payments list fails, we fall back to bill-level status alone.
-  const paidByBillId = new Map(); // billId -> sum of completed payment amounts
-  let paymentsConsidered = 0, paymentsApplied = 0;
+  // ── 2. Which entries are Bill.com-synced bills? (vs. imported/manual GL entries)
+  //    A 202000 credit whose entry is linked in billcom_sync_log is a synced
+  //    invoice → aged Bill.com row. Everything else → GL column.
+  const syncedEntryIds = new Set();
+  const billcomIdByEntry = new Map();
   try {
-    let payments = await billcomListPayments({ ...listArgs, maxItems: 2000 });
-    { // dedupe by id (same non-advancing-nextPage guard as bills)
-      const byId = new Map();
-      for (const p of payments) { const id = p && p.id; if (id != null && !byId.has(String(id))) byId.set(String(id), p); }
-      payments = Array.from(byId.values());
-    }
-    const isCompleted = (pay) => String(pick(pay, 'paymentStatus', 'status') || '').toUpperCase() === 'PAID';
-    for (const pay of payments) {
-      paymentsConsidered++;
-      if (!isCompleted(pay)) continue; // PAID only — conservative, GL-tie-out
-      // A payment can settle multiple bills; v3 exposes the breakdown under a
-      // few possible names. Fall back to a single billId+amount when absent.
-      const billPays = pick(pay, 'billPays', 'billPayments', 'billpays', 'bills') || null;
-      if (Array.isArray(billPays) && billPays.length) {
-        for (const bp of billPays) {
-          const bid = String(pick(bp, 'billId', 'bill_id', 'id') || '');
-          const amt = Number(pick(bp, 'amount', 'paidAmount', 'paymentAmount') || 0);
-          if (bid && amt > 0) { paidByBillId.set(bid, (paidByBillId.get(bid) || 0) + amt); paymentsApplied++; }
-        }
-      } else {
-        const bid = String(pick(pay, 'billId', 'bill_id') || '');
-        const amt = Number(pick(pay, 'amount', 'paymentAmount', 'totalAmount') || 0);
-        if (bid && amt > 0) { paidByBillId.set(bid, (paidByBillId.get(bid) || 0) + amt); paymentsApplied++; }
-      }
-    }
-  } catch (e) {
-    console.log('[ap-aging] payments read failed, using bill-level status only: ' + e.message);
-  }
-  const vendorName = new Map();
-  for (const v of vendors) {
-    const vid = String(pick(v, 'id') || '');
-    const nm = pick(v, 'name', 'vendorName', 'companyName', 'displayName');
-    if (vid && nm) vendorName.set(vid, nm);
-  }
-  // Location names: bill line jobId -> the billcom_job_name stored on the
-  // location map at connection time (no dependency on the dim table's shape).
-  const locNameByJob = new Map();
-  try {
-    const locRows = db.prepare(
-      'SELECT billcom_job_id AS job, billcom_job_name AS name FROM billcom_location_map WHERE entity_id = ?'
+    const rows = db.prepare(
+      "SELECT cl_entry_id, billcom_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'bill' AND status = 'success' AND cl_entry_id IS NOT NULL"
     ).all(entityId);
-    for (const r of locRows) if (r.job != null && r.name) locNameByJob.set(String(r.job), r.name);
-  } catch (e) { /* location labels are best-effort */ }
+    for (const r of rows) { syncedEntryIds.add(r.cl_entry_id); billcomIdByEntry.set(r.cl_entry_id, String(r.billcom_id)); }
+  } catch (e) { /* sync log optional */ }
 
-  // A bill is "open" if it still has an unpaid balance. Bill.com exposes the
-  // remaining amount under a few possible names; fall back to amount when the
-  // payment status says nothing has been paid.
-  const openAmountOf = (b) => {
-    const due = pick(b, 'amountDue', 'amount_due', 'openAmount', 'open_amount', 'dueAmount', 'remainingAmount', 'balance');
-    if (due != null) return Number(due);
-    const amt = Number(pick(b, 'amount', 'invoiceAmount', 'totalAmount') || 0);
-    const paid = Number(pick(b, 'paidAmount', 'paid_amount') || 0);
-    return amt - paid;
-  };
-  // Open amount net of COMPLETED payments cross-referenced from /payments.
-  const netOpenOf = (b) => {
-    const billId = String(pick(b, 'id') || '');
-    const paid = paidByBillId.get(billId) || 0;
-    return openAmountOf(b) - paid;
-  };
-  const isOpen = (b) => {
-    const p = String(pick(b, 'paymentStatus', 'status') || '').toUpperCase();
-    if (p === 'PAID' || p === 'VOID' || p === 'VOIDED') return false;
-    return netOpenOf(b) > 0.005;
-  };
+  // ── 3. FIFO net: apply debits (payments/relief) against the oldest open
+  //    credits (bills), so what remains are the genuinely open items as of date.
+  const openItems = []; // { line_id, entry_id, entry_num, date, memo, description, amount }
+  let creditQueue = []; // FIFO of open credit slices
+  for (const l of glLines) {
+    if ((l.credit || 0) > 0.005) {
+      creditQueue.push({ ...l, remaining: l.credit });
+    }
+    if ((l.debit || 0) > 0.005) {
+      let pay = l.debit;
+      while (pay > 0.005 && creditQueue.length) {
+        const head = creditQueue[0];
+        const take = Math.min(head.remaining, pay);
+        head.remaining -= take; pay -= take;
+        if (head.remaining <= 0.005) creditQueue.shift();
+      }
+      // any payment beyond open credits (over-relief) just reduces balance; ignored for item list
+    }
+  }
+  for (const c of creditQueue) {
+    if (c.remaining > 0.005) openItems.push({
+      line_id: c.line_id, entry_id: c.entry_id, entry_num: c.entry_num,
+      date: c.date, memo: c.memo || '', description: c.description || '', amount: c.remaining,
+    });
+  }
 
+  // ── 4. Enrich Bill.com-synced items with vendor + due date from Bill.com.
+  //    Only attempt the (slow) Bill.com pull if there ARE synced items to enrich.
+  const hasSynced = openItems.some(it => syncedEntryIds.has(it.entry_id));
+  const billByNum = new Map(); // invoiceNumber -> { vendor, dueDate }
+  const vendorById = new Map();
+  let billcomError = null;
+  if (hasSynced && cfg) {
+    try {
+      const password = billcomDecrypt(cfg.password_enc);
+      const devKey = billcomDecrypt(cfg.dev_key_enc);
+      const session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+      const listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+      const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
+      let vendors = [];
+      try { vendors = await billcomListVendors({ ...listArgs, maxItems: 5000 }); } catch (e) {}
+      for (const v of vendors) { const id = String(pick(v, 'id') || ''); const n = pick(v, 'name', 'vendorName', 'companyName'); if (id && n) vendorById.set(id, n); }
+      // dueDate-window paginator: the only reliable way to page Bill.com /bills
+      const bills = await billcomListBillsWindowed({ ...listArgs, fromDate: '2024-01-01', toDate: asOf });
+      for (const b of bills) {
+        const num = pick(b, 'invoiceNumber', 'invoice_number') || pick(pick(b, 'invoice') || {}, 'invoiceNumber');
+        if (!num) continue;
+        const vid = String(pick(b, 'vendorId', 'vendor_id') || (pick(b, 'vendor') || {}).id || '');
+        billByNum.set(String(num), { vendor: vendorById.get(vid) || pick(pick(b, 'vendor') || {}, 'name') || null, dueDate: pick(b, 'dueDate', 'due_date') || null });
+      }
+    } catch (e) { billcomError = e.message; }
+  }
+
+  // Invoice # is stored in the import memo as "... — <invoiceNum>".
+  const invNumFromMemo = (memo) => { const m = String(memo || '').match(/—\s*(.+?)\s*$/); return m ? m[1].trim() : null; };
+
+  // ── 5. Build buckets for Bill.com invoices; sum GL column for the rest.
   const buckets = ['current', 'd1_30', 'd31_60', 'd61_90', 'd91_plus'];
-  const bucketOf = (daysPastDue) => {
-    if (daysPastDue <= 0) return 'current';
-    if (daysPastDue <= 30) return 'd1_30';
-    if (daysPastDue <= 60) return 'd31_60';
-    if (daysPastDue <= 90) return 'd61_90';
-    return 'd91_plus';
-  };
+  const emptyBuckets = () => ({ current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d91_plus: 0, gl: 0, total: 0 });
+  const bucketOf = (d) => d <= 0 ? 'current' : d <= 30 ? 'd1_30' : d <= 60 ? 'd31_60' : d <= 90 ? 'd61_90' : 'd91_plus';
   const dayDiff = (a, b) => Math.round((Date.parse(a) - Date.parse(b)) / 86400000);
 
-  const byVendor = new Map(); // vendorKey -> { vendor, rows:[], subtotal:{...} }
-  const emptyBuckets = () => ({ current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d91_plus: 0, total: 0 });
+  const byVendor = new Map();
+  const glRows = [];
   const grand = emptyBuckets();
 
-  for (const b of bills) {
-    if (!isOpen(b)) continue;
-    const amount = netOpenOf(b);
-    if (!(amount > 0.005)) continue;
-    const paymentApplied = paidByBillId.get(String(pick(b, 'id') || '')) || 0;
-
-    const billId = String(pick(b, 'id') || '');
-    const invDate = pick(b, 'invoiceDate', 'invoice_date') || pick(pick(b, 'invoice') || {}, 'invoiceDate', 'invoice_date');
-    const dueDate = pick(b, 'dueDate', 'due_date') || invDate;
-    const num = pick(b, 'invoiceNumber', 'invoice_number') || pick(pick(b, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || billId;
-    const vid = String(pick(b, 'vendorId', 'vendor_id') || (pick(b, 'vendor') || {}).id || '');
-    const vname = vendorName.get(vid) || pick(pick(b, 'vendor') || {}, 'name') || ('Vendor ' + (vid || '?'));
-
-    // Location: derive from the first line item carrying a jobId we can name.
-    let location = '';
-    const lines = pick(b, 'lineItems', 'line_items', 'billLineItems') || [];
-    if (Array.isArray(lines)) {
-      for (const li of lines) {
-        const cls = pick(li, 'classifications') || {};
-        const job = String(pick(li, 'jobId') || pick(cls, 'jobId') || '');
-        if (job && locNameByJob.has(job)) { location = locNameByJob.get(job); break; }
-      }
+  for (const it of openItems) {
+    const num = invNumFromMemo(it.memo);
+    const enrich = (num && billByNum.get(String(num))) || null;
+    const isBillcom = syncedEntryIds.has(it.entry_id) && enrich;
+    if (isBillcom) {
+      const vname = enrich.vendor || ('Vendor');
+      const dueDate = enrich.dueDate || it.date;
+      const dpd = dayDiff(asOf, it.date); // age by invoice (GL line) date
+      const bk = bucketOf(dpd);
+      if (!byVendor.has(vname)) byVendor.set(vname, { vendor: vname, rows: [], subtotal: emptyBuckets() });
+      const grp = byVendor.get(vname);
+      grp.rows.push({ date: it.date, type: 'Bill', num: String(num), vendor: vname, due_date: dueDate, past_due_days: Math.max(0, dpd), amount: it.amount, bucket: bk });
+      grp.subtotal[bk] += it.amount; grp.subtotal.total += it.amount;
+      grand[bk] += it.amount; grand.total += it.amount;
+    } else {
+      // GL column: imported/manual entry, not aged, no vendor/invoice
+      glRows.push({ date: it.date, entry_num: it.entry_num, entry_id: it.entry_id, memo: it.memo, description: it.description, amount: it.amount });
+      grand.gl += it.amount; grand.total += it.amount;
     }
-
-    const dpd = dueDate ? dayDiff(asOf, dueDate) : 0;
-    const bk = bucketOf(dpd);
-
-    if (!byVendor.has(vid)) byVendor.set(vid, { vendor: vname, vendor_id: vid, rows: [], subtotal: emptyBuckets() });
-    const grp = byVendor.get(vid);
-    const row = {
-      date: invDate || '', type: 'Bill', num: String(num), vendor: vname,
-      location, due_date: dueDate || '', past_due_days: Math.max(0, dpd),
-      amount, payment_applied: paymentApplied, bucket: bk,
-    };
-    grp.rows.push(row);
-    grp.subtotal[bk] += amount; grp.subtotal.total += amount;
-    grand[bk] += amount; grand.total += amount;
   }
 
+  const glTotal = glRows.reduce((s, r) => s + r.amount, 0);
   const vendorsOut = Array.from(byVendor.values())
     .sort((a, b) => a.vendor.localeCompare(b.vendor))
-    .map(g => ({ ...g, rows: g.rows.sort((x, y) => String(x.due_date).localeCompare(String(y.due_date))) }));
+    .map(g => ({ ...g, rows: g.rows.sort((x, y) => String(x.date).localeCompare(String(y.date))) }));
+
+  // Reconciliation: report total should equal the GL balance by construction.
+  const reportTotal = grand.total;
+  const reconDiff = Math.round((reportTotal - glBalance) * 100) / 100;
 
   res.json({
     entity_id: entityId,
     as_of: asOf,
-    bucket_labels: { current: 'Current', d1_30: '1-30', d31_60: '31-60', d61_90: '61-90', d91_plus: '91+' },
+    ap_account: apAccount,
+    source: 'gl',
+    bucket_labels: { current: 'Current', d1_30: '1-30', d31_60: '31-60', d61_90: '61-90', d91_plus: '91+', gl: 'GL' },
     bucket_order: buckets,
     vendors: vendorsOut,
+    gl_rows: glRows.sort((a, b) => String(a.date).localeCompare(String(b.date))),
+    gl_total: glTotal,
     grand_total: grand,
+    gl_balance: glBalance,
+    recon_diff: reconDiff,
     bill_count: vendorsOut.reduce((n, g) => n + g.rows.length, 0),
-    payments_considered: paymentsConsidered,
-    payments_applied: paymentsApplied,
+    gl_entry_count: glRows.length,
+    billcom_error: billcomError,
   });
 });
+
 
 
 
