@@ -4363,6 +4363,14 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
     }
   }
 
+  // Net overpayment: if payments exceeded all bills (202000 is net-debit at the
+  // as-of date), the leftover unapplied debit is a prepaid/overpayment balance.
+  // Surface it as a negative GL line so the report still ties to the GL balance.
+  if (unappliedDebit > 0.005) {
+    glRows.push({ date: asOf, entry_num: null, entry_id: null, memo: 'Net prepaid / overpayment (payments exceed open bills)', description: '', amount: -unappliedDebit });
+    grand.gl -= unappliedDebit; grand.total -= unappliedDebit;
+  }
+
   const glTotal = glRows.reduce((s, r) => s + r.amount, 0);
   const vendorsOut = Array.from(byVendor.values())
     .sort((a, b) => a.vendor.localeCompare(b.vendor))

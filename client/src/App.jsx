@@ -2612,8 +2612,8 @@ function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPend
       </Fragment>)}
         {data.gl_rows&&data.gl_rows.length>0&&<Fragment>
           <tr><td colSpan={ncols} style={{...S.td,fontWeight:700,color:T.accent,background:T.accentDim}}>GL ENTRIES <span style={{fontWeight:400,color:T.textMuted}}>— imported / non-Bill.com &middot; not aged</span></td></tr>
-          {data.gl_rows.map((r,i)=><tr key={'gl'+i} onClick={()=>setViewEntry({id:r.entry_id})} style={{cursor:'pointer'}}>
-            <td style={S.td}>{r.date}</td><td style={S.td}>GL</td><td style={{...S.td,color:T.accent}}>JE-{String(r.entry_num).padStart(4,'0')}</td><td style={{...S.td,color:T.textMuted}} colSpan={3}>{r.memo}{r.description?' · '+r.description:''}</td>
+          {data.gl_rows.map((r,i)=><tr key={'gl'+i} onClick={()=>r.entry_id&&setViewEntry({id:r.entry_id})} style={{cursor:r.entry_id?'pointer':'default'}}>
+            <td style={S.td}>{r.date}</td><td style={S.td}>GL</td><td style={{...S.td,color:T.accent}}>{r.entry_num!=null?'JE-'+String(r.entry_num).padStart(4,'0'):''}</td><td style={{...S.td,color:T.textMuted}} colSpan={3}>{r.memo}{r.description?' · '+r.description:''}</td>
             {BK.map(b=><td key={b} style={S.tdR}></td>)}<td style={{...S.tdR,fontWeight:600,color:T.accent}}>{fmt(r.amount)}</td><td style={{...S.tdR,fontWeight:600}}>{fmt(r.amount)}</td>
           </tr>)}
           <tr style={{background:T.accentDim}}><td colSpan={COLS} style={{...S.td,fontWeight:600,fontStyle:'italic'}}>Total GL Entries</td>
