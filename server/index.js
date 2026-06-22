@@ -383,6 +383,11 @@ if (!entCols.includes('display_id')) {
 // Phase 3: default_cash_account on billcom_config (for payment JEs)
 const bcCfgCols = db.prepare("PRAGMA table_info(billcom_config)").all().map(c => c.name);
 if (!bcCfgCols.includes('default_cash_account')) db.exec("ALTER TABLE billcom_config ADD COLUMN default_cash_account TEXT");
+// Phase 7 (payment reconcile): clearing account for the QBO-style two-leg model.
+// Leg 1 relieves AP into the clearing account; Leg 2 moves the clearing balance
+// to operating cash as a process-date lump sum (mirrors Bill.com Money Out Clearing).
+if (!bcCfgCols.includes('default_clearing_account')) db.exec("ALTER TABLE billcom_config ADD COLUMN default_clearing_account TEXT");
+if (!bcCfgCols.includes('sync_cutoff_date')) db.exec("ALTER TABLE billcom_config ADD COLUMN sync_cutoff_date TEXT");
 
 // Bank-transaction matching: link a bank line to an already-posted JE instead of
 // creating a new one. matched_entry_id holds the JE id; status becomes 'matched'.
@@ -3538,7 +3543,7 @@ app.get('/api/turnkey/sync-log/:turnkey_project_id', turnkeyAuth, turnkey.requir
 
 // === Bill.com integration routes ===
 app.get('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
-  const row = db.prepare('SELECT entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, default_cash_account, last_tested_at, last_test_status, last_test_message, updated_by, updated_at FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
+  const row = db.prepare('SELECT entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, default_cash_account, default_clearing_account, sync_cutoff_date, last_tested_at, last_test_status, last_test_message, updated_by, updated_at FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
   if (!row) return res.json({ configured: false });
   let pwLast4 = '', keyLast4 = '';
   try { pwLast4 = maskSecret(billcomDecrypt(row.password_enc)); } catch {}
@@ -3554,6 +3559,8 @@ app.get('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id')
     dev_key_masked: keyLast4,
     default_ap_account: row.default_ap_account,
     default_cash_account: row.default_cash_account,
+    default_clearing_account: row.default_clearing_account,
+    sync_cutoff_date: row.sync_cutoff_date,
     last_tested_at: row.last_tested_at,
     last_test_status: row.last_test_status,
     last_test_message: row.last_test_message,
@@ -3563,7 +3570,7 @@ app.get('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id')
 });
 
 app.put('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
-  const { environment, username, password, org_id, dev_key, default_ap_account, default_cash_account } = req.body || {};
+  const { environment, username, password, org_id, dev_key, default_ap_account, default_cash_account, default_clearing_account, sync_cutoff_date } = req.body || {};
   if (!environment || !username || !org_id) return res.status(400).json({ error: 'environment, username, org_id required' });
   if (!['sandbox','production'].includes(environment)) return res.status(400).json({ error: 'environment must be sandbox or production' });
   const baseUrl = BILLCOM_BASE_URLS[environment];
@@ -3577,11 +3584,11 @@ app.put('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id')
   const now = new Date().toISOString();
   const updater = req.user.name || req.user.email;
   if (existing) {
-    db.prepare('UPDATE billcom_config SET environment=?, api_base_url=?, username=?, password_enc=?, org_id=?, dev_key_enc=?, default_ap_account=?, default_cash_account=?, updated_by=?, updated_at=? WHERE entity_id=?')
-      .run(environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, default_cash_account || null, updater, now, req.params.entity_id);
+    db.prepare('UPDATE billcom_config SET environment=?, api_base_url=?, username=?, password_enc=?, org_id=?, dev_key_enc=?, default_ap_account=?, default_cash_account=?, default_clearing_account=?, sync_cutoff_date=?, updated_by=?, updated_at=? WHERE entity_id=?')
+      .run(environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, default_cash_account || null, default_clearing_account || null, sync_cutoff_date || null, updater, now, req.params.entity_id);
   } else {
-    db.prepare('INSERT INTO billcom_config (entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, default_cash_account, updated_by, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
-      .run(req.params.entity_id, environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, default_cash_account || null, updater, now);
+    db.prepare('INSERT INTO billcom_config (entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, default_cash_account, default_clearing_account, sync_cutoff_date, updated_by, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(req.params.entity_id, environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, default_cash_account || null, default_clearing_account || null, sync_cutoff_date || null, updater, now);
   }
   res.json({ success: true });
 });
@@ -4222,6 +4229,256 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   }
 
   result.missing_mappings = Array.from(missingMap.values());
+  res.json(result);
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Payment Reconcile (Phase 7, Option 2) — QBO-style two-leg payment sync built
+// on the READ path only (the MFA/BDC_1361 wall blocks writing/initiating
+// payments via the API, but reading payment status works fine).
+//
+// Bill.com data model (verified against entity 40 production):
+//   • /payments rows carry: billPayments[] = [{ billId, amount }] (one payment
+//     can settle several bills), processDate (the date Bill.com pulls the bank),
+//     status (PAID / VOID), voidInfo[], cancelRequestSubmitted.
+//   • A bill's invoiceNumber is null at the top level (nested under invoice),
+//     so we link payments to CL bill JEs by billId via billcom_sync_log, NOT by
+//     invoice number.
+//
+// Two legs, mirroring how Bill.com posts into QuickBooks Online:
+//   Leg 1 (per bill relieved): Dr AP (202000) / Cr Clearing (1072) — relieves
+//          the open payable and ages the bill out of the AP-aging report.
+//   Leg 2 (per processDate, lump sum): Dr Clearing (1072) / Cr Cash (100200) —
+//          one funds-transfer entry per process date, matching the single
+//          batch ACH withdrawal on the bank statement.
+//
+// Only truly disbursed payments relieve: status === 'PAID', not voided, not
+// cancel-requested, and processDate <= as_of (a future-dated PAID is scheduled,
+// not yet pulled). Payments whose bill has no synced CL JE (e.g. pre-cutover
+// bills already in the opening balance) are skipped — relieving them would
+// double-count against the opening JE. Idempotent + incremental via
+// billcom_sync_log (sync_type 'payment' and 'funds_transfer'); safe to re-run.
+// ───────────────────────────────────────────────────────────────────────────
+app.post('/api/billcom/payment-reconcile/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+
+  const apAccount = cfg.default_ap_account;
+  const clearingAccount = cfg.default_clearing_account;
+  const cashAccount = cfg.default_cash_account;
+  if (!apAccount) return res.status(400).json({ error: 'default_ap_account not set in Bill.com config' });
+  if (!clearingAccount) return res.status(400).json({ error: 'default_clearing_account not set in Bill.com config' });
+  if (!cashAccount) return res.status(400).json({ error: 'default_cash_account not set in Bill.com config' });
+
+  for (const [label, code] of [['AP', apAccount], ['clearing', clearingAccount], ['cash', cashAccount]]) {
+    const ok = db.prepare('SELECT 1 FROM accounts WHERE entity_id = ? AND code = ?').get(entityId, code);
+    if (!ok) return res.status(400).json({ error: label + ' account ' + code + ' does not exist on entity' });
+  }
+
+  // dry_run=true previews the JEs that WOULD be created without writing them.
+  const dryRun = !!(req.body && (req.body.dry_run === true || req.body.dry_run === 'true'));
+  const asOf = String((req.body && req.body.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.body.as_of)) ? req.body.as_of : new Date().toISOString().slice(0, 10));
+  // Anything dated before the opening-balance cutoff is already in the opening JE.
+  const cutoffDate = String((req.body && req.body.cutoff_date) || cfg.sync_cutoff_date || '2026-01-01');
+
+  let session;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    const devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) {
+    return res.status(502).json({ error: 'Bill.com login failed: ' + e.message });
+  }
+  const listArgs = { sessionId: session.sessionId, devKey: billcomDecrypt(cfg.dev_key_enc), baseUrl: cfg.api_base_url };
+  const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
+
+  let payments;
+  try {
+    payments = await billcomListPayments({ ...listArgs, maxItems: 5000 });
+  } catch (e) {
+    return res.status(502).json({ error: 'Failed to fetch payments: ' + e.message });
+  }
+
+  // billId -> CL bill JE id (only bills we actually synced into CL can be relieved).
+  const billEntryByBillcomId = new Map();
+  for (const r of db.prepare(
+    "SELECT billcom_id, cl_entry_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'bill' AND status = 'success' AND cl_entry_id IS NOT NULL"
+  ).all(entityId)) {
+    if (r.billcom_id != null) billEntryByBillcomId.set(String(r.billcom_id), r.cl_entry_id);
+  }
+
+  const alreadySynced = db.prepare(
+    "SELECT 1 FROM billcom_sync_log WHERE entity_id = ? AND sync_type = ? AND billcom_id = ? AND status = 'success' LIMIT 1"
+  );
+  const logSync = db.prepare(
+    'INSERT INTO billcom_sync_log (entity_id, sync_type, billcom_id, cl_entry_id, status, message, created_at) VALUES (?,?,?,?,?,?,?)'
+  );
+  const now = new Date().toISOString();
+  const actor = req.user.name || req.user.email || 'system';
+
+  // A payment is "disbursed" (relieves AP) only when truly paid out, not voided,
+  // not pending cancellation, and not future-dated relative to as_of.
+  const isDisbursed = (pay) => {
+    const s = String(pick(pay, 'status', 'paymentStatus') || '').toUpperCase();
+    if (s !== 'PAID') return false;
+    const voids = pick(pay, 'voidInfo');
+    if (Array.isArray(voids) && voids.length > 0) return false;
+    if (pick(pay, 'cancelRequestSubmitted') === true) return false;
+    const pd = pick(pay, 'processDate', 'process_date', 'paymentDate');
+    if (!pd) return false;
+    if (String(pd) > asOf) return false;        // scheduled, not yet pulled
+    if (String(pd) < cutoffDate) return false;  // already in opening balance
+    return true;
+  };
+
+  const result = {
+    dry_run: dryRun, as_of: asOf, cutoff_date: cutoffDate,
+    accounts: { ap: apAccount, clearing: clearingAccount, cash: cashAccount },
+    payments_fetched: payments.length,
+    leg1: { relieved: 0, skipped: 0, errors: 0, amount: 0, details: [] },
+    leg2: { transfers: 0, skipped: 0, errors: 0, amount: 0, details: [] },
+  };
+
+  // ── Leg 1: relieve each bill settled by a disbursed payment.
+  //    Group disbursed amounts by processDate for Leg 2 lump sums.
+  const transferByDate = new Map(); // processDate -> total disbursed amount (this run)
+  const insertJE = (date, memo, lines) => {
+    const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
+    const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)')
+      .run(entityId, num, date, memo, actor);
+    for (const l of lines) {
+      db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit) VALUES (?,?,?,?)')
+        .run(r.lastInsertRowid, l.account_code, l.debit, l.credit);
+    }
+    return { id: r.lastInsertRowid, num };
+  };
+
+  for (const pay of payments) {
+    const payId = String(pick(pay, 'id') || '');
+    if (!payId) continue;
+    const processDate = String(pick(pay, 'processDate', 'process_date', 'paymentDate') || '');
+    const payNum = pick(pay, 'transactionNumber', 'confirmationNumber', 'paymentNumber') || payId;
+
+    if (!isDisbursed(pay)) {
+      result.leg1.skipped++;
+      result.leg1.details.push({ id: payId, status: 'skip', reason: 'not disbursed/in-window', processDate, payStatus: pick(pay, 'status') });
+      continue;
+    }
+
+    // Settle each bill this payment covers (billPayments[] is the authoritative
+    // allocation; fall back to the top-level billId for single-bill payments).
+    let allocations = Array.isArray(pick(pay, 'billPayments')) ? pick(pay, 'billPayments') : null;
+    if (!allocations || !allocations.length) {
+      const bid = pick(pay, 'billId');
+      const amt = Number(pick(pay, 'amount', 'paymentAmount') || 0);
+      allocations = bid ? [{ billId: bid, amount: amt }] : [];
+    }
+
+    for (const alloc of allocations) {
+      const billId = String(pick(alloc, 'billId', 'bill_id') || '');
+      const amount = Number(pick(alloc, 'amount') || 0);
+      if (!billId || amount <= 0) { result.leg1.skipped++; continue; }
+
+      // Dedup key: one relief per (payment, bill) allocation.
+      const dedupId = payId + ':' + billId;
+      if (alreadySynced.get(entityId, 'payment', dedupId)) {
+        result.leg1.skipped++;
+        result.leg1.details.push({ id: dedupId, status: 'skip', reason: 'already reconciled' });
+        // Still counts toward the clearing balance already moved in a prior run's
+        // Leg 2, so do NOT add to transferByDate here.
+        continue;
+      }
+
+      const billEntryId = billEntryByBillcomId.get(billId);
+      if (!billEntryId) {
+        // Bill not synced into CL (pre-cutover/opening-balance bill) — skip to
+        // avoid double-relieving against the opening JE.
+        result.leg1.skipped++;
+        result.leg1.details.push({ id: dedupId, status: 'skip', reason: 'bill not synced to CL (likely pre-cutover)', billId });
+        continue;
+      }
+
+      const memo = 'Bill.com payment ' + payNum + ' — relieve bill ' + billId;
+      const lines = [
+        { account_code: apAccount, debit: amount, credit: 0 },
+        { account_code: clearingAccount, debit: 0, credit: amount },
+      ];
+
+      if (dryRun) {
+        result.leg1.relieved++; result.leg1.amount += amount;
+        result.leg1.details.push({ id: dedupId, status: 'would_create', date: processDate, amount, billEntryId });
+        transferByDate.set(processDate, (transferByDate.get(processDate) || 0) + amount);
+      } else {
+        try {
+          const je = db.transaction(() => {
+            const created = insertJE(processDate, memo, lines);
+            logSync.run(entityId, 'payment', dedupId, created.id, 'success', 'relieved bill ' + billId + ' (JE #' + created.num + ')', now);
+            return created;
+          })();
+          result.leg1.relieved++; result.leg1.amount += amount;
+          result.leg1.details.push({ id: dedupId, status: 'created', cl_entry_id: je.id, date: processDate, amount });
+          transferByDate.set(processDate, (transferByDate.get(processDate) || 0) + amount);
+        } catch (e) {
+          result.leg1.errors++;
+          logSync.run(entityId, 'payment', dedupId, null, 'error', e.message, now);
+          result.leg1.details.push({ id: dedupId, status: 'error', reason: e.message });
+        }
+      }
+    }
+  }
+
+  // ── Leg 2: one funds-transfer JE per processDate that had NEW relief this run.
+  //    Dedup key = 'ft:' + processDate. If a transfer already exists for that
+  //    date (a prior run), we must ADD to it rather than skip — otherwise the
+  //    clearing account would not fully drain. We post a top-up for the delta.
+  for (const [pd, amount] of transferByDate.entries()) {
+    if (amount <= 0.005) continue;
+    const dedupId = 'ft:' + pd;
+    const prior = db.prepare(
+      "SELECT cl_entry_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'funds_transfer' AND billcom_id = ? AND status = 'success'"
+    ).all(entityId, dedupId);
+    // Sum what we've already transferred for this date so we only top up the delta.
+    let priorTransferred = 0;
+    for (const p of prior) {
+      if (p.cl_entry_id) {
+        const row = db.prepare('SELECT SUM(debit) AS d FROM journal_lines WHERE entry_id = ? AND account_code = ?').get(p.cl_entry_id, clearingAccount);
+        priorTransferred += (row && row.d) || 0;
+      }
+    }
+    const delta = amount; // amount here is only NEW relief from this run (prior runs' relief wasn't added to transferByDate)
+    if (delta <= 0.005) { result.leg2.skipped++; continue; }
+
+    const memo = 'Bill.com funds transfer — ' + pd + ' batch';
+    const lines = [
+      { account_code: clearingAccount, debit: delta, credit: 0 },
+      { account_code: cashAccount, debit: 0, credit: delta },
+    ];
+
+    if (dryRun) {
+      result.leg2.transfers++; result.leg2.amount += delta;
+      result.leg2.details.push({ date: pd, status: 'would_create', amount: delta, prior_transferred: priorTransferred });
+    } else {
+      try {
+        const je = db.transaction(() => {
+          const created = insertJE(pd, memo, lines);
+          logSync.run(entityId, 'funds_transfer', dedupId, created.id, 'success', 'funds transfer ' + pd + ' $' + delta.toFixed(2) + ' (JE #' + created.num + ')', now);
+          return created;
+        })();
+        result.leg2.transfers++; result.leg2.amount += delta;
+        result.leg2.details.push({ date: pd, status: 'created', cl_entry_id: je.id, amount: delta });
+      } catch (e) {
+        result.leg2.errors++;
+        logSync.run(entityId, 'funds_transfer', dedupId, null, 'error', e.message, now);
+        result.leg2.details.push({ date: pd, status: 'error', reason: e.message });
+      }
+    }
+  }
+
+  result.leg1.amount = Math.round(result.leg1.amount * 100) / 100;
+  result.leg2.amount = Math.round(result.leg2.amount * 100) / 100;
   res.json(result);
 });
 
