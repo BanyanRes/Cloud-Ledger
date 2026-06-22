@@ -4226,6 +4226,83 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
 });
 
 // ───────────────────────────────────────────────────────────────────────────
+// TEMP DEBUG (payment-reconcile design): inspect the real shape of Bill.com
+// bill + payment objects in production so the relieving-JE logic keys off
+// actual fields/enums rather than guesses. Read-only. Remove before final.
+// ───────────────────────────────────────────────────────────────────────────
+app.get('/api/_debug/billcom-payshape/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+  const out = { entity_id: entityId, environment: cfg.environment, base: cfg.api_base_url };
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    const devKey = billcomDecrypt(cfg.dev_key_enc);
+    const session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+    const listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+    const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
+
+    // (a) Bills via the working dueDate-window paginator
+    const asOf = new Date().toISOString().slice(0, 10);
+    const bills = await billcomListBillsWindowed({ ...listArgs, fromDate: '2024-01-01', toDate: asOf });
+    out.bill_count = bills.length;
+    out.bill_keys = bills.length ? Object.keys(bills[0]) : [];
+    // paymentStatus distribution across all bills
+    const psDist = {};
+    for (const b of bills) { const ps = String(pick(b, 'paymentStatus', 'payment_status') || 'null'); psDist[ps] = (psDist[ps] || 0) + 1; }
+    out.bill_paymentStatus_dist = psDist;
+    // a couple of redacted sample bills (paid + unpaid if available)
+    const redactBill = (b) => ({
+      id: pick(b, 'id'), invoiceNumber: pick(b, 'invoiceNumber', 'invoice_number'),
+      amount: pick(b, 'amount'), paymentStatus: pick(b, 'paymentStatus', 'payment_status'),
+      paidAmount: pick(b, 'paidAmount', 'paid_amount'), dueDate: pick(b, 'dueDate'),
+      invoiceDate: pick(b, 'invoiceDate'), payments: pick(b, 'payments'),
+      has_payments_array: Array.isArray(pick(b, 'payments')),
+    });
+    const paidSample = bills.find(b => /PAID/i.test(String(pick(b, 'paymentStatus', 'payment_status') || '')));
+    const anySample = bills[0] || null;
+    out.sample_paid_bill = paidSample ? redactBill(paidSample) : null;
+    out.sample_any_bill = anySample ? redactBill(anySample) : null;
+
+    // (b) Try the /payments list endpoint — capture shape + first error if blocked
+    try {
+      const pays = await billcomListPayments({ ...listArgs, maxItems: 25 });
+      out.payments_list_ok = true;
+      out.payment_count = pays.length;
+      out.payment_keys = pays.length ? Object.keys(pays[0]) : [];
+      const psd = {};
+      for (const p of pays) { const s = String(pick(p, 'status', 'paymentStatus') || 'null'); psd[s] = (psd[s] || 0) + 1; }
+      out.payment_status_dist = psd;
+      out.sample_payment = pays.length ? {
+        id: pick(pays[0], 'id'), status: pick(pays[0], 'status', 'paymentStatus'),
+        amount: pick(pays[0], 'amount', 'paymentAmount'),
+        processDate: pick(pays[0], 'processDate', 'process_date', 'paymentDate'),
+        disbursementStatus: pick(pays[0], 'disbursementStatus', 'disbursement_status'),
+        chartOfAccountId: pick(pays[0], 'chartOfAccountId'),
+        all_keys_values: pays[0],
+      } : null;
+    } catch (e) {
+      out.payments_list_ok = false;
+      out.payments_list_error = e.message;
+    }
+
+    // (c) For one paid bill, fetch its detail to see if payment info is nested there
+    if (paidSample) {
+      try {
+        const detail = await billcomGetById({ ...listArgs, resourcePath: '/bills', id: String(pick(paidSample, 'id')) });
+        out.paid_bill_detail_keys = Object.keys(detail || {});
+        out.paid_bill_detail_payments = pick(detail, 'payments');
+        out.paid_bill_detail_paymentStatus = pick(detail, 'paymentStatus', 'payment_status');
+        out.paid_bill_detail_paidAmount = pick(detail, 'paidAmount', 'paid_amount');
+      } catch (e) { out.paid_bill_detail_error = e.message; }
+    }
+  } catch (e) {
+    out.error = e.message;
+  }
+  res.json(out);
+});
+
+// ───────────────────────────────────────────────────────────────────────────
 // AP Aging Detail (Q5 / Weaver) — read open bills straight from Bill.com and
 // bucket by days past due. Read-only: no JEs are written. Available to
 // Accountant + Admin. The MFA/BDC_1361 block only affects payment *sync*;
