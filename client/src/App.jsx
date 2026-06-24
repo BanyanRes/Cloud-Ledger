@@ -355,7 +355,7 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
   </div></div>);}
 
 // ─── Entity Picker ───
-function GlobalSearch({entities,activeEntity,onSelectEntity,onGo}){
+function GlobalSearch({entities,activeEntity,onSelectEntity,onGo,onPickJE,onPickAccount}){
   const[open,setOpen]=useState(false);
   const[q,setQ]=useState("");
   const[accounts,setAccounts]=useState([]);
@@ -383,12 +383,14 @@ function GlobalSearch({entities,activeEntity,onSelectEntity,onGo}){
     if(jn.includes(t)||String(e.entry_num).includes(t))return true;
     if((e.date||"").toLowerCase().includes(t))return true;
     if((e.memo||"").toLowerCase().includes(t))return true;
+    const amtQ=t.replace(/[$,\s]/g,"");
+    if(amtQ&&/^[0-9.]+$/.test(amtQ)&&(e.lines||[]).some(l=>{const d=Number(l.debit||0),c=Number(l.credit||0);return String(d).includes(amtQ)||String(c).includes(amtQ)||d.toFixed(2).includes(amtQ)||c.toFixed(2).includes(amtQ);}))return true;
     return (e.lines||[]).some(l=>(l.account_code||"").toLowerCase().includes(t)||(l.description||"").toLowerCase().includes(t));
   }).slice(0,6):[];
   const close=()=>{setOpen(false);setQ("");};
   const pickEntity=(id)=>{onSelectEntity(id);onGo("dashboard");close();};
-  const pickAccount=()=>{onGo("coa");close();};
-  const pickJE=()=>{onGo("journal");close();};
+  const pickAccount=(code)=>{if(onPickAccount)onPickAccount(code);else onGo("coa");close();};
+  const pickJE=(id)=>{if(onPickJE)onPickJE(id);else onGo("journal");close();};
   const Row=({children,onClick})=>(<div onClick={onClick} style={{padding:"8px 14px",cursor:"pointer",fontSize:13,borderRadius:6}} onMouseEnter={e=>e.currentTarget.style.background=T.bgElevated} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>{children}</div>);
   const Hdr=({children})=>(<div style={{padding:"8px 14px 4px",fontSize:10,fontWeight:700,letterSpacing:"0.06em",textTransform:"uppercase",color:T.textDim}}>{children}</div>);
   const hasAny=entHits.length||acctHits.length||jeHits.length;
@@ -399,8 +401,8 @@ function GlobalSearch({entities,activeEntity,onSelectEntity,onGo}){
       <div style={{position:"absolute",top:"100%",left:0,marginTop:6,width:360,maxHeight:420,overflowY:"auto",background:"#fff",border:"1px solid "+T.border,borderRadius:T.radius,boxShadow:T.shadowLg,zIndex:100,padding:"6px 0"}}>
         {!hasAny&&<div style={{padding:"16px 14px",fontSize:13,color:T.textDim}}>{loaded?"No matches":"Searching…"}</div>}
         {entHits.length>0&&<><Hdr>Entities</Hdr>{entHits.map(e=><Row key={"e"+e.id} onClick={()=>pickEntity(e.id)}><span style={{fontWeight:600,color:T.textBright}}>{e.name}</span>{e.code&&<span style={{color:T.textDim,marginLeft:6,fontSize:11}}>{e.code}</span>}</Row>)}</>}
-        {acctHits.length>0&&<><Hdr>Accounts (current entity)</Hdr>{acctHits.map(a=><Row key={"a"+a.code} onClick={pickAccount}><span style={{color:T.accent,fontWeight:600}}>{a.code}</span><span style={{marginLeft:8}}>{a.name}</span><span style={{...S.tag(a.type),marginLeft:8,transform:"scale(0.85)"}}>{a.type}</span></Row>)}</>}
-        {jeHits.length>0&&<><Hdr>Journal Entries (current entity)</Hdr>{jeHits.map(e=><Row key={"j"+e.id} onClick={pickJE}><span style={{color:T.accent,fontWeight:600}}>JE-{String(e.entry_num).padStart(4,"0")}</span><span style={{color:T.textMuted,marginLeft:8}}>{e.date}</span><span style={{marginLeft:8}}>{e.memo}</span></Row>)}</>}
+        {acctHits.length>0&&<><Hdr>Accounts (current entity)</Hdr>{acctHits.map(a=><Row key={"a"+a.code} onClick={()=>pickAccount(a.code)}><span style={{color:T.accent,fontWeight:600}}>{a.code}</span><span style={{marginLeft:8}}>{a.name}</span><span style={{...S.tag(a.type),marginLeft:8,transform:"scale(0.85)"}}>{a.type}</span></Row>)}</>}
+        {jeHits.length>0&&<><Hdr>Journal Entries (current entity)</Hdr>{jeHits.map(e=><Row key={"j"+e.id} onClick={()=>pickJE(e.id)}><span style={{color:T.accent,fontWeight:600}}>JE-{String(e.entry_num).padStart(4,"0")}</span><span style={{color:T.textMuted,marginLeft:8}}>{e.date}</span><span style={{marginLeft:8}}>{e.memo}</span></Row>)}</>}
       </div></>}
   </div>);
 }
@@ -449,6 +451,10 @@ export default function App(){
   // Workpapers modal openable from the header (any page), for the active entity.
   const[wpEntity,setWpEntity]=useState(null);
   const[page,setPage]=useState('dashboard');const[loading,setLoading]=useState(true);
+  // JE to auto-open after navigating to the Journal page (used by global search).
+  const[pendingJEId,setPendingJEId]=useState(null);
+  // Account code to pre-filter the CoA page (used by global search).
+  const[pendingAcctCode,setPendingAcctCode]=useState(null);
   // Back-button trap with diagnostic logging
   useEffect(()=>{
     console.log('[CL-BACK] mount, user=', user?.email || 'null');
@@ -580,7 +586,7 @@ export default function App(){
     <div style={S.topBar}><div style={{display:'flex',alignItems:'center',gap:16}}>
       <button style={{...S.btnGhost,fontSize:18,padding:'4px 6px',color:T.textMuted}} onClick={()=>setSidebarCol(c=>!c)}>{sidebarCol?'\u2630':'\u2190'}</button>
       <div style={{display:'flex',alignItems:'center',gap:10}}><Logo size={32}/>{!sidebarCol&&<div style={{fontSize:17,fontWeight:800,color:T.textBright}}>CloudLedger</div>}</div>
-      <div style={{width:1,height:28,background:T.border}}/><EntityPicker entities={entities} activeId={activeEntity} onSelect={setActiveEntity} onManage={()=>setPage('entities')}/>{entities.length>0&&<GlobalSearch entities={entities} activeEntity={activeEntity} onSelectEntity={setActiveEntity} onGo={setPage}/>}
+      <div style={{width:1,height:28,background:T.border}}/><EntityPicker entities={entities} activeId={activeEntity} onSelect={setActiveEntity} onManage={()=>setPage('entities')}/>{entities.length>0&&<GlobalSearch entities={entities} activeEntity={activeEntity} onSelectEntity={setActiveEntity} onGo={setPage} onPickJE={(id)=>{setPendingJEId(id);setPage('journal');}} onPickAccount={(code)=>{setPendingAcctCode(code);setPage('coa');}}/>}
       {_activeEnt&&<button style={{...S.btnGhost,fontSize:18,padding:'4px 8px',lineHeight:1}} title={'Open '+_activeEnt.name+' Workpapers'} onClick={()=>setWpEntity(_activeEnt)}>📁</button>}</div>
       <div style={{display:'flex',alignItems:'center',gap:10}}>
         {canEdit&&activeEntity&&<button style={{...S.btnP,position:'relative'}} onClick={()=>setShowJE(true)}>+ Journal Entry{jeHasContent&&<span style={{position:'absolute',top:-3,right:-3,width:8,height:8,borderRadius:4,background:T.orange,border:'2px solid #fff'}}/>}</button>}
@@ -593,7 +599,7 @@ export default function App(){
           {sidebarCol?<span style={{display:'inline-block',width:18,textAlign:'center',fontSize:15}}>{n.icon}</span>:<span><span style={{display:'inline-block',width:22,textAlign:'center',marginRight:8}}>{n.icon}</span>{n.label}</span>}</div>:null)}</div>
       <div style={S.main}>{(()=>{const en=entities.find(e=>e.id===activeEntity);const entityName=en?en.name:'';return<>
         {page==='dashboard'&&<Dashboard entityId={activeEntity} setActiveEntity={setActiveEntity} setPage={setPage} user={user} key={rk}/>}
-        {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)}/>}
+        {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)} openJEId={pendingJEId} clearOpenJE={()=>setPendingJEId(null)}/>}
         {page==='coa'&&activeEntity&&<ChartOfAccounts entityId={activeEntity} entityName={entityName} canEdit={canEdit}/>}
         {page==='dimensions'&&activeEntity&&dimsEnabled&&<DimensionsManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='ar_customers'&&activeEntity&&arEnabled&&<CustomersManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
@@ -1700,15 +1706,17 @@ function BulkJEModal({entityId,onClose,onPosted}){
 }
 
 // ═══ Journal List ═══
-function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');const[q,setQ]=useState('');
+function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry,openJEId,clearOpenJE}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');const[q,setQ]=useState('');
   const[editEntry,setEditEntry]=useState(null);const[showBulk,setShowBulk]=useState(false);
   const load=useCallback(async()=>{const[e,a]=await Promise.all([api.getEntries(entityId,from||undefined,to||undefined),api.getAccounts(entityId)]);setEntries(e);setAccounts(a);},[entityId,from,to]);
-  useEffect(()=>{load();},[load]);const del=async id=>{if(!confirm('Delete this journal entry?'))return;await api.deleteEntry(entityId,id);load();};const acctName=code=>accounts.find(a=>a.code===code)?.name||'?';
-  const shown=entries.filter(e=>{const t=q.trim().toLowerCase();if(!t)return true;const jeNum='je-'+String(e.entry_num).padStart(4,'0');if(jeNum.includes(t)||String(e.entry_num).includes(t))return true;if((e.date||'').toLowerCase().includes(t))return true;if((e.memo||'').toLowerCase().includes(t))return true;return (e.lines||[]).some(l=>(l.account_code||'').toLowerCase().includes(t)||(acctName(l.account_code)||'').toLowerCase().includes(t)||(l.description||'').toLowerCase().includes(t)||(l.class_name||'').toLowerCase().includes(t)||(l.location_name||'').toLowerCase().includes(t)||(l.project_name||'').toLowerCase().includes(t));});
+  useEffect(()=>{load();},[load]);
+  // When arriving from global search with a target JE, open it once entries load.
+  useEffect(()=>{if(openJEId&&entries.length){const hit=entries.find(e=>e.id===openJEId);if(hit){setEditEntry(hit);}if(clearOpenJE)clearOpenJE();}},[openJEId,entries]);const del=async id=>{if(!confirm('Delete this journal entry?'))return;await api.deleteEntry(entityId,id);load();};const acctName=code=>accounts.find(a=>a.code===code)?.name||'?';
+  const shown=entries.filter(e=>{const t=q.trim().toLowerCase();if(!t)return true;const jeNum='je-'+String(e.entry_num).padStart(4,'0');if(jeNum.includes(t)||String(e.entry_num).includes(t))return true;if((e.date||'').toLowerCase().includes(t))return true;if((e.memo||'').toLowerCase().includes(t))return true;const amtQ=t.replace(/[$,\s]/g,'');const amtMatch=amtQ&&/^[0-9.]+$/.test(amtQ)&&(e.lines||[]).some(l=>{const d=Number(l.debit||0),c=Number(l.credit||0);return String(d).includes(amtQ)||String(c).includes(amtQ)||d.toFixed(2).includes(amtQ)||c.toFixed(2).includes(amtQ);});if(amtMatch)return true;return (e.lines||[]).some(l=>(l.account_code||'').toLowerCase().includes(t)||(acctName(l.account_code)||'').toLowerCase().includes(t)||(l.description||'').toLowerCase().includes(t)||(l.class_name||'').toLowerCase().includes(t)||(l.location_name||'').toLowerCase().includes(t)||(l.project_name||'').toLowerCase().includes(t));});
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}><div><div style={S.h1}>Journal Entries</div><div style={S.sub}>{entityName} &middot; {q?shown.length+' of '+entries.length:entries.length} entries{!canEdit&&' · read-only'}</div></div>{canEdit&&<div style={{display:'flex',gap:8}}><button style={S.btnS} onClick={()=>setShowBulk(true)}>Bulk Upload</button><button style={S.btnP} onClick={onNewEntry}>+ New Entry</button></div>}</div>
     <div style={S.filterBar}><div><label style={S.label}>From</label><input style={S.inputSm} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
       <div><label style={S.label}>To</label><input style={S.inputSm} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
-      <div style={{flex:1,minWidth:200}}><label style={S.label}>Search</label><input style={{...S.inputSm,width:'100%'}} placeholder="JE#, memo, date, account, description..." value={q} onChange={e=>setQ(e.target.value)}/></div>
+      <div style={{flex:1,minWidth:200}}><label style={S.label}>Search</label><input style={{...S.inputSm,width:'100%'}} placeholder="JE#, memo, date, account, amount, description..." value={q} onChange={e=>setQ(e.target.value)}/></div>
       {(from||to||q)&&<button style={{...S.btnGhost,marginTop:14,color:T.red}} onClick={()=>{setFrom('');setTo('');setQ('');}}>Clear</button>}</div>
     {shown.length===0?<div style={{...S.card,textAlign:'center',padding:60,color:T.textDim}}>No entries found</div>:
       <div style={{display:'flex',flexDirection:'column',gap:8}}>{shown.map(e=><div key={e.id} style={{...S.card,padding:14,marginBottom:0}}>
@@ -2316,7 +2324,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
   // directly so the window can be any custom range (not just trailing-12mo).
   const prevDay=(d)=>{const x=new Date(d+'T00:00:00');x.setDate(x.getDate()-1);return x.toISOString().slice(0,10);};
   useEffect(()=>{
-    if(!/^d{4}-d{2}-d{2}$/.test(from)||!/^d{4}-d{2}-d{2}$/.test(to))return;
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(from)||!/^\d{4}-\d{2}-\d{2}$/.test(to))return;
     (async()=>{
       setLoading(true);setErr('');
       try{
@@ -2437,6 +2445,9 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
   const[from,setFrom]=useState('');const[to,setTo]=useState('');
   const[groupBy,setGroupBy]=useState(dimsEnabled?'class':'none');
   const[rows,setRows]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
+  const[begRows,setBegRows]=useState([]); // beginning balances for selected balance-sheet accounts
+  const prevDay=(d)=>{const x=new Date(d+'T00:00:00');x.setDate(x.getDate()-1);return x.toISOString().slice(0,10);};
+  const isBS=(t)=>t==='Asset'||t==='Liability'||t==='Equity';
   useEffect(()=>{api.getAccounts(entityId).then(setAccounts).catch(()=>setAccounts([]));},[entityId]);
   useEffect(()=>{if(pendingConfig){if(pendingConfig.sel)setSel(pendingConfig.sel);setFrom(pendingConfig.from||'');setTo(pendingConfig.to||'');if(pendingConfig.groupBy)setGroupBy(pendingConfig.groupBy);clearPending&&clearPending();}},[]);
   useEffect(()=>{if(pendingConfig){if(pendingConfig.sel)setSel(pendingConfig.sel);if(pendingConfig.dim)setDim(pendingConfig.dim);setFrom(pendingConfig.from||'');setTo(pendingConfig.to||'');clearPending&&clearPending();}},[]);
@@ -2444,26 +2455,42 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
   const filteredAccts=accounts.filter(a=>!acctSearch||acctLabel(a.code,a.name).toLowerCase().includes(acctSearch.toLowerCase()));
   const run=async()=>{
     if(!sel.length){setErr('Select at least one account');return;}
-    setLoading(true);setErr('');setRows(null);
+    setLoading(true);setErr('');setRows(null);setBegRows([]);
     try{
       const all=await api.getGLDetail(entityId,{from:from||undefined,to:to||undefined});
       const selSet=new Set(sel);
       setRows((all.lines||all||[]).filter(l=>selSet.has(l.account_code)));
+      // Beginning balance only applies to balance-sheet accounts and only when a
+      // start date is set (otherwise the period runs from inception → beg = 0).
+      const bsSel=accounts.filter(a=>selSet.has(a.code)&&isBS(a.type));
+      if(from&&bsSel.length){
+        const bals=await api.getBalances(entityId,{as_of:prevDay(from)});
+        const byCode=new Map((bals||[]).map(b=>[b.code,b.balance]));
+        setBegRows(bsSel.map(a=>({code:a.code,name:a.name,type:a.type,balance:byCode.get(a.code)||0})).filter(r=>r.balance!==0));
+      }
     }catch(e){setErr(e.message);}finally{setLoading(false);}
   };
   const groupKey=l=>groupBy==='class'?(l.class_name||'(no class)'):groupBy==='location'?(l.location_name||'(no location)'):'All';
   const groups=(()=>{if(!rows)return[];const m=new Map();rows.forEach(l=>{const k=groupKey(l);if(!m.has(k))m.set(k,[]);m.get(k).push(l);});return[...m.entries()].sort((a,b)=>a[0].localeCompare(b[0]));})();
   const amt=l=>(l.debit||0)-(l.credit||0);
   const grand=rows?rows.reduce((s,l)=>s+amt(l),0):0;
+  const begTotal=begRows.reduce((s,b)=>s+(b.balance||0),0);
   const doExport=()=>{
     const d=[[entityName||'Custom Detail Report'],['Custom Detail Report'],['Period: '+(from||'Begin')+' to '+(to||today())],[]];
+    if(begRows.length>0){
+      d.push(['Beginning Balances — Balance Sheet accounts as of '+from]);
+      d.push(['','Account','','','','','Balance']);
+      begRows.forEach(b=>d.push(['',b.code+' '+b.name,'','','','',b.balance]));
+      d.push(['','','','','','Total Beginning Balance',begTotal]);d.push([]);
+    }
     groups.forEach(([g,lines])=>{
       if(groupBy!=='none')d.push([g]);
       d.push([groupBy==='none'?'Group':'',('Account'),'Date','Type','Num','Description','Amount']);
       let sub=0;lines.forEach(l=>{sub+=amt(l);d.push(['',l.account_code+' '+l.account_name,l.date,'Journal','JE-'+String(l.entry_num).padStart(4,'0'),l.description||l.memo||'',amt(l)]);});
       d.push(['','','','','','Total for '+g,sub]);d.push([]);
     });
-    d.push(['','','','','','GRAND TOTAL',grand]);
+    d.push(['','','','','','PERIOD ACTIVITY',grand]);
+    if(begRows.length>0)d.push(['','','','','','ENDING BALANCE (BS accts: beginning + activity)',begTotal+grand]);
     exportToExcel(d,'Custom_Detail_'+(to||today())+'.xlsx');
   };
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Custom Detail Report</div><div style={S.sub}>Pick accounts, optionally group by class or location</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='customdetail' currentConfig={{sel,from,to,groupBy}} onApply={(c)=>{setSel(c.sel||[]);setFrom(c.from||'');setTo(c.to||'');if(c.groupBy)setGroupBy(c.groupBy);}} canEdit={canEdit}/>{rows&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
@@ -2487,14 +2514,18 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
       <button style={{...S.btnP,marginTop:14}} onClick={run} disabled={loading}>{loading?'Running...':'Run Report'}</button>
     </div>
     {rows&&<div style={S.cardFlush}>
-      {groups.length===0?<div style={{padding:24,color:T.textDim}}>No activity for the selected accounts/period.</div>:
+      {begRows.length>0&&<table style={{...S.table,marginBottom:0}}><thead><tr><th style={S.th} colSpan={4}>Beginning Balances — Balance Sheet accounts as of {from}</th><th style={S.thR}>Balance</th></tr></thead>
+        <tbody>{begRows.map((b,i)=><tr key={'beg'+i}><td style={S.td} colSpan={4}>{b.code} {b.name}</td><td style={{...S.tdR,color:b.balance<0?T.red:T.textBright}}>{fmt(b.balance)}</td></tr>)}
+          <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600}} colSpan={4}>Total Beginning Balance</td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(begTotal)}</td></tr></tbody></table>}
+      {groups.length===0&&begRows.length===0?<div style={{padding:24,color:T.textDim}}>No activity for the selected accounts/period.</div>:
       <table style={S.table}><thead><tr><th style={S.th}>Account</th><th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Description</th><th style={S.thR}>Amount</th></tr></thead>
       <tbody>{groups.map(([g,lines])=>{const sub=lines.reduce((s,l)=>s+amt(l),0);return<Fragment key={g}>
         {groupBy!=='none'&&<tr style={{background:T.bgElevated}}><td style={{...S.tdBold,color:T.textBright}} colSpan={5}>{g}</td></tr>}
         {lines.map((l,i)=><tr key={i}><td style={S.td}>{l.account_code} {l.account_name}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.date}</td><td style={S.td}>JE-{String(l.entry_num).padStart(4,'0')}</td><td style={S.td}>{l.description||l.memo||''}</td><td style={{...S.tdR,color:amt(l)<0?T.red:T.textBright}}>{fmt(amt(l))}</td></tr>)}
         {groupBy!=='none'&&<tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600}} colSpan={4}>Total for {g}</td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(sub)}</td></tr>}
       </Fragment>;})}
-        <tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={4}>GRAND TOTAL</td><td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(grand)}</td></tr>
+        <tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={4}>PERIOD ACTIVITY</td><td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(grand)}</td></tr>
+        {begRows.length>0&&<tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={4}>ENDING BALANCE (Balance Sheet accts: beginning + activity)</td><td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(begTotal+grand)}</td></tr>}
       </tbody></table>}
     </div>}
   </div>);
