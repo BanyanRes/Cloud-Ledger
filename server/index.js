@@ -5453,7 +5453,7 @@ async function mgmtRollForward(inputBuf) {
     const scm = ncXml.match(selfClose);
     if (scm) { ncXml = ncXml.replace(selfClose, (m, attrs) => '<c r="' + ref + '"' + attrs.replace(/\s+t="[^"]*"/, '') + '><v>' + val + '</v></c>'); return; }
     const re = new RegExp('(<c r="' + ref + '"[^>]*>)([\\s\\S]*?)(</c>)');
-    if (re.test(ncXml)) ncXml = ncXml.replace(re, (m, open, inner, close) => { const o = open.replace(/\s+t="[^"]*"/, ''); const fm = inner.match(/<f[\s\S]*?<\/f>|<f[^>]*\/>/); return o + (fm ? fm[0] : '') + '<v>' + val + '</v>' + close; });
+    if (re.test(ncXml)) ncXml = ncXml.replace(re, (m, open, inner, close) => { const o = open.replace(/\s+t="[^"]*"/, ''); return o + '<v>' + val + '</v>' + close; });
   };
   for (const r in endingByRow) { if (begC) setNum(colLetter(begC) + r, endingByRow[r]); if (chgC) setNum(colLetter(chgC) + r, 0); }
   if (qStartRow) setNum('B' + qStartRow, excelSerial(nextStart));
