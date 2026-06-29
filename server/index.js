@@ -17,6 +17,7 @@ const { rollForward } = require('./requisition_rollforward');
 const { verifyRollforward } = require('./requisition_rollforward_verify');
 const { saveRequisitionOutputs } = require('./requisition_workpaper_save');
 const ExcelJS = require('exceljs');
+const JSZip = require('jszip');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -5438,26 +5439,58 @@ app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAcce
       const uscFee = uscQuarterlyFee() || 0;
       total += bbrFee + gcmFee + uscFee;
 
-      // Update the calc sheet in place: header dates + per-row beginning/change/ending/fee.
-      const setVal = (r, c, v) => { if (c) ws.getRow(r).getCell(c).value = v; };
-      for (let r = 1; r <= 16; r++) {
-        const label = ws.getRow(r).getCell(1).value;
-        if (typeof label !== 'string') continue;
-        if (/quarter:/i.test(label)) setVal(r, 2, next.label);
-        else if (/quarter start/i.test(label)) setVal(r, 2, next.start);
-      }
-      for (const ln of lines) {
-        if (begC) setVal(ln.r, begC, ln.newBeginning);
-        if (chgC) setVal(ln.r, chgC, ln.change);
-        if (endC) setVal(ln.r, endC, ln.newEnding);
-      }
+      // Write by editing the original .xlsx zip in place (JSZip), NOT a full
+      // ExcelJS round-trip. ExcelJS rewrite drops drawings/calcChain and makes
+      // Excel prompt to "recover" the file. We only set numeric cells (beginning,
+      // change, quarter-start date); ending/fees/totals are formulas the workbook
+      // recomputes on open (fullCalcOnLoad), so all other parts stay byte-intact.
+      const colLetter = (n) => { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+      const excelSerial = (dt) => Math.round((Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate()) - Date.UTC(1899, 11, 30)) / 86400000);
+      let qStartRow = null;
+      for (let r = 1; r <= 16; r++) { const label = ws.getRow(r).getCell(1).value; if (typeof label === 'string' && /quarter start/i.test(label)) { qStartRow = r; break; } }
 
-      const outBuf = await wb.xlsx.writeBuffer();
+      const zip = await JSZip.loadAsync(req.file.buffer);
+      let wbXml = await zip.file('xl/workbook.xml').async('string');
+      const relsXml = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+      const ridToTarget = {};
+      for (const m of relsXml.matchAll(/Id="(rId\d+)"[^>]*Target="(worksheets\/sheet\d+\.xml)"/g)) ridToTarget[m[1]] = m[2];
+      const reSheet = new RegExp('<sheet name="' + ws.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"[^>]*r:id="(rId\\d+)"');
+      const msheet = wbXml.match(reSheet);
+      const calcTarget = msheet ? ridToTarget[msheet[1]] : null;
+      if (!calcTarget) throw new Error('could not locate calc sheet xml');
+
+      let sheetXml = await zip.file('xl/' + calcTarget).async('string');
+      const setNumber = (ref, val) => {
+        const re = new RegExp('(<c r="' + ref + '"[^>]*>)([\\s\\S]*?)(</c>)');
+        if (re.test(sheetXml)) {
+          sheetXml = sheetXml.replace(re, (m, open, inner, close) => {
+            const o = open.replace(/\s+t="[^"]*"/, '');
+            const fm = inner.match(/<f[\s\S]*?<\/f>|<f[^>]*\/>/);
+            return o + (fm ? fm[0] : '') + '<v>' + val + '</v>' + close;
+          });
+        } else {
+          const reEmpty = new RegExp('<c r="' + ref + '"([^>]*)/>');
+          sheetXml = sheetXml.replace(reEmpty, (m, attrs) => '<c r="' + ref + '"' + attrs.replace(/\s+t="[^"]*"/, '') + '><v>' + val + '</v></c>');
+        }
+      };
+      for (const ln of lines) {
+        if (begC) setNumber(colLetter(begC) + ln.r, ln.newBeginning);
+        if (chgC) setNumber(colLetter(chgC) + ln.r, ln.change);
+        // ending (endC) is a formula =beg+chg; leave it to recompute.
+      }
+      if (qStartRow) setNumber('B' + qStartRow, excelSerial(next.start));
+      zip.file('xl/' + calcTarget, sheetXml);
+
+      if (/<calcPr/.test(wbXml)) wbXml = wbXml.replace(/<calcPr([^/]*)\/>/, (m, a) => /fullCalcOnLoad/.test(a) ? m : '<calcPr' + a + ' fullCalcOnLoad="1"/>');
+      else wbXml = wbXml.replace('</workbook>', '<calcPr calcId="0" fullCalcOnLoad="1"/></workbook>');
+      zip.file('xl/workbook.xml', wbXml);
+
+      const outBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
       const fname = 'CLRF_Mgmt_Fee_Calc_' + next.label.replace(/\s+/g, '_') + '.xlsx';
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
       res.setHeader('X-Mgmt-Fee-Summary', JSON.stringify({ quarter: next.label, total: Math.round(total*100)/100, bbr: bbrFee, gcm: gcmFee, usc: uscFee, standard: Math.round((total-bbrFee-gcmFee-uscFee)*100)/100 }).replace(/[\r\n]/g, ' '));
-      res.send(Buffer.from(outBuf));
+      res.send(outBuf);
     } catch (e) {
       res.status(500).json({ error: 'Generate error: ' + e.message });
     }
