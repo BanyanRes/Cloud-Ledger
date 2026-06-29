@@ -5452,11 +5452,27 @@ app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAcce
       const zip = await JSZip.loadAsync(req.file.buffer);
       let wbXml = await zip.file('xl/workbook.xml').async('string');
       const relsXml = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+      // Map rId -> worksheet target. Attribute order in .rels varies by writer
+      // (Excel emits Id..Type..Target; some libs reorder), so match each
+      // attribute independently within each <Relationship .../> element.
       const ridToTarget = {};
-      for (const m of relsXml.matchAll(/Id="(rId\d+)"[^>]*Target="(worksheets\/sheet\d+\.xml)"/g)) ridToTarget[m[1]] = m[2];
-      const reSheet = new RegExp('<sheet name="' + ws.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"[^>]*r:id="(rId\\d+)"');
-      const msheet = wbXml.match(reSheet);
-      const calcTarget = msheet ? ridToTarget[msheet[1]] : null;
+      for (const rel of relsXml.match(/<Relationship\b[^>]*\/>/g) || []) {
+        const tm = rel.match(/Target="([^"]*worksheets\/sheet\d+\.xml)"/);
+        const im = rel.match(/Id="(rId\d+)"/);
+        if (tm && im) ridToTarget[im[1]] = tm[1].replace(/^\.?\//, '').replace(/^xl\//, '');
+      }
+      // Locate the <sheet> element for ws.name without depending on attribute
+      // order (Excel: name first; ExcelJS: sheetId first). Grab the whole tag
+      // by name, then pull r:id from inside it.
+      let calcTarget = null;
+      for (const tag of wbXml.match(/<sheet\b[^>]*\/>/g) || []) {
+        const nm = tag.match(/\bname="([^"]*)"/);
+        if (nm && nm[1] === ws.name) {
+          const rid = tag.match(/r:id="(rId\d+)"/);
+          if (rid) calcTarget = ridToTarget[rid[1]];
+          break;
+        }
+      }
       if (!calcTarget) throw new Error('could not locate calc sheet xml');
 
       let sheetXml = await zip.file('xl/' + calcTarget).async('string');
