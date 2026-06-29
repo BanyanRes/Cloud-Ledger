@@ -5477,6 +5477,18 @@ app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAcce
 
       let sheetXml = await zip.file('xl/' + calcTarget).async('string');
       const setNumber = (ref, val) => {
+        // A cell is either self-closing (<c r=".."/>, empty) or open/close
+        // (<c r=".."> ... </c>). Decide which form THIS cell is before editing —
+        // matching the open/close pattern against a self-closing cell would let
+        // the lazy [\s\S]*? run past it and swallow the next cell's </c>,
+        // corrupting the sheet (mismatched tags -> Excel "recover" prompt).
+        const selfClose = new RegExp('<c r="' + ref + '"([^>]*?)/>');
+        const scm = sheetXml.match(selfClose);
+        if (scm) {
+          sheetXml = sheetXml.replace(selfClose, (m, attrs) =>
+            '<c r="' + ref + '"' + attrs.replace(/\s+t="[^"]*"/, '') + '><v>' + val + '</v></c>');
+          return;
+        }
         const re = new RegExp('(<c r="' + ref + '"[^>]*>)([\\s\\S]*?)(</c>)');
         if (re.test(sheetXml)) {
           sheetXml = sheetXml.replace(re, (m, open, inner, close) => {
@@ -5484,9 +5496,6 @@ app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAcce
             const fm = inner.match(/<f[\s\S]*?<\/f>|<f[^>]*\/>/);
             return o + (fm ? fm[0] : '') + '<v>' + val + '</v>' + close;
           });
-        } else {
-          const reEmpty = new RegExp('<c r="' + ref + '"([^>]*)/>');
-          sheetXml = sheetXml.replace(reEmpty, (m, attrs) => '<c r="' + ref + '"' + attrs.replace(/\s+t="[^"]*"/, '') + '><v>' + val + '</v></c>');
         }
       };
       for (const ln of lines) {
