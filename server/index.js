@@ -5249,8 +5249,14 @@ function mgmtHeaderRow(ws) {
 }
 const mgmtNum = (v) => {
   if (v == null) return null;
-  if (typeof v === 'object' && v.result != null) v = v.result;
-  if (typeof v === 'object' && v.text != null) v = v.text;
+  // ExcelJS formula cells: { formula, result } or { sharedFormula, result };
+  // rich text: { richText:[...] }; hyperlink: { text }.
+  if (typeof v === 'object') {
+    if (v.result != null) v = v.result;
+    else if (v.text != null) v = v.text;
+    else if (Array.isArray(v.richText)) v = v.richText.map(t => t.text).join('');
+    else return null;
+  }
   const n = Number(String(v).replace(/[$,\s]/g, ''));
   return Number.isFinite(n) ? n : null;
 };
@@ -5346,13 +5352,22 @@ app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAcce
       const begC = cols['Beginning InvestorTotal'];
       const chgC = cols['Change in  Commitment in Qtr'] || cols['New Commitment in Qtr'] || cols['Change in Commitment in Qtr'];
 
-      // Determine quarter roll-forward
+      // Determine the target quarter. The client sends quarter_start already set
+      // to the NEW quarter's start (from analyze's next_quarter.start), so use it
+      // as-is; only roll forward from the prior start when no override is given.
       let priorStart = null;
       for (let r = 1; r <= 16; r++) {
         const label = ws.getRow(r).getCell(1).value;
         if (typeof label === 'string' && /quarter start/i.test(label)) priorStart = ws.getRow(r).getCell(2).value;
       }
-      const next = mgmtNextQuarter(req.body.quarter_start ? new Date(req.body.quarter_start) : new Date(priorStart));
+      let next;
+      if (req.body.quarter_start) {
+        const s = new Date(req.body.quarter_start);
+        const end = new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth() + 3, 0));
+        next = { start: s, end, daysInQuarter: Math.round((end - s) / 86400000) + 1, label: 'Q' + (Math.floor(s.getUTCMonth() / 3) + 1) + ' ' + s.getUTCFullYear() };
+      } else {
+        next = mgmtNextQuarter(new Date(priorStart));
+      }
 
       // Rates carried from the workbook's Rates tab (fallback to standard 1.5%).
       const ratesTab = wb.getWorksheet('Rates');
@@ -5370,11 +5385,18 @@ app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAcce
         return group === 'Affiliated LP' || group === 'Affiliated Investor' ? 0 : 0.015;
       };
 
-      // Tier-based quarterly fee for BBR/GCM, read straight from their tabs.
+      // Tier-based quarterly fee for BBR/GCM. Prefer the workbook's already-
+      // computed "Quarterly Fee" totals (F8/F10) since the rate cells are
+      // cross-sheet formulas whose results ExcelJS may not surface. Fall back to
+      // recomputing from tier commitments (row 4) × rates (row 6).
       const tierQuarterlyFee = (tabName) => {
         const t = wb.getWorksheet(tabName);
         if (!t) return null;
-        // row4 = tier commitments (C,D,E); row6 = rates (C,D,E)
+        // F10 = Quarterly Fee (Pro-Rated total); F8 = Quarterly Fee (Whole Quarter).
+        const f10 = mgmtNum(t.getRow(10).getCell(6).value);
+        if (f10 != null && f10 !== 0) return f10;
+        const f8 = mgmtNum(t.getRow(8).getCell(6).value);
+        if (f8 != null && f8 !== 0) return f8;
         const t1 = mgmtNum(t.getRow(4).getCell(3).value), t2 = mgmtNum(t.getRow(4).getCell(4).value), t3 = mgmtNum(t.getRow(4).getCell(5).value);
         const r1 = mgmtNum(t.getRow(6).getCell(3).value), r2 = mgmtNum(t.getRow(6).getCell(4).value), r3 = mgmtNum(t.getRow(6).getCell(5).value);
         if ([t1,t2,t3,r1,r2,r3].some(x => x == null)) return null;
@@ -5383,6 +5405,9 @@ app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAcce
       const uscQuarterlyFee = () => {
         const u = wb.getWorksheet('USC Rate');
         if (!u) return null;
+        // B8 = "Total GCM Fee for Quarter" = B2*B6/4, already computed in the book.
+        const b8 = mgmtNum(u.getRow(8).getCell(2).value);
+        if (b8 != null && b8 !== 0) return b8;
         const calls = mgmtNum(u.getRow(2).getCell(2).value);
         const rate = mgmtNum(u.getRow(6).getCell(2).value);
         if (calls == null || rate == null) return null;
