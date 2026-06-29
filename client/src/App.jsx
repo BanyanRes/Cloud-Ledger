@@ -552,7 +552,7 @@ export default function App(){
   useEffect(()=>{const t=api.getToken();if(t){api.me().then(u=>{if(u)setUser(u);}).catch(()=>api.clearToken()).finally(()=>setLoading(false));}else setLoading(false);},[]);
   useEffect(()=>{if(user)api.getEntities().then(e=>{setEntities(e);if(e.length>0&&!activeEntity)setActiveEntity(e[0].id);});},[user]);
   const refreshEntities=useCallback(async()=>{const e=await api.getEntities();setEntities(e);return e;},[]);
-  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom'],Viewer:['entries','reports','coa','bankrec']}[user.role]||[]).includes(s);};
+  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
   // Read-only users (Viewer) SEE the same sections as an Accountant but cannot edit.
   // canEdit gates every write control; it must never be derived from mere visibility.
   const canEdit = !!user && (user.role==='Admin' || user.role==='Accountant');
@@ -565,6 +565,8 @@ export default function App(){
   const _activeEnt = entities.find(e=>e.id===activeEntity);
   const isTurnkeyEntity = !!(_activeEnt && (_activeEnt.code==='TURNKEYR' || /turnkey\s*rail/i.test(_activeEnt.name||'')));
   const isDevEntity = !!(_activeEnt && _activeEnt.entity_type==='development');
+  // County Line Rail Fund — the only entity with the Management Fee workpaper for now.
+  const isCLRF = !!(_activeEnt && (_activeEnt.code==='CLRF' || /county\s*line\s*rail\s*fund/i.test(_activeEnt.name||'')));
   const isShellEntity = !!(_activeEnt && _activeEnt.entity_type==='shell');
   const dimsEnabled = !!_activeEnt && !isShellEntity;// location/class dimensions available on every entity EXCEPT shell
   const arEnabled = !!_activeEnt && !isShellEntity;// AR / customer invoicing available on every entity EXCEPT shell
@@ -578,6 +580,7 @@ export default function App(){
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
     ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
     ...(arEnabled?[{id:'d3c',divider:1,label:'RECEIVABLES'},{id:'ar_customers',label:'Customers',icon:'👥',section:'coa'}]:[]),
+    {id:'dwp',divider:1,label:'WORKPAPERS'},...(isCLRF?[{id:'wp_mgmtfee',label:'Management Fee',icon:'📄',section:'workpapers'}]:[]),
     {id:'d4',divider:1,label:'ADMIN'},{id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},{id:'users',label:'Users',icon:NI.users,section:'all'},
     {id:'d5',divider:1,label:'INTEGRATIONS'},{id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
   ];
@@ -619,6 +622,7 @@ export default function App(){
         {page==='users'&&<UserManagement currentUser={user}/>}
         {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} canEdit={canEdit} reqState={reqState} setReqState={setReqState}/>}
+        {page==='wp_mgmtfee'&&activeEntity&&isCLRF&&<MgmtFeeWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
       </>})()}</div></div>
     {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
@@ -2710,6 +2714,91 @@ function MemorizedReportsPage({entityId,entityName,canEdit=true,onOpen}){
            </div></td></tr>)}
          </tbody></table></div>
      </div>)}</div>}
+  </div>);
+}
+
+// ═══ Workpapers › Management Fee (CLRF) — roll prior quarter forward ═══
+function MgmtFeeWorkpaper({entityId,entityName,canEdit=true}){
+  const[file,setFile]=useState(null);
+  const[analysis,setAnalysis]=useState(null);
+  const[rows,setRows]=useState([]); // {name,group,beginning_commitment,change}
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const[result,setResult]=useState(null);
+  const fmt=n=>n==null?'-':n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const onPick=async(f)=>{
+    setErr('');setResult(null);setAnalysis(null);setRows([]);setFile(f);
+    if(!f)return;
+    setBusy(true);
+    try{const a=await api.mgmtFeeAnalyze(entityId,f);setAnalysis(a);setRows((a.investors||[]).map(i=>({...i})));}
+    catch(e){setErr(e.message);} finally{setBusy(false);}
+  };
+  const setChange=(i,v)=>setRows(rs=>rs.map((r,idx)=>idx===i?{...r,change:v}:r));
+  const totalChange=rows.reduce((s,r)=>s+(Number(String(r.change).replace(/[$,\s]/g,''))||0),0);
+  const generate=async()=>{
+    setErr('');setBusy(true);setResult(null);
+    try{
+      const changes=rows.filter(r=>Number(String(r.change).replace(/[$,\s]/g,''))!==0).map(r=>({name:r.name,change:Number(String(r.change).replace(/[$,\s]/g,''))}));
+      const out=await api.mgmtFeeGenerate(entityId,file,changes,analysis?.next_quarter?.start);
+      if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
+      setResult(out.summary||{});
+    }catch(e){setErr(e.message);} finally{setBusy(false);}
+  };
+  return(<div>
+    <div style={S.h1}>Management Fee Workpaper</div>
+    <div style={{color:T.textMuted,marginBottom:16,fontSize:13,maxWidth:760}}>Upload the prior quarter's management-fee workbook. CloudLedger reads the investor list, group classifications, rate tables and tier splits, rolls the quarter forward (new dates, ending → next beginning), applies any commitment changes you enter, and produces the next quarter's workbook.</div>
+    {err&&<div style={S.err}>{err}</div>}
+
+    <div style={{...S.card,marginBottom:16}}>
+      <div style={{...S.h2,marginBottom:10}}>1 · Upload prior-quarter workbook</div>
+      <input type="file" accept=".xlsx" disabled={busy||!canEdit} onChange={e=>onPick(e.target.files[0])} style={{fontSize:13}}/>
+      {file&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{file.name}</span>}
+      {busy&&!analysis&&<div style={{marginTop:8,color:T.textMuted,fontSize:12}}>Reading workbook…</div>}
+    </div>
+
+    {analysis&&<>
+      <div style={{...S.card,marginBottom:16}}>
+        <div style={{...S.h2,marginBottom:10}}>2 · Quarter roll-forward</div>
+        <div style={{display:'flex',gap:30,flexWrap:'wrap',fontSize:13}}>
+          <div><div style={{color:T.textDim,fontSize:11}}>PRIOR QUARTER</div><div style={{color:T.textBright,fontWeight:600}}>{analysis.prior_quarter||'—'}</div><div style={{color:T.textMuted,fontSize:12}}>starts {analysis.prior_quarter_start}</div></div>
+          <div style={{fontSize:20,color:T.textDim,alignSelf:'center'}}>→</div>
+          <div><div style={{color:T.textDim,fontSize:11}}>NEW QUARTER</div><div style={{color:T.accent,fontWeight:600}}>{analysis.next_quarter?.label}</div><div style={{color:T.textMuted,fontSize:12}}>{analysis.next_quarter?.start} – {analysis.next_quarter?.end} ({analysis.next_quarter?.days} days)</div></div>
+          <div><div style={{color:T.textDim,fontSize:11}}>INVESTORS</div><div style={{color:T.textBright,fontWeight:600}}>{analysis.investor_count}</div><div style={{color:T.textMuted,fontSize:12}}>{Object.entries(analysis.groups||{}).map(([g,n])=>g+':'+n).join('  ')}</div></div>
+        </div>
+      </div>
+
+      <div style={{...S.card,marginBottom:16}}>
+        <div style={{...S.h2,marginBottom:6}}>3 · Commitment changes this quarter <span style={{fontWeight:400,color:T.textMuted,fontSize:12}}>(leave 0 if unchanged)</span></div>
+        <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>Each investor's prior ending commitment carries to the new beginning. Enter new capital calls, transfers, or redemptions as a positive/negative change.</div>
+        <div style={{maxHeight:'46vh',overflowY:'auto'}}>
+        <table style={S.table}><thead style={{position:'sticky',top:0,background:T.bgElevated,zIndex:1}}><tr><th style={S.th}>Investor</th><th style={S.th}>Group</th><th style={S.thR}>Beginning</th><th style={S.thR}>Change (+/−)</th><th style={S.thR}>New Ending</th></tr></thead>
+        <tbody>{rows.map((r,i)=>{const chg=Number(String(r.change).replace(/[$,\s]/g,''))||0;const end=(r.beginning_commitment||0)+chg;return(
+          <tr key={i}><td style={S.td}>{r.name}</td><td style={S.td}><span style={S.tag(r.group)}>{r.group}</span></td>
+          <td style={S.tdR}>{fmt(r.beginning_commitment)}</td>
+          <td style={{...S.tdR,padding:'2px 8px'}}><input value={r.change} disabled={!canEdit} onChange={e=>setChange(i,e.target.value)} style={{...S.input,width:120,textAlign:'right',padding:'4px 8px',fontSize:12}}/></td>
+          <td style={{...S.tdR,color:chg!==0?T.accent:T.text,fontWeight:chg!==0?600:400}}>{fmt(end)}</td></tr>);})}
+        </tbody></table>
+        </div>
+        {totalChange!==0&&<div style={{marginTop:8,fontSize:12,color:T.textMuted}}>Net commitment change: <span style={{color:T.accent,fontWeight:600}}>{fmt(totalChange)}</span></div>}
+      </div>
+
+      <div style={{display:'flex',gap:10,alignItems:'center'}}>
+        <button style={{...S.btnP,opacity:busy?0.6:1}} disabled={busy||!canEdit} onClick={generate}>{busy?'Generating…':'Generate '+(analysis.next_quarter?.label||'next quarter')+' workbook'}</button>
+      </div>
+
+      {result&&<div style={{...S.card,marginTop:16,borderColor:T.green+'55'}}>
+        <div style={{...S.h2,marginBottom:8,color:T.green}}>✓ {result.quarter} workbook generated</div>
+        <div style={{display:'flex',gap:24,flexWrap:'wrap',fontSize:13}}>
+          <div><div style={{color:T.textDim,fontSize:11}}>STANDARD</div><div style={{color:T.textBright}}>{fmt(result.standard)}</div></div>
+          <div><div style={{color:T.textDim,fontSize:11}}>BBR</div><div style={{color:T.textBright}}>{fmt(result.bbr)}</div></div>
+          <div><div style={{color:T.textDim,fontSize:11}}>GCM</div><div style={{color:T.textBright}}>{fmt(result.gcm)}</div></div>
+          <div><div style={{color:T.textDim,fontSize:11}}>USC</div><div style={{color:T.textBright}}>{fmt(result.usc)}</div></div>
+          <div><div style={{color:T.textDim,fontSize:11}}>TOTAL QUARTERLY FEE</div><div style={{color:T.accent,fontWeight:700,fontSize:15}}>{fmt(result.total)}</div></div>
+        </div>
+        <div style={{marginTop:8,fontSize:12,color:T.textMuted}}>The .xlsx has downloaded. Review the calc tab before sending.</div>
+      </div>}
+    </>}
   </div>);
 }
 

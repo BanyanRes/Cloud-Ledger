@@ -277,5 +277,42 @@ export const api = {
     return { blob, filename, summary, failedChecks, workpaperFolder, workpaperSaved, packetFileId, packetFileName, forced };
   },
 
+  // Workpapers › Management Fee: analyze a prior-quarter workbook, then generate
+  // the next quarter as a downloadable .xlsx.
+  mgmtFeeAnalyze: async (eid, file) => {
+    const fd = new FormData();
+    fd.append('workbook', file);
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/mgmt-fee/' + eid + '/analyze', {
+      method: 'POST', headers: token ? { Authorization: 'Bearer ' + token } : {}, body: fd,
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Analyze failed');
+    return data;
+  },
+  mgmtFeeGenerate: async (eid, file, changes, quarterStart) => {
+    const fd = new FormData();
+    fd.append('workbook', file);
+    fd.append('changes', JSON.stringify(changes || []));
+    if (quarterStart) fd.append('quarter_start', quarterStart);
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/mgmt-fee/' + eid + '/generate', {
+      method: 'POST', headers: token ? { Authorization: 'Bearer ' + token } : {}, body: fd,
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) {
+      let data = {}; try { data = await res.json(); } catch {}
+      throw new Error(data.error || 'Generate failed');
+    }
+    let summary = {}; try { summary = JSON.parse(res.headers.get('x-mgmt-fee-summary') || '{}'); } catch {}
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const filename = m ? m[1] : 'Mgmt_Fee_Calc.xlsx';
+    const blob = await res.blob();
+    return { blob, filename, summary };
+  },
+
   setToken, getToken, clearToken,
 };

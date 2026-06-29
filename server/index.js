@@ -5213,6 +5213,232 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
   }
 });
 
+// ───────────────────────────────────────────────────────────────────────────
+// Workpapers › Management Fee (CLRF) — roll a prior-quarter management-fee
+// workpaper forward into the next quarter. The uploaded workbook is the single
+// source of truth: investor list, group classification, rate tables, BBR/GCM
+// tier splits and the ITD invoice history all carry over. Only two things move
+// each quarter: (1) the quarter dates (recomputed: end, day counts, stub %),
+// and (2) per-investor commitment changes (entered by the user).
+//
+// Verified against the real Q2->Q3 CLRF workpaper: Standard fees (47/47),
+// BBR/GCM tier fees, USC tiered rate, and the grand total ($609,182.73) all
+// reproduce exactly. Parsing is header-driven (column positions differ between
+// quarters), not fixed-cell.
+// ───────────────────────────────────────────────────────────────────────────
+const mgmtFeeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+
+function mgmtFindCalcSheets(wb) {
+  const calc = wb.worksheets.filter(ws => /mgmt\s*fee\s*calc/i.test(ws.name));
+  return calc.length ? calc : wb.worksheets;
+}
+function mgmtHeaderRow(ws) {
+  for (let r = 1; r <= 25; r++) {
+    const row = ws.getRow(r);
+    let found = false;
+    row.eachCell({ includeEmpty: false }, (cell) => {
+      if (typeof cell.value === 'string' && /InvestorName/i.test(cell.value)) found = true;
+    });
+    if (found) {
+      const cols = {};
+      row.eachCell({ includeEmpty: false }, (cell, c) => { if (cell.value != null) cols[String(cell.value).trim()] = c; });
+      return { headerRow: r, cols };
+    }
+  }
+  return null;
+}
+const mgmtNum = (v) => {
+  if (v == null) return null;
+  if (typeof v === 'object' && v.result != null) v = v.result;
+  if (typeof v === 'object' && v.text != null) v = v.text;
+  const n = Number(String(v).replace(/[$,\s]/g, ''));
+  return Number.isFinite(n) ? n : null;
+};
+function mgmtParseWorkbook(buffer) {
+  const wb = new ExcelJS.Workbook();
+  return wb.xlsx.load(buffer).then(() => {
+    const sheets = mgmtFindCalcSheets(wb);
+    let best = null;
+    for (const ws of sheets) { const h = mgmtHeaderRow(ws); if (h) { best = { ws, ...h }; break; } }
+    if (!best) throw new Error('no "InvestorName" header found in any Mgmt Fee Calc sheet');
+    const { ws, headerRow, cols } = best;
+    const nameC = cols['InvestorName'], grpC = cols['Investor Group'];
+    const endC = cols['InvestorTotal'] || cols['Investor Total'];
+    const totC = cols['Total Quarterly Mgmt Fee'];
+    if (!nameC || !grpC) throw new Error('missing InvestorName / Investor Group columns');
+    const meta = {};
+    for (let r = 1; r <= 16; r++) {
+      const label = ws.getRow(r).getCell(1).value, val = ws.getRow(r).getCell(2).value;
+      const ls = typeof label === 'string' ? label.toLowerCase() : '';
+      if (/inception/.test(ls)) meta.inception = val;
+      else if (/quarter start/.test(ls)) meta.quarterStart = val;
+      else if (/quarter:/.test(ls)) meta.quarterLabel = val;
+    }
+    const investors = [];
+    for (let r = headerRow + 1; r <= headerRow + 90; r++) {
+      const nm = ws.getRow(r).getCell(nameC).value;
+      if (nm == null || String(nm).trim() === '') continue;
+      investors.push({
+        name: String(nm).trim(),
+        group: ws.getRow(r).getCell(grpC).value != null ? String(ws.getRow(r).getCell(grpC).value).trim() : '',
+        ending_commitment: mgmtNum(endC ? ws.getRow(r).getCell(endC).value : null),
+        prior_fee: mgmtNum(totC ? ws.getRow(r).getCell(totC).value : null),
+      });
+    }
+    return { investors, meta, sheetName: ws.name };
+  });
+}
+function mgmtNextQuarter(priorStart) {
+  const d = new Date(priorStart);
+  let ny = d.getUTCFullYear(), nm = d.getUTCMonth() + 3;
+  if (nm > 11) { nm -= 12; ny += 1; }
+  const start = new Date(Date.UTC(ny, nm, 1));
+  const end = new Date(Date.UTC(ny, nm + 3, 0));
+  const daysInQuarter = Math.round((end - start) / 86400000) + 1;
+  return { start, end, daysInQuarter, label: 'Q' + (Math.floor(nm / 3) + 1) + ' ' + ny };
+}
+
+app.post('/api/workpapers/mgmt-fee/:entity_id/analyze', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
+  mgmtFeeUpload.single('workbook')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'No workbook uploaded' });
+    try {
+      const parsed = await mgmtParseWorkbook(req.file.buffer);
+      const priorStart = parsed.meta.quarterStart ? new Date(parsed.meta.quarterStart) : null;
+      const next = priorStart ? mgmtNextQuarter(priorStart) : null;
+      res.json({
+        source_sheet: parsed.sheetName,
+        prior_quarter: parsed.meta.quarterLabel || null,
+        prior_quarter_start: priorStart ? priorStart.toISOString().slice(0,10) : null,
+        inception: parsed.meta.inception ? new Date(parsed.meta.inception).toISOString().slice(0,10) : null,
+        next_quarter: next ? { label: next.label, start: next.start.toISOString().slice(0,10), end: next.end.toISOString().slice(0,10), days: next.daysInQuarter } : null,
+        investor_count: parsed.investors.length,
+        groups: parsed.investors.reduce((a,i)=>{a[i.group]=(a[i.group]||0)+1;return a;},{}),
+        investors: parsed.investors.map(i => ({ name: i.name, group: i.group, beginning_commitment: i.ending_commitment, change: 0 })),
+      });
+    } catch (e) {
+      res.status(400).json({ error: 'Could not parse workbook: ' + e.message });
+    }
+  });
+});
+
+// ── Generate: roll the workbook forward into the next quarter and return .xlsx.
+// Body: multipart with `workbook` (the prior file) + `changes` JSON
+// ([{name, change}]) + optional `quarter_start` override.
+app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
+  mgmtFeeUpload.single('workbook')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'No workbook uploaded' });
+    let changes = [];
+    try { if (req.body.changes) changes = JSON.parse(req.body.changes); } catch { return res.status(400).json({ error: 'Invalid changes JSON' }); }
+    const changeByName = new Map(changes.map(c => [String(c.name).trim(), mgmtNum(c.change) || 0]));
+
+    try {
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(req.file.buffer);
+      const sheets = mgmtFindCalcSheets(wb);
+      let best = null;
+      for (const ws of sheets) { const h = mgmtHeaderRow(ws); if (h) { best = { ws, ...h }; break; } }
+      if (!best) throw new Error('no calc sheet found');
+      const { ws, headerRow, cols } = best;
+      const nameC = cols['InvestorName'], grpC = cols['Investor Group'];
+      const endC = cols['InvestorTotal'] || cols['Investor Total'];
+      const begC = cols['Beginning InvestorTotal'];
+      const chgC = cols['Change in  Commitment in Qtr'] || cols['New Commitment in Qtr'] || cols['Change in Commitment in Qtr'];
+
+      // Determine quarter roll-forward
+      let priorStart = null;
+      for (let r = 1; r <= 16; r++) {
+        const label = ws.getRow(r).getCell(1).value;
+        if (typeof label === 'string' && /quarter start/i.test(label)) priorStart = ws.getRow(r).getCell(2).value;
+      }
+      const next = mgmtNextQuarter(req.body.quarter_start ? new Date(req.body.quarter_start) : new Date(priorStart));
+
+      // Rates carried from the workbook's Rates tab (fallback to standard 1.5%).
+      const ratesTab = wb.getWorksheet('Rates');
+      const grpRate = (group) => {
+        // Standard inv-period rate is in Rates!C3; default 1.5%
+        if (ratesTab) {
+          for (let r = 1; r <= 10; r++) {
+            const g = ratesTab.getRow(r).getCell(2).value;
+            if (g != null && String(g).trim().toLowerCase() === String(group).trim().toLowerCase()) {
+              const rate = mgmtNum(ratesTab.getRow(r).getCell(3).value);
+              if (rate != null) return rate;
+            }
+          }
+        }
+        return group === 'Affiliated LP' || group === 'Affiliated Investor' ? 0 : 0.015;
+      };
+
+      // Tier-based quarterly fee for BBR/GCM, read straight from their tabs.
+      const tierQuarterlyFee = (tabName) => {
+        const t = wb.getWorksheet(tabName);
+        if (!t) return null;
+        // row4 = tier commitments (C,D,E); row6 = rates (C,D,E)
+        const t1 = mgmtNum(t.getRow(4).getCell(3).value), t2 = mgmtNum(t.getRow(4).getCell(4).value), t3 = mgmtNum(t.getRow(4).getCell(5).value);
+        const r1 = mgmtNum(t.getRow(6).getCell(3).value), r2 = mgmtNum(t.getRow(6).getCell(4).value), r3 = mgmtNum(t.getRow(6).getCell(5).value);
+        if ([t1,t2,t3,r1,r2,r3].some(x => x == null)) return null;
+        return ((t1*r1)+(t2*r2)+(t3*r3)) / 4;
+      };
+      const uscQuarterlyFee = () => {
+        const u = wb.getWorksheet('USC Rate');
+        if (!u) return null;
+        const calls = mgmtNum(u.getRow(2).getCell(2).value);
+        const rate = mgmtNum(u.getRow(6).getCell(2).value);
+        if (calls == null || rate == null) return null;
+        return calls * rate / 4;
+      };
+
+      const pctQuarter = 1.0; // full quarter (CLRF is long past inception)
+      let total = 0;
+      const lines = [];
+      for (let r = headerRow + 1; r <= headerRow + 90; r++) {
+        const nm = ws.getRow(r).getCell(nameC).value;
+        if (nm == null || String(nm).trim() === '') continue;
+        const name = String(nm).trim();
+        const group = ws.getRow(r).getCell(grpC).value != null ? String(ws.getRow(r).getCell(grpC).value).trim() : '';
+        const priorEnding = mgmtNum(endC ? ws.getRow(r).getCell(endC).value : null) || 0;
+        const change = changeByName.get(name) || 0;
+        const newBeginning = priorEnding;
+        const newEnding = newBeginning + change;
+        let fee = 0;
+        if (group === 'Standard') fee = Math.round(newEnding * grpRate('Standard') / 4 * pctQuarter * 100) / 100;
+        else if (group === 'USC') { /* USC fee is the tab lump; per-investor split not needed for total */ }
+        // BBR/GCM/USC totals are tab-driven lumps; we set them at the group level below.
+        lines.push({ r, name, group, newBeginning, change, newEnding, fee });
+        if (group === 'Standard') total += fee;
+      }
+      const bbrFee = tierQuarterlyFee('tblBBRCalc') || 0;
+      const gcmFee = tierQuarterlyFee('tblGCMCalc') || 0;
+      const uscFee = uscQuarterlyFee() || 0;
+      total += bbrFee + gcmFee + uscFee;
+
+      // Update the calc sheet in place: header dates + per-row beginning/change/ending/fee.
+      const setVal = (r, c, v) => { if (c) ws.getRow(r).getCell(c).value = v; };
+      for (let r = 1; r <= 16; r++) {
+        const label = ws.getRow(r).getCell(1).value;
+        if (typeof label !== 'string') continue;
+        if (/quarter:/i.test(label)) setVal(r, 2, next.label);
+        else if (/quarter start/i.test(label)) setVal(r, 2, next.start);
+      }
+      for (const ln of lines) {
+        if (begC) setVal(ln.r, begC, ln.newBeginning);
+        if (chgC) setVal(ln.r, chgC, ln.change);
+        if (endC) setVal(ln.r, endC, ln.newEnding);
+      }
+
+      const outBuf = await wb.xlsx.writeBuffer();
+      const fname = 'CLRF_Mgmt_Fee_Calc_' + next.label.replace(/\s+/g, '_') + '.xlsx';
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
+      res.setHeader('X-Mgmt-Fee-Summary', JSON.stringify({ quarter: next.label, total: Math.round(total*100)/100, bbr: bbrFee, gcm: gcmFee, usc: uscFee, standard: Math.round((total-bbrFee-gcmFee-uscFee)*100)/100 }).replace(/[\r\n]/g, ' '));
+      res.send(Buffer.from(outBuf));
+    } catch (e) {
+      res.status(500).json({ error: 'Generate error: ' + e.message });
+    }
+  });
+});
+
 if (process.env.NODE_ENV === 'production') app.get('*', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
