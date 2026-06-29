@@ -5343,6 +5343,30 @@ async function mgmtRollForward(inputBuf) {
   // next quarter start date (first day of the quarter's first month)
   const nextStart = new Date(Date.UTC(2000 + nextYY, (nextQ - 1) * 3, 1));
 
+  // Prior-quarter references can't be retargeted by sheet name alone: an older
+  // quarter tab may use a DIFFERENT column layout (e.g. legacy Q2 has
+  // A=InvestorNo, B=InvestorName, T=ITD-before, V=ITD-after, while the current
+  // layout has A=InvestorName, S=ITD-before, U=ITD-after). A blind name swap
+  // leaves formulas pointing at the wrong columns -> #N/A. So when shifting a
+  // reference from PREVCALC up to curName, remap each column letter by its
+  // header text (row 17). Same-layout quarters yield an identity map, so this is
+  // always safe.
+  const colLetterOf = (n) => { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+  const headerMapOf = (sheetName) => {
+    const w = ewb.getWorksheet(sheetName); const map = {};
+    if (w) w.getRow(17).eachCell({ includeEmpty: false }, (c, col) => { if (c.value != null) { const t = String(c.value).trim(); if (!(t in map)) map[t] = colLetterOf(col); } });
+    return map;
+  };
+  const prevHdr = headerMapOf(PREVCALC), curHdr = headerMapOf(curName);
+  const prevColByLetter = {}; for (const k in prevHdr) prevColByLetter[prevHdr[k]] = k;
+  const prevToCurCol = {}; for (const col in prevColByLetter) { const h = prevColByLetter[col]; if (curHdr[h]) prevToCurCol[col] = curHdr[h]; }
+  // Shift a formula's PREVCALC refs up to curName WITH column remap; curName self
+  // refs and other sheet names are untouched here.
+  const shiftPrevRefs = (xml) => xml.replace(new RegExp("'" + PREVCALC.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + "'!((?:\\$?[A-Z]{1,2}\\$?\\d*)(?::\\$?[A-Z]{1,2}\\$?\\d*)?)", 'g'), (m, ref) => {
+    const nr = ref.replace(/(\$?)([A-Z]{1,2})(\$?\d*)/g, (mm, d1, col, rest) => d1 + (prevToCurCol[col] || col) + rest);
+    return "'" + curName + "'!" + nr;
+  });
+
   const { ws, headerRow, cols } = cur;
   const nameC = cols['InvestorName'], endC = cols['InvestorTotal'] || cols['Investor Total'];
   const begC = cols['Beginning InvestorTotal'];
@@ -5406,7 +5430,7 @@ async function mgmtRollForward(inputBuf) {
     return { num: newNum, rid: newRid };
   };
 
-  const q4calc = await copyWorksheet(curName, (sx) => reName(reName(sx, curName, NEW), PREVCALC, curName));
+  const q4calc = await copyWorksheet(curName, (sx) => shiftPrevRefs(reName(sx, curName, NEW)));
   let q4recalc = null;
   if (name2info[CURRECALC]) q4recalc = await copyWorksheet(CURRECALC, (sx) => reName(sx, curName, NEW));
 
@@ -5440,7 +5464,7 @@ async function mgmtRollForward(inputBuf) {
   for (const tab of ['ITD Recalc', 'ITD Mgmt Fee']) {
     if (!name2info[tab]) continue;
     let sx = await zip.file('xl/' + name2info[tab].target).async('string');
-    sx = reName(reName(sx, curName, NEW), PREVCALC, curName);
+    sx = shiftPrevRefs(reName(sx, curName, NEW));
     zip.file('xl/' + name2info[tab].target, sx);
   }
 
