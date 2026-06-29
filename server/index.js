@@ -5305,6 +5305,191 @@ function mgmtNextQuarter(priorStart) {
   return { start, end, daysInQuarter, label: 'Q' + (Math.floor(nm / 3) + 1) + ' ' + ny };
 }
 
+// ── Mgmt-fee Q-roll-forward engine ──────────────────────────────────────────
+// Clones the current "Mgmt Fee Calc QX YY" + "QX YY Recalc" tabs into the NEXT
+// quarter, shifts every quarter reference one forward, repoints the Invoice and
+// ITD aggregators, and preserves the prior tabs intact. Operates at the zip/XML
+// level so drawings, comments, and styles stay byte-intact (no ExcelJS rewrite,
+// which would drop those parts and trigger Excel's repair prompt).
+function mgmtShiftQuarterText(s) {
+  return s.replace(/Q([1-4])('?\s?)(\d{2}|20\d{2})/g, (m, q, sep, yr) => {
+    let qn = +q, y = yr.length === 2 ? 2000 + +yr : +yr;
+    let nq = qn === 4 ? 1 : qn + 1, ny = qn === 4 ? y + 1 : y;
+    let nyr = yr.length === 2 ? String(ny).slice(2) : String(ny);
+    return 'Q' + nq + sep + nyr;
+  });
+}
+async function mgmtRollForward(inputBuf) {
+  const colLetter = (n) => { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+  const excelSerial = (dt) => Math.round((Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate()) - Date.UTC(1899, 11, 30)) / 86400000);
+
+  // Identify the current calc tab + quarter via ExcelJS (for header/cols/endings).
+  const ewb = new ExcelJS.Workbook();
+  await ewb.xlsx.load(inputBuf);
+  const calcSheets = mgmtFindCalcSheets(ewb);
+  let cur = null;
+  for (const ws of calcSheets) { const h = mgmtHeaderRow(ws); if (h) { cur = { ws, ...h }; break; } }
+  if (!cur) throw new Error('no calc sheet found');
+  const curName = cur.ws.name;
+  const qm = curName.match(/Mgmt Fee Calc Q([1-4]) ?(\d{2})/i);
+  if (!qm) throw new Error('calc tab name not in "Mgmt Fee Calc QX YY" form: ' + curName);
+  const curQ = +qm[1], curYY = +qm[2];
+  const nextQ = curQ === 4 ? 1 : curQ + 1, nextYY = curQ === 4 ? curYY + 1 : curYY;
+  const prevQ = curQ === 1 ? 4 : curQ - 1, prevYY = curQ === 1 ? curYY - 1 : curYY;
+  const NEW = `Mgmt Fee Calc Q${nextQ} ${nextYY}`;
+  const PREVCALC = `Mgmt Fee Calc Q${prevQ} ${prevYY}`;
+  const CURRECALC = `Q${curQ} ${curYY} Recalc`;
+  const NEWRECALC = `Q${nextQ} ${nextYY} Recalc`;
+  // next quarter start date (first day of the quarter's first month)
+  const nextStart = new Date(Date.UTC(2000 + nextYY, (nextQ - 1) * 3, 1));
+
+  const { ws, headerRow, cols } = cur;
+  const nameC = cols['InvestorName'], endC = cols['InvestorTotal'] || cols['Investor Total'];
+  const begC = cols['Beginning InvestorTotal'];
+  const chgC = cols['Change in  Commitment in Qtr'] || cols['Change in Commitment in Qtr'] || cols['New Commitment in Qtr'];
+  const endingByRow = {};
+  for (let r = headerRow + 1; r <= headerRow + 90; r++) {
+    const nm = ws.getRow(r).getCell(nameC).value;
+    if (nm == null || String(nm).trim() === '') continue;
+    endingByRow[r] = mgmtNum(ws.getRow(r).getCell(endC).value) || 0;
+  }
+  let qStartRow = null;
+  for (let r = 1; r <= 16; r++) { const l = ws.getRow(r).getCell(1).value; if (typeof l === 'string' && /quarter start/i.test(l)) { qStartRow = r; break; } }
+
+  // zip-level clone + retarget
+  const zip = await JSZip.loadAsync(inputBuf);
+  let wbXml = await zip.file('xl/workbook.xml').async('string');
+  const relsXml = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+  const rid2tgt = {};
+  for (const rel of relsXml.match(/<Relationship\b[^>]*\/>/g) || []) { const im = rel.match(/Id="(rId\d+)"/), tm = rel.match(/Target="([^"]+)"/); if (im && tm) rid2tgt[im[1]] = tm[1]; }
+  const name2info = {};
+  for (const tag of wbXml.match(/<sheet\b[^>]*\/>/g) || []) {
+    const nm = tag.match(/\bname="([^"]*)"/), rid = tag.match(/r:id="(rId\d+)"/), sid = tag.match(/sheetId="(\d+)"/);
+    if (nm && rid) { const name = nm[1].replace(/&apos;/g, "'").replace(/&gt;/g, '>').replace(/&amp;/g, '&'); name2info[name] = { rid: rid[1], sheetId: sid ? +sid[1] : 0, target: rid2tgt[rid[1]].replace(/^\/?xl\//, '') }; }
+  }
+  if (!name2info[NEW] === false) throw new Error('target tab ' + NEW + ' already exists — already rolled forward?');
+  const allSheetNums = Object.values(name2info).map(i => +i.target.match(/sheet(\d+)\.xml/)[1]);
+  let nextSheetNum = Math.max(...allSheetNums) + 1;
+  const allRids = (relsXml.match(/Id="rId(\d+)"/g) || []).map(x => +x.match(/\d+/)[0]);
+  let nextRid = Math.max(...allRids) + 1;
+  const reName = (s, from, to) => s.split("'" + from + "'").join("'" + to + "'");
+
+  const copyWorksheet = async (srcName, transform) => {
+    const src = name2info[srcName];
+    if (!src) throw new Error('source tab not found: ' + srcName);
+    const srcNum = +src.target.match(/sheet(\d+)\.xml/)[1];
+    const newNum = nextSheetNum++, newRid = 'rId' + (nextRid++);
+    let sx = await zip.file('xl/' + src.target).async('string'); if (transform) sx = transform(sx);
+    zip.file('xl/worksheets/sheet' + newNum + '.xml', sx);
+    const relsPath = 'xl/worksheets/_rels/sheet' + srcNum + '.xml.rels';
+    if (zip.file(relsPath)) {
+      let rx = await zip.file(relsPath).async('string'); const deps = [];
+      rx = rx.replace(/Target="([^"]+)"/g, (m, t) => {
+        const mm = t.match(/(comments|vmlDrawing|drawing)(\d+)\.(xml|vml)/); if (!mm) return m;
+        const kind = mm[1], ext = mm[3], dir = (kind === 'vmlDrawing' || kind === 'drawing') ? 'drawings/' : '';
+        let k = 1; while (zip.file('xl/' + dir + kind + k + '.' + ext) || deps.find(d => d.newName === kind + k + '.' + ext)) k++;
+        const newName = kind + k + '.' + ext, oldName = kind + mm[2] + '.' + ext;
+        deps.push({ oldName, newName, dir }); return 'Target="' + t.replace(oldName, newName) + '"';
+      });
+      for (const d of deps) {
+        const srcPath = Object.keys(zip.files).find(p => p.endsWith('/' + d.oldName) || p === 'xl/' + d.dir + d.oldName);
+        if (srcPath) { const buf = await zip.file(srcPath).async('nodebuffer'); zip.file(srcPath.replace(d.oldName, d.newName), buf); }
+      }
+      zip.file('xl/worksheets/_rels/sheet' + newNum + '.xml.rels', rx);
+    }
+    return { num: newNum, rid: newRid };
+  };
+
+  const q4calc = await copyWorksheet(curName, (sx) => reName(reName(sx, curName, NEW), PREVCALC, curName));
+  let q4recalc = null;
+  if (name2info[CURRECALC]) q4recalc = await copyWorksheet(CURRECALC, (sx) => reName(sx, curName, NEW));
+
+  // register new sheets
+  let extraRels = '<Relationship Id="' + q4calc.rid + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' + q4calc.num + '.xml"/>';
+  if (q4recalc) extraRels += '<Relationship Id="' + q4recalc.rid + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet' + q4recalc.num + '.xml"/>';
+  zip.file('xl/_rels/workbook.xml.rels', relsXml.replace('</Relationships>', extraRels + '</Relationships>'));
+  const maxSid = Math.max(...Object.values(name2info).map(i => i.sheetId));
+  const curTag = wbXml.match(new RegExp('<sheet name="' + curName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"[^>]*/>'))[0];
+  wbXml = wbXml.replace(curTag, '<sheet name="' + NEW + '" sheetId="' + (maxSid + 1) + '" r:id="' + q4calc.rid + '"/>' + curTag);
+  if (q4recalc && name2info[CURRECALC]) {
+    const rTag = wbXml.match(new RegExp('<sheet name="' + CURRECALC.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"[^>]*/>'))[0];
+    wbXml = wbXml.replace(rTag, '<sheet name="' + NEWRECALC + '" sheetId="' + (maxSid + 2) + '" r:id="' + q4recalc.rid + '"/>' + rTag);
+  }
+
+  // edit NEW calc numeric cells: beginning = prior ending, change = 0, date, B1 label
+  let ncXml = await zip.file('xl/worksheets/sheet' + q4calc.num + '.xml').async('string');
+  const setNum = (ref, val) => {
+    const selfClose = new RegExp('<c r="' + ref + '"([^>]*?)/>');
+    const scm = ncXml.match(selfClose);
+    if (scm) { ncXml = ncXml.replace(selfClose, (m, attrs) => '<c r="' + ref + '"' + attrs.replace(/\s+t="[^"]*"/, '') + '><v>' + val + '</v></c>'); return; }
+    const re = new RegExp('(<c r="' + ref + '"[^>]*>)([\\s\\S]*?)(</c>)');
+    if (re.test(ncXml)) ncXml = ncXml.replace(re, (m, open, inner, close) => { const o = open.replace(/\s+t="[^"]*"/, ''); const fm = inner.match(/<f[\s\S]*?<\/f>|<f[^>]*\/>/); return o + (fm ? fm[0] : '') + '<v>' + val + '</v>' + close; });
+  };
+  for (const r in endingByRow) { if (begC) setNum(colLetter(begC) + r, endingByRow[r]); if (chgC) setNum(colLetter(chgC) + r, 0); }
+  if (qStartRow) setNum('B' + qStartRow, excelSerial(nextStart));
+  ncXml = ncXml.replace(/<c r="B1"[^>]*>[\s\S]*?<\/c>/, '<c r="B1" t="inlineStr"><is><t>Q' + nextQ + ' 20' + nextYY + '</t></is></c>');
+  zip.file('xl/worksheets/sheet' + q4calc.num + '.xml', ncXml);
+
+  // ITD aggregators: shift in place (cur->NEW, prev->cur)
+  for (const tab of ['ITD Recalc', 'ITD Mgmt Fee']) {
+    if (!name2info[tab]) continue;
+    let sx = await zip.file('xl/' + name2info[tab].target).async('string');
+    sx = reName(reName(sx, curName, NEW), PREVCALC, curName);
+    zip.file('xl/' + name2info[tab].target, sx);
+  }
+
+  // Invoice: repoint formulas cur->NEW; shift dynamic quarter labels; keep annual axis + one-offs
+  if (name2info['Invoice']) {
+    let invXml = await zip.file('xl/' + name2info['Invoice'].target).async('string');
+    invXml = reName(invXml, curName, NEW);
+    let ssXml = await zip.file('xl/sharedStrings.xml').async('string');
+    const ssList = [];
+    for (const si of ssXml.match(/<si>[\s\S]*?<\/si>/g) || []) { const t = (si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || []).map(x => x.replace(/<[^>]+>/g, '')).join(''); ssList.push(t.replace(/&amp;/g, '&').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&apos;/g, "'")); }
+    const invCell = {};
+    for (const m of invXml.matchAll(/<c r="([A-Z]+)(\d+)"[^>]*\bt="s"[^>]*><v>(\d+)<\/v><\/c>/g)) { const t = ssList[+m[3]]; if (t != null) invCell[m[1] + m[2]] = { col: m[1], row: +m[2], txt: t }; }
+    const qOf = (t) => { const mm = t.match(/Q([1-4])'?\s?(\d{2}|20\d{2})/); return mm ? { q: +mm[1], y: mm[2].length === 2 ? 2000 + +mm[2] : +mm[2] } : null; };
+    const annualAxis = new Set(); const byCol = {};
+    for (const k in invCell) { (byCol[invCell[k].col] = byCol[invCell[k].col] || []).push(invCell[k]); }
+    for (const col in byCol) {
+      const cells = byCol[col].sort((a, b) => a.row - b.row);
+      for (let i = 0; i < cells.length; i++) {
+        let run = [cells[i]], prev = qOf(cells[i].txt); if (!prev) continue;
+        for (let j = i + 1; j < cells.length; j++) { if (cells[j].row !== cells[j - 1].row + 1) break; const c = qOf(cells[j].txt); if (!c) break; if (c.y === prev.y && c.q === prev.q + 1) { run.push(cells[j]); prev = c; } else break; }
+        if (run.length >= 3) run.forEach(c => annualAxis.add(c.col + c.row));
+      }
+    }
+    const shiftAllowed = (ref, txt) => {
+      if (annualAxis.has(ref)) return false;
+      if (/Legacy Knight|Bloomingdale|capital call|dtd /i.test(txt)) return false;
+      return /Q[1-4]'?\s?2?6\b/.test(txt) && /(Management|Mangement|Mgmt|Catch[- ]?Up|Expense|ITD|Payment)/i.test(txt);
+    };
+    invXml = invXml.replace(/<c r="([A-Z]+\d+)"([^>]*)\bt="s"([^>]*)><v>(\d+)<\/v><\/c>/g, (m, ref, a1, a2, idx) => {
+      const txt = ssList[+idx]; if (txt == null || !shiftAllowed(ref, txt)) return m;
+      const shifted = mgmtShiftQuarterText(txt).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return '<c r="' + ref + '"' + a1 + a2 + ' t="inlineStr"><is><t xml:space="preserve">' + shifted + '</t></is></c>';
+    });
+    zip.file('xl/' + name2info['Invoice'].target, invXml);
+  }
+
+  // content types + drop calcChain + force recalc on open
+  let ct = await zip.file('[Content_Types].xml').async('string');
+  const addOv = (p, t) => { if (!ct.includes('PartName="' + p + '"')) ct = ct.replace('</Types>', '<Override PartName="' + p + '" ContentType="' + t + '"/></Types>'); };
+  addOv('/xl/worksheets/sheet' + q4calc.num + '.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml');
+  if (q4recalc) addOv('/xl/worksheets/sheet' + q4recalc.num + '.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml');
+  for (const p of Object.keys(zip.files)) {
+    if (/xl\/comments\d+\.xml$/.test(p)) addOv('/' + p, 'application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml');
+    if (/xl\/drawings\/drawing\d+\.xml$/.test(p)) addOv('/' + p, 'application/vnd.openxmlformats-officedocument.drawing+xml');
+  }
+  if (zip.file('xl/calcChain.xml')) { zip.remove('xl/calcChain.xml'); ct = ct.replace(/<Override PartName="\/xl\/calcChain\.xml"[^>]*\/>/, ''); }
+  zip.file('[Content_Types].xml', ct);
+  if (/<calcPr/.test(wbXml)) wbXml = wbXml.replace(/<calcPr([^/]*)\/>/, (m, a) => /fullCalcOnLoad/.test(a) ? m : '<calcPr' + a + ' fullCalcOnLoad="1"/>');
+  else wbXml = wbXml.replace('</workbook>', '<calcPr calcId="0" fullCalcOnLoad="1"/></workbook>');
+  zip.file('xl/workbook.xml', wbXml);
+
+  const outBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  return { outBuf, label: `Q${nextQ} ${nextYY}`, newTab: NEW, investors: Object.keys(endingByRow).length };
+}
+
 app.post('/api/workpapers/mgmt-fee/:entity_id/analyze', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   mgmtFeeUpload.single('workbook')(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message });
@@ -5336,185 +5521,12 @@ app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAcce
   mgmtFeeUpload.single('workbook')(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message });
     if (!req.file) return res.status(400).json({ error: 'No workbook uploaded' });
-    let changes = [];
-    try { if (req.body.changes) changes = JSON.parse(req.body.changes); } catch { return res.status(400).json({ error: 'Invalid changes JSON' }); }
-    const changeByName = new Map(changes.map(c => [String(c.name).trim(), mgmtNum(c.change) || 0]));
-
     try {
-      const wb = new ExcelJS.Workbook();
-      await wb.xlsx.load(req.file.buffer);
-      const sheets = mgmtFindCalcSheets(wb);
-      let best = null;
-      for (const ws of sheets) { const h = mgmtHeaderRow(ws); if (h) { best = { ws, ...h }; break; } }
-      if (!best) throw new Error('no calc sheet found');
-      const { ws, headerRow, cols } = best;
-      const nameC = cols['InvestorName'], grpC = cols['Investor Group'];
-      const endC = cols['InvestorTotal'] || cols['Investor Total'];
-      const begC = cols['Beginning InvestorTotal'];
-      const chgC = cols['Change in  Commitment in Qtr'] || cols['New Commitment in Qtr'] || cols['Change in Commitment in Qtr'];
-
-      // Determine the target quarter. The client sends quarter_start already set
-      // to the NEW quarter's start (from analyze's next_quarter.start), so use it
-      // as-is; only roll forward from the prior start when no override is given.
-      let priorStart = null;
-      for (let r = 1; r <= 16; r++) {
-        const label = ws.getRow(r).getCell(1).value;
-        if (typeof label === 'string' && /quarter start/i.test(label)) priorStart = ws.getRow(r).getCell(2).value;
-      }
-      let next;
-      if (req.body.quarter_start) {
-        const s = new Date(req.body.quarter_start);
-        const end = new Date(Date.UTC(s.getUTCFullYear(), s.getUTCMonth() + 3, 0));
-        next = { start: s, end, daysInQuarter: Math.round((end - s) / 86400000) + 1, label: 'Q' + (Math.floor(s.getUTCMonth() / 3) + 1) + ' ' + s.getUTCFullYear() };
-      } else {
-        next = mgmtNextQuarter(new Date(priorStart));
-      }
-
-      // Rates carried from the workbook's Rates tab (fallback to standard 1.5%).
-      const ratesTab = wb.getWorksheet('Rates');
-      const grpRate = (group) => {
-        // Standard inv-period rate is in Rates!C3; default 1.5%
-        if (ratesTab) {
-          for (let r = 1; r <= 10; r++) {
-            const g = ratesTab.getRow(r).getCell(2).value;
-            if (g != null && String(g).trim().toLowerCase() === String(group).trim().toLowerCase()) {
-              const rate = mgmtNum(ratesTab.getRow(r).getCell(3).value);
-              if (rate != null) return rate;
-            }
-          }
-        }
-        return group === 'Affiliated LP' || group === 'Affiliated Investor' ? 0 : 0.015;
-      };
-
-      // Tier-based quarterly fee for BBR/GCM. Prefer the workbook's already-
-      // computed "Quarterly Fee" totals (F8/F10) since the rate cells are
-      // cross-sheet formulas whose results ExcelJS may not surface. Fall back to
-      // recomputing from tier commitments (row 4) × rates (row 6).
-      const tierQuarterlyFee = (tabName) => {
-        const t = wb.getWorksheet(tabName);
-        if (!t) return null;
-        // F10 = Quarterly Fee (Pro-Rated total); F8 = Quarterly Fee (Whole Quarter).
-        const f10 = mgmtNum(t.getRow(10).getCell(6).value);
-        if (f10 != null && f10 !== 0) return f10;
-        const f8 = mgmtNum(t.getRow(8).getCell(6).value);
-        if (f8 != null && f8 !== 0) return f8;
-        const t1 = mgmtNum(t.getRow(4).getCell(3).value), t2 = mgmtNum(t.getRow(4).getCell(4).value), t3 = mgmtNum(t.getRow(4).getCell(5).value);
-        const r1 = mgmtNum(t.getRow(6).getCell(3).value), r2 = mgmtNum(t.getRow(6).getCell(4).value), r3 = mgmtNum(t.getRow(6).getCell(5).value);
-        if ([t1,t2,t3,r1,r2,r3].some(x => x == null)) return null;
-        return ((t1*r1)+(t2*r2)+(t3*r3)) / 4;
-      };
-      const uscQuarterlyFee = () => {
-        const u = wb.getWorksheet('USC Rate');
-        if (!u) return null;
-        // B8 = "Total GCM Fee for Quarter" = B2*B6/4, already computed in the book.
-        const b8 = mgmtNum(u.getRow(8).getCell(2).value);
-        if (b8 != null && b8 !== 0) return b8;
-        const calls = mgmtNum(u.getRow(2).getCell(2).value);
-        const rate = mgmtNum(u.getRow(6).getCell(2).value);
-        if (calls == null || rate == null) return null;
-        return calls * rate / 4;
-      };
-
-      const pctQuarter = 1.0; // full quarter (CLRF is long past inception)
-      let total = 0;
-      const lines = [];
-      for (let r = headerRow + 1; r <= headerRow + 90; r++) {
-        const nm = ws.getRow(r).getCell(nameC).value;
-        if (nm == null || String(nm).trim() === '') continue;
-        const name = String(nm).trim();
-        const group = ws.getRow(r).getCell(grpC).value != null ? String(ws.getRow(r).getCell(grpC).value).trim() : '';
-        const priorEnding = mgmtNum(endC ? ws.getRow(r).getCell(endC).value : null) || 0;
-        const change = changeByName.get(name) || 0;
-        const newBeginning = priorEnding;
-        const newEnding = newBeginning + change;
-        let fee = 0;
-        if (group === 'Standard') fee = Math.round(newEnding * grpRate('Standard') / 4 * pctQuarter * 100) / 100;
-        else if (group === 'USC') { /* USC fee is the tab lump; per-investor split not needed for total */ }
-        // BBR/GCM/USC totals are tab-driven lumps; we set them at the group level below.
-        lines.push({ r, name, group, newBeginning, change, newEnding, fee });
-        if (group === 'Standard') total += fee;
-      }
-      const bbrFee = tierQuarterlyFee('tblBBRCalc') || 0;
-      const gcmFee = tierQuarterlyFee('tblGCMCalc') || 0;
-      const uscFee = uscQuarterlyFee() || 0;
-      total += bbrFee + gcmFee + uscFee;
-
-      // Write by editing the original .xlsx zip in place (JSZip), NOT a full
-      // ExcelJS round-trip. ExcelJS rewrite drops drawings/calcChain and makes
-      // Excel prompt to "recover" the file. We only set numeric cells (beginning,
-      // change, quarter-start date); ending/fees/totals are formulas the workbook
-      // recomputes on open (fullCalcOnLoad), so all other parts stay byte-intact.
-      const colLetter = (n) => { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
-      const excelSerial = (dt) => Math.round((Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate()) - Date.UTC(1899, 11, 30)) / 86400000);
-      let qStartRow = null;
-      for (let r = 1; r <= 16; r++) { const label = ws.getRow(r).getCell(1).value; if (typeof label === 'string' && /quarter start/i.test(label)) { qStartRow = r; break; } }
-
-      const zip = await JSZip.loadAsync(req.file.buffer);
-      let wbXml = await zip.file('xl/workbook.xml').async('string');
-      const relsXml = await zip.file('xl/_rels/workbook.xml.rels').async('string');
-      // Map rId -> worksheet target. Attribute order in .rels varies by writer
-      // (Excel emits Id..Type..Target; some libs reorder), so match each
-      // attribute independently within each <Relationship .../> element.
-      const ridToTarget = {};
-      for (const rel of relsXml.match(/<Relationship\b[^>]*\/>/g) || []) {
-        const tm = rel.match(/Target="([^"]*worksheets\/sheet\d+\.xml)"/);
-        const im = rel.match(/Id="(rId\d+)"/);
-        if (tm && im) ridToTarget[im[1]] = tm[1].replace(/^\.?\//, '').replace(/^xl\//, '');
-      }
-      // Locate the <sheet> element for ws.name without depending on attribute
-      // order (Excel: name first; ExcelJS: sheetId first). Grab the whole tag
-      // by name, then pull r:id from inside it.
-      let calcTarget = null;
-      for (const tag of wbXml.match(/<sheet\b[^>]*\/>/g) || []) {
-        const nm = tag.match(/\bname="([^"]*)"/);
-        if (nm && nm[1] === ws.name) {
-          const rid = tag.match(/r:id="(rId\d+)"/);
-          if (rid) calcTarget = ridToTarget[rid[1]];
-          break;
-        }
-      }
-      if (!calcTarget) throw new Error('could not locate calc sheet xml');
-
-      let sheetXml = await zip.file('xl/' + calcTarget).async('string');
-      const setNumber = (ref, val) => {
-        // A cell is either self-closing (<c r=".."/>, empty) or open/close
-        // (<c r=".."> ... </c>). Decide which form THIS cell is before editing —
-        // matching the open/close pattern against a self-closing cell would let
-        // the lazy [\s\S]*? run past it and swallow the next cell's </c>,
-        // corrupting the sheet (mismatched tags -> Excel "recover" prompt).
-        const selfClose = new RegExp('<c r="' + ref + '"([^>]*?)/>');
-        const scm = sheetXml.match(selfClose);
-        if (scm) {
-          sheetXml = sheetXml.replace(selfClose, (m, attrs) =>
-            '<c r="' + ref + '"' + attrs.replace(/\s+t="[^"]*"/, '') + '><v>' + val + '</v></c>');
-          return;
-        }
-        const re = new RegExp('(<c r="' + ref + '"[^>]*>)([\\s\\S]*?)(</c>)');
-        if (re.test(sheetXml)) {
-          sheetXml = sheetXml.replace(re, (m, open, inner, close) => {
-            const o = open.replace(/\s+t="[^"]*"/, '');
-            const fm = inner.match(/<f[\s\S]*?<\/f>|<f[^>]*\/>/);
-            return o + (fm ? fm[0] : '') + '<v>' + val + '</v>' + close;
-          });
-        }
-      };
-      for (const ln of lines) {
-        if (begC) setNumber(colLetter(begC) + ln.r, ln.newBeginning);
-        if (chgC) setNumber(colLetter(chgC) + ln.r, ln.change);
-        // ending (endC) is a formula =beg+chg; leave it to recompute.
-      }
-      if (qStartRow) setNumber('B' + qStartRow, excelSerial(next.start));
-      zip.file('xl/' + calcTarget, sheetXml);
-
-      if (/<calcPr/.test(wbXml)) wbXml = wbXml.replace(/<calcPr([^/]*)\/>/, (m, a) => /fullCalcOnLoad/.test(a) ? m : '<calcPr' + a + ' fullCalcOnLoad="1"/>');
-      else wbXml = wbXml.replace('</workbook>', '<calcPr calcId="0" fullCalcOnLoad="1"/></workbook>');
-      zip.file('xl/workbook.xml', wbXml);
-
-      const outBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
-      const fname = 'CLRF_Mgmt_Fee_Calc_' + next.label.replace(/\s+/g, '_') + '.xlsx';
+      const { outBuf, label, newTab, investors } = await mgmtRollForward(req.file.buffer);
+      const fname = 'CLRF_Mgmt_Fee_Calc_' + label.replace(/\s+/g, '_') + '.xlsx';
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
-      res.setHeader('X-Mgmt-Fee-Summary', JSON.stringify({ quarter: next.label, total: Math.round(total*100)/100, bbr: bbrFee, gcm: gcmFee, usc: uscFee, standard: Math.round((total-bbrFee-gcmFee-uscFee)*100)/100 }).replace(/[\r\n]/g, ' '));
+      res.setHeader('X-Mgmt-Fee-Summary', JSON.stringify({ quarter: label, new_tab: newTab, investors }).replace(/[\r\n]/g, ' '));
       res.send(outBuf);
     } catch (e) {
       res.status(500).json({ error: 'Generate error: ' + e.message });
