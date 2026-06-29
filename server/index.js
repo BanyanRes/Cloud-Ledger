@@ -5368,6 +5368,12 @@ async function mgmtRollForward(inputBuf) {
     if (nm && rid) { const name = nm[1].replace(/&apos;/g, "'").replace(/&gt;/g, '>').replace(/&amp;/g, '&'); name2info[name] = { rid: rid[1], sheetId: sid ? +sid[1] : 0, target: rid2tgt[rid[1]].replace(/^\/?xl\//, '') }; }
   }
   if (!name2info[NEW] === false) throw new Error('target tab ' + NEW + ' already exists — already rolled forward?');
+  // Capture the ORIGINAL sheet order (by name). Inserting new <sheet> tags shifts
+  // every later sheet's positional index, so any definedName scoped with
+  // localSheetId="N" (a 0-based sheet index) would silently point at the wrong
+  // sheet afterward — which Excel flags as corruption. We remap those indices by
+  // name once the final order is known (see end of function).
+  const origOrder = [...wbXml.matchAll(/<sheet name="([^"]*)"/g)].map(m => m[1].replace(/&apos;/g, "'").replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
   const allSheetNums = Object.values(name2info).map(i => +i.target.match(/sheet(\d+)\.xml/)[1]);
   let nextSheetNum = Math.max(...allSheetNums) + 1;
   const allRids = (relsXml.match(/Id="rId(\d+)"/g) || []).map(x => +x.match(/\d+/)[0]);
@@ -5484,6 +5490,11 @@ async function mgmtRollForward(inputBuf) {
   zip.file('[Content_Types].xml', ct);
   if (/<calcPr/.test(wbXml)) wbXml = wbXml.replace(/<calcPr([^/]*)\/>/, (m, a) => /fullCalcOnLoad/.test(a) ? m : '<calcPr' + a + ' fullCalcOnLoad="1"/>');
   else wbXml = wbXml.replace('</workbook>', '<calcPr calcId="0" fullCalcOnLoad="1"/></workbook>');
+  // Remap localSheetId indices to the FINAL sheet order (see origOrder note above).
+  const finalOrder = [...wbXml.matchAll(/<sheet name="([^"]*)"/g)].map(m => m[1].replace(/&apos;/g, "'").replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
+  const newIdxByName = {}; finalOrder.forEach((n, i) => { newIdxByName[n] = i; });
+  const idxRemap = {}; origOrder.forEach((n, i) => { if (newIdxByName[n] != null) idxRemap[i] = newIdxByName[n]; });
+  wbXml = wbXml.replace(/localSheetId="(\d+)"/g, (m, d) => { const n = idxRemap[+d]; return 'localSheetId="' + (n == null ? d : n) + '"'; });
   zip.file('xl/workbook.xml', wbXml);
 
   const outBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
