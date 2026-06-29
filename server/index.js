@@ -5488,7 +5488,15 @@ async function mgmtRollForward(inputBuf) {
         if (run.length >= 3) run.forEach(c => annualAxis.add(c.col + c.row));
       }
     }
+    // The "ITD Activity" ledger (row 21 down) is a manually maintained,
+    // inception-to-date transaction table. It carries its own quarter labels
+    // (e.g. "Q3'26 Expense") but those are historical entries, not a current-
+    // quarter pointer — the accountant adds a new row each quarter by hand. So we
+    // never shift anything at row 21 or below; only the summary/YTD area above it.
+    const ITD_ACTIVITY_ROW = 21;
     const shiftAllowed = (ref, txt) => {
+      const rowNum = parseInt((ref.match(/\d+/) || ['0'])[0], 10);
+      if (rowNum >= ITD_ACTIVITY_ROW) return false;
       if (annualAxis.has(ref)) return false;
       if (/Legacy Knight|Bloomingdale|capital call|dtd /i.test(txt)) return false;
       return /Q[1-4]'?\s?2?6\b/.test(txt) && /(Management|Mangement|Mgmt|Catch[- ]?Up|Expense|ITD|Payment)/i.test(txt);
@@ -5501,7 +5509,7 @@ async function mgmtRollForward(inputBuf) {
     zip.file('xl/' + name2info['Invoice'].target, invXml);
   }
 
-  // content types + drop calcChain + force recalc on open
+  // content types for the new sheets + their cloned comments/drawings
   let ct = await zip.file('[Content_Types].xml').async('string');
   const addOv = (p, t) => { if (!ct.includes('PartName="' + p + '"')) ct = ct.replace('</Types>', '<Override PartName="' + p + '" ContentType="' + t + '"/></Types>'); };
   addOv('/xl/worksheets/sheet' + q4calc.num + '.xml', 'application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml');
@@ -5510,10 +5518,23 @@ async function mgmtRollForward(inputBuf) {
     if (/xl\/comments\d+\.xml$/.test(p)) addOv('/' + p, 'application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml');
     if (/xl\/drawings\/drawing\d+\.xml$/.test(p)) addOv('/' + p, 'application/vnd.openxmlformats-officedocument.drawing+xml');
   }
-  if (zip.file('xl/calcChain.xml')) { zip.remove('xl/calcChain.xml'); ct = ct.replace(/<Override PartName="\/xl\/calcChain\.xml"[^>]*\/>/, ''); }
   zip.file('[Content_Types].xml', ct);
-  if (/<calcPr/.test(wbXml)) wbXml = wbXml.replace(/<calcPr([^/]*)\/>/, (m, a) => /fullCalcOnLoad/.test(a) ? m : '<calcPr' + a + ' fullCalcOnLoad="1"/>');
-  else wbXml = wbXml.replace('</workbook>', '<calcPr calcId="0" fullCalcOnLoad="1"/></workbook>');
+  // The workbook contains a pre-existing circular reference: ITD Recalc B85 =
+  // C84 - <curQ>!G16, reached through whole-column XLOOKUP ranges (e.g. a calc
+  // tab's S column reads 'ITD Recalc'!B:B, whose B85 reads the calc tab's G16
+  // total). The source file masks it by saving cached values and never forcing a
+  // recompute. We need the opposite — the new quarter's totals must recompute on
+  // open so the accountant sees correct figures without pressing F9 — so we set
+  // fullCalcOnLoad. To stop that recompute from raising Excel's circular-reference
+  // warning, we also enable iterative calculation (the same toggle as Excel's
+  // "Enable iterative calculation" option), which resolves the benign cycle by
+  // convergence. Verified: under iteration the totals settle to the correct
+  // values (Q4 beginning ties to Q3 ending) with zero error cells. calcChain is
+  // dropped so Excel rebuilds it cleanly for the new sheets.
+  if (zip.file('xl/calcChain.xml')) { zip.remove('xl/calcChain.xml'); ct = ct.replace(/<Override PartName="\/xl\/calcChain\.xml"[^>]*\/>/, ''); zip.file('[Content_Types].xml', ct); }
+  const calcAttrs = ' iterate="1" iterateCount="100" iterateDelta="0.001" fullCalcOnLoad="1"';
+  if (/<calcPr/.test(wbXml)) wbXml = wbXml.replace(/<calcPr([^/]*)\/>/, (m, a) => '<calcPr' + a.replace(/\s+(iterate|iterateCount|iterateDelta|fullCalcOnLoad)="[^"]*"/g, '') + calcAttrs + '/>');
+  else wbXml = wbXml.replace('</workbook>', '<calcPr calcId="0"' + calcAttrs + '/></workbook>');
   // Remap localSheetId indices to the FINAL sheet order (see origOrder note above).
   const finalOrder = [...wbXml.matchAll(/<sheet name="([^"]*)"/g)].map(m => m[1].replace(/&apos;/g, "'").replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
   const newIdxByName = {}; finalOrder.forEach((n, i) => { newIdxByName[n] = i; });
