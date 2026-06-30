@@ -5457,6 +5457,39 @@ async function mgmtRollForward(inputBuf) {
   };
   for (const r in endingByRow) { if (begC) setNum(colLetter(begC) + r, endingByRow[r]); if (chgC) setNum(colLetter(chgC) + r, 0); }
   if (qStartRow) setNum('B' + qStartRow, excelSerial(nextStart));
+  // Normalize the catch-up column. A subsequent-closing investor gets a one-time
+  // catch-up fee in the quarter they join, sometimes entered as a MANUAL formula
+  // that doesn't key off this-quarter's new commitment (e.g. James Bloomingdale's
+  // "=N97*($E$8+$E$9)" charges every quarter, not just the join quarter). On
+  // roll-forward that would re-bill the catch-up. The standard catch-up formula
+  // (used by ~all rows) is gated on D>0, so it self-zeroes once D resets to 0.
+  // So in the NEW tab we replace any non-standard catch-up cell with the standard
+  // template (row-number adjusted), making the catch-up correctly 0 next quarter.
+  const catchC = cols['Catch-up Management Fee'];
+  if (catchC) {
+    const cl = colLetter(catchC);
+    const cellRe = (r) => new RegExp('<c r="' + cl + r + '"[^>]*>([\\s\\S]*?)</c>');
+    // Pick the standard template: the most common catch-up formula shape
+    // (an =IF(AND(...="GCM"...>0)...) gated on D). Sample from a known-normal row.
+    const fOf = (r) => { const m = ncXml.match(cellRe(r)); if (!m) return null; const fm = m[1].match(/<f[^>]*>([\s\S]*?)<\/f>/); return fm ? fm[1] : null; };
+    // NB: <f> content is raw OOXML — no leading "=", and ">" is stored as "&gt;".
+    const isStandard = (f) => !!f && /^IF\(AND\(/.test(f) && /="GCM"/.test(f) && /\$D\d+&gt;0/.test(f);
+    // find a template row + its row number to substitute
+    let tmpl = null, tmplRow = null;
+    for (let r = headerRow + 1; r <= headerRow + 90; r++) { const f = fOf(r); if (isStandard(f)) { tmpl = f; tmplRow = r; break; } }
+    if (tmpl) {
+      for (let r = headerRow + 1; r <= headerRow + 90; r++) {
+        const m = ncXml.match(cellRe(r)); if (!m) continue;
+        const fm = m[1].match(/<f[^>]*>([\s\S]*?)<\/f>/); if (!fm) continue; // no formula -> leave
+        if (isStandard(fm[1])) continue; // already standard
+        // build standard formula for THIS row by retargeting the template's row number
+        const rowFixed = tmpl.replace(new RegExp('(\\$[A-Z]{1,2})' + tmplRow + '\\b', 'g'), '$1' + r);
+        const open = m[0].match(/^<c r="[^"]*"[^>]*>/)[0].replace(/\s+t="[^"]*"/, '');
+        const replacement = open + '<f>' + rowFixed + '</f></c>';
+        ncXml = ncXml.replace(cellRe(r), () => replacement); // function form: avoids $-substitution in replacement
+      }
+    }
+  }
   ncXml = ncXml.replace(/<c r="B1"[^>]*>[\s\S]*?<\/c>/, '<c r="B1" t="inlineStr"><is><t>Q' + nextQ + ' 20' + nextYY + '</t></is></c>');
   zip.file('xl/worksheets/sheet' + q4calc.num + '.xml', ncXml);
 
