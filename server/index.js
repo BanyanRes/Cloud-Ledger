@@ -5502,7 +5502,14 @@ async function mgmtRollForward(inputBuf) {
   if (xferC) {
     const xl = colLetter(xferC);
     for (let r = headerRow + 1; r <= headerRow + 90; r++) {
-      const re = new RegExp('<c r="' + xl + r + '"[^>]*>[\\s\\S]*?</c>|<c r="' + xl + r + '"[^>]*/>');
+      // Match the self-closing form FIRST. A self-closing cell like
+      // `<c r="T18" s="136"/>` must not fall through to the open/close branch:
+      // there, `[^>]*>` stops at the `>` of the self-close and `[\s\S]*?</c>`
+      // then greedily swallows the NEXT cell up to its </c> (e.g. U18's
+      // SUM formula + shared-formula master), corrupting it and triggering
+      // Excel's repair prompt. So try `<c .../>` first; only if it's a real
+      // open tag (its content not ending in `/`) do we match `<c ...>...</c>`.
+      const re = new RegExp('<c r="' + xl + r + '"[^>]*/>|<c r="' + xl + r + '"[^>]*[^/]>[\\s\\S]*?</c>');
       const m = ncXml.match(re); if (!m) continue;
       // only touch cells that actually hold a transfer (a value or a formula); skip already-empty
       if (/<f[^>]*>/.test(m[0]) || /<v>/.test(m[0])) {
