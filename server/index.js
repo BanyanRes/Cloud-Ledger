@@ -5521,7 +5521,37 @@ async function mgmtRollForward(inputBuf) {
   ncXml = ncXml.replace(/<c r="B1"[^>]*>[\s\S]*?<\/c>/, '<c r="B1" t="inlineStr"><is><t>Q' + nextQ + ' 20' + nextYY + '</t></is></c>');
   zip.file('xl/worksheets/sheet' + q4calc.num + '.xml', ncXml);
 
-  // ITD aggregators: shift in place (cur->NEW, prev->cur)
+  // Freeze the now-prior quarter's S column to static values to break the circular
+  // reference. The current tab (curName) becomes the prior quarter after roll-forward.
+  // Its S column ("ITD Fees + Current Quarter (before transfers)") holds live
+  // XLOOKUP('ITD Recalc'!B:B) formulas. Once the new quarter is added, ITD Recalc
+  // is rewritten to read the new tab's columns, so 'ITD Recalc' <-> curName becomes
+  // a genuine cycle (Excel raises the circular-reference warning). A past quarter
+  // should be a fixed historical record, not a live driver — so we replace each
+  // S-cell formula in curName with its cached numeric value (which we already have
+  // from the ExcelJS-loaded workbook `ws`). Cells with no cached value (inactive
+  // sponsor rows whose current-quarter fee is 0) are frozen to 0; their S equals
+  // prior-ITD + R where R = 0, and they carry no live ITD contribution.
+  {
+    const sCol = cols['ITD Fees + Current Quarter (before transfers)'];
+    if (sCol) {
+      const sL = colLetter(sCol);
+      let curSx = await zip.file('xl/' + name2info[curName].target).async('string');
+      for (let r = headerRow + 1; r <= headerRow + 90; r++) {
+        const ref = sL + r;
+        // only touch cells whose formula references ITD Recalc (the cycle source)
+        const re = new RegExp('<c r="' + ref + '"([^>]*?)>(?:(?!</c>)[\\s\\S])*?</c>');
+        const m = curSx.match(re);
+        if (!m || !/ITD Recalc/.test(m[0])) continue;
+        let v = mgmtNum(ws.getRow(r).getCell(sCol).value);
+        if (v == null) v = 0;
+        const attrs = m[1].replace(/\s+t="[^"]*"/, '');
+        curSx = curSx.replace(re, '<c r="' + ref + '"' + attrs + '><v>' + v + '</v></c>');
+      }
+      zip.file('xl/' + name2info[curName].target, curSx);
+    }
+  }
+
   for (const tab of ['ITD Recalc', 'ITD Mgmt Fee']) {
     if (!name2info[tab]) continue;
     let sx = await zip.file('xl/' + name2info[tab].target).async('string');
