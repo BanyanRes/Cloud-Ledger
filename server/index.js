@@ -5610,6 +5610,13 @@ async function mgmtRollForward(inputBuf) {
   wbXml = wbXml.replace(/localSheetId="(\d+)"/g, (m, d) => { const n = idxRemap[+d]; return 'localSheetId="' + (n == null ? d : n) + '"'; });
   zip.file('xl/workbook.xml', wbXml);
 
+  // JSZip materializes intermediate folder entries (e.g. "xl/", "xl/worksheets/")
+  // when parts are added via zip.file(). Excel treats a directory entry in an
+  // OOXML package as content with no registered content type and raises its
+  // "we found a problem with some content... recover?" repair prompt on open.
+  // The package must contain files only, so drop every directory entry here.
+  for (const p of Object.keys(zip.files)) { if (zip.files[p] && zip.files[p].dir) zip.remove(p); }
+
   const outBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
   return { outBuf, label: `Q${nextQ} ${nextYY}`, newTab: NEW, investors: Object.keys(endingByRow).length };
 }
