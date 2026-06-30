@@ -5490,6 +5490,27 @@ async function mgmtRollForward(inputBuf) {
       }
     }
   }
+  // Reset the Transfers column. A transfer (one investor assigning its interest
+  // to another, e.g. Stewart Tate -> his revocable trust) is a one-time event in
+  // the quarter it happens: the calc tab's Transfers cell carries a hardcoded
+  // amount (and a "=-Tnn" mirror on the receiving row), and ITD-after = SUM(S:T)
+  // nets it out that quarter. Rolling that forward re-applies the transfer every
+  // quarter, so the inception-to-date fee total spirals negative. Transfers must
+  // be 0 next quarter (the prior-quarter ending ITD already reflects the moved
+  // balance), so we blank every non-empty Transfers cell in the new tab.
+  const xferC = cols['Transfers'];
+  if (xferC) {
+    const xl = colLetter(xferC);
+    for (let r = headerRow + 1; r <= headerRow + 90; r++) {
+      const re = new RegExp('<c r="' + xl + r + '"[^>]*>[\\s\\S]*?</c>|<c r="' + xl + r + '"[^>]*/>');
+      const m = ncXml.match(re); if (!m) continue;
+      // only touch cells that actually hold a transfer (a value or a formula); skip already-empty
+      if (/<f[^>]*>/.test(m[0]) || /<v>/.test(m[0])) {
+        const open = m[0].match(/^<c r="[^"]*"[^>]*?(?=\/?>)/)[0].replace(/\s+t="[^"]*"/, '');
+        ncXml = ncXml.replace(re, () => open + '><v>0</v></c>');
+      }
+    }
+  }
   ncXml = ncXml.replace(/<c r="B1"[^>]*>[\s\S]*?<\/c>/, '<c r="B1" t="inlineStr"><is><t>Q' + nextQ + ' 20' + nextYY + '</t></is></c>');
   zip.file('xl/worksheets/sheet' + q4calc.num + '.xml', ncXml);
 
@@ -5498,6 +5519,20 @@ async function mgmtRollForward(inputBuf) {
     if (!name2info[tab]) continue;
     let sx = await zip.file('xl/' + name2info[tab].target).async('string');
     sx = shiftPrevRefs(reName(sx, curName, NEW));
+    // Same one-time-transfer reset as the calc tab: ITD Recalc has a "Transfers"
+    // column (header row 1) whose cells are "=-Bnn" (transferor) / "=-Gnn"
+    // (transferee). Left intact they re-subtract the prior ITD every quarter,
+    // driving ITD-after negative. Blank them so the rolled-forward ITD only
+    // reflects transfers that genuinely occurred in the new quarter (none yet).
+    if (tab === 'ITD Recalc') {
+      // ITD Recalc's Transfers column cells are "=-Bnn" (transferor) / "=-Gnn"
+      // (transferee). Detecting that formula shape is layout-robust; zero them so
+      // the rolled-forward ITD only reflects transfers in the new quarter (none).
+      sx = sx.replace(/(<c r="[A-Z]+\d+"[^>]*>)<f>=?-[BG]\d+<\/f>(?:<v>[^<]*<\/v>)?(<\/c>)/g, (m, open, close) => {
+        const o = open.replace(/\s+t="[^"]*"/, '');
+        return o + '<v>0</v>' + close;
+      });
+    }
     zip.file('xl/' + name2info[tab].target, sx);
   }
 
