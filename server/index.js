@@ -5599,7 +5599,19 @@ async function mgmtRollForward(inputBuf) {
   // convergence. Verified: under iteration the totals settle to the correct
   // values (Q4 beginning ties to Q3 ending) with zero error cells. calcChain is
   // dropped so Excel rebuilds it cleanly for the new sheets.
-  if (zip.file('xl/calcChain.xml')) { zip.remove('xl/calcChain.xml'); ct = ct.replace(/<Override PartName="\/xl\/calcChain\.xml"[^>]*\/>/, ''); zip.file('[Content_Types].xml', ct); }
+  if (zip.file('xl/calcChain.xml')) {
+    zip.remove('xl/calcChain.xml');
+    ct = ct.replace(/<Override PartName="\/xl\/calcChain\.xml"[^>]*\/>/, ''); zip.file('[Content_Types].xml', ct);
+    // Also drop the workbook->calcChain relationship. Removing the part and its
+    // content-type Override is not enough: xl/_rels/workbook.xml.rels still holds
+    // a <Relationship .../calcChain Target="calcChain.xml"/> that now points at a
+    // deleted part. That dangling rel is exactly what triggers Excel's "we found
+    // a problem with some content" repair prompt on open. Re-read the rels we
+    // already rewrote (new-sheet rels appended) and strip the calcChain entry.
+    let wbRels = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+    wbRels = wbRels.replace(/<Relationship[^>]*Type="[^"]*\/calcChain"[^>]*\/>/g, '');
+    zip.file('xl/_rels/workbook.xml.rels', wbRels);
+  }
   const calcAttrs = ' iterate="1" iterateCount="100" iterateDelta="0.001" fullCalcOnLoad="1"';
   if (/<calcPr/.test(wbXml)) wbXml = wbXml.replace(/<calcPr([^/]*)\/>/, (m, a) => '<calcPr' + a.replace(/\s+(iterate|iterateCount|iterateDelta|fullCalcOnLoad)="[^"]*"/g, '') + calcAttrs + '/>');
   else wbXml = wbXml.replace('</workbook>', '<calcPr calcId="0"' + calcAttrs + '/></workbook>');
