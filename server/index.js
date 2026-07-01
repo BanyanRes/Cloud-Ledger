@@ -5552,7 +5552,7 @@ async function mgmtRollForward(inputBuf) {
     }
   }
 
-  for (const tab of ['ITD Recalc', 'ITD Mgmt Fee']) {
+  for (const tab of ['ITD Recalc']) {
     if (!name2info[tab]) continue;
     let sx = await zip.file('xl/' + name2info[tab].target).async('string');
     sx = shiftPrevRefs(reName(sx, curName, NEW));
@@ -5572,6 +5572,98 @@ async function mgmtRollForward(inputBuf) {
     }
     zip.file('xl/' + name2info[tab].target, sx);
   }
+
+  // ITD Mgmt Fee: a manually-grown pivot of per-investor fees, one dated column
+  // per fee event, with Grand Total in the last column. Unlike ITD Recalc we must
+  // NOT shiftPrevRefs here: that would repoint the existing current-quarter column
+  // (e.g. the Q3 column) at the new quarter, overwriting the prior quarter's fees
+  // and dropping a quarter out of the ITD history. Instead we PRESERVE every
+  // existing column and INSERT a new dated column for the new quarter, immediately
+  // left of Grand Total, pulling each investor's base quarterly fee (calc col O).
+  if (name2info['ITD Mgmt Fee']) {
+    const tgtMF = 'xl/' + name2info['ITD Mgmt Fee'].target;
+    let sx = await zip.file(tgtMF).async('string');
+    // Locate the header row (has the date serials) and the Grand Total column.
+    // Grand Total is the last header cell carrying the "Grand Total" string; the
+    // dated columns sit to its left. We detect it structurally: find the row whose
+    // first column A holds "Grand Total" (the totals row) to bound data rows, and
+    // find the header row as the one directly above the first data row.
+    // From the workbook's stable layout: header row 5, data 6..85, totals row 86,
+    // tie row 87, Grand Total in column R (18). We derive these instead of trusting
+    // fixed letters by scanning, so the code survives layout drift.
+    const colToNum = (a) => { let n = 0; for (const ch of a) n = n * 26 + (ch.charCodeAt(0) - 64); return n; };
+    const numToCol = (n) => { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+    // find totals row: the <row> containing a cell whose shared-string is "Grand Total" in column A
+    // (fallback to scanning for a SUM row). We read sharedStrings to resolve A-cell text.
+    let ssXmlMF = await zip.file('xl/sharedStrings.xml').async('string');
+    const ssArrMF = [];
+    for (const si of ssXmlMF.match(/<si>[\s\S]*?<\/si>/g) || []) { const t = (si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || []).map(x => x.replace(/<[^>]+>/g, '')).join(''); ssArrMF.push(t); }
+    // Grand Total column = the header cell whose text = "Grand Total"; header row = its row.
+    let gtCol = null, hdrRowMF = null;
+    for (const cm of sx.matchAll(/<c r="([A-Z]+)(\d+)"[^>]*\bt="s"[^>]*><v>(\d+)<\/v><\/c>/g)) {
+      if (ssArrMF[+cm[3]] === 'Grand Total') { gtCol = colToNum(cm[1]); hdrRowMF = +cm[2]; break; }
+    }
+    if (gtCol && hdrRowMF) {
+      const gtL = numToCol(gtCol), newL = numToCol(gtCol), movedGtL = numToCol(gtCol + 1);
+      // data rows run from hdrRow+1 up to the totals row (the row whose col-A text is "Grand Total")
+      let totalsRow = null;
+      for (const rm of sx.matchAll(/<row r="(\d+)"[^>]*>([\s\S]*?)<\/row>/g)) {
+        const aCell = rm[2].match(/<c r="A\d+"[^>]*\bt="s"[^>]*><v>(\d+)<\/v><\/c>/);
+        if (aCell && ssArrMF[+aCell[1]] === 'Grand Total' && +rm[1] > hdrRowMF) { totalsRow = +rm[1]; break; }
+      }
+      const firstData = hdrRowMF + 1;
+      const lastData = totalsRow ? totalsRow - 1 : hdrRowMF + 80;
+      // 1) Move Grand Total column one to the right (gtCol -> gtCol+1), extending its
+      //    row SUM(...:<prevLastDatedCol>) to include the new column, and self R->S refs.
+      const gtCellRe = new RegExp('<c r="' + gtL + '(\\d+)"([^>]*?)(\\/>|>[\\s\\S]*?<\\/c>)', 'g');
+      sx = sx.replace(gtCellRe, (m, row, attrs, tail) => {
+        const newTail = tail.replace(/<f([^>]*)>([\s\S]*?)<\/f>/g, (fm, fa, ff) => {
+          // shared-formula master carries ref="R7:R37"; the master cell just moved
+          // gtL->movedGtL, so its shared range must move columns too, else Excel
+          // fills the wrong (old) column on open and corrupts the sheet.
+          const nfa = fa.replace(/\bref="([A-Z]+)(\d+):([A-Z]+)(\d+)"/g, (rm, c1, r1, c2, r2) =>
+            'ref="' + (c1 === gtL ? movedGtL : c1) + r1 + ':' + (c2 === gtL ? movedGtL : c2) + r2 + '"');
+          let nf = ff
+            .replace(new RegExp('\\b' + gtL + '(\\d+)\\b', 'g'), movedGtL + '$1')
+            .replace(new RegExp('SUM\\(([A-Z]+\\d+):' + numToCol(gtCol - 1) + '(\\d+)\\)', 'g'), 'SUM($1:' + gtL + '$2)');
+          return '<f' + nfa + '>' + nf + '</f>';
+        });
+        return '<c r="' + movedGtL + row + '"' + attrs + newTail;
+      });
+      // 2) Insert the new dated column at gtCol, before the (now-moved) Grand Total cell in each row.
+      const addCell = (rowNum, cellXml) => {
+        const re = new RegExp('(<row r="' + rowNum + '"[^>]*>)([\\s\\S]*?)(</row>)');
+        if (!re.test(sx)) return;
+        sx = sx.replace(re, (m, open, body, close) => {
+          const movedRe = new RegExp('(<c r="' + movedGtL + '\\d+"[^>]*?(?:/>|>[\\s\\S]*?</c>))');
+          if (movedRe.test(body)) return open + body.replace(movedRe, cellXml + '$1') + close;
+          return open + body + cellXml + close;
+        });
+      };
+      // header date cell (reuse the header style of an existing dated header cell)
+      const styleMatch = sx.match(new RegExp('<c r="' + numToCol(gtCol - 1) + hdrRowMF + '"[^>]*\\bs="(\\d+)"'));
+      const dateStyle = styleMatch ? styleMatch[1] : '72';
+      addCell(hdrRowMF, '<c r="' + newL + hdrRowMF + '" s="' + dateStyle + '"><v>' + excelSerial(nextStart) + '</v></c>');
+      // per-investor XLOOKUP cells (only rows that carry an A-name)
+      for (let rr = firstData; rr <= lastData; rr++) {
+        const rowM = sx.match(new RegExp('<row r="' + rr + '"[^>]*>[\\s\\S]*?</row>'));
+        if (!rowM || !new RegExp('<c r="A' + rr + '"[^>]*>').test(rowM[0])) continue;
+        const valStyle = (rowM[0].match(new RegExp('<c r="B' + rr + '"[^>]*\\bs="(\\d+)"')) || [null, '16'])[1] || '16';
+        const fml = '_xlfn.XLOOKUP(A' + rr + ",'" + NEW + "'!A:A,'" + NEW + "'!O:O)";
+        addCell(rr, '<c r="' + newL + rr + '" s="' + valStyle + '"><f>' + fml + '</f></c>');
+      }
+      // totals row: SUM for the new column
+      if (totalsRow) {
+        const totStyle = (sx.match(new RegExp('<c r="' + movedGtL + totalsRow + '"[^>]*\\bs="(\\d+)"')) || [null, '74'])[1] || '74';
+        addCell(totalsRow, '<c r="' + newL + totalsRow + '" s="' + totStyle + '"><f>SUM(' + newL + firstData + ':' + newL + lastData + ')</f></c>');
+      }
+      // widen row spans by one column and the sheet dimension
+      sx = sx.replace(/spans="1:(\d+)"/g, (m, b) => 'spans="1:' + Math.max(+b, gtCol + 1) + '"');
+      sx = sx.replace(/<dimension ref="([A-Z]+\d+):([A-Z]+)(\d+)"\/>/, (m, a, cL, cR) => '<dimension ref="' + a + ':' + numToCol(gtCol + 1) + cR + '"/>');
+    }
+    zip.file(tgtMF, sx);
+  }
+
 
   // Invoice: repoint formulas cur->NEW; shift dynamic quarter labels; keep annual axis + one-offs
   if (name2info['Invoice']) {
