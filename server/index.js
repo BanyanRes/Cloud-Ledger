@@ -5604,7 +5604,6 @@ async function mgmtRollForward(inputBuf) {
       if (ssArrMF[+cm[3]] === 'Grand Total') { gtCol = colToNum(cm[1]); hdrRowMF = +cm[2]; break; }
     }
     if (gtCol && hdrRowMF) {
-      const gtL = numToCol(gtCol), newL = numToCol(gtCol), movedGtL = numToCol(gtCol + 1);
       // data rows run from hdrRow+1 up to the totals row (the row whose col-A text is "Grand Total")
       let totalsRow = null;
       for (const rm of sx.matchAll(/<row r="(\d+)"[^>]*>([\s\S]*?)<\/row>/g)) {
@@ -5613,24 +5612,42 @@ async function mgmtRollForward(inputBuf) {
       }
       const firstData = hdrRowMF + 1;
       const lastData = totalsRow ? totalsRow - 1 : hdrRowMF + 80;
-      // 1) Move Grand Total column one to the right (gtCol -> gtCol+1), extending its
-      //    row SUM(...:<prevLastDatedCol>) to include the new column, and self R->S refs.
-      const gtCellRe = new RegExp('<c r="' + gtL + '(\\d+)"([^>]*?)(\\/>|>[\\s\\S]*?<\\/c>)', 'g');
-      sx = sx.replace(gtCellRe, (m, row, attrs, tail) => {
-        const newTail = tail.replace(/<f([^>]*)>([\s\S]*?)<\/f>/g, (fm, fa, ff) => {
-          // shared-formula master carries ref="R7:R37"; the master cell just moved
-          // gtL->movedGtL, so its shared range must move columns too, else Excel
-          // fills the wrong (old) column on open and corrupts the sheet.
-          const nfa = fa.replace(/\bref="([A-Z]+)(\d+):([A-Z]+)(\d+)"/g, (rm, c1, r1, c2, r2) =>
-            'ref="' + (c1 === gtL ? movedGtL : c1) + r1 + ':' + (c2 === gtL ? movedGtL : c2) + r2 + '"');
-          let nf = ff
-            .replace(new RegExp('\\b' + gtL + '(\\d+)\\b', 'g'), movedGtL + '$1')
-            .replace(new RegExp('SUM\\(([A-Z]+\\d+):' + numToCol(gtCol - 1) + '(\\d+)\\)', 'g'), 'SUM($1:' + gtL + '$2)');
-          return '<f' + nfa + '>' + nf + '</f>';
-        });
-        return '<c r="' + movedGtL + row + '"' + attrs + newTail;
+      const prevLastDated = numToCol(gtCol - 1);   // column just left of Grand Total
+      const newL = numToCol(gtCol);                // vacated slot the new column lands in
+      const movedGtL = numToCol(gtCol + 1);        // Grand Total after the shift
+      // Shift bare (non-sheet-qualified) column refs >= gtCol inside a formula body.
+      // Sheet-qualified refs like 'Mgmt Fee Calc Q4 26'!O:O must be left alone.
+      const shiftColsInFormula = (f) => f.replace(/(\$?)([A-Z]{1,3})(?=\$?\d|:|$|[^A-Za-z0-9(])/g, (m, dollar, col, off, str) => {
+        const prevChar = str[off - 1];
+        if (prevChar === '!' || prevChar === "'") return m;
+        if (prevChar && /[A-Za-z0-9_]/.test(prevChar)) return m;
+        const cn = colToNum(col);
+        return cn >= gtCol ? dollar + numToCol(cn + 1) : m;
       });
-      // 2) Insert the new dated column at gtCol, before the (now-moved) Grand Total cell in each row.
+      const shiftRefAttr = (attrs) => attrs.replace(/\bref="([A-Z]+)(\d+):([A-Z]+)(\d+)"/g, (rm, c1, r1, c2, r2) => {
+        const n1 = colToNum(c1), n2 = colToNum(c2);
+        return 'ref="' + (n1 >= gtCol ? numToCol(n1 + 1) : c1) + r1 + ':' + (n2 >= gtCol ? numToCol(n2 + 1) : c2) + r2 + '"';
+      });
+      // 1) Shift EVERY column >= gtCol one to the right (Grand Total AND any
+      //    annotation/comment columns to its right move together, so nothing
+      //    collides). Cell refs, shared ref="" attrs, and formula bodies all shift.
+      sx = sx.replace(/<c r="([A-Z]+)(\d+)"([^>]*?)(\/>|>[\s\S]*?<\/c>)/g, (m, col, row, attrs, tail) => {
+        const cn = colToNum(col);
+        const newCol = cn >= gtCol ? numToCol(cn + 1) : col;
+        const newAttrs = shiftRefAttr(attrs);
+        const newTail = tail.replace(/<f([^>]*)>([\s\S]*?)<\/f>/g, (fm, fa, ff) =>
+          '<f' + shiftRefAttr(fa) + '>' + shiftColsInFormula(ff) + '</f>');
+        return '<c r="' + newCol + row + '"' + newAttrs + newTail;
+      });
+      // 2) Extend Grand Total's per-row SUM to include the new column: the range
+      //    end was prevLastDated (unchanged by the shift), widen it to newL.
+      sx = sx.replace(new RegExp('(<c r="' + movedGtL + '\\d+"[^>]*>)([\\s\\S]*?)(<\\/c>)', 'g'), (m, open, body, close) => {
+        const nb = body.replace(/<f([^>]*)>([\s\S]*?)<\/f>/g, (fm, fa, ff) =>
+          '<f' + fa + '>' + ff.replace(new RegExp('SUM\\(([A-Z]+\\d+):' + prevLastDated + '(\\d+)\\)', 'g'), 'SUM($1:' + newL + '$2)') + '</f>');
+        return open + nb + close;
+      });
+      // 3) Insert the new dated column cells at the vacated gtCol (newL), placed
+      //    immediately before the moved Grand Total cell in each row.
       const addCell = (rowNum, cellXml) => {
         const re = new RegExp('(<row r="' + rowNum + '"[^>]*>)([\\s\\S]*?)(</row>)');
         if (!re.test(sx)) return;
@@ -5640,11 +5657,9 @@ async function mgmtRollForward(inputBuf) {
           return open + body + cellXml + close;
         });
       };
-      // header date cell (reuse the header style of an existing dated header cell)
-      const styleMatch = sx.match(new RegExp('<c r="' + numToCol(gtCol - 1) + hdrRowMF + '"[^>]*\\bs="(\\d+)"'));
+      const styleMatch = sx.match(new RegExp('<c r="' + prevLastDated + hdrRowMF + '"[^>]*\\bs="(\\d+)"'));
       const dateStyle = styleMatch ? styleMatch[1] : '72';
       addCell(hdrRowMF, '<c r="' + newL + hdrRowMF + '" s="' + dateStyle + '"><v>' + excelSerial(nextStart) + '</v></c>');
-      // per-investor XLOOKUP cells (only rows that carry an A-name)
       for (let rr = firstData; rr <= lastData; rr++) {
         const rowM = sx.match(new RegExp('<row r="' + rr + '"[^>]*>[\\s\\S]*?</row>'));
         if (!rowM || !new RegExp('<c r="A' + rr + '"[^>]*>').test(rowM[0])) continue;
@@ -5652,14 +5667,25 @@ async function mgmtRollForward(inputBuf) {
         const fml = '_xlfn.XLOOKUP(A' + rr + ",'" + NEW + "'!A:A,'" + NEW + "'!O:O)";
         addCell(rr, '<c r="' + newL + rr + '" s="' + valStyle + '"><f>' + fml + '</f></c>');
       }
-      // totals row: SUM for the new column
       if (totalsRow) {
         const totStyle = (sx.match(new RegExp('<c r="' + movedGtL + totalsRow + '"[^>]*\\bs="(\\d+)"')) || [null, '74'])[1] || '74';
         addCell(totalsRow, '<c r="' + newL + totalsRow + '" s="' + totStyle + '"><f>SUM(' + newL + firstData + ':' + newL + lastData + ')</f></c>');
       }
-      // widen row spans by one column and the sheet dimension
-      sx = sx.replace(/spans="1:(\d+)"/g, (m, b) => 'spans="1:' + Math.max(+b, gtCol + 1) + '"');
-      sx = sx.replace(/<dimension ref="([A-Z]+\d+):([A-Z]+)(\d+)"\/>/, (m, a, cL, cR) => '<dimension ref="' + a + ':' + numToCol(gtCol + 1) + cR + '"/>');
+      // 4) Recompute each row's spans upper bound from its actual max column, then
+      //    widen the sheet dimension and shift <col> width entries >= gtCol.
+      sx = sx.replace(/<row r="(\d+)"([^>]*)>([\s\S]*?)<\/row>/g, (m, rnum, rattrs, body) => {
+        let maxc = 0, minc = 1e9;
+        for (const cm of body.matchAll(/<c r="([A-Z]+)\d+"/g)) { const c = colToNum(cm[1]); if (c > maxc) maxc = c; if (c < minc) minc = c; }
+        if (!maxc) return m;
+        const lo = minc === 1e9 ? 1 : minc;
+        const nattrs = /spans="/.test(rattrs) ? rattrs.replace(/spans="\d+:\d+"/, 'spans="' + lo + ':' + maxc + '"') : rattrs;
+        return '<row r="' + rnum + '"' + nattrs + '>' + body + '</row>';
+      });
+      sx = sx.replace(/<dimension ref="([A-Z]+\d+):([A-Z]+)(\d+)"\/>/, (m, a, cL, cR) => {
+        const n = colToNum(cL); return '<dimension ref="' + a + ':' + numToCol(n >= gtCol ? n + 1 : n) + cR + '"/>';
+      });
+      sx = sx.replace(/<col min="(\d+)" max="(\d+)"/g, (m, mn, mx) =>
+        '<col min="' + (+mn >= gtCol ? +mn + 1 : +mn) + '" max="' + (+mx >= gtCol ? +mx + 1 : +mx) + '"');
     }
     zip.file(tgtMF, sx);
   }
