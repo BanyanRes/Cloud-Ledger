@@ -5664,13 +5664,22 @@ async function mgmtRollForward(inputBuf) {
         const rowM = sx.match(new RegExp('<row r="' + rr + '"[^>]*>[\\s\\S]*?</row>'));
         if (!rowM || !new RegExp('<c r="A' + rr + '"[^>]*>').test(rowM[0])) continue;
         const valStyle = (rowM[0].match(new RegExp('<c r="B' + rr + '"[^>]*\\bs="(\\d+)"')) || [null, '16'])[1] || '16';
-        const fml = '_xlfn.XLOOKUP(A' + rr + ",'" + NEW + "'!A:A,'" + NEW + "'!O:O)";
+        // Wrap in IFERROR so investors absent from the new calc tab show 0, not #N/A.
+        const fml = '_xlfn.IFERROR(_xlfn.XLOOKUP(A' + rr + ",'" + NEW + "'!A:A,'" + NEW + "'!O:O),0)";
         addCell(rr, '<c r="' + newL + rr + '" s="' + valStyle + '"><f>' + fml + '</f></c>');
       }
       if (totalsRow) {
         const totStyle = (sx.match(new RegExp('<c r="' + movedGtL + totalsRow + '"[^>]*\\bs="(\\d+)"')) || [null, '74'])[1] || '74';
         addCell(totalsRow, '<c r="' + newL + totalsRow + '" s="' + totStyle + '"><f>SUM(' + newL + firstData + ':' + newL + lastData + ')</f></c>');
       }
+      // Tie-check row: the Grand-Total column's tie cell compares the ITD grand
+      // total against the current calc tab's ITD figure (e.g. +S86-'...Q3 26'!S16).
+      // The reference points at curName (the quarter being rolled forward); repoint
+      // it to NEW so it validates against the new quarter's calc tab (...'Q4 26'!S16).
+      sx = sx.replace(new RegExp('(<c r="' + movedGtL + '\\d+"[^>]*>)([\\s\\S]*?)(<\\/c>)', 'g'), (m, open, body, close) => {
+        if (!body.includes("'" + curName + "'")) return m;
+        return open + body.split("'" + curName + "'").join("'" + NEW + "'") + close;
+      });
       // 4) Recompute each row's spans upper bound from its actual max column, then
       //    widen the sheet dimension and shift <col> width entries >= gtCol.
       sx = sx.replace(/<row r="(\d+)"([^>]*)>([\s\S]*?)<\/row>/g, (m, rnum, rattrs, body) => {
