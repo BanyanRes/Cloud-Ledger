@@ -5585,6 +5585,48 @@ async function mgmtRollForward(inputBuf, commitmentChanges = []) {
         const o = open.replace(/\s+t="[^"]*"/, '');
         return o + '<v>0</v>' + close;
       });
+      // Normalize column B ("Prior Quarter ITD"). Every investor row should carry
+      // the same XLOOKUP into the prior quarter's ITD-after column, but the source
+      // workbook sometimes has a few rows hardcoded to a static value (e.g. B81/B82
+      // for James Bloomingdale and the Stewart Tate trust were frozen to 0), which
+      // drops their prior ITD on roll-forward and breaks the transfer carry-forward.
+      // Rebuild any B cell that lost its formula, using a sibling B cell's formula
+      // as the row-adjusted template. Only touch rows that (a) have a real investor
+      // name in column A and (b) currently lack a <f> in column B.
+      {
+        // shared strings for resolving column-A investor names
+        const ssXmlR = await zip.file('xl/sharedStrings.xml').async('string');
+        const ssArr = [];
+        for (const si of ssXmlR.match(/<si>[\s\S]*?<\/si>/g) || []) { const t = (si.match(/<t[^>]*>([\s\S]*?)<\/t>/g) || []).map(x => x.replace(/<[^>]+>/g, '')).join(''); ssArr.push(t); }
+        // find a template: the first column-B cell that still has a formula
+        let tmplRow = null, tmplF = null;
+        for (let r = 2; r <= 200; r++) {
+          const mm = sx.match(new RegExp('<c r="B' + r + '"[^>]*><f[^>]*>([\\s\\S]*?)<\\/f>'));
+          if (mm) { tmplRow = r; tmplF = mm[1]; break; }
+        }
+        // resolve which column A "Checker"/blank rows to skip: only fix rows whose
+        // A cell is a nonempty shared string that isn't the "Checker" sentinel.
+        if (tmplF) {
+          const aName = (r) => {
+            const am = sx.match(new RegExp('<c r="A' + r + '"([^>]*)>(?:<v>(\\d+)<\\/v>)?'));
+            if (!am) return null;
+            if (/t="s"/.test(am[1]) && am[2] != null) return (ssArr[+am[2]] || '').trim();
+            return null;
+          };
+          for (let r = 2; r <= 200; r++) {
+            const nm = aName(r);
+            if (!nm || /^checker$/i.test(nm)) continue;
+            // does B{r} already have a formula? if so skip
+            const bWhole = sx.match(new RegExp('<c r="B' + r + '"[^>]*?(?:/>|>[\\s\\S]*?<\\/c>)'));
+            if (!bWhole) continue;
+            if (/<f[^>]*>/.test(bWhole[0])) continue;
+            // rebuild B{r} with the template formula retargeted to this row
+            const rowF = tmplF.replace(new RegExp('([A-Z]{1,2})' + tmplRow + '\\b', 'g'), '$1' + r);
+            const open = bWhole[0].match(/^<c r="B\d+"[^>]*?(?=\/?>)/)[0].replace(/\s+t="[^"]*"/, '');
+            sx = sx.replace(bWhole[0], open + '><f>' + rowF + '</f></c>');
+          }
+        }
+      }
     }
     zip.file('xl/' + name2info[tab].target, sx);
   }
