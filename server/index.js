@@ -5680,6 +5680,20 @@ async function mgmtRollForward(inputBuf) {
         if (!body.includes("'" + curName + "'")) return m;
         return open + body.split("'" + curName + "'").join("'" + NEW + "'") + close;
       });
+      // Normalize the totals row: the source workbook has inconsistent SUM ranges
+      // per column (e.g. B86 =SUM(B6:B82), E86 =SUM(E6:E83), others 6:85), which
+      // drops the late-inserted investor rows (83-85) from some column totals and
+      // makes the Grand Total tie out by an amount equal to those rows' fees.
+      // Widen every totals-row SUM in this sheet to the full investor range
+      // (firstData:lastData). Covers plain and shared-master formulas alike.
+      if (totalsRow) {
+        const rowRe = new RegExp('(<row r="' + totalsRow + '"[^>]*>)([\\s\\S]*?)(</row>)');
+        sx = sx.replace(rowRe, (m, open, body, close) => {
+          const nb = body.replace(/<f([^>]*)>SUM\(([A-Z]+)(\d+):([A-Z]+)(\d+)\)<\/f>/g,
+            (fm, fa, c1, r1, c2, r2) => '<f' + fa + '>SUM(' + c1 + firstData + ':' + c2 + lastData + ')</f>');
+          return open + nb + close;
+        });
+      }
       // 4) Recompute each row's spans upper bound from its actual max column, then
       //    widen the sheet dimension and shift <col> width entries >= gtCol.
       sx = sx.replace(/<row r="(\d+)"([^>]*)>([\s\S]*?)<\/row>/g, (m, rnum, rattrs, body) => {
