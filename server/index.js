@@ -5695,6 +5695,21 @@ async function mgmtRollForward(inputBuf) {
       });
       sx = sx.replace(/<col min="(\d+)" max="(\d+)"/g, (m, mn, mx) =>
         '<col min="' + (+mn >= gtCol ? +mn + 1 : +mn) + '" max="' + (+mx >= gtCol ? +mx + 1 : +mx) + '"');
+      // Give the newly-inserted column (at gtCol) its own width def with bestFit so
+      // Excel auto-sizes it and the amounts aren't hidden behind ###. Reuse the
+      // width of the dated column just to its left (prevLastDated) when available.
+      {
+        const prevColN = gtCol - 1;
+        // find the specific <col> covering prevColN to copy its width
+        let width = '13.26953125';
+        for (const cm of sx.matchAll(/<col min="(\d+)" max="(\d+)"[^>]*?width="([\d.]+)"[^>]*?\/>/g)) {
+          if (+cm[1] <= prevColN && prevColN <= +cm[2]) { width = cm[3]; break; }
+        }
+        const newColDef = '<col min="' + gtCol + '" max="' + gtCol + '" width="' + width + '" bestFit="1" customWidth="1"/>';
+        if (/<cols>/.test(sx) && !new RegExp('<col min="' + gtCol + '" max="' + gtCol + '"').test(sx)) {
+          sx = sx.replace('</cols>', newColDef + '</cols>');
+        }
+      }
     }
     zip.file(tgtMF, sx);
   }
