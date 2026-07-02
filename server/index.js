@@ -5319,8 +5319,15 @@ function mgmtShiftQuarterText(s) {
     return 'Q' + nq + sep + nyr;
   });
 }
-async function mgmtRollForward(inputBuf) {
+async function mgmtRollForward(inputBuf, commitmentChanges = []) {
   const colLetter = (n) => { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+  // Per-investor commitment change for the new quarter, keyed by trimmed name.
+  // Entered by the user (e.g. a full redemption is a negative change equal to the
+  // prior ending, zeroing the investor's commitment so no fee is calculated).
+  const changeByName = {};
+  for (const c of (commitmentChanges || [])) {
+    if (c && c.name != null) changeByName[String(c.name).trim()] = Number(c.change) || 0;
+  }
   const excelSerial = (dt) => Math.round((Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate()) - Date.UTC(1899, 11, 30)) / 86400000);
 
   // Identify the current calc tab + quarter via ExcelJS (for header/cols/endings).
@@ -5372,10 +5379,12 @@ async function mgmtRollForward(inputBuf) {
   const begC = cols['Beginning InvestorTotal'];
   const chgC = cols['Change in  Commitment in Qtr'] || cols['Change in Commitment in Qtr'] || cols['New Commitment in Qtr'];
   const endingByRow = {};
+  const nameByRow = {};
   for (let r = headerRow + 1; r <= headerRow + 90; r++) {
     const nm = ws.getRow(r).getCell(nameC).value;
     if (nm == null || String(nm).trim() === '') continue;
     endingByRow[r] = mgmtNum(ws.getRow(r).getCell(endC).value) || 0;
+    nameByRow[r] = String(nm).trim();
   }
   let qStartRow = null;
   for (let r = 1; r <= 16; r++) { const l = ws.getRow(r).getCell(1).value; if (typeof l === 'string' && /quarter start/i.test(l)) { qStartRow = r; break; } }
@@ -5455,7 +5464,14 @@ async function mgmtRollForward(inputBuf) {
     const re = new RegExp('(<c r="' + ref + '"[^>]*>)([\\s\\S]*?)(</c>)');
     if (re.test(ncXml)) ncXml = ncXml.replace(re, (m, open, inner, close) => { const o = open.replace(/\s+t="[^"]*"/, ''); return o + '<v>' + val + '</v>' + close; });
   };
-  for (const r in endingByRow) { if (begC) setNum(colLetter(begC) + r, endingByRow[r]); if (chgC) setNum(colLetter(chgC) + r, 0); }
+  for (const r in endingByRow) {
+    if (begC) setNum(colLetter(begC) + r, endingByRow[r]);
+    // Apply the user's per-investor commitment change (default 0). Beginning is the
+    // prior ending; InvestorTotal (E) = Beginning + Change, and every fee column
+    // keys off E, so a change that zeroes the commitment yields zero fee. A full
+    // redemption (change = -beginning) makes E = 0 and the quarterly fee 0.
+    if (chgC) setNum(colLetter(chgC) + r, changeByName[nameByRow[r]] || 0);
+  }
   if (qStartRow) setNum('B' + qStartRow, excelSerial(nextStart));
   // Normalize the catch-up column. A subsequent-closing investor gets a one-time
   // catch-up fee in the quarter they join, sometimes entered as a MANUAL formula
@@ -5851,7 +5867,9 @@ app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAcce
     if (err) return res.status(400).json({ error: err.message });
     if (!req.file) return res.status(400).json({ error: 'No workbook uploaded' });
     try {
-      const { outBuf, label, newTab, investors } = await mgmtRollForward(req.file.buffer);
+      let changes = [];
+      try { changes = JSON.parse(req.body.changes || '[]'); } catch { changes = []; }
+      const { outBuf, label, newTab, investors } = await mgmtRollForward(req.file.buffer, changes);
       const fname = 'CLRF_Mgmt_Fee_Calc_' + label.replace(/\s+/g, '_') + '.xlsx';
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
