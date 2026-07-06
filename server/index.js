@@ -4007,15 +4007,24 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   }
 
   const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
-  // Bills: process when approval is complete (APPROVED) or not gated (UNASSIGNED, no policy),
-  // or when already paid; skip while waiting on approvers (ASSIGNED) or denied (DENIED).
+  // Bills: sync regardless of approval progress. Per client request (CLA, 7/2026)
+  // approvals are NOT required to sync — a bill still awaiting approvers (ASSIGNED)
+  // is imported like any other. The only status we refuse is DENIED, since a
+  // rejected bill should never post to the ledger. Setting body.require_approval
+  // (or config) restores the stricter behavior that waits for full approval.
+  const requireApproval = !!(req.body && req.body.require_approval);
   const isBillEligible = (bill) => {
     const a = String(pick(bill, 'approvalStatus', 'status') || '').toUpperCase();
     const p = String(pick(bill, 'paymentStatus') || '').toUpperCase();
-    if (a === 'DENIED' || a === 'ASSIGNED') return false;
-    if (a === 'APPROVED' || a === 'UNASSIGNED' || a === '') return true;
-    if (p === 'PAID' || p === 'PARTIAL_PAID' || p === 'PARTIALLY_PAID') return true;
-    return false;
+    if (a === 'DENIED') return false;                 // rejected bills never post
+    if (requireApproval) {
+      // legacy strict mode: only fully-approved / ungated / already-paid bills
+      if (a === 'ASSIGNED') return false;
+      if (a === 'APPROVED' || a === 'UNASSIGNED' || a === '') return true;
+      if (p === 'PAID' || p === 'PARTIAL_PAID' || p === 'PARTIALLY_PAID') return true;
+      return false;
+    }
+    return true;                                      // default: approvals not required
   };
   // Payments: only process if actually disbursed (or scheduled to be).
   const isPaymentEligible = (pay) => {
@@ -4165,6 +4174,61 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       result.bills.errors++;
       logSync.run(entityId, 'bill', billId, null, 'error', 'JE insert failed: ' + e.message, now);
       result.bills.details.push({ id: billId, status: 'error', reason: e.message });
+    }
+  }
+
+  // Deletion sync (per CLA request, 7/2026): when a bill is deleted in Bill.com it
+  // should also be removed from CloudLedger. Bill.com's /bills list returns only
+  // active bills, so any bill we previously synced (has a success row in
+  // billcom_sync_log with a cl_entry_id) that is NOT in the current list has been
+  // deleted upstream — we remove its journal entry (journal_lines cascade) and
+  // record a 'bill_deleted' log row so re-runs are idempotent.
+  //
+  // Guard against false positives from a truncated list: only delete when the live
+  // fetch came back complete (under the maxItems cap). If Bill.com returned the
+  // full 500-row ceiling the list may be partial, so we skip deletions that run to
+  // avoid removing a bill that merely paged out of view.
+  result.bills.deleted = 0;
+  const liveIds = new Set(bills.map(b => String(pick(b, 'id') || '')).filter(Boolean));
+  const listComplete = bills.length < 500;
+  if (!listComplete) {
+    result.bills.delete_skipped = 'live bill list hit the 500-row cap; deletions skipped this run to avoid false positives';
+  } else {
+    // synced bills that still have a live CL entry, keyed by billcom_id -> cl_entry_id
+    const syncedBills = db.prepare(
+      "SELECT billcom_id, cl_entry_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'bill' AND status = 'success' AND cl_entry_id IS NOT NULL"
+    ).all(entityId);
+    // a bill already logged as deleted should not be re-processed
+    const deletedIds = new Set(db.prepare(
+      "SELECT billcom_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'bill_deleted' AND status = 'success'"
+    ).all(entityId).map(r => String(r.billcom_id)));
+    const entryStillExists = db.prepare('SELECT 1 FROM journal_entries WHERE id = ? AND entity_id = ?');
+    const delEntry = db.prepare('DELETE FROM journal_entries WHERE id = ? AND entity_id = ?');
+    const delAtts = db.prepare('SELECT filename FROM journal_attachments WHERE entry_id = ?');
+    result.bills.deleted_details = [];
+    for (const row of syncedBills) {
+      const bid = String(row.billcom_id);
+      if (liveIds.has(bid)) continue;        // still active in Bill.com
+      if (deletedIds.has(bid)) continue;     // already handled on a prior run
+      // only delete if the CL entry actually exists (it may have been removed manually)
+      if (!entryStillExists.get(row.cl_entry_id, entityId)) {
+        logSync.run(entityId, 'bill_deleted', bid, row.cl_entry_id, 'success', 'bill absent in Bill.com; CL entry already gone', now);
+        continue;
+      }
+      try {
+        // remove any attachment files first, then the entry (lines cascade)
+        for (const a of delAtts.all(row.cl_entry_id)) { try { fs.unlinkSync(path.join(UPLOAD_DIR, a.filename)); } catch {} }
+        const info = delEntry.run(row.cl_entry_id, entityId);
+        if (info.changes > 0) {
+          result.bills.deleted++;
+          logSync.run(entityId, 'bill_deleted', bid, row.cl_entry_id, 'success', 'bill deleted in Bill.com; removed CL entry ' + row.cl_entry_id, now);
+          result.bills.deleted_details.push({ id: bid, cl_entry_id: row.cl_entry_id, status: 'deleted' });
+        }
+      } catch (e) {
+        result.bills.errors++;
+        logSync.run(entityId, 'bill_deleted', bid, row.cl_entry_id, 'error', 'delete failed: ' + e.message, now);
+        result.bills.deleted_details.push({ id: bid, cl_entry_id: row.cl_entry_id, status: 'error', reason: e.message });
+      }
     }
   }
 
