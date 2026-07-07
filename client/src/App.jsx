@@ -3241,7 +3241,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
 
 function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
   const[showAdd,setShowAdd]=useState(false);const[bulk,setBulk]=useState(false);
-  const[name,setName]=useState('');const[newType,setNewType]=useState('accounting');const[newDisplayId,setNewDisplayId]=useState('');const[bulkText,setBulkText]=useState('');const[err,setErr]=useState('');
+  const[name,setName]=useState('');const[newType,setNewType]=useState('accounting');const[newDisplayId,setNewDisplayId]=useState('');const[bulkText,setBulkText]=useState('');const[bulkType,setBulkType]=useState('accounting');const[bulkBusy,setBulkBusy]=useState(false);const[err,setErr]=useState('');
   const[typeBusy,setTypeBusy]=useState(null);// entity id whose type is being toggled
   const[openType,setOpenType]=useState({accounting:false,development:false,shell:false});
   const[importing,setImporting]=useState(null);// entity id being imported into
@@ -3279,9 +3279,23 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
       {err&&<div style={S.err}>{err}</div>}
       <div style={{fontSize:11,color:T.textMuted,marginBottom:10}}>A default chart of accounts will be created. You can replace it by importing a trial balance from the entity row. Development-project entities unlock the Requisitions coding tools.</div>
       <button style={S.btnP} onClick={async()=>{if(!name.trim()){setErr('Name required');return;}try{await api.createEntity(name.trim(),newType,newDisplayId.trim());setName('');setNewType('accounting');setNewDisplayId('');setShowAdd(false);setErr('');refresh();}catch(e){setErr(e.message);}}}>Create Entity</button></div>}
-    {bulk&&<div style={{...S.card,borderColor:T.accent+'40'}}><div style={{...S.h2,marginBottom:8}}>Bulk Import Entities</div><div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>One entity name per line</div>
+    {bulk&&(()=>{const TYPE_ALIASES={accounting:'accounting',acct:'accounting',acc:'accounting',development:'development','development project':'development',dev:'development',devproject:'development',shell:'shell'};
+      const parseBulk=()=>bulkText.split('\n').map(l=>l.trim()).filter(Boolean).map(line=>{
+        let name=line,type=null;
+        const parts=line.includes('\t')?line.split('\t'):line.split(',');
+        if(parts.length>1){const last=parts[parts.length-1].trim().toLowerCase();
+          if(TYPE_ALIASES[last]){type=TYPE_ALIASES[last];name=parts.slice(0,-1).join(',').trim();}}
+        return{name,type:type||bulkType};});
+      const rows=parseBulk();
+      return(<div style={{...S.card,borderColor:T.accent+'40'}}><div style={{...S.h2,marginBottom:8}}>Bulk Import Entities</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>One entity per line. Optionally add a type column after a comma or tab &mdash; <span style={{fontFamily:'monospace'}}>accounting</span>, <span style={{fontFamily:'monospace'}}>development</span>, or <span style={{fontFamily:'monospace'}}>shell</span>. Lines without a type use the default below.<br/><span style={{fontFamily:'monospace',fontSize:11}}>e.g.&nbsp; CLR Fund II LP, accounting&nbsp;&nbsp;|&nbsp;&nbsp;Sabine Yard Expansion, development</span></div>
       <textarea style={{...S.input,height:160,fontFamily:'monospace',fontSize:12,resize:'vertical'}} value={bulkText} onChange={e=>setBulkText(e.target.value)}/>
-      {err&&<div style={S.err}>{err}</div>}<button style={{...S.btnP,marginTop:10}} onClick={async()=>{const names=bulkText.split('\n').map(l=>l.trim()).filter(Boolean);if(!names.length){setErr('None');return;}try{for(const n of names)await api.createEntity(n);setBulkText('');setBulk(false);refresh();}catch(e){setErr(e.message);}}}>Import</button></div>}
+      <div style={{display:'flex',gap:12,alignItems:'center',marginTop:10,flexWrap:'wrap'}}>
+        <label style={{...S.label,marginBottom:0}}>Default type</label>
+        <select style={{...S.inputSm,width:'auto'}} value={bulkType} onChange={e=>setBulkType(e.target.value)}><option value="accounting">Accounting</option><option value="development">Development Project</option><option value="shell">Shell</option></select>
+        {rows.length>0&&<span style={{fontSize:11,color:T.textMuted}}>{rows.length} entit{rows.length===1?'y':'ies'}: {['accounting','development','shell'].map(t=>({t,n:rows.filter(r=>r.type===t).length})).filter(x=>x.n>0).map(x=>x.n+' '+x.t).join(', ')}</span>}
+      </div>
+      {err&&<div style={S.err}>{err}</div>}<button style={{...S.btnP,marginTop:10}} disabled={bulkBusy} onClick={async()=>{if(!rows.length){setErr('None');return;}setBulkBusy(true);setErr('');try{for(const r of rows)await api.createEntity(r.name,r.type);setBulkText('');setBulk(false);refresh();}catch(e){setErr(e.message);}finally{setBulkBusy(false);}}}>{bulkBusy?'Importing...':'Import'}</button></div>);})()}
     <div style={{...S.cardFlush,overflowX:'auto'}}><table style={{...S.table,minWidth:1180}}><thead><tr><th style={{...S.th,minWidth:240}}>Entity</th><th style={{...S.th,width:760,minWidth:760}}>Actions</th></tr></thead>
       <tbody>{ENTITY_TYPES.map(t=>{const grp=entities.filter(e=>entTypeOf(e)===t.key).sort((a,b)=>a.name.localeCompare(b.name));const isOpen=openType[t.key];return(<Fragment key={t.key}>
         <tr style={{cursor:'pointer',background:T.bgElevated,borderTop:'2px solid '+T.border}} onClick={()=>setOpenType(o=>({...o,[t.key]:!o[t.key]}))}>
