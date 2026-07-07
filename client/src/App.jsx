@@ -2242,6 +2242,7 @@ function WipSchedule({entityName,asOf,setAsOf}){
 
 function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEdit=true}){
   const[balances,setBalances]=useState([]);
+  const[rk,setRk]=useState(0);
   const[drillAcct,setDrillAcct]=useState(null);
   const[locations,setLocations]=useState([]);
   const[locId,setLocId]=useState('');// '' = all (whole-entity TB); otherwise a location_id
@@ -2271,7 +2272,7 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   useEffect(()=>{
     if(dimmed) api.getBalances(entityId,{as_of:validAsOf,...(locId?{location_id:locId}:{}),...(classId?{class_id:classId}:{}),...(projId?{project_id:projId}:{})}).then(setBalances);
     else api.getBalances(entityId,{as_of:validAsOf,close_pl_before:fyS}).then(setBalances);
-  },[entityId,validAsOf,fyS,locId,classId,projId,dimmed]);
+  },[entityId,validAsOf,fyS,locId,classId,projId,dimmed,rk]);
   useEffect(()=>{api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));},[entityId]);
   useEffect(()=>{api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
   useEffect(()=>{api.getProjects(entityId).then(d=>setProjects(d||[])).catch(()=>setProjects([]));},[entityId]);
@@ -2308,7 +2309,7 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
         <td style={amtStyle} onClick={()=>r.cr>0&&setDrillAcct(r)} title={r.cr>0?'Click for 12-month detail':''}>{r.cr>0?<span style={{color:T.accent,borderBottom:'1px dotted '+T.accent+'80'}}>{fmt(r.cr)}</span>:''}</td></tr>)}
         <tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={3}>Total</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td></tr></tbody></table>
     <div style={{textAlign:'center',marginTop:14,fontSize:13,fontWeight:600,color:Math.abs(tDr-tCr)<0.005?T.green:T.red}}>{Math.abs(tDr-tCr)<0.005?'In balance':'Off by $'+fmt(tDr-tCr)}</div></div>
-    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillFrom} to={asOf} onClose={()=>setDrillAcct(null)} onChanged={reload}/>}
+    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillFrom} to={asOf} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
   </div>);
 }
 
@@ -2378,7 +2379,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
              <td style={S.tdR}></td><td style={S.tdR}></td>
              <td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(begBal)}</td></tr>
            {lines.length===0?
-             <tr><td colSpan={6} style={{...S.td,textAlign:'center',padding:30,color:T.textDim}}>No activity in this period</td></tr>
+             <tr><td colSpan={6} style={{...S.td,textAlign:'center',padding:30,color:T.textDim}}>No activity in this period{from>'2015-01-01'&&<div style={{marginTop:10}}><button onClick={()=>setFrom('2015-01-01')} style={{...S.btnS,fontSize:12,padding:'6px 14px'}}>View all activity</button><div style={{fontSize:11,color:T.textMuted,marginTop:6}}>The default view shows the last 12 months. This account's activity may be older \u2014 e.g. an investment purchase.</div></div>}</td></tr>
              :lines.map((l,i)=>{running+=isDr?(l.debit-l.credit):(l.credit-l.debit);
                const tip=(l.created_by?'Posted by '+l.created_by:'')+(l.created_at?(l.created_by?' on ':'Posted on ')+new Date(l.created_at+(l.created_at.includes('Z')||l.created_at.includes('+')?'':'Z')).toLocaleString('en-US',{timeZone:'America/Los_Angeles',year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true,timeZoneName:'short'}):'');
                return<tr key={i}>
