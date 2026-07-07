@@ -2993,8 +2993,17 @@ function BankReconciliation({entityId,user,canEdit=true}){const[accounts,setAcco
         <div style={{fontWeight:700,color:T.textBright,fontSize:14,marginBottom:4}}>{a.name}</div><div style={{fontSize:12,color:T.textDim,marginBottom:12}}>{a.code}</div>
         <div style={{fontSize:24,fontWeight:700,color:T.textBright}}>${fmt(bal)}</div></div>;})}</div>
     <div style={S.cardFlush}><div style={{padding:'16px 20px'}}><div style={S.h2}>History</div></div>{recs.length===0?<div style={{padding:40,textAlign:'center',color:T.textDim}}>No reconciliations yet</div>:
-      <table style={S.table}><thead><tr><th style={S.th}>Date</th><th style={S.th}>Account</th><th style={S.thR}>Statement</th><th style={S.thR}>Book</th><th style={S.thR}>Cleared</th><th style={S.th}>By</th><th style={S.th}></th></tr></thead>
-        <tbody>{recs.map(r=><tr key={r.id}><td style={S.td}>{r.statement_date}</td><td style={S.td}>{r.account_code}</td><td style={S.tdR}>${fmt(r.statement_balance)}</td><td style={S.tdR}>${fmt(r.book_balance)}</td><td style={S.tdR}>{r.cleared_count}</td><td style={S.td}>{r.completed_by}</td><td style={S.td}><button style={{...S.btnS,padding:'4px 12px',fontSize:11}} onClick={()=>setReportRec(r)}>Report</button></td></tr>)}</tbody></table>}</div>
+      (()=>{
+        // Latest reconciliation per account (by statement_date, then id) — only that
+        // one can be undone; later recs depend on the cleared state left by earlier ones.
+        const latestByAcct={};recs.forEach(r=>{const cur=latestByAcct[r.account_code];if(!cur||r.statement_date>cur.statement_date||(r.statement_date===cur.statement_date&&r.id>cur.id))latestByAcct[r.account_code]=r;});
+        const undoRec=async r=>{if(!confirm('Undo the '+r.statement_date+' reconciliation for account '+r.account_code+'?\n\nIts '+r.cleared_count+' cleared item(s) will return to uncleared and reappear in the next reconciliation. No journal entries are changed.'))return;
+          try{await api.deleteReconciliation(entityId,r.id);load();}catch(ex){alert(ex.message);}};
+        return(<table style={S.table}><thead><tr><th style={S.th}>Date</th><th style={S.th}>Account</th><th style={S.thR}>Statement</th><th style={S.thR}>Book</th><th style={S.thR}>Cleared</th><th style={S.th}>By</th><th style={S.th}></th></tr></thead>
+        <tbody>{recs.map(r=><tr key={r.id}><td style={S.td}>{r.statement_date}</td><td style={S.td}>{r.account_code}</td><td style={S.tdR}>${fmt(r.statement_balance)}</td><td style={S.tdR}>${fmt(r.book_balance)}</td><td style={S.tdR}>{r.cleared_count}</td><td style={S.td}>{r.completed_by}</td><td style={S.td}><div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
+          <button style={{...S.btnS,padding:'4px 12px',fontSize:11}} onClick={()=>setReportRec(r)}>Report</button>
+          {canEdit&&latestByAcct[r.account_code]?.id===r.id&&<button style={{...S.btnS,padding:'4px 12px',fontSize:11,color:T.red,borderColor:T.red+'40'}} title="Undo this reconciliation — cleared items return to uncleared" onClick={()=>undoRec(r)}>Undo</button>}
+        </div></td></tr>)}</tbody></table>);})()}</div>
     {reportRec&&<ReconciliationReportModal entityId={entityId} rec={reportRec} onClose={()=>setReportRec(null)}/>}
     </div>);}
 

@@ -3170,6 +3170,28 @@ app.post('/api/entities/:eid/reconciliations', auth, requireEntityAccess(), requ
   })(); res.json({ id: result });
 });
 
+// Undo (unpost) a completed bank reconciliation. QBO-style constraint: only the
+// most recent reconciliation for an account can be undone, because each later
+// reconciliation's beginning balance depends on the cleared state left by earlier
+// ones. Undoing deletes the reconciliation row and un-clears its items, so they
+// reappear as uncleared in the next reconciliation session. No journal entries
+// are touched.
+app.delete('/api/entities/:eid/reconciliations/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const eid = req.params.eid, id = parseInt(req.params.id);
+  const rec = db.prepare('SELECT * FROM reconciliations WHERE id=? AND entity_id=?').get(id, eid);
+  if (!rec) return res.status(404).json({ error: 'Reconciliation not found' });
+  const newer = db.prepare(
+    'SELECT id, statement_date FROM reconciliations WHERE entity_id=? AND account_code=? AND (statement_date > ? OR (statement_date = ? AND id > ?)) ORDER BY statement_date DESC, id DESC'
+  ).all(eid, rec.account_code, rec.statement_date, rec.statement_date, id);
+  if (newer.length) return res.status(409).json({ error: 'A newer reconciliation exists for account ' + rec.account_code + ' (statement date ' + newer[0].statement_date + '). Undo reconciliations newest-first.' });
+  const result = db.transaction(() => {
+    const uncleared = db.prepare('DELETE FROM cleared_items WHERE reconciliation_id=?').run(id).changes;
+    db.prepare('DELETE FROM reconciliations WHERE id=?').run(id);
+    return uncleared;
+  })();
+  res.json({ success: true, id, account_code: rec.account_code, statement_date: rec.statement_date, items_uncleared: result });
+});
+
 // Bank reconciliation report — QBO-style summary + cleared/uncleared detail for a
 // single completed reconciliation. Assembled from the stored reconciliation row,
 // its cleared_items, and the account's journal lines. Returns structured JSON the
