@@ -1538,7 +1538,7 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
   useEffect(()=>{api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
   const showLocation=(dimsEnabled&&locations.length>0)||(entry.lines||[]).some(l=>l.location_id);const showClass=(dimsEnabled&&classes.length>0)||(entry.lines||[]).some(l=>l.class_id);
-  const[form,setForm]=useState({date:entry.date,memo:entry.memo,lines:entry.lines.map(l=>({account_code:l.account_code,project_id:l.project_id||'',location_id:l.location_id||'',class_id:l.class_id||'',description:l.description||'',debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
+  const[form,setForm]=useState({date:entry.date,memo:entry.memo,lines:(entry.lines||[]).map(l=>({account_code:l.account_code,project_id:l.project_id||'',location_id:l.location_id||'',class_id:l.class_id||'',description:l.description||'',debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
   const[attachments,setAttachments]=useState(entry.attachments||[]);
   const[attUploading,setAttUploading]=useState(false);
   const attInputRef=useRef(null);
@@ -2605,6 +2605,10 @@ function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPend
   useEffect(()=>{if(pendingConfig){if(pendingConfig.asOf)setAsOf(pendingConfig.asOf);clearPending&&clearPending();}},[]);
   const[data,setData]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
   const[viewEntry,setViewEntry]=useState(null);
+  const[entryLoading,setEntryLoading]=useState(false);
+  // GL rows only carry an entry id; fetch the full entry (with lines) before
+  // opening the JE modal, which requires entry.lines to render.
+  const openEntry=async(id)=>{if(!id)return;setEntryLoading(true);try{const full=await api.getEntry(entityId,id);setViewEntry(full);}catch(e){alert('Could not open entry: '+e.message);}finally{setEntryLoading(false);}};
   const BK=['current','d1_30','d31_60','d61_90','d91_plus'];
   const run=async()=>{
     setLoading(true);setErr('');setData(null);
@@ -2659,7 +2663,7 @@ function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPend
       </Fragment>)}
         {data.gl_rows&&data.gl_rows.length>0&&<Fragment>
           <tr><td colSpan={ncols} style={{...S.td,fontWeight:700,color:T.accent,background:T.accentDim}}>GL ENTRIES <span style={{fontWeight:400,color:T.textMuted}}>— imported / non-Bill.com &middot; not aged</span></td></tr>
-          {data.gl_rows.map((r,i)=><tr key={'gl'+i} onClick={()=>r.entry_id&&setViewEntry({id:r.entry_id})} style={{cursor:r.entry_id?'pointer':'default'}}>
+          {data.gl_rows.map((r,i)=><tr key={'gl'+i} onClick={()=>openEntry(r.entry_id)} style={{cursor:r.entry_id?'pointer':'default',opacity:entryLoading?0.6:1}}>
             <td style={S.td}>{r.date}</td><td style={S.td}>GL</td><td style={{...S.td,color:T.accent}}>{r.entry_num!=null?'JE-'+String(r.entry_num).padStart(4,'0'):''}</td><td style={{...S.td,color:T.textMuted}} colSpan={3}>{r.memo}{r.description?' · '+r.description:''}</td>
             {BK.map(b=><td key={b} style={S.tdR}></td>)}<td style={{...S.tdR,fontWeight:600,color:T.accent}}>{fmt(r.amount)}</td><td style={{...S.tdR,fontWeight:600}}>{fmt(r.amount)}</td>
           </tr>)}

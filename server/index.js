@@ -2316,6 +2316,23 @@ app.get('/api/entities/:eid/entries', auth, requireEntityAccess(), (req, res) =>
   res.json(entries.map(e => ({ ...e, lines: lineStmt.all(e.id), attachments: attachStmt.all(e.id) })));
 });
 
+// Single journal entry by id, with lines + attachments (same shape as the list).
+// Lets any drilldown that only holds an entry id (e.g. AP Aging GL rows) open the
+// JE modal without needing to prefetch the full entry.
+app.get('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), (req, res) => {
+  const e = db.prepare('SELECT * FROM journal_entries WHERE id = ? AND entity_id = ?').get(req.params.id, req.params.eid);
+  if (!e) return res.status(404).json({ error: 'Entry not found' });
+  const lines = db.prepare(`SELECT jl.*, dp.name AS project_name, dp.code AS project_code,
+      dc.name AS class_name, dl.name AS location_name
+    FROM journal_lines jl
+    LEFT JOIN dim_projects dp ON dp.id = jl.project_id
+    LEFT JOIN dim_classes dc ON dc.id = jl.class_id
+    LEFT JOIN dim_locations dl ON dl.id = jl.location_id
+    WHERE jl.entry_id = ?`).all(e.id);
+  const attachments = db.prepare('SELECT id, original_name, mime_type, size FROM journal_attachments WHERE entry_id = ?').all(e.id);
+  res.json({ ...e, lines, attachments });
+});
+
 // GL detail (flat lines) for a printable/exportable general ledger, optionally
 // filtered by location or class. Returns one row per journal line with its entry
 // date/num/memo, account code+name+type, dr/cr, description, and dimension names,

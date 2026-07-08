@@ -75,6 +75,7 @@ export const api = {
     if (from) p.push('from=' + from); if (to) p.push('to=' + to);
     return request(q + (p.length ? '?' + p.join('&') : ''));
   },
+  getEntry: (eid, id) => request('/entities/' + eid + '/entries/' + id),
   createEntry: (eid, data) => request('/entities/' + eid + '/entries', { method: 'POST', body: data }),
   updateEntry: (eid, id, data) => request('/entities/' + eid + '/entries/' + id, { method: 'PUT', body: data }),
   deleteEntry: (eid, id) => request('/entities/' + eid + '/entries/' + id, { method: 'DELETE' }),
