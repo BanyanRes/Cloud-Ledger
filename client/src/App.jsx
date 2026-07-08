@@ -1893,7 +1893,12 @@ function ChartOfAccounts({entityId,entityName,canEdit}){const[accounts,setAccoun
     const[accts,bals]=await Promise.all([api.getAccounts(entityId),api.getBalances(entityId,{as_of:asOf}).catch(()=>[])]);
     setAccounts(accts);const m={};(bals||[]).forEach(b=>{m[b.code]=b.balance;});setBalByCode(m);
   },[entityId,asOf]);useEffect(()=>{load();},[load]);
-  const startEdit=a=>{setEditing(a.code);setEditForm({new_code:a.code,name:a.name,type:a.type,subtype:a.subtype||'',bank_acct:!!a.bank_acct});setEditErr('');};
+  const editPanelRef=useRef(null);
+  // The edit form renders at the top of the page; when Edit is clicked on a row
+  // far down a long chart of accounts, the form would open off-screen and look
+  // like nothing happened. Scroll it into view so it's always visible.
+  const startEdit=a=>{setEditing(a.code);setEditForm({new_code:a.code,name:a.name,type:a.type,subtype:a.subtype||'',bank_acct:!!a.bank_acct});setEditErr('');
+    setTimeout(()=>{editPanelRef.current&&editPanelRef.current.scrollIntoView({behavior:'smooth',block:'center'});},50);};
   const saveEdit=async()=>{if(!editForm.new_code||!editForm.name){setEditErr('Code and name required');return;}
     try{await api.updateAccount(entityId,editing,editForm);setEditing(null);load();}catch(e){setEditErr(e.message);}};
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}><div><div style={S.h1}>Chart of Accounts</div><div style={S.sub}>{accounts.length} accounts</div></div>
@@ -1907,7 +1912,7 @@ function ChartOfAccounts({entityId,entityName,canEdit}){const[accounts,setAccoun
       <div style={S.col}><label style={S.label}>Type</label><select style={S.select} value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}>{['Asset','Liability','Equity','Revenue','Expense'].map(t=><option key={t}>{t}</option>)}</select></div></div>
       <div style={{marginBottom:14}}><label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,cursor:'pointer'}}><input type="checkbox" style={S.checkbox} checked={form.bank_acct} onChange={e=>setForm(f=>({...f,bank_acct:e.target.checked}))}/>Bank / cash account</label></div>
       {err&&<div style={S.err}>{err}</div>}<button style={S.btnP} onClick={async()=>{if(!form.code||!form.name){setErr('Required');return;}try{await api.createAccount(entityId,form);setForm({code:'',name:'',type:'Asset',subtype:'',bank_acct:false});setShowAdd(false);setErr('');load();}catch(e){setErr(e.message);}}}>Add Account</button></div>}
-    {editing&&<div style={{...S.card,borderColor:T.accent+'40',marginBottom:16}}>
+    {editing&&<div ref={editPanelRef} style={{...S.card,borderColor:T.accent+'40',marginBottom:16}}>
       <div style={{fontSize:14,fontWeight:600,color:T.textBright,marginBottom:12}}>Edit Account: {editing}</div>
       <div style={S.row}>
         <div style={S.col}><label style={S.label}>Account Code</label><input style={S.input} value={editForm.new_code} onChange={e=>setEditForm(f=>({...f,new_code:e.target.value}))}/></div>
