@@ -1711,6 +1711,10 @@ function BulkJEModal({entityId,onClose,onPosted}){
 // ═══ Journal List ═══
 function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry,openJEId,clearOpenJE}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');const[q,setQ]=useState('');
   const[editEntry,setEditEntry]=useState(null);const[showBulk,setShowBulk]=useState(false);
+  const[colW,setColW]=useState(()=>{try{const s=JSON.parse(localStorage.getItem('cl_je_colw'));if(s&&typeof s.acct==='number')return s;}catch(e){}return{acct:380,desc:300,debit:140,credit:140};});
+  useEffect(()=>{try{localStorage.setItem('cl_je_colw',JSON.stringify(colW));}catch(e){}},[colW]);
+  const startColDrag=(key,ev)=>{ev.preventDefault();ev.stopPropagation();const sx=ev.clientX;const sw=colW[key];const min=key==='acct'?140:key==='desc'?120:80;document.body.style.userSelect='none';const mv=e=>setColW(p=>({...p,[key]:Math.max(min,sw+(e.clientX-sx))}));const up=()=>{document.body.style.userSelect='';window.removeEventListener('mousemove',mv);window.removeEventListener('mouseup',up);};window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);};
+  const grip=key=>(<span onMouseDown={e=>startColDrag(key,e)} title="Drag to resize column" style={{position:'absolute',top:0,right:0,width:8,height:'100%',cursor:'col-resize',userSelect:'none',borderRight:'2px solid transparent'}} onMouseEnter={e=>e.currentTarget.style.borderRight='2px solid '+T.accent} onMouseLeave={e=>e.currentTarget.style.borderRight='2px solid transparent'}/>);
   const load=useCallback(async()=>{const[e,a]=await Promise.all([api.getEntries(entityId,from||undefined,to||undefined),api.getAccounts(entityId)]);setEntries(e);setAccounts(a);},[entityId,from,to]);
   useEffect(()=>{load();},[load]);
   // When arriving from global search with a target JE, open it once entries load.
@@ -1731,12 +1735,12 @@ function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry,op
             <span style={{fontSize:12,color:T.textDim}}>{e.created_by}</span>
             {canEdit&&<button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>setEditEntry(e)}>Edit</button>}
             {canEdit&&<button style={{...S.btnD,padding:'5px 12px',fontSize:11}} onClick={()=>del(e.id)}>Delete</button>}</div></div>
-        <table style={{...S.table,tableLayout:'fixed',width:'100%'}}>
-          <colgroup><col style={{width:'280px'}}/><col/><col style={{width:'140px'}}/><col style={{width:'140px'}}/></colgroup>
-          <thead><tr><th style={S.th}>Account</th><th style={S.th}>Description</th><th style={S.thR}>Debit</th><th style={S.thR}>Credit</th></tr></thead>
+        <div style={{overflowX:'auto'}}><table style={{...S.table,tableLayout:'fixed',width:colW.acct+colW.desc+colW.debit+colW.credit}}>
+          <colgroup><col style={{width:colW.acct}}/><col style={{width:colW.desc}}/><col style={{width:colW.debit}}/><col style={{width:colW.credit}}/></colgroup>
+          <thead><tr><th style={{...S.th,position:'relative'}}>Account{grip('acct')}</th><th style={{...S.th,position:'relative'}}>Description{grip('desc')}</th><th style={{...S.thR,position:'relative'}}>Debit{grip('debit')}</th><th style={{...S.thR,position:'relative'}}>Credit{grip('credit')}</th></tr></thead>
           <tbody>{e.lines.map((l,i)=><tr key={i}><td style={S.td} title={acctLabel(l.account_code,acctName(l.account_code))}>{acctLabel(l.account_code,acctName(l.account_code))}</td>
             <td style={{...S.td,color:T.textMuted,fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={[l.description||'',l.project_name?('Project: '+(l.project_code&&l.project_code!==l.project_name?l.project_code:l.project_name)):'',l.location_name?('Location: '+l.location_name):'',l.class_name?('Class: '+l.class_name):''].filter(Boolean).join('  ·  ')}>{l.description||''}{(l.project_name||l.location_name||l.class_name)&&<span style={{marginLeft:l.description?8:0,fontSize:10,color:T.accent}}>{[l.project_name?('▦ '+(l.project_code&&l.project_code!==l.project_name?l.project_code:l.project_name)):'',l.location_name,l.class_name].filter(Boolean).join(' · ')}</span>}</td>
-            <td style={S.tdR}>{l.debit>0?fmt(l.debit):''}</td><td style={S.tdR}>{l.credit>0?fmt(l.credit):''}</td></tr>)}</tbody></table>
+            <td style={S.tdR}>{l.debit>0?fmt(l.debit):''}</td><td style={S.tdR}>{l.credit>0?fmt(l.credit):''}</td></tr>)}</tbody></table></div>
         {e.attachments?.length>0&&<div style={{marginTop:10,display:'flex',flexWrap:'wrap',gap:4}}>{e.attachments.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>)}</div>}
       </div>)}</div>}
     {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={load}/>}
