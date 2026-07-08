@@ -2618,21 +2618,38 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       // ── PDF bank statement parsing ──
       const data = await pdfParse(req.file.buffer);
       const text = data.text || '';
-      const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
+      let lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
 
-      // Common bank statement date patterns
-      const dateRx = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/;
+      // Some PDFs (e.g. Sunflower Bank / First National 1870) linearize through
+      // pdf-parse with ALL inter-word spaces stripped, so a transaction row comes
+      // out glued: "06/04/26APPFOLIOSAASCOUNTYLINERAILFUND2,880.00-". The parser
+      // therefore keys off the date at the START of the line and the money token
+      // at the END, and takes whatever is between as the description — this works
+      // whether or not the words are space-separated.
+
+      // Cut off everything from the Daily Balance Summary onward: that table and
+      // the disclosures that follow also begin lines with dates but are NOT
+      // transactions (folding them in would double-count balances as activity).
+      const stopIdx = lines.findIndex(l => /daily balance summary|balance summary/i.test(l));
+      if (stopIdx >= 0) lines = lines.slice(0, stopIdx);
+
+      // Date at the very start of the line (with or without a following space).
+      const dateHeadRx = /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/;
       const altDateRx = /^(\w{3,9})\s+(\d{1,2}),?\s+(\d{4})/; // "January 15, 2024"
-      // Match amounts: optional sign, optional $, digits with commas, decimal, OR amounts in parens like (1,234.56)
-      const numRx = /\(?\$?[\d,]+\.\d{2}\)?|[\-\+]\$?[\d,]+\.\d{2}/g;
+      // A money token. The integer part is BOUNDED (1-3 digits + comma groups, or
+      // up to 7 plain digits) so a long reference number with no decimal — e.g.
+      // "RF#105925009476061126" glued in front of "663,719.62" — can't be sucked
+      // into the amount. A decimal ".dd" is REQUIRED. Supports a leading sign, a
+      // TRAILING minus (bank convention: "2,880.00-"), and parenthesized negatives.
+      const moneyRx = /\(?[-+]?\$?(?:\d{1,3}(?:,\d{3})+|\d{1,7})\.\d{2}-?\)?/g;
 
-      // Keywords that indicate money going OUT (withdrawal/debit/payment)
-      const withdrawalRx = /withdraw|payment|debit|paid out|ach debit|wire out|check\b|chk\b|pmt\b/i;
-      // Keywords that indicate money coming IN (deposit/credit)
-      const depositRx = /deposit|credit|interest\s*(paid|capitali|earned|income)|ach credit|wire in|xfer in/i;
+      // Keywords that indicate money OUT / money IN, used only as a fallback to
+      // fix the sign when the amount token itself carries no sign.
+      const withdrawalRx = /withdraw|payment|payable|debit|paid out|ach debit|wire out|xfer\s*(from|out)|check\b|chk\b|pmt\b|svc\b|fee\b/i;
+      const depositRx = /deposit|credit|interest\s*(paid|capitali|earned|income)|ach credit|wire in|xfer\s*in/i;
 
       const parseDate = s => {
-        let m = s.match(dateRx);
+        let m = s.match(dateHeadRx);
         if (m) {
           let [, mm, dd, yy] = m;
           if (yy.length === 2) yy = (+yy > 50 ? '19' : '20') + yy;
@@ -2647,63 +2664,57 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
         return null;
       };
 
-      const parseAmt = s => {
-        const trimmed = s.trim();
-        const isParen = /^\(.*\)$/.test(trimmed);
-        const clean = trimmed.replace(/[$,\s()]/g, '');
+      const parseAmt = tok => {
+        const t = tok.trim();
+        const paren = /^\(.*\)$/.test(t);
+        // Trailing-minus form ("2,880.00-") is negative, but only when there's no
+        // leading sign already (so we don't double-negate "-2,880.00").
+        const trailNeg = /-\)?$/.test(t) && !/^[-+]/.test(t);
+        const clean = t.replace(/[$,()\s]/g, '').replace(/-$/, '');
         let v = parseFloat(clean) || 0;
-        if (isParen) v = -v;
-        if (trimmed.startsWith('-') && v > 0) v = -v;
+        if (paren || trailNeg) v = -Math.abs(v);
+        if (t.startsWith('-') && v > 0) v = -v;
         return v;
       };
 
       let lastDate = null;
       for (const line of lines) {
-        const dt = parseDate(line);
-        if (dt) lastDate = dt;
-        else if (!lastDate) continue;
-
-        const amounts = line.match(numRx);
-        if (!amounts || amounts.length === 0) continue;
-
+        if (/statement date/i.test(line)) continue; // header, not a transaction
         const lineDate = parseDate(line);
-        if (!lineDate && !dt) continue;
+        if (lineDate) lastDate = lineDate;
         const usedDate = lineDate || lastDate;
+        if (!usedDate) continue; // no date context yet — skip preamble lines
 
-        // Extract description: everything between the date and the first amount
-        const firstAmtIdx = line.indexOf(amounts[0]);
-        let desc = '';
-        if (lineDate) {
-          const dateMatch = line.match(dateRx) || line.match(altDateRx);
-          if (dateMatch) desc = line.substring(dateMatch.index + dateMatch[0].length, firstAmtIdx).trim();
-        }
-        if (!desc) desc = line.substring(0, firstAmtIdx).replace(dateRx, '').replace(altDateRx, '').trim();
+        const money = line.match(moneyRx);
+        if (!money || !money.length) continue;
 
-        // Clean up description: remove trailing/leading parens, extra whitespace
-        desc = desc.replace(/[\(\)]+$/g, '').replace(/^[\(\)]+/g, '').trim();
+        // The transaction amount is the LAST money token on the line. A plain
+        // transaction row has exactly one; if a row ever carried a running
+        // balance too, the activity amount precedes the balance — but these
+        // statements put only the amount on the row, so "last" is safe and also
+        // avoids grabbing a glued-in figure earlier in the description.
+        const amtTok = money[money.length - 1];
+        let amount = parseAmt(amtTok);
+        if (amount === 0) continue;
 
-        // Determine the transaction amount
-        let amount = 0;
-        if (amounts.length === 1) {
-          amount = parseAmt(amounts[0]);
-        } else if (amounts.length === 2) {
-          amount = parseAmt(amounts[0]);
-        } else if (amounts.length >= 3) {
-          const a1 = parseAmt(amounts[0]);
-          const a2 = parseAmt(amounts[1]);
-          amount = a1 !== 0 ? a1 : a2;
-        }
+        // Description = text between the date and the FIRST money token.
+        let afterDate = line;
+        const dm = line.match(dateHeadRx) || line.match(altDateRx);
+        if (dm && dm.index === 0) afterDate = line.slice(dm[0].length);
+        const firstMoneyIdx = afterDate.search(moneyRx);
+        let desc = (firstMoneyIdx > 0 ? afterDate.slice(0, firstMoneyIdx) : afterDate).trim();
+        desc = desc.replace(/[()]+$/g, '').replace(/^[()]+/g, '').trim();
+        if (!desc) continue;
 
-        // If amount is positive but description indicates a withdrawal, flip it
-        // If amount is negative but description indicates a deposit, flip it
-        if (amount > 0 && withdrawalRx.test(desc) && !depositRx.test(desc)) {
-          amount = -amount;
-        } else if (amount < 0 && depositRx.test(desc) && !withdrawalRx.test(desc)) {
-          amount = -amount;
+        // Fallback sign fix: only when the token had no explicit sign (i.e. it
+        // came through positive) and the description clearly indicates direction.
+        const tokenHadSign = /^[-+]/.test(amtTok.trim()) || /-\)?$/.test(amtTok.trim()) || /^\(.*\)$/.test(amtTok.trim());
+        if (!tokenHadSign) {
+          if (amount > 0 && withdrawalRx.test(desc) && !depositRx.test(desc)) amount = -amount;
+          else if (amount < 0 && depositRx.test(desc) && !withdrawalRx.test(desc)) amount = Math.abs(amount);
         }
 
         if (amount === 0 || !desc) continue;
-
         rows.push({ date: usedDate, description: desc.substring(0, 500), amount });
       }
 
