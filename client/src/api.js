@@ -271,11 +271,14 @@ export const api = {
     const packetFileName = res.headers.get('x-packet-file-name') || '';
     // '1' when the server downloaded despite a failed required check (force).
     const forced = res.headers.get('x-reconcile-forced') === '1';
+    // How the development fee was determined this period (or that it needs manual
+    // entry): { amount, base, rate_text, source, needs_review, note, prior, validated }.
+    let devFee = null; try { devFee = JSON.parse(res.headers.get('x-dev-fee') || 'null'); } catch {}
     const cd = res.headers.get('content-disposition') || '';
     const m = cd.match(/filename="?([^"]+)"?/);
     const filename = m ? m[1] : 'Requisition_Report.xlsx';
     const blob = await res.blob();
-    return { blob, filename, summary, failedChecks, workpaperFolder, workpaperSaved, packetFileId, packetFileName, forced };
+    return { blob, filename, summary, failedChecks, workpaperFolder, workpaperSaved, packetFileId, packetFileName, forced, devFee };
   },
 
   // Workpapers › Management Fee: analyze a prior-quarter workbook, then generate

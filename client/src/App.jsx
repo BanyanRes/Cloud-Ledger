@@ -3114,7 +3114,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     }));
     setRfBusy(true);setRfErr('');setRfDetail(null);setRfResult(null);
     try{
-      const {blob,filename,summary,failedChecks,workpaperFolder,workpaperSaved,packetFileId,packetFileName,forced}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoices,force});
+      const {blob,filename,summary,failedChecks,workpaperFolder,workpaperSaved,packetFileId,packetFileName,forced,devFee}=await api.rollForwardRequisition(entityId,rfFile,newCurrent,{reqNumber:rfReqNum,asOfDate:rfAsOf,invoices,force});
       const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);
       // Also download the invoice-packet PDF into the user's Downloads folder
       // (it is retained in Workpapers too). Fetch the saved entity-file as a blob
@@ -3132,7 +3132,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         }catch(pe){/* packet download is best-effort; the workbook already downloaded */}
       }
       // Success: clear the working set (invoices/workbook/req#), keep the result banner.
-      setReqState(cur=>({...cur,cards:[],file:null,reqNum:'',detail:null,result:{filename,summary,failedChecks,count:newCurrent.length,workpaperFolder,workpaperSaved,forced}}));
+      setReqState(cur=>({...cur,cards:[],file:null,reqNum:'',detail:null,result:{filename,summary,failedChecks,count:newCurrent.length,workpaperFolder,workpaperSaved,forced,devFee}}));
     }catch(e){setRfErr(e.message);if(e.detail)setRfDetail(e.detail);}
     finally{setRfBusy(false);}};
 
@@ -3217,6 +3217,21 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
               <div style={{fontSize:22,fontWeight:700,color:k==='Required failed'&&v>0?T.red:T.textBright}}>{v!=null?v:'—'}</div>
               <div style={{fontSize:10,color:T.textMuted,marginTop:2,textTransform:'uppercase',letterSpacing:'0.05em'}}>{k}</div></div>)}
         </div>}
+        {rfResult.devFee&&(rfResult.devFee.needs_review?
+          <div style={{marginTop:12,padding:'10px 12px',borderRadius:8,background:T.orangeDim,border:'1px solid '+T.orange+'40'}}>
+            <div style={{fontSize:11,fontWeight:700,color:T.orange,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:4}}>Development fee — manual entry needed</div>
+            <div style={{fontSize:12,color:T.text}}>{rfResult.devFee.note||'CloudLedger could not confirm this project\u2019s dev-fee method from the prior report. Enter the development fee for this period by hand.'}{rfResult.devFee.prior&&rfResult.devFee.prior.fee!=null&&<span style={{color:T.textMuted}}> Prior period: {Number(rfResult.devFee.prior.fee).toLocaleString(undefined,{style:'currency',currency:'USD'})} on {Number(rfResult.devFee.prior.base).toLocaleString(undefined,{style:'currency',currency:'USD'})} of costs.</span>}</div>
+          </div>
+        :rfResult.devFee.amount!=null?
+          <div style={{marginTop:12,padding:'10px 12px',borderRadius:8,background:T.bgElevated,border:'1px solid '+T.greenBorder}}>
+            <div style={{fontSize:11,fontWeight:700,color:T.green,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:4}}>Development fee added</div>
+            <div style={{fontSize:13,color:T.textBright,fontWeight:600}}>{Number(rfResult.devFee.amount).toLocaleString(undefined,{style:'currency',currency:'USD'})}{rfResult.devFee.rate_text?<span style={{fontWeight:400,color:T.text}}> &mdash; {rfResult.devFee.rate_text}</span>:null}</div>
+            <div style={{fontSize:11,color:T.textMuted,marginTop:3}}>
+              {rfResult.devFee.base!=null&&<>Base: {Number(rfResult.devFee.base).toLocaleString(undefined,{style:'currency',currency:'USD'})} of new costs. </>}
+              Method {rfResult.devFee.source==='claude'?'inferred by Claude':'read from the prior report\u2019s formulas'}{rfResult.devFee.validated?', matched the prior period':''}.
+            </div>
+          </div>
+        :null)}
         {rfResult.failedChecks&&rfResult.failedChecks.length>0&&<div style={{marginTop:12,paddingTop:10,borderTop:'1px solid '+T.greenBorder}}>
           <div style={{fontSize:11,fontWeight:700,color:T.orange,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:6}}>Advisory checks not evaluated / not passed</div>
           <table style={S.table}><thead><tr><th style={S.th}>Check</th><th style={S.th}>Level</th><th style={S.thR}>Expected</th><th style={S.thR}>Actual</th><th style={S.th}>Detail</th></tr></thead>
