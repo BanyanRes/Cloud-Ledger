@@ -23,6 +23,7 @@
 // ============================================================================
 
 const { cellNum, cellStr, cellFormula, COL } = require('./requisition_reconcile.js');
+const { learnDevFeeSpec, applyDevFeeSpec } = require('./requisition_devfee.js');
 
 // Resolve a worksheet by name tolerantly: exact match first, then a
 // case-insensitive / whitespace-normalized match, then a few known aliases.
@@ -408,19 +409,20 @@ function findRowByLabel(ws, needles) {
 // Compute this period's Development Fee and return a Current-Log row for it.
 //
 // The fee is a percentage of this period's NEW costs, EXCLUDING the dev fee line
-// itself (including it would be circular). The percentage is entity-specific and
-// lives in the Dev Fee tab, not hard-coded here: the tab computes it as
-//   E15 = ROUND(baseCost * rate1, 2)   (e.g. rate1 = 4%)
-//   E17 = ROUND(E15 / 2, 2)            (waived half -> effective 2%)
-//   E19 = E17                          (the amount that goes on the Current Log)
-// We read rate1 and the "/2" structure straight from the tab's formulas so each
-// entity's own rate carries through, then apply it to the freshly-entered
-// invoices' total (minus any dev fee line).
+// itself (including it would be circular). HOW the percentage/rounding/half-waive
+// works differs by project, so we LEARN the method from the prior Req report's
+// Dev Fee tab (see requisition_devfee.learnDevFeeSpec): first by parsing the
+// tab's formulas, and if those are missing/ambiguous, by asking Claude — then
+// back-validating the learned method against the prior period's actual base→fee.
+// If the method can't be learned or doesn't reproduce the prior fee, we return
+// devFee info with needsReview=true and NO row, so the fee is entered by hand
+// rather than shipping a wrong number.
 //
-// Returns { row, amount, code } or null if the tab has no usable dev-fee setup
-// or there are no costs to base a fee on. `row` matches the shape replaceCurrentLog
-// / writeRowCells expect.
-function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta }) {
+// Async because the Claude fallback is async. Returns:
+//   { row, amount, code, base, rateText, spec, source, needsReview, note } | null
+// where `row` matches the shape replaceCurrentLog / writeRowCells expect. A null
+// return means there was no Dev Fee tab or no costs to base a fee on.
+async function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta, callClaude = null }) {
   if (!devFeeWs) return null;
 
   // 1. Identify the dev-fee cost code from the prior workbook's Current Log dev
@@ -456,26 +458,12 @@ function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta }) {
   }
   if (!(base > 0)) return null;
 
-  // 3. Read the entity-specific rate structure from the Dev Fee tab. Parse the
-  //    first percentage out of E15's formula (e.g. "ROUND(E10*4%,2)" -> 0.04) and
-  //    detect the "/2" halving in E17. Fall back to 4% & halving if unreadable.
-  let rate = 0.04, halve = true;
-  const e15f = cellFormula(devFeeWs.getCell('E15')) || '';
-  const e17f = cellFormula(devFeeWs.getCell('E17')) || '';
-  const pctM = e15f.match(/(\d+(?:\.\d+)?)\s*%/) || e15f.match(/\*\s*0?\.(\d+)/);
-  if (pctM) {
-    if (e15f.includes('%')) rate = parseFloat(pctM[1]) / 100;
-    else rate = parseFloat('0.' + pctM[1]);
-  }
-  halve = /\/\s*2\b/.test(e17f) || /E15\s*\/\s*2/i.test(e17f);
+  // 3. Learn the project's dev-fee method from the prior Dev Fee tab: parse the
+  //    formulas, fall back to Claude if ambiguous, and back-validate against the
+  //    prior period's observed base→fee. Whatever we learn, WE compute the fee.
+  const learned = await learnDevFeeSpec({ devFeeWs, priorCurWs, devCode, COL, callClaude });
 
   const round2 = (n) => Math.round(n * 100) / 100;
-  let fee = round2(base * rate);
-  if (halve) fee = round2(fee / 2);
-  if (!(fee > 0)) return null;
-
-  // 4. Build the Current-Log row. Bill number is month-based ("April_26 Dev Fee")
-  //    derived from the as-of date, matching the workbook's existing convention.
   const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
   let billLabel = 'Dev Fee';
   if (meta && meta.asOfDate) {
@@ -483,19 +471,55 @@ function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta }) {
     if (!isNaN(d.getTime())) billLabel = `${MONTHS[d.getMonth()]}_${String(d.getFullYear()).slice(2)} Dev Fee`;
   }
   const t = template || {};
-  const rateText = (halve ? (rate * 50) : (rate * 100)).toFixed(rate * 100 % 1 === 0 && (halve ? (rate*50)%1===0 : true) ? 0 : 2).replace(/\.00$/, '') + '% of new costs';
+
+  // Could not learn a trustworthy method → don't invent a fee. Surface for
+  // manual entry with the prior example so the user can key it in.
+  if (!learned || !learned.spec || learned.needsReview) {
+    return {
+      amount: null,
+      code: devCode,
+      base: round2(base),
+      spec: learned ? learned.spec : null,
+      source: learned ? learned.source : 'none',
+      needsReview: true,
+      note: (learned && learned.note) ||
+        'Could not confirm this project\'s dev-fee method from the prior report; please enter the dev fee for this period manually.',
+      prior: learned ? learned.prior : null,
+      row: null,
+    };
+  }
+
+  // 4. Apply the learned spec to this period's base.
+  const spec = learned.spec;
+  const fee = applyDevFeeSpec(spec, base);
+  if (!(fee > 0)) {
+    return {
+      amount: null, code: devCode, base: round2(base), spec, source: learned.source,
+      needsReview: true, note: 'Learned dev-fee method produced a non-positive fee; enter manually.',
+      prior: learned.prior, row: null,
+    };
+  }
+
+  const pct = spec.halve ? (spec.rate * 50) : (spec.rate * 100);
+  const rateText = (Number.isInteger(pct) ? String(pct) : pct.toFixed(2).replace(/\.?0+$/, '')) +
+    '% of new costs' + (spec.halve ? ' (half waived)' : '');
   return {
     amount: fee,
     code: devCode,
     base: round2(base),
     rateText,
+    spec,
+    source: learned.source,       // 'formula:E15' | 'claude'
+    needsReview: false,
+    validation: learned.validation, // { ok, expected, got } against prior
+    prior: learned.prior,
     row: {
       cat: t.cat != null ? t.cat : 'Soft Costs',
       code: devCode,
       bankcat: t.bankcat != null ? t.bankcat : 'Development Fee',
       gl: t.gl != null ? t.gl : devCode,
       name: t.name || 'Development Fee',
-      vendor: 'County Line Rail Interest',
+      vendor: t.vendor || 'County Line Rail Interest',
       bill: billLabel,
       amount: fee,
       req: meta && meta.reqNumber ? 'Req#' + meta.reqNumber : undefined,
@@ -512,7 +536,10 @@ function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta }) {
 // Returns { landmarks, devFee } describing where key rows ended up and the
 // auto-computed development fee (amount + the row that was appended), if any.
 // ----------------------------------------------------------------------------
-function rollForward(workbook, newCurrent, meta = {}) {
+// Async because computeDevFeeRow may call Claude to learn the dev-fee method.
+// meta may carry { callClaude } — a caller-injected async fn for the Claude
+// fallback; when absent, only deterministic formula parsing is used.
+async function rollForward(workbook, newCurrent, meta = {}) {
   const priorWs = findSheet(workbook, 'Prior Invoice Log');
   const curWs = findSheet(workbook, 'Current Invoice Log');
   const b2a = findSheet(workbook, 'Budget to Actual');
@@ -552,18 +579,33 @@ function rollForward(workbook, newCurrent, meta = {}) {
   const effectiveCurrent = Array.isArray(newCurrent) ? newCurrent.slice() : [];
   let devFeeInfo = null;
   try {
-    const df = computeDevFeeRow({ devFeeWs: devFee, priorCurWs: curWs, newCurrent: effectiveCurrent, meta });
-    if (df) {
-      // Remove any caller-supplied dev fee line for the same code, then append ours.
+    const df = await computeDevFeeRow({
+      devFeeWs: devFee, priorCurWs: curWs, newCurrent: effectiveCurrent, meta,
+      callClaude: meta.callClaude || null,
+    });
+    if (df && df.row && !df.needsReview) {
+      // Learned a trustworthy method. Remove any caller-supplied dev fee line for
+      // the same code, then append ours.
       const filtered = effectiveCurrent.filter(inv => String(inv.code) !== String(df.code));
       filtered.push(df.row);
       effectiveCurrent.length = 0;
       effectiveCurrent.push(...filtered);
-      devFeeInfo = { amount: df.amount, code: df.code, base: df.base, rateText: df.rateText, row: df.row };
+      devFeeInfo = {
+        amount: df.amount, code: df.code, base: df.base, rateText: df.rateText,
+        source: df.source, spec: df.spec, validation: df.validation, prior: df.prior,
+        needsReview: false, row: df.row,
+      };
+    } else if (df) {
+      // Method could not be confirmed. Do NOT auto-insert a fee — surface it so
+      // the user enters the dev fee manually. The roll-forward still proceeds.
+      devFeeInfo = {
+        amount: null, code: df.code, base: df.base, source: df.source,
+        spec: df.spec || null, prior: df.prior || null, needsReview: true, note: df.note,
+      };
     }
   } catch (e) {
     // Dev fee is best-effort; never block the roll-forward on it.
-    devFeeInfo = { error: e.message };
+    devFeeInfo = { error: e.message, needsReview: true };
   }
 
   // 2. Rebuild Prior Log = prior groups + folded current rows.

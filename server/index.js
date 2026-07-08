@@ -15,6 +15,7 @@ const turnkey = require('./turnkey');
 const requisition = require('./requisition');
 const { rollForward, findSheet: findReqSheet } = require('./requisition_rollforward');
 const { verifyRollforward } = require('./requisition_rollforward_verify');
+const { makeDevFeeClaudeCaller } = require('./requisition_devfee');
 const { saveRequisitionOutputs } = require('./requisition_workpaper_save');
 const ExcelJS = require('exceljs');
 const JSZip = require('jszip');
@@ -5167,9 +5168,12 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
 
   try {
     // Mutate `workbook` into Req#N+1. The engine also auto-computes this period's
-    // Development Fee (entity rate from the Dev Fee tab) and appends it as a
-    // Current-Log line; rfResult.devFee carries the amount + row for the packet.
-    const rfResult = rollForward(workbook, newCurrent, meta);
+    // Development Fee by LEARNING the project's method from the prior report's Dev
+    // Fee tab (formula parse, else Claude), back-validated against the prior fee;
+    // rfResult.devFee carries the amount + row (or needsReview when it couldn't be
+    // confirmed). Inject a Claude caller for the fallback when an API key is set.
+    const devFeeCaller = process.env.ANTHROPIC_API_KEY ? makeDevFeeClaudeCaller() : null;
+    const rfResult = await rollForward(workbook, newCurrent, { ...meta, callClaude: devFeeCaller });
 
     // Verify WITHOUT recalc (no LibreOffice in prod). Structural required checks
     // gate; A4/B5 degrade to "not evaluated". No callClaude here — a failure is
@@ -5296,6 +5300,24 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
     // Tell the client this download bypassed a failed required check, so it can
     // flag the file as needing manual correction rather than presenting it as clean.
     if (forcedPastFailure) res.setHeader('X-Reconcile-Forced', '1');
+    // Surface how the development fee was determined (or that it needs manual
+    // entry) so the client can show it on the success card. Header-safe JSON.
+    try {
+      if (rfResult && rfResult.devFee) {
+        const d = rfResult.devFee;
+        const devFeeHeader = {
+          amount: d.amount != null ? d.amount : null,
+          base: d.base != null ? d.base : null,
+          rate_text: d.rateText || null,
+          source: d.source || null,            // 'formula:E15' | 'claude' | 'none'
+          needs_review: !!d.needsReview,
+          note: d.note || null,
+          prior: d.prior || null,              // { base, fee } observed in prior period
+          validated: d.validation ? !!d.validation.ok : null,
+        };
+        res.setHeader('X-Dev-Fee', JSON.stringify(devFeeHeader).replace(/[\r\n]/g, ' '));
+      }
+    } catch {}
     res.send(Buffer.from(outBuf));
   } catch (e) {
     // A userFacing error (e.g. a missing required tab) is a client-input problem,
