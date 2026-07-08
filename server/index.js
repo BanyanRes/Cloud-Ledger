@@ -820,6 +820,40 @@ async function billcomListBillsWindowed({ sessionId, devKey, baseUrl, fromDate, 
   return Array.from(byId.values());
 }
 
+// Bill.com v3 /payments has the SAME broken offset pagination as /bills (nextPage
+// returns the same first 100 rows), so a plain paged fetch silently caps at the
+// first page and never sees newer payments. Mirror the bills approach: walk
+// month-sized processDate windows and union+dedupe by id. Each CLRF window is far
+// below the 100-row cap. Returns the full payment set across [fromDate, toDate].
+async function billcomListPaymentsWindowed({ sessionId, devKey, baseUrl, fromDate, toDate }) {
+  const base = (baseUrl || BILLCOM_BASE_URLS.sandbox);
+  const hdr = { sessionId, devKey, Accept: "application/json" };
+  const addMonth = (d) => { const [Y, M] = d.split("-"); let yy = +Y, mm = +M + 1; if (mm > 12) { mm = 1; yy++; } return yy + "-" + String(mm).padStart(2, "0") + "-01"; };
+  const startYM = fromDate.slice(0, 7) + "-01";
+  const endExclusive = addMonth(toDate.slice(0, 7) + "-01");
+  const byId = new Map();
+  let win = startYM;
+  let guard = 0;
+  while (win < endExclusive && guard < 240) {
+    guard++;
+    const winEnd = addMonth(win);
+    const filt = "processDate:gte:" + win + ",processDate:lt:" + winEnd;
+    const url = base + "/payments?max=100&filters=" + encodeURIComponent(filt);
+    let json;
+    try {
+      const resp = await billcomFetch(url, { method: "GET", headers: hdr }, 20000);
+      const text = await resp.text();
+      try { json = JSON.parse(text); } catch { throw new Error("Non-JSON payments window (HTTP " + resp.status + ")"); }
+      if (!resp.ok) { const msg = Array.isArray(json) ? json.map(e => e.message || JSON.stringify(e)).join("; ") : (json.message || ("HTTP " + resp.status)); throw new Error("payments window: " + msg); }
+    } catch (e) { throw new Error("payments window " + win + ": " + e.message); }
+    const results = Array.isArray(json.results) ? json.results : [];
+    for (const p of results) { const id = p && p.id; if (id != null && !byId.has(String(id))) byId.set(String(id), p); }
+    if (results.length >= 100) console.log("[billcom-sync] WARNING payments window " + win + " hit 100-row cap; may be truncated");
+    win = winEnd;
+  }
+  return Array.from(byId.values());
+}
+
 
 // One-time recovery: earlier versions of the replace endpoint accidentally saved files
 // to WORKPAPERS_DIR root (or to an "undefined" subdir) instead of WORKPAPERS_DIR/<entity_id>/.
@@ -4029,13 +4063,23 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   const cutoffDate = String((req.body && req.body.cutoff_date) || cfg.sync_cutoff_date || '2026-01-01');
 
   let bills, payments;
+  // Bill.com v3 /bills and /payments IGNORE offset pagination — nextPage returns
+  // the same first 100 rows repeatedly, so a plain paged fetch (billcomListBills)
+  // silently caps at ~100 stale rows and never sees newer bills. That's why sync
+  // reported "0 synced, 500 skipped": the 500 rows were the same old page fetched
+  // five times, all already-synced/pre-cutoff, while June bills were never pulled.
+  // Fetch via month-windowed filters instead (the method already proven for AP
+  // aging), from the cutoff month through one month past today to catch any
+  // future-dated due/process dates. Union+dedupe by id.
+  const windowFrom = (cutoffDate.slice(0, 7) + '-01');
+  const windowTo = (() => { const d = new Date(); d.setMonth(d.getMonth() + 1); return d.toISOString().slice(0, 10); })();
   try {
-    bills = await billcomListBills({ ...listArgs, maxItems: 500 });
+    bills = await billcomListBillsWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo });
   } catch (e) {
     return res.status(502).json({ error: 'Failed to fetch bills: ' + e.message });
   }
   try {
-    payments = await billcomListPayments({ ...listArgs, maxItems: 500 });
+    payments = await billcomListPaymentsWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo });
   } catch (e) {
     return res.status(502).json({ error: 'Failed to fetch payments: ' + e.message });
   }
@@ -4218,19 +4262,22 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // deleted upstream — we remove its journal entry (journal_lines cascade) and
   // record a 'bill_deleted' log row so re-runs are idempotent.
   //
-  // Guard against false positives from a truncated list: only delete when the live
-  // fetch came back complete (under the maxItems cap). If Bill.com returned the
-  // full 500-row ceiling the list may be partial, so we skip deletions that run to
-  // avoid removing a bill that merely paged out of view.
+  // Guard against false positives. The live fetch is now windowed by dueDate
+  // ([windowFrom, windowTo]), so `bills` is the complete set of live bills WITHIN
+  // that window — not the entire active list. Deletion mirroring must therefore be
+  // scoped to the same window: only a synced bill whose invoice date falls inside
+  // [windowFrom, windowTo] and is absent from the live window has truly been
+  // deleted in Bill.com. A synced bill dated outside the window simply wasn't
+  // fetched this run and must NOT be treated as deleted.
   result.bills.deleted = 0;
   const liveIds = new Set(bills.map(b => String(pick(b, 'id') || '')).filter(Boolean));
-  const listComplete = bills.length < 500;
-  if (!listComplete) {
-    result.bills.delete_skipped = 'live bill list hit the 500-row cap; deletions skipped this run to avoid false positives';
-  } else {
-    // synced bills that still have a live CL entry, keyed by billcom_id -> cl_entry_id
+  {
+    // synced bills that still have a live CL entry, keyed by billcom_id -> cl_entry_id,
+    // limited to those whose CL entry date is inside the fetched window.
     const syncedBills = db.prepare(
-      "SELECT billcom_id, cl_entry_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'bill' AND status = 'success' AND cl_entry_id IS NOT NULL"
+      "SELECT bl.billcom_id, bl.cl_entry_id, je.date AS entry_date " +
+      "FROM billcom_sync_log bl JOIN journal_entries je ON je.id = bl.cl_entry_id " +
+      "WHERE bl.entity_id = ? AND bl.sync_type = 'bill' AND bl.status = 'success' AND bl.cl_entry_id IS NOT NULL"
     ).all(entityId);
     // a bill already logged as deleted should not be re-processed
     const deletedIds = new Set(db.prepare(
@@ -4244,6 +4291,9 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       const bid = String(row.billcom_id);
       if (liveIds.has(bid)) continue;        // still active in Bill.com
       if (deletedIds.has(bid)) continue;     // already handled on a prior run
+      // Only consider deletion when this bill's CL entry date is inside the window
+      // we actually fetched — otherwise its absence just means "not in this window".
+      if (!(row.entry_date && String(row.entry_date) >= windowFrom && String(row.entry_date) < windowTo)) continue;
       // only delete if the CL entry actually exists (it may have been removed manually)
       if (!entryStillExists.get(row.cl_entry_id, entityId)) {
         logSync.run(entityId, 'bill_deleted', bid, row.cl_entry_id, 'success', 'bill absent in Bill.com; CL entry already gone', now);

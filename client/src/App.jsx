@@ -2316,8 +2316,18 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
 // ═══ Account Drill-Down Modal (12-month GL detail from TB) ═══
 function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp,onClose,onChanged}){
   const[reloadKey,setReloadKey]=useState(0);
+  // Committed range that actually drives the query (item 2: only updates when the
+  // user clicks Refresh, so the window doesn't reload on every typed digit).
   const[from,setFrom]=useState(fromProp);
   const[to,setTo]=useState(toProp);
+  // Draft range bound to the date inputs; committed to from/to on Refresh (or Enter).
+  const[fromDraft,setFromDraft]=useState(fromProp);
+  const[toDraft,setToDraft]=useState(toProp);
+  const applyDates=()=>{
+    if(/^\d{4}-\d{2}-\d{2}$/.test(fromDraft))setFrom(fromDraft);
+    if(/^\d{4}-\d{2}-\d{2}$/.test(toDraft))setTo(toDraft);
+  };
+  const datesDirty=fromDraft!==from||toDraft!==to;
   const[lines,setLines]=useState([]);
   const[begBal,setBegBal]=useState(0);
   const[loading,setLoading]=useState(true);
@@ -2340,7 +2350,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
         ]);
         setAllEntries(entries);setAllAccounts(accts);
         const txns=[];
-        entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code)txns.push({date:e.date,entry_num:e.entry_num,jeId:e.id,memo:e.memo,debit:l.debit||0,credit:l.credit||0,created_by:e.created_by,created_at:e.created_at});});});
+        entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code)txns.push({date:e.date,entry_num:e.entry_num,jeId:e.id,memo:e.memo,debit:l.debit||0,credit:l.credit||0,created_by:e.created_by,created_at:e.created_at,class_name:l.class_name||'',location_name:l.location_name||''});});});
         txns.sort((a,b)=>a.date.localeCompare(b.date)||a.entry_num-b.entry_num);
         const bb=(begBalances||[]).find(x=>x.code===acct.code);
         setBegBal(bb?bb.balance:0);
@@ -2353,16 +2363,17 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
   let running=begBal;
   const totalDr=lines.reduce((s,l)=>s+l.debit,0);
   const totalCr=lines.reduce((s,l)=>s+l.credit,0);
-  const doExport=()=>{const d=[[entityName||'Account Detail'],[acct.code+' - '+acct.name],['Period: '+from+' to '+to],[],['Date','JE','Memo','Debit','Credit','Balance']];
-    d.push(['','','Beginning Balance','','',begBal]);
-    let r=begBal;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),l.memo,l.debit||'',l.credit||'',r]);});
-    d.push(['','','Totals',totalDr,totalCr,r]);
+  const doExport=()=>{const acctLabel=acct.code+' - '+acct.name;
+    const d=[[entityName||'Account Detail'],[acctLabel],['Period: '+from+' to '+to],[],['Date','JE','Account','Class','Location','Memo','Debit','Credit','Balance']];
+    d.push(['','','','','','Beginning Balance','','',begBal]);
+    let r=begBal;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),acctLabel,l.class_name||'',l.location_name||'',l.memo,l.debit||'',l.credit||'',r]);});
+    d.push(['','','','','','Totals',totalDr,totalCr,r]);
     exportToExcel(d,'GL_'+acct.code+'_'+to+'.xlsx');};
-  return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:1100,maxHeight:'90vh',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
+  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:1100,maxHeight:'90vh',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14,gap:16}}>
       <div><div style={{fontSize:18,fontWeight:700,color:T.textBright}}>{acct.code} &mdash; {acct.name}</div>
-        <div style={{display:'flex',alignItems:'center',gap:8,marginTop:6}}><label style={{fontSize:11,color:T.textMuted}}>From</label><input type="date" value={from} max={to} onChange={e=>setFrom(e.target.value)} style={{...S.inputSm,padding:'4px 8px',fontSize:12}}/><label style={{fontSize:11,color:T.textMuted}}>To</label><input type="date" value={to} min={from} onChange={e=>setTo(e.target.value)} style={{...S.inputSm,padding:'4px 8px',fontSize:12}}/><button onClick={()=>{setFrom(fromProp);setTo(toProp);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'4px 8px',cursor:'pointer'}}>Reset</button></div>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginTop:6}}><label style={{fontSize:11,color:T.textMuted}}>From</label><input type="date" value={fromDraft} max={toDraft} onChange={e=>setFromDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')applyDates();}} style={{...S.inputSm,padding:'4px 8px',fontSize:12}}/><label style={{fontSize:11,color:T.textMuted}}>To</label><input type="date" value={toDraft} min={fromDraft} onChange={e=>setToDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')applyDates();}} style={{...S.inputSm,padding:'4px 8px',fontSize:12}}/><button onClick={applyDates} disabled={!datesDirty} style={{background:datesDirty?T.accent:T.bgElevated,border:'1px solid '+(datesDirty?T.accent:T.border),borderRadius:6,color:datesDirty?'#fff':T.textMuted,fontSize:11,fontWeight:600,padding:'4px 12px',cursor:datesDirty?'pointer':'default'}}>Refresh</button><button onClick={()=>{setFromDraft(fromProp);setToDraft(toProp);setFrom(fromProp);setTo(toProp);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'4px 8px',cursor:'pointer'}}>Reset</button></div>
         <div style={{marginTop:6}}><span style={S.tag(acct.type)}>{acct.type}</span></div></div>
       <button style={S.btnExport} onClick={doExport}>Export Excel</button>
     </div>
@@ -2379,7 +2390,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
              <td style={S.tdR}></td><td style={S.tdR}></td>
              <td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(begBal)}</td></tr>
            {lines.length===0?
-             <tr><td colSpan={6} style={{...S.td,textAlign:'center',padding:30,color:T.textDim}}>No activity in this period{from>'2015-01-01'&&<div style={{marginTop:10}}><button onClick={()=>setFrom('2015-01-01')} style={{...S.btnS,fontSize:12,padding:'6px 14px'}}>View all activity</button><div style={{fontSize:11,color:T.textMuted,marginTop:6}}>The default view shows the last 12 months. This account's activity may be older \u2014 e.g. an investment purchase.</div></div>}</td></tr>
+             <tr><td colSpan={6} style={{...S.td,textAlign:'center',padding:30,color:T.textDim}}>No activity in this period{from>'2015-01-01'&&<div style={{marginTop:10}}><button onClick={()=>{setFromDraft('2015-01-01');setFrom('2015-01-01');}} style={{...S.btnS,fontSize:12,padding:'6px 14px'}}>View all activity</button><div style={{fontSize:11,color:T.textMuted,marginTop:6}}>The default view shows the last 12 months. This account's activity may be older \u2014 e.g. an investment purchase.</div></div>}</td></tr>
              :lines.map((l,i)=>{running+=isDr?(l.debit-l.credit):(l.credit-l.debit);
                const tip=(l.created_by?'Posted by '+l.created_by:'')+(l.created_at?(l.created_by?' on ':'Posted on ')+new Date(l.created_at+(l.created_at.includes('Z')||l.created_at.includes('+')?'':'Z')).toLocaleString('en-US',{timeZone:'America/Los_Angeles',year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true,timeZoneName:'short'}):'');
                return<tr key={i}>
