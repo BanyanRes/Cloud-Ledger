@@ -24,6 +24,37 @@
 
 const { cellNum, cellStr, cellFormula, COL } = require('./requisition_reconcile.js');
 
+// Resolve a worksheet by name tolerantly: exact match first, then a
+// case-insensitive / whitespace-normalized match, then a few known aliases.
+// Requisition workbooks come from different project templates (CLIP, CLRF, …)
+// whose tab names drift slightly ("Current Inv Log", "B2A", trailing spaces),
+// and an exact-name miss returns undefined → the first `.getCell` on it throws
+// the opaque "Cannot read properties of undefined (reading 'getCell')". This
+// resolver removes that whole class of failure and lets callers give a precise
+// "which tab is missing" error instead.
+const SHEET_ALIASES = {
+  'prior invoice log': ['prior inv log', 'prior log', 'prior invoices'],
+  'current invoice log': ['current inv log', 'current log', 'current invoices'],
+  'budget to actual': ['b2a', 'budget vs actual', 'budget-to-actual', 'budget to actuals'],
+  'dev fee': ['development fee', 'dev fee calc', 'developer fee'],
+  'hard cost contingency table': ['hard cost contingency', 'hard contingency table', 'hard cost contingency tbl'],
+  'soft cost contingency table': ['soft cost contingency', 'soft contingency table', 'soft cost contingency tbl'],
+};
+function findSheet(workbook, canonicalName) {
+  const norm = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/\s+/g, ' ');
+  const want = norm(canonicalName);
+  // 1. exact
+  let ws = workbook.getWorksheet(canonicalName);
+  if (ws) return ws;
+  // 2. normalized exact + 3. aliases, scanning every sheet once
+  const aliases = SHEET_ALIASES[want] || [];
+  for (const sheet of workbook.worksheets) {
+    const n = norm(sheet.name);
+    if (n === want || aliases.includes(n)) return sheet;
+  }
+  return undefined;
+}
+
 // Read one invoice-log sheet into an ordered list of groups. A group is a run of
 // data rows terminated by a SUBTOTAL row, with blank spacer rows interspersed.
 //   group = { code, name, subtotalName, rows: [{...cells}], }
@@ -482,10 +513,28 @@ function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta }) {
 // auto-computed development fee (amount + the row that was appended), if any.
 // ----------------------------------------------------------------------------
 function rollForward(workbook, newCurrent, meta = {}) {
-  const priorWs = workbook.getWorksheet('Prior Invoice Log');
-  const curWs = workbook.getWorksheet('Current Invoice Log');
-  const b2a = workbook.getWorksheet('Budget to Actual');
-  const devFee = workbook.getWorksheet('Dev Fee');
+  const priorWs = findSheet(workbook, 'Prior Invoice Log');
+  const curWs = findSheet(workbook, 'Current Invoice Log');
+  const b2a = findSheet(workbook, 'Budget to Actual');
+  const devFee = findSheet(workbook, 'Dev Fee');
+
+  // Fail fast with a precise, human-readable message when a required tab is
+  // missing, instead of letting the first `.getCell` throw the opaque
+  // "Cannot read properties of undefined (reading 'getCell')". The four tabs
+  // below are structural; Dev Fee and the contingency tables are optional
+  // (their absence just skips the corresponding step).
+  const required = { 'Prior Invoice Log': priorWs, 'Current Invoice Log': curWs, 'Budget to Actual': b2a };
+  const missing = Object.keys(required).filter(k => !required[k]);
+  if (missing.length) {
+    const present = workbook.worksheets.map(s => s.name).join(', ');
+    const err = new Error(
+      'Workbook is missing required tab(s): ' + missing.join(', ') +
+      '. Tabs found in the uploaded file: ' + (present || '(none)') +
+      '. A requisition roll-forward needs a "Prior Invoice Log", a "Current Invoice Log", and a "Budget to Actual" tab.'
+    );
+    err.userFacing = true;
+    throw err;
+  }
 
   // 1. Capture prior structure + current rows BEFORE mutating anything.
   const priorGroups = parseLogGroups(priorWs);
@@ -874,5 +923,5 @@ function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
 
 module.exports = {
   rollForward, parseLogGroups, currentRowsByCode, rebuildPriorLog,
-  replaceCurrentLog, repointAbsoluteRefs, findRowByLabel,
+  replaceCurrentLog, repointAbsoluteRefs, findRowByLabel, findSheet,
 };

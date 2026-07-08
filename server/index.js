@@ -13,7 +13,7 @@ const path = require('path');
 const fs = require('fs');
 const turnkey = require('./turnkey');
 const requisition = require('./requisition');
-const { rollForward } = require('./requisition_rollforward');
+const { rollForward, findSheet: findReqSheet } = require('./requisition_rollforward');
 const { verifyRollforward } = require('./requisition_rollforward_verify');
 const { saveRequisitionOutputs } = require('./requisition_workpaper_save');
 const ExcelJS = require('exceljs');
@@ -5156,11 +5156,13 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
   }
 
   const prevSheets = {
-    prior: priorBook.getWorksheet('Prior Invoice Log'),
-    current: priorBook.getWorksheet('Current Invoice Log'),
+    prior: findReqSheet(priorBook, 'Prior Invoice Log'),
+    current: findReqSheet(priorBook, 'Current Invoice Log'),
   };
   if (!prevSheets.prior || !prevSheets.current) {
-    return res.status(400).json({ error: 'Workbook is missing required sheets: Prior Invoice Log and/or Current Invoice Log' });
+    const present = priorBook.worksheets.map(s => s.name).join(', ');
+    const missing = [!prevSheets.prior && 'Prior Invoice Log', !prevSheets.current && 'Current Invoice Log'].filter(Boolean).join(', ');
+    return res.status(400).json({ error: 'Workbook is missing required tab(s): ' + missing + '. Tabs found: ' + (present || '(none)') + '. A requisition roll-forward needs "Prior Invoice Log", "Current Invoice Log", and "Budget to Actual" tabs.' });
   }
 
   try {
@@ -5296,6 +5298,10 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
     if (forcedPastFailure) res.setHeader('X-Reconcile-Forced', '1');
     res.send(Buffer.from(outBuf));
   } catch (e) {
+    // A userFacing error (e.g. a missing required tab) is a client-input problem,
+    // not a server fault — return 400 with its message so the UI shows the actual
+    // cause instead of a generic 500.
+    if (e && e.userFacing) return res.status(400).json({ error: e.message });
     res.status(500).json({ error: 'Roll-forward error: ' + e.message });
   }
 });

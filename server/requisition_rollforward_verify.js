@@ -27,6 +27,7 @@
 // ============================================================================
 
 const { reconcile, cellNum, cellStr, cellFormula, COL } = require('./requisition_reconcile.js');
+const { findSheet } = require('./requisition_rollforward.js');
 
 // Allowed patch operations the model may return. Anything else is rejected.
 //   setFormula : { op:'setFormula', sheet, cell, formula }    e.g. fix Dev Fee J6 ref
@@ -41,10 +42,10 @@ const ALLOWED_SHEETS = new Set([
 
 function getSheets(workbook) {
   return {
-    prior: workbook.getWorksheet('Prior Invoice Log'),
-    current: workbook.getWorksheet('Current Invoice Log'),
-    b2a: workbook.getWorksheet('Budget to Actual'),
-    devFee: workbook.getWorksheet('Dev Fee'),
+    prior: findSheet(workbook, 'Prior Invoice Log'),
+    current: findSheet(workbook, 'Current Invoice Log'),
+    b2a: findSheet(workbook, 'Budget to Actual'),
+    devFee: findSheet(workbook, 'Dev Fee'),
   };
 }
 
