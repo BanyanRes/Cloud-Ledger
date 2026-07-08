@@ -4044,8 +4044,13 @@ app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id
 // (relieving it would double-count against the opening balance). Idempotent via
 // billcom_sync_log: sync_type 'payment' keyed payId:billId, 'funds_transfer'
 // keyed ft:processDate. Safe to re-run and safe to call from either endpoint.
-function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cashAccount, payments, asOf, cutoffDate, dryRun, actor, now }) {
+function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cashAccount, payments, asOf, cutoffDate, dryRun, actor, now, billInvoiceDateById }) {
   const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
+  // Optional map of billcom bill id -> invoice date, built by the caller from the
+  // bills fetched in the same run. Lets us exclude a payment by its INVOICE date
+  // (the conversion rule: invoices on/before the last JE-entered invoice are
+  // already in CL and must not be re-imported), independent of when it was paid.
+  const invDateOf = (billId) => (billInvoiceDateById && billInvoiceDateById.get(String(billId))) || null;
 
   // billId -> CL bill JE id (only bills actually synced into CL can be relieved).
   const billEntryByBillcomId = new Map();
@@ -4118,6 +4123,18 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
       const billId = String(pick(alloc, 'billId', 'bill_id') || '');
       const amount = Number(pick(alloc, 'amount') || 0);
       if (!billId || amount <= 0) { result.leg1.skipped++; continue; }
+
+      // Conversion-cutoff rule (by INVOICE date, not payment date): if the bill
+      // this payment settles is dated on/before the cutoff, the invoice is already
+      // in CL (entered via JE pre-conversion) and its payoff belongs to the opening
+      // state — so skip the payment no matter when it was actually paid. cutoffDate
+      // is exclusive: invoiceDate < cutoffDate means pre-conversion.
+      const invDate = invDateOf(billId);
+      if (invDate && String(invDate) < cutoffDate) {
+        result.leg1.skipped++;
+        result.leg1.details.push({ id: payId + ':' + billId, status: 'skip', reason: 'invoice pre-conversion (' + invDate + ' < ' + cutoffDate + ')' });
+        continue;
+      }
 
       const dedupId = payId + ':' + billId;
       if (alreadySynced.get(entityId, 'payment', dedupId)) {
@@ -4518,10 +4535,18 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   //    fetched payments, relieves each linked bill, and posts one funds-transfer
   //    per date. It shares dedup keys (payment payId:billId, funds_transfer
   //    ft:date) with the payment-reconcile endpoint, so neither path double-posts.
+  // Build billcom bill id -> invoice date from the bills fetched above, so the
+  // core can exclude payments by invoice date (conversion-cutoff rule).
+  const billInvoiceDateById = new Map();
+  for (const b of bills) {
+    const bid = pick(b, 'id');
+    const idt = pick(b, 'invoiceDate', 'invoice_date', 'dueDate') || pick(pick(b, 'invoice') || {}, 'invoiceDate', 'invoice_date');
+    if (bid != null && idt) billInvoiceDateById.set(String(bid), String(idt));
+  }
   const payResult = performPaymentReconcileCore({
     entityId, apAccount, clearingAccount, cashAccount,
     payments, asOf: new Date().toISOString().slice(0, 10), cutoffDate,
-    dryRun: false, actor, now,
+    dryRun: false, actor, now, billInvoiceDateById,
   });
   // Fold the two-leg result into the sync response shape the client expects
   // (synced = bill reliefs + funds transfers created; errors/skipped summed).
@@ -4620,11 +4645,25 @@ app.post('/api/billcom/payment-reconcile/:entity_id', auth, requireEntityAccess(
   const now = new Date().toISOString();
   const actor = req.user.name || req.user.email || 'system';
 
+  // Also fetch bills (windowed) to build a bill id -> invoice date map, so the
+  // core can apply the conversion-cutoff rule by invoice date, not payment date.
+  const billInvoiceDateById = new Map();
+  try {
+    const bills = await billcomListBillsWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo });
+    for (const b of bills) {
+      const bid = pick(b, 'id');
+      const idt = pick(b, 'invoiceDate', 'invoice_date', 'dueDate') || pick(pick(b, 'invoice') || {}, 'invoiceDate', 'invoice_date');
+      if (bid != null && idt) billInvoiceDateById.set(String(bid), String(idt));
+    }
+  } catch (e) {
+    return res.status(502).json({ error: 'Failed to fetch bills for invoice-date check: ' + e.message });
+  }
+
   // Delegate to the shared two-leg core (same logic Sync uses), so both paths
   // post identical entries and share dedup keys — re-running either is safe.
   const result = performPaymentReconcileCore({
     entityId, apAccount, clearingAccount, cashAccount,
-    payments, asOf, cutoffDate, dryRun, actor, now,
+    payments, asOf, cutoffDate, dryRun, actor, now, billInvoiceDateById,
   });
   res.json(result);
 });
