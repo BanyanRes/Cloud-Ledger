@@ -414,6 +414,9 @@ function hideZeroAmountRows(ws) {
   if (!ws) return;
   const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
   const sumRange = (a, b) => { let t = 0; for (let r = a; r <= b; r++) { const c = ws.getCell(r, COL.amount); const cf = cellFormula(c); if (cf && /SUBTOTAL/i.test(cf)) continue; const n = cellNum(c); if (n != null) t += n; } return t; };
+  // Grand total row bounds the region where blank spacer rows get collapsed.
+  let gtRow = last;
+  for (let r = 3; r <= last; r++) { const gf = cellFormula(ws.getCell(r, COL.amount)); if (gf && /SUBTOTAL/i.test(gf) && /grand total/i.test(cellStr(ws.getCell(r, COL.name)))) { gtRow = r; break; } }
   for (let r = 3; r <= last; r++) {
     const amtCell = ws.getCell(r, COL.amount);
     const f = cellFormula(amtCell);
@@ -428,7 +431,12 @@ function hideZeroAmountRows(ws) {
       continue;
     }
     const hasContent = !!name || !!cellStr(ws.getCell(r, COL.vendor)).trim() || cellNum(ws.getCell(r, COL.code)) != null;
-    if (!hasContent) continue; // blank spacer row — leave as-is
+    if (!hasContent) {
+      // Blank spacer row: collapse it (within the data region, before the grand
+      // total) so there are no gaps between items, subtotals, and the total.
+      if (r < gtRow) ws.getRow(r).hidden = true;
+      continue;
+    }
     const amt = cellNum(amtCell);
     ws.getRow(r).hidden = (amt == null || amt === 0);
   }
