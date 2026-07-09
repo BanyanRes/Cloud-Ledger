@@ -405,6 +405,35 @@ function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, 
   }
 }
 
+// Hide zero/blank-amount line items on an invoice log to declutter the many $0
+// placeholder rows. Subtotal/grand-total rows and blank spacer rows are left
+// visible. Non-zero data rows are explicitly un-hidden so the state is
+// deterministic each roll-forward. Note: the grand total is SUBTOTAL(9,...),
+// which still counts hidden rows, so totals are unaffected.
+function hideZeroAmountRows(ws) {
+  if (!ws) return;
+  const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
+  const sumRange = (a, b) => { let t = 0; for (let r = a; r <= b; r++) { const c = ws.getCell(r, COL.amount); const cf = cellFormula(c); if (cf && /SUBTOTAL/i.test(cf)) continue; const n = cellNum(c); if (n != null) t += n; } return t; };
+  for (let r = 3; r <= last; r++) {
+    const amtCell = ws.getCell(r, COL.amount);
+    const f = cellFormula(amtCell);
+    const name = cellStr(ws.getCell(r, COL.name)).trim();
+    if (f && /SUBTOTAL/i.test(f)) {
+      // Grand total always visible; a group subtotal is hidden only when its
+      // whole group nets to zero (so empty categories collapse cleanly).
+      if (/grand total/i.test(name)) { ws.getRow(r).hidden = false; continue; }
+      const m = f.match(/[A-Z]+(\d+):[A-Z]+(\d+)/i);
+      const groupSum = m ? sumRange(Number(m[1]), Number(m[2])) : null;
+      ws.getRow(r).hidden = (groupSum != null && Math.abs(groupSum) < 0.005);
+      continue;
+    }
+    const hasContent = !!name || !!cellStr(ws.getCell(r, COL.vendor)).trim() || cellNum(ws.getCell(r, COL.code)) != null;
+    if (!hasContent) continue; // blank spacer row — leave as-is
+    const amt = cellNum(amtCell);
+    ws.getRow(r).hidden = (amt == null || amt === 0);
+  }
+}
+
 function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
   // Clear existing data region (keep header rows 1-2).
   const existingLast = Math.max(nextPriorWs.rowCount || 0, nextPriorWs.actualRowCount || 0);
@@ -717,6 +746,11 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   // 2b. Align the numeric coding/amount columns on the prepared Prior Log: cost
   //     code (C) centered, GL coding (E) and amount paid (I) right-aligned.
   rightAlignNumericColumns(priorWs, { codeAlign: 'center' });
+
+  // 2c. Hide zero/blank-amount line items on the Prior Invoice Log to declutter
+  //     the many $0 placeholder rows (universal). Subtotals/grand total stay, and
+  //     SUBTOTAL(9) totals are unaffected since they still count hidden rows.
+  hideZeroAmountRows(priorWs);
 
   // 3. Replace Current Log with the incoming period's invoices (incl. dev fee).
   const curInfo = replaceCurrentLog(curWs, effectiveCurrent, meta);
