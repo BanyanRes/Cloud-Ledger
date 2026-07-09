@@ -40,8 +40,8 @@ const { learnDevFeeSpec, applyDevFeeSpec } = require('./requisition_devfee.js');
 const SHEET_ALIASES = {
   'prior invoice log': ['prior inv log', 'prior log', 'prior invoices'],
   'current invoice log': ['current inv log', 'current log', 'current invoices'],
-  'budget to actual': ['b2a', 'budget vs actual', 'budget-to-actual', 'budget to actuals'],
-  'dev fee': ['development fee', 'dev fee calc', 'developer fee'],
+  'budget to actual': ['b2a', 'budget vs actual', 'budget-to-actual', 'budget to actuals', 'buna budget'],
+  'dev fee': ['development fee', 'dev fee calc', 'developer fee', 'development fee calculation', 'development fee calc'],
   'hard cost contingency table': ['hard cost contingency', 'hard contingency table', 'hard cost contingency tbl'],
   'soft cost contingency table': ['soft cost contingency', 'soft contingency table', 'soft cost contingency tbl'],
 };
@@ -777,8 +777,8 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   // 4c. Roll the Hard/Soft Cost Contingency Tables forward: each row's
   //     "Requested Herein" (col E) folds into "Previously Requested" (col D) and
   //     E clears. The "Total Requested" (F=D+E) and allocation rows recompute.
-  const hardCt = workbook.getWorksheet('Hard Cost Contingency Table');
-  const softCt = workbook.getWorksheet('Soft Cost Contingency Table');
+  const hardCt = findSheet(workbook, 'Hard Cost Contingency Table');
+  const softCt = findSheet(workbook, 'Soft Cost Contingency Table');
   const contingencyTables = {
     hard: rollForwardContingencyTable(hardCt),
     soft: rollForwardContingencyTable(softCt),
