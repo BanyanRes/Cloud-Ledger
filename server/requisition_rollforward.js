@@ -370,18 +370,39 @@ function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, 
   }
   priorExDev = round2(priorExDev);
 
-  const curGT = `'Current Invoice Log'!${AMT}${curGrandTotalRow}`;
   const priorGT = `'Prior Invoice Log'!${AMT}${priorGtRow}`;
-  const curDev = devCode != null ? `-SUMIF('Current Invoice Log'!$${CODE}:$${CODE},${devCode},'Current Invoice Log'!$${AMT}:$${AMT})` : '';
   const priorDev = devCode != null ? `-SUMIF('Prior Invoice Log'!$${CODE}:$${CODE},${devCode},'Prior Invoice Log'!$${AMT}:$${AMT})` : '';
 
-  devFeeWs.getCell(hardRow, 3).value = { formula: `${curGT}${curDev}`, result: round2(base) };
+  // C = this month's project costs (ex dev fee). Written as a VALUE (the engine
+  //     computed it from the entered invoices) so it does NOT reference the
+  //     dev-fee line — that keeps the dev-fee line = 'Dev Fee'!C30 link below
+  //     non-circular (the fee ties back to these costs).
+  devFeeWs.getCell(hardRow, 3).value = round2(base);
+  // D = costs through the prior month (Prior Log total, excluding prior dev fees).
   devFeeWs.getCell(hardRow, 4).value = { formula: `${priorGT}${priorDev}`, result: priorExDev };
+  // B = incurred to date = this month + prior.
   devFeeWs.getCell(hardRow, 2).value = { formula: `C${hardRow}+D${hardRow}`, result: round2(base + priorExDev) };
 
   const labelCol = cellStr(devFeeWs.getCell(hardRow, 1)).trim() ? 1 : 2;
   devFeeWs.getCell(hardRow, labelCol).value = 'Project costs';
   for (const sr of softRows) for (const c of [1, 2, 3, 4]) devFeeWs.getCell(sr, c).value = null;
+
+  // Link the Current Invoice Log's dev-fee line to the Dev Fee tab's Current
+  // Month Dev Fee (C30) so the posted fee always ties to the tab. Seeded with
+  // the computed fee for display before Excel recalculates.
+  if (devCode != null) {
+    const cl = Math.max(curWs.rowCount || 0, curWs.actualRowCount || 0);
+    const ref = `'${devFeeWs.name}'!C30`;
+    const fee = devFeeInfo && Number.isFinite(devFeeInfo.amount) ? round2(devFeeInfo.amount) : null;
+    for (let r = 3; r <= cl; r++) {
+      const f = cellFormula(curWs.getCell(r, COL.amount));
+      if (f && /SUBTOTAL/i.test(f)) continue; // skip subtotal/grand-total rows
+      if (String(cellNum(curWs.getCell(r, COL.code))) === String(devCode)) {
+        curWs.getCell(r, COL.amount).value = fee != null ? { formula: ref, result: fee } : { formula: ref };
+        break;
+      }
+    }
+  }
 }
 
 function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
