@@ -23,6 +23,10 @@
 // ============================================================================
 
 const { cellNum, cellStr, cellFormula, COL, applyInvoiceCols, isDevFeeLabel } = require('./requisition_reconcile.js');
+// Convert a 1-based column index to its A1 letter (8 -> "H") so SUBTOTAL
+// ranges track the DETECTED amount column instead of a hard-coded letter
+// (templates without a GL column put Amount in H, not I).
+function colLetter(n) { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s || 'A'; }
 const { learnDevFeeSpec, applyDevFeeSpec } = require('./requisition_devfee.js');
 
 // Resolve a worksheet by name tolerantly: exact match first, then a
@@ -327,20 +331,13 @@ function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
 
   const landmarks = { groupSubtotalRow: {}, byLabel: {}, grandTotalRow: null };
   let r = 3;
+  let grandTotalName = null; // written LAST so it sits below every group
   for (const g of priorGroups) {
     const isGrand = /grand total/i.test(g.subtotalName || '');
-    if (isGrand) {
-      // write grand total after a spacer; range covers all data written so far
-      r += 0;
-      const gtRow = r;
-      nextPriorWs.getCell(gtRow, COL.name).value = g.subtotalName;
-      nextPriorWs.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,I3:I${gtRow - 1})` };
-      styleAmountCell(nextPriorWs, gtRow, { underline: true });
-      nextPriorWs.getRow(gtRow).height = DATA_ROW_HEIGHT;
-      landmarks.grandTotalRow = gtRow;
-      r = gtRow + 1;
-      continue;
-    }
+    // Defer the grand total: it must be written AFTER any current-only groups
+    // that get appended below (otherwise its range misses them and it lands
+    // mid-list instead of at the bottom).
+    if (isGrand) { grandTotalName = g.subtotalName; continue; }
     const dataStart = r;
     // prior data rows
     for (const row of g.rows) {
@@ -363,7 +360,7 @@ function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
     // subtotal — single thin rule above the figure (one consistent convention)
     const subRow = r;
     nextPriorWs.getCell(subRow, COL.name).value = g.subtotalName || ((g.name || '') + ' Total');
-    nextPriorWs.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,I${dataStart}:I${dataEnd + 1})` };
+    nextPriorWs.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,${colLetter(COL.amount)}${dataStart}:${colLetter(COL.amount)}${dataEnd + 1})` };
     styleAmountCell(nextPriorWs, subRow, { underline: true });
     nextPriorWs.getRow(subRow).height = DATA_ROW_HEIGHT;
     if (g.code != null) landmarks.groupSubtotalRow[String(g.code)] = subRow;
@@ -382,10 +379,22 @@ function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
     const subRow = r;
     const nm = (rows[0].name || ('Code ' + key)) + ' Total';
     nextPriorWs.getCell(subRow, COL.name).value = nm;
-    nextPriorWs.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,I${dataStart}:I${r - 1})` };
+    nextPriorWs.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,${colLetter(COL.amount)}${dataStart}:${colLetter(COL.amount)}${r - 1})` };
     styleAmountCell(nextPriorWs, subRow, { underline: true });
     if (key !== '__none__') landmarks.groupSubtotalRow[key] = subRow;
     r = subRow + 2;
+  }
+
+  // Grand total goes at the very bottom, so its range covers every data row —
+  // including any current-only groups appended above.
+  if (grandTotalName != null) {
+    const gtRow = r;
+    nextPriorWs.getCell(gtRow, COL.name).value = grandTotalName;
+    nextPriorWs.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,${colLetter(COL.amount)}3:${colLetter(COL.amount)}${gtRow - 1})` };
+    styleAmountCell(nextPriorWs, gtRow, { underline: true });
+    nextPriorWs.getRow(gtRow).height = DATA_ROW_HEIGHT;
+    landmarks.grandTotalRow = gtRow;
+    r = gtRow + 1;
   }
 
   return landmarks;
@@ -687,7 +696,7 @@ function replaceCurrentLog(ws, rows, meta) {
     ws.getCell(r, COL.amount).value = null; styleAmountCell(ws, r, { underline: false }); r++;            // spacer
     const subRow = r;
     ws.getCell(subRow, COL.name).value = (grp[0].name || ('Code ' + key)) + ' Total';
-    ws.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,I${dataStart}:I${r - 1})` };
+    ws.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,${colLetter(COL.amount)}${dataStart}:${colLetter(COL.amount)}${r - 1})` };
     styleAmountCell(ws, subRow, { underline: true });
     ws.getRow(subRow).height = DATA_ROW_HEIGHT;
     r = subRow + 1;
@@ -696,7 +705,7 @@ function replaceCurrentLog(ws, rows, meta) {
   // grand total
   const gtRow = r;
   ws.getCell(gtRow, COL.name).value = 'Grand Total';
-  ws.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,I3:I${gtRow - 1})` };
+  ws.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,${colLetter(COL.amount)}3:${colLetter(COL.amount)}${gtRow - 1})` };
   styleAmountCell(ws, gtRow, { underline: true });
   ws.getRow(gtRow).height = DATA_ROW_HEIGHT;
 
@@ -876,7 +885,7 @@ function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
   const sumSubtotalRange = (ws, subtotalRow) => {
     const f = cellFormula(ws.getCell(subtotalRow, COL.amount));
     if (!f) return null;
-    const m = f.match(/I(\d+):I(\d+)/i);
+    const m = f.match(/[A-Z]+(\d+):[A-Z]+(\d+)/i);
     if (!m) return null;
     const a = Number(m[1]), b = Number(m[2]);
     let sum = 0;
