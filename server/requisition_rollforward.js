@@ -152,6 +152,24 @@ function dropZeroDuplicateRows(groups) {
   return dropped;
 }
 
+// Read a cost code preserving its TYPE. Numeric codes come back as numbers;
+// alphanumeric sub-codes (e.g. '11230-1' … '11230-7') come back as trimmed
+// strings. cellNum() coerces via Number(), so 'code-1' -> null: that silently
+// dropped every hyphenated sub-code when folding the Current Log into the Prior
+// Log, and those rows then no longer matched their B2A SUMIF-by-code line —
+// e.g. the whole "Expansion Costs (Base Construction Costs)" group ($5.28M on
+// Silsbee P1) fell out of the report tie-out. Only a truly blank cell is null.
+function cellCode(cell) {
+  if (!cell) return null;
+  let v = cell.value;
+  if (v && typeof v === 'object') v = ('result' in v && v.result != null) ? v.result : v.formula;
+  if (v == null) return null;
+  if (typeof v === 'number') return v;
+  const s = String(v).trim();
+  if (s === '') return null;
+  return /^-?\d+(?:\.\d+)?$/.test(s) ? Number(s) : s; // pure number -> Number; else keep string
+}
+
 // Capture the cell payloads we need to rewrite a row, preserving formulas.
 function readRowCells(ws, r) {
   const get = (col) => {
@@ -182,7 +200,7 @@ function readRowCells(ws, r) {
   };
   return {
     srcRow: r,
-    cat: get(COL.cat), code: cellNum(ws.getCell(r, COL.code)),
+    cat: get(COL.cat), code: cellCode(ws.getCell(r, COL.code)),
     bankcat: get(COL.bankcat), gl: get(COL.gl),
     name: cellStr(ws.getCell(r, COL.name)).trim(),
     vendor: cellStr(ws.getCell(r, COL.vendor)).trim(),
@@ -210,7 +228,7 @@ function currentRowsByCode(ws) {
     // "Echo Land Cost" placeholder with no amount/vendor) is counted by the prior
     // parser but silently dropped here, folding one row short (A3 row-count fail).
     if (amt == null && !vendor && !name) continue;
-    const code = cellNum(ws.getCell(r, COL.code));
+    const code = cellCode(ws.getCell(r, COL.code));
     const key = code == null ? '__none__' : String(code);
     if (!byCode.has(key)) byCode.set(key, []);
     byCode.get(key).push(readRowCells(ws, r));
@@ -854,7 +872,72 @@ async function rollForward(workbook, newCurrent, meta = {}) {
     if (!isNaN(_d.getTime()) && _b4 && _b4.value instanceof Date) _b4.value = _d;
   }
 
+  // Advance the free-text date headers on the B2A tab (Previous/Inception-to,
+  // this-period, To-Date/Incurred-to, As-of). Best-effort cosmetic; never block.
+  try { if (meta.asOfDate) advanceB2AHeaderDates(b2a, meta.asOfDate); } catch (e) { /* cosmetic */ }
+
   return { landmarks, devFee: devFeeInfo, contingency, contingencyTables };
+}
+
+// Advance the date-bearing TEXT headers on the Budget-to-Actual tab. Columns
+// such as "Previous Application / Inception to <date>", "Payment this period",
+// "Total Complete & Draw To Date / Incurred to <date>", and "As of <date>" are
+// free-text strings the template carries. The roll-forward previously moved only
+// the title date (B4/L1) and left these stale (still naming the prior period).
+// Rule: cells describing the CURRENT period (this period / to date / as of) get
+// the new as-of date; cells describing the PRIOR window (previous / inception-to)
+// get the period that WAS current (the prior period-end), inferred as the latest
+// date already written in a current-period header cell — so no extra input is
+// needed. Only string cells in the header band that contain an M/D/Y (slash)
+// date are touched; Date cells, formulas, ISO 'YYYY-MM-DD' strings (e.g. L1),
+// and dateless labels are left alone. Format-preserving (keeps zero-padding and
+// 2-vs-4-digit year of the date it replaces). Returns count of cells changed.
+function advanceB2AHeaderDates(b2a, asOfDate) {
+  if (!b2a || !asOfDate) return 0;
+  // Parse as-of as a LOCAL date. `new Date('2026-06-30')` is UTC midnight, so a
+  // machine behind UTC then reads getDate() as the 29th — an off-by-one that
+  // stamped headers "6/29" instead of "6/30". Build from Y-M-D parts locally.
+  let newAsOf;
+  if (asOfDate instanceof Date) newAsOf = asOfDate;
+  else {
+    const iso = String(asOfDate).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    newAsOf = iso ? new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])) : new Date(asOfDate);
+  }
+  if (isNaN(newAsOf.getTime())) return 0;
+  const DATE_RE = /(\d{1,2})\/(\d{1,2})\/(\d{2,4})/;               // slash-only: never matches ISO 'YYYY-MM-DD'
+  const parse = (s) => {
+    const m = s.match(DATE_RE); if (!m) return null;
+    let y = Number(m[3]); if (m[3].length === 2) y += 2000;
+    const d = new Date(y, Number(m[1]) - 1, Number(m[2]));
+    return isNaN(d.getTime()) ? null : d;
+  };
+  const fmtLike = (sample, d) => {                                // mirror padding + year width of the sample
+    const m = sample.match(DATE_RE);
+    const mm = String(d.getMonth() + 1), dd = String(d.getDate()), y = d.getFullYear();
+    const padM = m && m[1].length === 2, padD = m && m[2].length === 2, yr2 = m && m[3].length === 2;
+    return (padM ? mm.padStart(2, '0') : mm) + '/' + (padD ? dd.padStart(2, '0') : dd) + '/' + (yr2 ? String(y).slice(-2) : String(y));
+  };
+  const cells = [];
+  const R = Math.min(12, Math.max(b2a.rowCount || 0, b2a.actualRowCount || 0, 12));
+  const C = Math.min(30, Math.max(b2a.columnCount || 0, b2a.actualColumnCount || 0, 15));
+  for (let r = 1; r <= R; r++) for (let c = 1; c <= C; c++) {
+    const cell = b2a.getCell(r, c);
+    const v = cell.value;
+    if (typeof v !== 'string' || !DATE_RE.test(v)) continue;       // strings only; skips Date/formula/number cells
+    const low = v.toLowerCase();
+    cells.push({ cell, text: v, isPrev: /(previous|prior|inception)/.test(low), cur: parse(v) });
+  }
+  if (!cells.length) return 0;
+  let prevEnd = null;                                              // latest current-period date = prior period-end
+  for (const x of cells) if (!x.isPrev && x.cur && (!prevEnd || x.cur > prevEnd)) prevEnd = x.cur;
+  let changed = 0;
+  for (const x of cells) {
+    const target = x.isPrev ? (prevEnd || x.cur) : newAsOf;
+    if (!target) continue;
+    const next = x.text.replace(DATE_RE, fmtLike(x.text, target));
+    if (next !== x.text) { x.cell.value = next; changed++; }
+  }
+  return changed;
 }
 
 // Write the new period invoices into the Current Log, grouped by cost code with
