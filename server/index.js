@@ -5289,7 +5289,7 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
   // into a single "Project costs" line; all others keep their existing Dev Fee
   // layout. Configurable via REQ_DEVFEE_COLLAPSE_ENTITIES (comma-separated entity
   // ids); defaults to County Line Industrial Park (CLIP = entity 42).
-  const _dfCollapseIds = (process.env.REQ_DEVFEE_COLLAPSE_ENTITIES || '42,38').split(',').map(x => x.trim()).filter(Boolean);
+  const _dfCollapseIds = (process.env.REQ_DEVFEE_COLLAPSE_ENTITIES || '42,38,39').split(',').map(x => x.trim()).filter(Boolean);
   const _rfEid = String(parseInt(req.params.entity_id));
   meta.collapseDevFeeCosts = _dfCollapseIds.includes(_rfEid);
   // Same CLIP-style entities also fix the report-number header (update the

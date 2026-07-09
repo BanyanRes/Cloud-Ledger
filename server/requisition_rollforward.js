@@ -22,7 +22,7 @@
 // step (headless LibreOffice) and the reconciliation engine to verify the result.
 // ============================================================================
 
-const { cellNum, cellStr, cellFormula, COL, applyInvoiceCols, isDevFeeLabel } = require('./requisition_reconcile.js');
+const { cellNum, cellStr, cellFormula, COL, applyInvoiceCols, isDevFeeLabel, logDataStart } = require('./requisition_reconcile.js');
 // Convert a 1-based column index to its A1 letter (8 -> "H") so SUBTOTAL
 // ranges track the DETECTED amount column instead of a hard-coded letter
 // (templates without a GL column put Amount in H, not I).
@@ -71,10 +71,11 @@ function findSheet(workbook, canonicalName) {
 //   group = { code, name, subtotalName, rows: [{...cells}], }
 // rows preserve formula-vs-value (formula cells keep their formula string).
 function parseLogGroups(ws) {
+  const _ds = logDataStart(ws);
   const groups = [];
   let cur = null;
   const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
-  for (let r = 3; r <= last; r++) {
+  for (let r = _ds; r <= last; r++) {
     const amtCell = ws.getCell(r, COL.amount);
     const f = cellFormula(amtCell);
     const name = cellStr(ws.getCell(r, COL.name)).trim();
@@ -194,9 +195,10 @@ function readRowCells(ws, r) {
 // Classify current-period rows by cost code so they can be folded into the
 // matching prior group.
 function currentRowsByCode(ws) {
+  const _ds = logDataStart(ws);
   const byCode = new Map();
   const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
-  for (let r = 3; r <= last; r++) {
+  for (let r = _ds; r <= last; r++) {
     const amtCell = ws.getCell(r, COL.amount);
     const f = cellFormula(amtCell);
     if (f && /SUBTOTAL/i.test(f)) continue;
@@ -314,9 +316,10 @@ function alignCell(ws, r, col, horizontal) {
 // column's horizontal alignment is configurable (`codeAlign`, default 'right')
 // so the Prior log can center it.
 function rightAlignNumericColumns(ws, { codeAlign = 'right' } = {}) {
+  const _ds = logDataStart(ws);
   if (!ws) return;
   const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
-  for (let r = 3; r <= last; r++) {
+  for (let r = _ds; r <= last; r++) {
     for (const col of [COL.code, COL.gl, COL.amount]) {
       const v = ws.getCell(r, col).value;
       if (v === null || v === undefined || v === '') continue;
@@ -352,7 +355,7 @@ function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, 
 
   let priorGtRow = null;
   const pl = Math.max(priorWs.rowCount || 0, priorWs.actualRowCount || 0);
-  for (let r = 3; r <= pl; r++) {
+  for (let r = logDataStart(priorWs); r <= pl; r++) {
     const f = cellFormula(priorWs.getCell(r, COL.amount));
     if (f && /SUBTOTAL/i.test(f) && /grand total/i.test(cellStr(priorWs.getCell(r, COL.name)))) { priorGtRow = r; break; }
   }
@@ -364,7 +367,7 @@ function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, 
 
   // Seed for column D: prior-log total excluding every dev-fee line.
   let priorExDev = 0;
-  for (let r = 3; r <= pl; r++) {
+  for (let r = logDataStart(priorWs); r <= pl; r++) {
     const f = cellFormula(priorWs.getCell(r, COL.amount));
     if (f && /SUBTOTAL/i.test(f)) continue;
     const amt = cellNum(priorWs.getCell(r, COL.amount));
@@ -407,7 +410,7 @@ function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, 
     for (let rr = 19; rr <= 60; rr++) { const cf = cellFormula(devFeeWs.getCell('C' + rr)); if (cf && /^[+=]?\s*c18\s*$/i.test(cf)) { totalRow = rr; break; } }
     const ref = `'${devFeeWs.name}'!C${totalRow}`;
     const fee = devFeeInfo && Number.isFinite(devFeeInfo.amount) ? round2(devFeeInfo.amount) : null;
-    for (let r = 3; r <= cl; r++) {
+    for (let r = logDataStart(curWs); r <= cl; r++) {
       const f = cellFormula(curWs.getCell(r, COL.amount));
       if (f && /SUBTOTAL/i.test(f)) continue; // skip subtotal/grand-total rows
       if (String(cellNum(curWs.getCell(r, COL.code))) === String(devCode)) {
@@ -424,13 +427,14 @@ function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, 
 // deterministic each roll-forward. Note: the grand total is SUBTOTAL(9,...),
 // which still counts hidden rows, so totals are unaffected.
 function hideZeroAmountRows(ws) {
+  const _ds = logDataStart(ws);
   if (!ws) return;
   const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
   const sumRange = (a, b) => { let t = 0; for (let r = a; r <= b; r++) { const c = ws.getCell(r, COL.amount); const cf = cellFormula(c); if (cf && /SUBTOTAL/i.test(cf)) continue; const n = cellNum(c); if (n != null) t += n; } return t; };
   // Grand total row bounds the region where blank spacer rows get collapsed.
   let gtRow = last;
-  for (let r = 3; r <= last; r++) { const gf = cellFormula(ws.getCell(r, COL.amount)); if (gf && /SUBTOTAL/i.test(gf) && /grand total/i.test(cellStr(ws.getCell(r, COL.name)))) { gtRow = r; break; } }
-  for (let r = 3; r <= last; r++) {
+  for (let r = _ds; r <= last; r++) { const gf = cellFormula(ws.getCell(r, COL.amount)); if (gf && /SUBTOTAL/i.test(gf) && /grand total/i.test(cellStr(ws.getCell(r, COL.name)))) { gtRow = r; break; } }
+  for (let r = _ds; r <= last; r++) {
     const amtCell = ws.getCell(r, COL.amount);
     const f = cellFormula(amtCell);
     const name = cellStr(ws.getCell(r, COL.name)).trim();
@@ -456,14 +460,15 @@ function hideZeroAmountRows(ws) {
 }
 
 function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
+  const _ds = logDataStart(nextPriorWs);
   // Clear existing data region (keep header rows 1-2).
   const existingLast = Math.max(nextPriorWs.rowCount || 0, nextPriorWs.actualRowCount || 0);
-  for (let r = 3; r <= existingLast; r++) {
-    for (let c = 2; c <= 11; c++) nextPriorWs.getCell(r, c).value = null;
+  for (let r = _ds; r <= existingLast; r++) {
+    for (let c = 1; c <= 11; c++) nextPriorWs.getCell(r, c).value = null;
   }
 
   const landmarks = { groupSubtotalRow: {}, byLabel: {}, grandTotalRow: null };
-  let r = 3;
+  let r = _ds;
   let grandTotalName = null; // written LAST so it sits below every group
   for (const g of priorGroups) {
     const isGrand = /grand total/i.test(g.subtotalName || '');
@@ -536,9 +541,10 @@ function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
 // Find a data row in a sheet by a bill/name substring (used to re-point absolute
 // refs by label rather than by a tracked row number).
 function findRowByLabel(ws, needles) {
+  const _ds = logDataStart(ws);
   const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
   const wants = needles.map(n => n.toLowerCase());
-  for (let r = 3; r <= last; r++) {
+  for (let r = _ds; r <= last; r++) {
     const name = cellStr(ws.getCell(r, COL.name)).toLowerCase();
     const bill = cellStr(ws.getCell(r, COL.bill)).toLowerCase();
     const hay = name + ' | ' + bill;
@@ -565,6 +571,7 @@ function findRowByLabel(ws, needles) {
 // where `row` matches the shape replaceCurrentLog / writeRowCells expect. A null
 // return means there was no Dev Fee tab or no costs to base a fee on.
 async function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta, callClaude = null }) {
+  const _ds = logDataStart(priorCurWs);
   if (!devFeeWs) return null;
 
   // 1. Identify the dev-fee cost code from the prior workbook's Current Log dev
@@ -586,7 +593,7 @@ async function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta, callCl
     // that merely shares the "Development ... Fee" bank category — picking it
     // would mis-code the fee (wrong code, wrong name).
     let byBankcat = null;
-    for (let r = 3; r <= last; r++) {
+    for (let r = _ds; r <= last; r++) {
       const amtF = cellFormula(priorCurWs.getCell(r, COL.amount));
       if (amtF && /SUBTOTAL/i.test(amtF)) continue; // skip subtotal/total rows
       const nm = cellStr(priorCurWs.getCell(r, COL.name));
@@ -842,8 +849,9 @@ async function rollForward(workbook, newCurrent, meta = {}) {
 // Write the new period invoices into the Current Log, grouped by cost code with
 // SUBTOTAL rows and a Grand Total, mirroring the sheet's existing layout.
 function replaceCurrentLog(ws, rows, meta) {
+  const _ds = logDataStart(ws);
   const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
-  for (let r = 3; r <= last; r++) for (let c = 2; c <= 11; c++) ws.getCell(r, c).value = null;
+  for (let r = _ds; r <= last; r++) for (let c = 1; c <= 11; c++) ws.getCell(r, c).value = null;
 
   // group incoming rows by code, preserving first-seen order
   const order = [];
@@ -853,7 +861,7 @@ function replaceCurrentLog(ws, rows, meta) {
     if (!byCode.has(key)) { byCode.set(key, []); order.push(key); }
     byCode.get(key).push(row);
   }
-  let r = 3;
+  let r = _ds;
   for (const key of order) {
     const grp = byCode.get(key);
     const dataStart = r;

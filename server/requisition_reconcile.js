@@ -198,6 +198,25 @@ function detectInvoiceCols(ws) {
   return map;
 }
 
+// Find the header row of an invoice-log sheet (the row with the most recognizable
+// column headers within the first several rows) and return the row where DATA
+// begins (header + 1). Defaults to 3 (header on row 2), matching the standard
+// templates; Silsbee-style logs carry a title block + header lower down.
+function logDataStart(ws) {
+  if (!ws) return 3;
+  const HDR = [/bank\s*cost\s*cat/, /cost code name/, /cost code\s*#|cost code\s*(number|no)\b/, /cost category/, /vendor|payee/, /bill\s*(number|no|#)?/, /amount/, /requisition|req\s*(month|#|no)/, /invoice date/];
+  let bestRow = 2, bestHits = 0;
+  for (let r = 1; r <= 8; r++) {
+    let hits = 0;
+    for (let c = 1; c <= 16; c++) {
+      const t = cellStr(ws.getCell(r, c)).toLowerCase().replace(/\s+/g, ' ').trim();
+      if (t && HDR.some(re => re.test(t))) hits++;
+    }
+    if (hits > bestHits) { bestHits = hits; bestRow = r; }
+  }
+  return (bestHits >= 3 ? bestRow : 2) + 1;
+}
+
 // Detect + apply the layout of an invoice-log worksheet into the shared COL map.
 function applyInvoiceCols(ws) { const d = detectInvoiceCols(ws); Object.assign(COL, d); return d; }
 
@@ -208,6 +227,7 @@ function applyInvoiceCols(ws) { const d = detectInvoiceCols(ws); Object.assign(C
 //   total: sum of data-row amounts
 //   byCode: { code: sum }
 function readLog(ws) {
+  const _ds = logDataStart(ws);
   const rows = [];
   const subtotals = [];
   const byCode = {};
@@ -217,7 +237,7 @@ function readLog(ws) {
   // which truncates the scan. Use rowCount (max row index) so we reach the
   // Grand Total and the late groups (Dev Fee, etc.).
   const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
-  for (let r = 3; r <= last; r++) {
+  for (let r = _ds; r <= last; r++) {
     const amtCell = ws.getCell(r, COL.amount);
     const f = cellFormula(amtCell);
     if (f && /SUBTOTAL/i.test(f)) {
@@ -512,4 +532,4 @@ function reconcile(prev, next, opts = {}) {
   };
 }
 
-module.exports = { reconcile, readLog, cellNum, cellStr, cellFormula, COL, DEFAULT_COL, TOL, detectInvoiceCols, applyInvoiceCols, isDevFeeLabel };
+module.exports = { reconcile, readLog, cellNum, cellStr, cellFormula, COL, DEFAULT_COL, TOL, detectInvoiceCols, applyInvoiceCols, isDevFeeLabel, logDataStart };
