@@ -559,21 +559,29 @@ async function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta, callCl
   let template = null; // { cat, code, bankcat, gl, name, vendor }
   if (priorCurWs) {
     const last = Math.max(priorCurWs.rowCount || 0, priorCurWs.actualRowCount || 0);
+    const mkTemplate = (r) => ({
+      cat: priorCurWs.getCell(r, COL.cat).value,
+      code: cellNum(priorCurWs.getCell(r, COL.code)),
+      bankcat: priorCurWs.getCell(r, COL.bankcat).value,
+      gl: priorCurWs.getCell(r, COL.gl).value,
+      name: cellStr(priorCurWs.getCell(r, COL.name)).trim() || 'Development Fee',
+      vendor: cellStr(priorCurWs.getCell(r, COL.vendor)).trim() || 'Banyan Residential',
+    });
+    // Prefer the line whose NAME is a dev-fee label (the actual Development Fee
+    // line); only fall back to a bank-category match when no name matches. Some
+    // templates carry a non-fee line (e.g. "Travel - Other Development Costs")
+    // that merely shares the "Development ... Fee" bank category — picking it
+    // would mis-code the fee (wrong code, wrong name).
+    let byBankcat = null;
     for (let r = 3; r <= last; r++) {
-      const nm = cellStr(priorCurWs.getCell(r, COL.name)).toLowerCase();
-      const bank = cellStr(priorCurWs.getCell(r, COL.bankcat)).toLowerCase();
-      if (isDevFeeLabel(nm) || isDevFeeLabel(bank)) {
-        template = {
-          cat: priorCurWs.getCell(r, COL.cat).value,
-          code: cellNum(priorCurWs.getCell(r, COL.code)),
-          bankcat: priorCurWs.getCell(r, COL.bankcat).value,
-          gl: priorCurWs.getCell(r, COL.gl).value,
-          name: cellStr(priorCurWs.getCell(r, COL.name)).trim() || 'Development Fee',
-          vendor: cellStr(priorCurWs.getCell(r, COL.vendor)).trim() || 'Banyan Residential',
-        };
-        break;
-      }
+      const amtF = cellFormula(priorCurWs.getCell(r, COL.amount));
+      if (amtF && /SUBTOTAL/i.test(amtF)) continue; // skip subtotal/total rows
+      const nm = cellStr(priorCurWs.getCell(r, COL.name));
+      const bank = cellStr(priorCurWs.getCell(r, COL.bankcat));
+      if (isDevFeeLabel(nm)) { template = mkTemplate(r); break; }
+      if (byBankcat == null && isDevFeeLabel(bank)) byBankcat = r;
     }
+    if (!template && byBankcat != null) template = mkTemplate(byBankcat);
   }
   const devCode = template && template.code != null ? template.code : 12913;
 
