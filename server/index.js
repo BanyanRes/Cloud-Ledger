@@ -15,6 +15,7 @@ const turnkey = require('./turnkey');
 const requisition = require('./requisition');
 const { rollForward, findSheet: findReqSheet } = require('./requisition_rollforward');
 const { verifyRollforward } = require('./requisition_rollforward_verify');
+const { preserveExternalLinks } = require('./requisition_preserve');
 const { makeDevFeeClaudeCaller } = require('./requisition_devfee');
 const { saveRequisitionOutputs } = require('./requisition_workpaper_save');
 const ExcelJS = require('exceljs');
@@ -5335,7 +5336,12 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
     // user can see (and hand-correct) what didn't reconcile in the downloaded file.
     const forcedPastFailure = !verification.ok && force;
 
-    const outBuf = await workbook.xlsx.writeBuffer();
+    let outBuf = await workbook.xlsx.writeBuffer();
+    // ExcelJS drops external-link parts on write but leaves the '[n]' formula
+    // references, which makes Excel show a "we found a problem… recover?" repair
+    // prompt. Re-inject the external links so the workbook matches the source and
+    // opens cleanly. Best-effort: returns the unchanged buffer if anything fails.
+    outBuf = await preserveExternalLinks(req.file.buffer, Buffer.from(outBuf));
 
     // Persist this period's invoices now (roll-forward succeeded), stamped with
     // the new requisition number. Build the in-memory rows used for the packet.
