@@ -139,7 +139,67 @@ function cellFormula(cell) {
 // Column map for the invoice-log sheets (1-based, matching the SRN workbook):
 //   B(2)=Cost Category C(3)=Cost Code# D(4)=Bank Cost Cat E(5)=GL Coding
 //   F(6)=Cost Code Name G(7)=Vendor H(8)=Bill# I(9)=Amount J(10)=Req# K(11)=Inv Date
-const COL = { cat: 2, code: 3, bankcat: 4, gl: 5, name: 6, vendor: 7, bill: 8, amount: 9, req: 10, date: 11 };
+const DEFAULT_COL = { cat: 2, code: 3, bankcat: 4, gl: 5, name: 6, vendor: 7, bill: 8, amount: 9, req: 10, date: 11 };
+// Working column map. Mutable: applyInvoiceCols() overwrites these per workbook
+// from the detected header row so templates that differ from the SRN layout
+// (e.g. one with no "GL Coding" column, shifting Amount from col 9 to col 8)
+// are read correctly. Shared by reference across the engine/verify/devfee.
+const COL = { ...DEFAULT_COL };
+
+// Recognize a development/management-fee label in any of its common spellings
+// ("Development Fee", "Development Management Fee", "Dev Fee", "Management Fee").
+const DEVFEE_RE = /dev(?:elopment)?\s*(?:mgmt|management)?\s*fee|management fee/i;
+function isDevFeeLabel(s) { return DEVFEE_RE.test(String(s == null ? '' : s)); }
+
+// Detect the invoice-log column layout from the header row instead of assuming
+// fixed positions. Scans the first rows for a header row and maps each field by
+// its header text; falls back to DEFAULT_COL for any field it can't find, and
+// parks an unfound field on an unused column when its default slot is already
+// taken (so a missing "GL" column never collides with the real "Cost Code Name").
+function detectInvoiceCols(ws) {
+  const map = { ...DEFAULT_COL };
+  if (!ws) return map;
+  const rules = [
+    ['bankcat', t => /bank\s*cost\s*cat/.test(t)],
+    ['name',    t => /cost code name/.test(t)],
+    ['code',    t => /cost code\s*#|cost code\s*(number|no)\b|^cost code$/.test(t)],
+    ['cat',     t => /cost category/.test(t)],
+    ['gl',      t => /gl coding|gl account|^g\/?l$|^gl\b/.test(t)],
+    ['vendor',  t => /vendor|payee/.test(t)],
+    ['bill',    t => /bill\s*(number|no|#)?|invoice\s*(number|no|#)/.test(t)],
+    ['amount',  t => /amount/.test(t)],
+    ['req',     t => /requisition|req\s*(month|#|no)/.test(t)],
+    ['date',    t => /invoice date|^date$|date$/.test(t)],
+  ];
+  let bestAssigned = null, bestHits = 0;
+  for (let r = 1; r <= 8; r++) {
+    const assigned = {}; let hits = 0;
+    for (let c = 1; c <= 16; c++) {
+      const t = cellStr(ws.getCell(r, c)).toLowerCase().replace(/\s+/g, ' ').trim();
+      if (!t) continue;
+      for (const [field, test] of rules) {
+        if (assigned[field] != null) continue;
+        if (test(t)) { assigned[field] = c; hits++; break; }
+      }
+    }
+    if (hits > bestHits) { bestHits = hits; bestAssigned = assigned; }
+  }
+  // Only override when we found a convincing header row that includes the
+  // critical Amount column; otherwise keep the default map untouched.
+  if (!bestAssigned || bestHits < 4 || bestAssigned.amount == null) return map;
+  Object.assign(map, bestAssigned);
+  const used = new Set(Object.values(bestAssigned));
+  for (const field of Object.keys(DEFAULT_COL)) {
+    if (bestAssigned[field] != null) continue;      // detected: keep
+    const def = DEFAULT_COL[field];
+    if (!used.has(def)) { map[field] = def; used.add(def); }        // default slot free
+    else { let g = 25; while (used.has(g)) g++; map[field] = g; used.add(g); } // park on unused col
+  }
+  return map;
+}
+
+// Detect + apply the layout of an invoice-log worksheet into the shared COL map.
+function applyInvoiceCols(ws) { const d = detectInvoiceCols(ws); Object.assign(COL, d); return d; }
 
 // ----- log reader -----------------------------------------------------------
 // Walk an invoice-log worksheet and return:
@@ -425,4 +485,4 @@ function reconcile(prev, next, opts = {}) {
   };
 }
 
-module.exports = { reconcile, readLog, cellNum, cellStr, cellFormula, COL, TOL };
+module.exports = { reconcile, readLog, cellNum, cellStr, cellFormula, COL, DEFAULT_COL, TOL, detectInvoiceCols, applyInvoiceCols, isDevFeeLabel };

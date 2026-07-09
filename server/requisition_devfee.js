@@ -28,7 +28,7 @@
 // applyDevFeeSpec(spec, base) => rounded fee number.
 // ============================================================================
 
-const { cellNum, cellStr, cellFormula } = require('./requisition_reconcile.js');
+const { cellNum, cellStr, cellFormula, isDevFeeLabel } = require('./requisition_reconcile.js');
 
 // Apply a learned spec to a base amount. Central so parse + Claude + validation
 // all compute identically.
@@ -60,7 +60,7 @@ function parseDevFeeSpec(devFeeWs) {
   const scan = [];
   const last = Math.max(devFeeWs.rowCount || 0, devFeeWs.actualRowCount || 0, 30);
   for (let r = 1; r <= last; r++) {
-    for (const col of ['E', 'F', 'G']) {
+    for (const col of ['B', 'C', 'D', 'E', 'F', 'G']) {
       const f = cellFormula(devFeeWs.getCell(col + r));
       if (f) scan.push({ addr: col + r, f });
     }
@@ -109,7 +109,7 @@ function observePriorBaseFee(priorCurWs, devCode, COL) {
     const nm = cellStr(priorCurWs.getCell(r, COL.name)).toLowerCase();
     const bank = cellStr(priorCurWs.getCell(r, COL.bankcat)).toLowerCase();
     const code = cellNum(priorCurWs.getCell(r, COL.code));
-    const isDevFee = nm.includes('development fee') || bank.includes('development fee') ||
+    const isDevFee = isDevFeeLabel(nm) || isDevFeeLabel(bank) ||
       (devCode != null && String(code) === String(devCode));
     if (isDevFee) { fee = (fee || 0) + amt; }
     else { base += amt; }

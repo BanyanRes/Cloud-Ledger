@@ -22,7 +22,7 @@
 // step (headless LibreOffice) and the reconciliation engine to verify the result.
 // ============================================================================
 
-const { cellNum, cellStr, cellFormula, COL } = require('./requisition_reconcile.js');
+const { cellNum, cellStr, cellFormula, COL, applyInvoiceCols, isDevFeeLabel } = require('./requisition_reconcile.js');
 const { learnDevFeeSpec, applyDevFeeSpec } = require('./requisition_devfee.js');
 
 // Resolve a worksheet by name tolerantly: exact match first, then a
@@ -433,7 +433,7 @@ async function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta, callCl
     for (let r = 3; r <= last; r++) {
       const nm = cellStr(priorCurWs.getCell(r, COL.name)).toLowerCase();
       const bank = cellStr(priorCurWs.getCell(r, COL.bankcat)).toLowerCase();
-      if (nm.includes('development fee') || bank.includes('development fee')) {
+      if (isDevFeeLabel(nm) || isDevFeeLabel(bank)) {
         template = {
           cat: priorCurWs.getCell(r, COL.cat).value,
           code: cellNum(priorCurWs.getCell(r, COL.code)),
@@ -562,6 +562,12 @@ async function rollForward(workbook, newCurrent, meta = {}) {
     err.userFacing = true;
     throw err;
   }
+
+  // 0. Detect this workbook's invoice-log column layout from the header row
+  //    and apply it to the shared COL map (some templates omit the GL column,
+  //    shifting Amount from col 9 to col 8). Covers this roll-forward plus the
+  //    reconciliation + dev-fee steps that read the same COL in this request.
+  applyInvoiceCols(curWs);
 
   // 1. Capture prior structure + current rows BEFORE mutating anything.
   const priorGroups = parseLogGroups(priorWs);
