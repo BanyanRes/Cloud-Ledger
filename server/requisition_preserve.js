@@ -79,7 +79,22 @@ async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
     }
 
     if (changed) out.file('xl/workbook.xml', wb);
-    return changed ? await out.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }) : outBuf;
+
+    // (3) Strip bare directory entries. A proper OOXML/OPC package (like the one
+    //     Excel writes) contains only file parts, never folder entries. JSZip
+    //     re-emits a folder entry for every directory when it generates the zip,
+    //     and Excel treats those undeclared zero-length "parts" as corruption,
+    //     showing the "we found a problem... recover?" repair prompt. Remove any
+    //     folder objects so the regenerated package is clean. Done last, after all
+    //     out.file() calls, so nothing re-creates them.
+    let hadDirs = false;
+    for (const n of Object.keys(out.files)) {
+      if (out.files[n].dir) { delete out.files[n]; hadDirs = true; }
+    }
+
+    return (changed || hadDirs)
+      ? await out.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' })
+      : outBuf;
   } catch (e) {
     return outBuf; // never block a download over finalization
   }
