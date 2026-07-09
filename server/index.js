@@ -5298,7 +5298,7 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
   // Per-entity development-fee payee (the dev-fee line vendor). Override the map
   // via REQ_DEVFEE_PAYEES as JSON {"<entityId>":"<payee>"}. Entities not listed
   // fall back to the vendor cloned from the prior dev-fee line.
-  const _payeeMap = (() => { try { return Object.assign({ '42': 'County Line Rail Interest', '38': 'County Line Rail Interest', '39': 'CLR Silsbee Property Owner' }, JSON.parse(process.env.REQ_DEVFEE_PAYEES || '{}')); } catch (e) { return { '42': 'County Line Rail Interest', '38': 'County Line Rail Interest', '39': 'CLR Silsbee Property Owner' }; } })();
+  const _payeeMap = (() => { try { return Object.assign({ '42': 'County Line Rail Interest', '38': 'County Line Rail Interest', '39': 'County Line Rail Interest' }, JSON.parse(process.env.REQ_DEVFEE_PAYEES || '{}')); } catch (e) { return { '42': 'County Line Rail Interest', '38': 'County Line Rail Interest', '39': 'County Line Rail Interest' }; } })();
   if (meta.collapseDevFeeCosts && _payeeMap[_rfEid]) meta.devFeePayee = _payeeMap[_rfEid];
 
   // Force flag: when set, a FAILED required reconciliation no longer blocks the

@@ -356,7 +356,7 @@ function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, 
     const f = cellFormula(priorWs.getCell(r, COL.amount));
     if (f && /SUBTOTAL/i.test(f) && /grand total/i.test(cellStr(priorWs.getCell(r, COL.name)))) { priorGtRow = r; break; }
   }
-  if (priorGtRow == null) return;
+  // (a missing Grand Total row is OK — column D falls back to a computed value)
 
   const round2 = (n) => Math.round(n * 100) / 100;
   const devCode = devFeeInfo && devFeeInfo.code != null ? devFeeInfo.code : null;
@@ -376,8 +376,9 @@ function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, 
   }
   priorExDev = round2(priorExDev);
 
-  const priorGT = `'Prior Invoice Log'!${AMT}${priorGtRow}`;
-  const priorDev = devCode != null ? `-SUMIF('Prior Invoice Log'!$${CODE}:$${CODE},${devCode},'Prior Invoice Log'!$${AMT}:$${AMT})` : '';
+  const pName = priorWs.name; // phase-suffixed on Silsbee (e.g. 'Prior Invoice Log P2')
+  const priorGT = `'${pName}'!${AMT}${priorGtRow}`;
+  const priorDev = devCode != null ? `-SUMIF('${pName}'!$${CODE}:$${CODE},${devCode},'${pName}'!$${AMT}:$${AMT})` : '';
 
   // C = this month's project costs (ex dev fee). Written as a VALUE (the engine
   //     computed it from the entered invoices) so it does NOT reference the
@@ -385,7 +386,9 @@ function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, 
   //     non-circular (the fee ties back to these costs).
   devFeeWs.getCell(hardRow, 3).value = round2(base);
   // D = costs through the prior month (Prior Log total, excluding prior dev fees).
-  devFeeWs.getCell(hardRow, 4).value = { formula: `${priorGT}${priorDev}`, result: priorExDev };
+  devFeeWs.getCell(hardRow, 4).value = (priorGtRow != null)
+    ? { formula: `${priorGT}${priorDev}`, result: priorExDev }
+    : priorExDev; // no Grand Total to reference (Silsbee) -> computed value
   // B = incurred to date = this month + prior.
   devFeeWs.getCell(hardRow, 2).value = { formula: `C${hardRow}+D${hardRow}`, result: round2(base + priorExDev) };
 
