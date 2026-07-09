@@ -725,7 +725,7 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   //     sourced from the invoice-log totals, so this month's costs populate
   //     without needing each invoice tagged Hard vs Soft. Best-effort.
   try {
-    updateDevFeeProjectCosts({ devFeeWs: devFee, priorWs, curWs, curGrandTotalRow: curInfo && curInfo.grandTotalRow, devFeeInfo });
+    if (meta.collapseDevFeeCosts) updateDevFeeProjectCosts({ devFeeWs: devFee, priorWs, curWs, curGrandTotalRow: curInfo && curInfo.grandTotalRow, devFeeInfo });
   } catch (e) { /* never block the roll-forward on the Dev Fee tab cosmetic */ }
 
   // 5. Update titles (date / requisition number).
