@@ -499,6 +499,70 @@ function tieDevFeeDueLine({ devFeeWs, b2aWs, priorWs, devFeeInfo, payeeLabel }) 
   devFeeWs.getCell(dueRow, 4).value = { formula: `'${bName}'!${PL}${devRow}`, result: round2(priorDev) };
 }
 
+// Rebuild the Dev Fee tab as a minimal, single-column statement (Jimmy's
+// simplified layout): drop the "Incurred to date" and "prior month" columns for
+// both project costs and dev fees, leaving only the current period —
+//   A4  <as-of date>
+//   B6  Project costs   B7 Incurred - Month of   B8 =A4
+//   A9  Project costs
+//   A10 Project costs         B10 <current-month project costs, ex dev fee>
+//   A13 Development fees:     B13 Current Month Dev Fee
+//   A14 Due to <payee>        B14 =B10*<rate>   (the calculated dev fee)
+// The Current Invoice Log's dev-fee line is repointed at B14. Gated to collapse
+// entities; best-effort (wrapped by caller).
+function buildSimpleDevFeeTab({ devFeeWs, curWs, devFeeInfo, asOfDate, payeeLabel }) {
+  if (!devFeeWs || !devFeeInfo) return;
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const base = Number.isFinite(devFeeInfo.base) ? devFeeInfo.base : 0;
+  const fee = Number.isFinite(devFeeInfo.amount) ? devFeeInfo.amount : null;
+  const spec = devFeeInfo.spec || {};
+  let rate = Number.isFinite(spec.rate) ? spec.rate : (base > 0 && fee != null ? fee / base : 0.04);
+  if (spec.halve) rate = rate / 2;
+  rate = Math.round(rate * 1e6) / 1e6;                 // trim float noise -> 0.04, not 0.0400001
+
+  // as-of as a LOCAL date (avoid the UTC off-by-one that stamps the prior day).
+  let asOf = null;
+  if (asOfDate instanceof Date) asOf = asOfDate;
+  else if (asOfDate) { const m = String(asOfDate).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); asOf = m ? new Date(+m[1], +m[2] - 1, +m[3]) : new Date(asOfDate); }
+  if (asOf && isNaN(asOf.getTime())) asOf = null;
+
+  // Clear the old multi-column body (keep the A2/A3 title); strip stray borders
+  // and fills on the removed columns (C+) so the sheet reads clean.
+  for (let r = 4; r <= 40; r++) {
+    for (let c = 1; c <= 8; c++) {
+      const cell = devFeeWs.getCell(r, c);
+      cell.value = null;
+      if (c >= 3) { cell.border = {}; cell.fill = { type: 'pattern', pattern: 'none' }; }
+    }
+  }
+  // Write the simplified layout.
+  if (asOf) devFeeWs.getCell('A4').value = asOf;
+  devFeeWs.getCell('B6').value = 'Project costs';
+  devFeeWs.getCell('B7').value = 'Incurred - Month of';
+  devFeeWs.getCell('B8').value = asOf ? { formula: 'A4', result: asOf } : { formula: 'A4' };
+  devFeeWs.getCell('A9').value = 'Project costs';
+  devFeeWs.getCell('A10').value = 'Project costs';
+  devFeeWs.getCell('B10').value = round2(base);
+  devFeeWs.getCell('A13').value = 'Development fees:';
+  devFeeWs.getCell('B13').value = 'Current Month Dev Fee';
+  if (payeeLabel) devFeeWs.getCell('A14').value = payeeLabel;
+  devFeeWs.getCell('B14').value = { formula: `B10*${rate}`, result: fee != null ? round2(fee) : round2(base * rate) };
+
+  // Repoint the Current Invoice Log's dev-fee line at the new fee cell (B14).
+  if (curWs && devFeeInfo.code != null) {
+    const ref = `'${devFeeWs.name}'!B14`;
+    const cl = Math.max(curWs.rowCount || 0, curWs.actualRowCount || 0);
+    for (let r = logDataStart(curWs); r <= cl; r++) {
+      const f = cellFormula(curWs.getCell(r, COL.amount));
+      if (f && /SUBTOTAL/i.test(f)) continue;
+      if (String(cellNum(curWs.getCell(r, COL.code))) === String(devFeeInfo.code)) {
+        curWs.getCell(r, COL.amount).value = fee != null ? { formula: ref, result: round2(fee) } : { formula: ref };
+        break;
+      }
+    }
+  }
+}
+
 // Hide zero/blank-amount line items on an invoice log to declutter the many $0
 // placeholder rows. Subtotal/grand-total rows and blank spacer rows are left
 // visible. Non-zero data rows are explicitly un-hidden so the state is
@@ -894,13 +958,10 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   //     sourced from the invoice-log totals, so this month's costs populate
   //     without needing each invoice tagged Hard vs Soft. Best-effort.
   try {
-    if (meta.collapseDevFeeCosts) updateDevFeeProjectCosts({ devFeeWs: devFee, priorWs, curWs, curGrandTotalRow: curInfo && curInfo.grandTotalRow, devFeeInfo });
-    // Tie the "Due to <payee>" line to the B2A dev-fee row (to-date -> B, prior -> D)
-    // and relabel the payee. County Line Rail Interest abbreviates to CLRI.
-    if (meta.devFeePayee) {
-      const payee = String(meta.devFeePayee);
-      const label = /county\s*line\s*rail\s*interest/i.test(payee) ? 'Due to CLRI' : ('Due to ' + payee);
-      tieDevFeeDueLine({ devFeeWs: devFee, b2aWs: b2a, priorWs, devFeeInfo, payeeLabel: label });
+    if (meta.collapseDevFeeCosts) {
+      const payee = meta.devFeePayee ? String(meta.devFeePayee) : '';
+      const label = /county\s*line\s*rail\s*interest/i.test(payee) ? 'Due to CLRI' : (payee ? 'Due to ' + payee : null);
+      buildSimpleDevFeeTab({ devFeeWs: devFee, curWs, devFeeInfo, asOfDate: meta.asOfDate, payeeLabel: label });
     }
   } catch (e) { /* never block the roll-forward on the Dev Fee tab cosmetic */ }
 
