@@ -26,6 +26,11 @@ async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
     let changed = false;
     let wb = await out.file('xl/workbook.xml').async('string');
 
+    // ExcelJS mangles full-column print-area/title refs ($A:$G) into $ANaN:$GNaN
+    // (NaN where a row number would go), which makes Excel show a repair prompt.
+    // Strip the bogus NaN so the reference is valid again.
+    if (/[A-Z]NaN/.test(wb)) { wb = wb.replace(/([A-Z])NaN/g, '$1'); changed = true; }
+
     // (1) Force a full recalculation when the workbook opens.
     if (/<calcPr\b[^>]*\/>/.test(wb)) {
       if (!/fullCalcOnLoad=/.test(wb)) {
