@@ -5178,6 +5178,43 @@ function buildRollforwardFilename(originalName, reqNumber, asOfDate) {
   return base + '.xlsx';
 }
 
+// Translate ExcelJS's cryptic shared-formula write error into a clear, actionable
+// message. ExcelJS throws e.g. "Shared Formula master must exist above and or left
+// of clone for cell F14" when a follower cell points to a master formula that is
+// missing or positioned after it — which a roll-forward can trip when a total or
+// subtotal row shifts. We locate the exact tab + master cell so the user knows
+// precisely what to fix. Returns null when the error is something else.
+function explainSharedFormulaWriteError(workbook, rawMsg) {
+  const m = /Shared Formula master must exist[^]*?for cell ([A-Z]+\d+)/i.exec(rawMsg || '');
+  if (!m) return null;
+  const ref = m[1];
+  const parse = (a) => { const q = /^([A-Z]+)(\d+)$/.exec(a || ''); if (!q) return null; const col = q[1].split('').reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0); return { col, row: parseInt(q[2], 10) }; };
+  const rp = parse(ref) || { col: 0, row: 0 };
+  let tab = null, master = null;
+  try {
+    for (const ws of (workbook ? workbook.worksheets : [])) {
+      let cell; try { cell = ws.getCell(ref); } catch (e) { continue; }
+      const mdl = cell && cell.model;
+      if (!mdl || !mdl.sharedFormula) continue;
+      const mp = parse(mdl.sharedFormula);
+      const positionedOK = mp && (mp.row < rp.row || (mp.row === rp.row && mp.col < rp.col));
+      let masterOk = false;
+      try { const mm = ws.getCell(mdl.sharedFormula).model; masterOk = !!(mm && mm.shareType === 'shared'); } catch (e) {}
+      if (!positionedOK || !masterOk) { tab = ws.name; master = mdl.sharedFormula; break; }
+    }
+  } catch (e) {}
+  const at = tab ? ` on the "${tab}" tab` : '';
+  const expected = master ? ` (its master formula should sit at ${master})` : '';
+  const goTab = tab ? ` go to the "${tab}" tab,` : '';
+  const message =
+    `Roll-forward couldn't save the workbook because of a broken shared formula at cell ${ref}${at}. ` +
+    `Excel stores a run of identical formulas as a group: one "master" cell holds the real formula and the cells below it just point to that master${expected}. ` +
+    `While rolling the report forward, that master ended up missing or moved below/right of ${ref} — usually because a total or subtotal row was inserted, deleted, or reordered — which Excel's file format doesn't allow, so the save was rejected. ` +
+    `To fix it: open the source requisition workbook,${goTab} click cell ${ref}, re-enter its formula (or copy the formula down from the row just above so the group has a valid master again), save, and re-run the roll-forward.`;
+  return { message, cell: ref, sheet: tab, master };
+}
+
+
 // ─── R4: Roll-forward engine route ───────────────────────────────────────────
 // Produce Req#N+1 from an uploaded Req#N workbook + the new period's invoices.
 // The engine writes formulas but does not evaluate them; production has no
@@ -5422,6 +5459,8 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
     // not a server fault — return 400 with its message so the UI shows the actual
     // cause instead of a generic 500.
     if (e && e.userFacing) return res.status(400).json({ error: e.message });
+    const sf = explainSharedFormulaWriteError(workbook, e && e.message);
+    if (sf) return res.status(400).json({ error: sf.message, code: 'SHARED_FORMULA', cell: sf.cell, sheet: sf.sheet });
     res.status(500).json({ error: 'Roll-forward error: ' + e.message });
   }
 });
