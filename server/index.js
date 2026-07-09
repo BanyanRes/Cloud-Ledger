@@ -5294,6 +5294,8 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
   // Same CLIP-style entities also fix the report-number header (update the
   // existing "Requisition Report #N" line in place instead of adding a duplicate).
   meta.fixReportNumberHeader = meta.collapseDevFeeCosts;
+  // CLIP-style entities pay the development fee to a specific payee (env-overridable).
+  if (meta.collapseDevFeeCosts) meta.devFeePayee = process.env.REQ_DEVFEE_PAYEE || 'County Line Rail Interest';
 
   // Force flag: when set, a FAILED required reconciliation no longer blocks the
   // download. The roll-forward still runs and is verified, but instead of a 422
@@ -5435,7 +5437,9 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
     // Auto-save the workbook + a merged invoice packet into the entity's
     // Workpapers under "<year>/Requisition Reports/<Month year>" (best-effort:
     // a save failure is logged but never blocks the user's download).
-    if (REQ_AUTOSAVE_WORKPAPERS) try {
+    // Always build the invoice packet (so it can be downloaded); only auto-save
+    // the WORKBOOK into the Workpapers tree when the flag is on (saveWorkbook).
+    try {
       const entRow = db.prepare('SELECT name, display_id FROM entities WHERE id = ?').get(eidInt) || {};
       const packetPrefix = (entRow.display_id && entRow.display_id.trim()) || entRow.name || '';
       const saved = await saveRequisitionOutputs({
@@ -5445,6 +5449,7 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
         devFee: rfResult && rfResult.devFee && !rfResult.devFee.error ? rfResult.devFee : null,
         who: (req.user && (req.user.name || req.user.email)) || 'system',
         packetPrefix, workbookFilename: fname,
+        saveWorkbook: REQ_AUTOSAVE_WORKPAPERS,
       });
       if (saved.errors && saved.errors.length) console.error('requisition workpaper save:', saved.errors.join('; '));
       res.setHeader('X-Workpaper-Folder', saved.folder || '');

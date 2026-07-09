@@ -648,7 +648,7 @@ async function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta, callCl
       bankcat: t.bankcat != null ? t.bankcat : 'Development Fee',
       gl: t.gl != null ? t.gl : devCode,
       name: t.name || 'Development Fee',
-      vendor: t.vendor || 'County Line Rail Interest',
+      vendor: (meta && meta.devFeePayee) || t.vendor || 'County Line Rail Interest',
       bill: billLabel,
       amount: fee,
       req: meta && meta.reqNumber ? 'Req#' + meta.reqNumber : undefined,

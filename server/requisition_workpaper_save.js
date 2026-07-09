@@ -241,7 +241,7 @@ function addOutline(doc, marks) {
 // Main entry. Saves the workbook and (if any invoices) the merged packet into
 // the period folder. Best-effort: never throws — returns a result summary so the
 // caller can log it without risking the user's download.
-async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfDate, workbookBuffer, invoices, devFee, who, packetPrefix, workbookFilename }) {
+async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfDate, workbookBuffer, invoices, devFee, who, packetPrefix, workbookFilename, saveWorkbook = true }) {
   const result = { folder: null, workbook: null, packet: null, errors: [] };
   try {
     const folderPath = requisitionFolderPath(asOfDate);
@@ -255,7 +255,7 @@ async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfD
     // back to the bare label if no name was supplied.
     const workbookName = (workbookFilename && String(workbookFilename).trim()) || `${reqLabel} Report.xlsx`;
 
-    if (workbookBuffer && workbookBuffer.length) {
+    if (saveWorkbook !== false && workbookBuffer && workbookBuffer.length) {
       try {
         result.workbook = saveBufferToWorkpapers(
           db, workpapersDir, eid, folderPath,
