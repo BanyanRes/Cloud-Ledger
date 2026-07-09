@@ -228,7 +228,7 @@ function makeDevFeeClaudeCaller({ apiKey = process.env.ANTHROPIC_API_KEY, model 
 // Returns { spec, prior, validation, needsReview, source } where spec may be
 // null (couldn't be learned or didn't validate). The caller decides whether to
 // write a fee (spec present, !needsReview) or leave it for manual entry.
-async function learnDevFeeSpec({ devFeeWs, priorCurWs, devCode, COL, callClaude = null }) {
+async function learnDevFeeSpec({ devFeeWs, priorCurWs, devCode, COL, callClaude = null, trustParsed = false }) {
   const prior = observePriorBaseFee(priorCurWs, devCode, COL);
 
   // Stage 1: deterministic parse.
@@ -238,7 +238,10 @@ async function learnDevFeeSpec({ devFeeWs, priorCurWs, devCode, COL, callClaude 
     // If we have a prior fee to check against and it reconciles, trust it. If we
     // have no prior fee to check (first-ever dev fee), accept the parsed spec but
     // flag it lightly via source. If it FAILS validation, fall through to Claude.
-    if (v.ok || prior == null || prior.fee == null) {
+    if (v.ok || prior == null || prior.fee == null || trustParsed) {
+      // trustParsed: for collapse entities the base is redefined as this period's
+      // new-invoice total x the parsed rate, so the prior-fee reproduction gate
+      // (which assumes the prior fee used the same base) does not apply.
       return { spec: parsed, prior, validation: v, needsReview: false, source: parsed.source };
     }
   }

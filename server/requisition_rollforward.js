@@ -47,15 +47,21 @@ const SHEET_ALIASES = {
 };
 function findSheet(workbook, canonicalName) {
   const norm = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/\s+/g, ' ');
+  // Strip a trailing phase suffix (" P2", "-P1", " Phase 2") so Silsbee-style
+  // templates, which tag every tab with its phase, still resolve to the canonical
+  // name. Requires a separator before the token so mid-word "p" (e.g. "group 2")
+  // is not affected.
+  const stripPhase = (s) => s.replace(/[\s-]+(?:p|phase)\s*\d+$/i, '').trim();
   const want = norm(canonicalName);
   // 1. exact
   let ws = workbook.getWorksheet(canonicalName);
   if (ws) return ws;
-  // 2. normalized exact + 3. aliases, scanning every sheet once
+  // 2. normalized exact + 3. aliases (also with the phase suffix removed)
   const aliases = SHEET_ALIASES[want] || [];
   for (const sheet of workbook.worksheets) {
     const n = norm(sheet.name);
-    if (n === want || aliases.includes(n)) return sheet;
+    const nb = stripPhase(n);
+    if (n === want || aliases.includes(n) || nb === want || aliases.includes(nb)) return sheet;
   }
   return undefined;
 }
@@ -392,7 +398,11 @@ function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, 
   // the computed fee for display before Excel recalculates.
   if (devCode != null) {
     const cl = Math.max(curWs.rowCount || 0, curWs.actualRowCount || 0);
-    const ref = `'${devFeeWs.name}'!C30`;
+    // Locate the "Current Month Dev Fee" total cell — a column-C cell that
+    // restates C18 (C30 on CLIP/Buna, C25 on Silsbee); fall back to C18 itself.
+    let totalRow = 18;
+    for (let rr = 19; rr <= 60; rr++) { const cf = cellFormula(devFeeWs.getCell('C' + rr)); if (cf && /^[+=]?\s*c18\s*$/i.test(cf)) { totalRow = rr; break; } }
+    const ref = `'${devFeeWs.name}'!C${totalRow}`;
     const fee = devFeeInfo && Number.isFinite(devFeeInfo.amount) ? round2(devFeeInfo.amount) : null;
     for (let r = 3; r <= cl; r++) {
       const f = cellFormula(curWs.getCell(r, COL.amount));
@@ -598,7 +608,7 @@ async function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta, callCl
   // 3. Learn the project's dev-fee method from the prior Dev Fee tab: parse the
   //    formulas, fall back to Claude if ambiguous, and back-validate against the
   //    prior period's observed base→fee. Whatever we learn, WE compute the fee.
-  const learned = await learnDevFeeSpec({ devFeeWs, priorCurWs, devCode, COL, callClaude });
+  const learned = await learnDevFeeSpec({ devFeeWs, priorCurWs, devCode, COL, callClaude, trustParsed: !!(meta && meta.collapseDevFeeCosts) });
 
   const round2 = (n) => Math.round(n * 100) / 100;
   const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
@@ -811,8 +821,13 @@ async function rollForward(workbook, newCurrent, meta = {}) {
       for (let r = 1; r <= 8 && !hdrCell; r++) for (let c = 1; c <= 6; c++) {
         if (/requi\w*\s*report\s*#/i.test(cellStr(b2a.getCell(r, c)))) { hdrCell = b2a.getCell(r, c); break; }
       }
-      if (hdrCell) hdrCell.value = 'Requisition Report #' + meta.reqNumber;
-      else if (b2a.getCell('B4')) b2a.getCell('B4').value = 'Requisition Report #' + meta.reqNumber;
+      if (hdrCell) {
+        // Replace only the number after '#', preserving any suffix like ' (Phase 2)'.
+        const curTitle = cellStr(hdrCell).trim();
+        hdrCell.value = /#\s*\d+/.test(curTitle) ? curTitle.replace(/#\s*\d+/, '#' + meta.reqNumber) : ('Requisition Report #' + meta.reqNumber);
+      } else if (b2a.getCell('B4')) {
+        b2a.getCell('B4').value = 'Requisition Report #' + meta.reqNumber;
+      }
     } else if (b2a.getCell('B4')) {
       b2a.getCell('B4').value = 'Requistion Report # ' + meta.reqNumber;
     }

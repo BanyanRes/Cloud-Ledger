@@ -5290,12 +5290,16 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
   // layout. Configurable via REQ_DEVFEE_COLLAPSE_ENTITIES (comma-separated entity
   // ids); defaults to County Line Industrial Park (CLIP = entity 42).
   const _dfCollapseIds = (process.env.REQ_DEVFEE_COLLAPSE_ENTITIES || '42,38').split(',').map(x => x.trim()).filter(Boolean);
-  meta.collapseDevFeeCosts = _dfCollapseIds.includes(String(parseInt(req.params.entity_id)));
+  const _rfEid = String(parseInt(req.params.entity_id));
+  meta.collapseDevFeeCosts = _dfCollapseIds.includes(_rfEid);
   // Same CLIP-style entities also fix the report-number header (update the
   // existing "Requisition Report #N" line in place instead of adding a duplicate).
   meta.fixReportNumberHeader = meta.collapseDevFeeCosts;
-  // CLIP-style entities pay the development fee to a specific payee (env-overridable).
-  if (meta.collapseDevFeeCosts) meta.devFeePayee = process.env.REQ_DEVFEE_PAYEE || 'County Line Rail Interest';
+  // Per-entity development-fee payee (the dev-fee line vendor). Override the map
+  // via REQ_DEVFEE_PAYEES as JSON {"<entityId>":"<payee>"}. Entities not listed
+  // fall back to the vendor cloned from the prior dev-fee line.
+  const _payeeMap = (() => { try { return Object.assign({ '42': 'County Line Rail Interest', '38': 'County Line Rail Interest', '39': 'CLR Silsbee Property Owner' }, JSON.parse(process.env.REQ_DEVFEE_PAYEES || '{}')); } catch (e) { return { '42': 'County Line Rail Interest', '38': 'County Line Rail Interest', '39': 'CLR Silsbee Property Owner' }; } })();
+  if (meta.collapseDevFeeCosts && _payeeMap[_rfEid]) meta.devFeePayee = _payeeMap[_rfEid];
 
   // Force flag: when set, a FAILED required reconciliation no longer blocks the
   // download. The roll-forward still runs and is verified, but instead of a 422
