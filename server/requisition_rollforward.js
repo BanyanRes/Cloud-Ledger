@@ -357,7 +357,7 @@ function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, 
   const pl = Math.max(priorWs.rowCount || 0, priorWs.actualRowCount || 0);
   for (let r = logDataStart(priorWs); r <= pl; r++) {
     const f = cellFormula(priorWs.getCell(r, COL.amount));
-    if (f && /SUBTOTAL/i.test(f) && /grand total/i.test(cellStr(priorWs.getCell(r, COL.name)))) { priorGtRow = r; break; }
+    if (f && /SUBTOTAL/i.test(f) && /gran[dt]\s*totals?/i.test(cellStr(priorWs.getCell(r, COL.name)))) { priorGtRow = r; break; }
   }
   // (a missing Grand Total row is OK — column D falls back to a computed value)
 
@@ -433,7 +433,7 @@ function hideZeroAmountRows(ws) {
   const sumRange = (a, b) => { let t = 0; for (let r = a; r <= b; r++) { const c = ws.getCell(r, COL.amount); const cf = cellFormula(c); if (cf && /SUBTOTAL/i.test(cf)) continue; const n = cellNum(c); if (n != null) t += n; } return t; };
   // Grand total row bounds the region where blank spacer rows get collapsed.
   let gtRow = last;
-  for (let r = _ds; r <= last; r++) { const gf = cellFormula(ws.getCell(r, COL.amount)); if (gf && /SUBTOTAL/i.test(gf) && /grand total/i.test(cellStr(ws.getCell(r, COL.name)))) { gtRow = r; break; } }
+  for (let r = _ds; r <= last; r++) { const gf = cellFormula(ws.getCell(r, COL.amount)); if (gf && /SUBTOTAL/i.test(gf) && /gran[dt]\s*totals?/i.test(cellStr(ws.getCell(r, COL.name)))) { gtRow = r; break; } }
   for (let r = _ds; r <= last; r++) {
     const amtCell = ws.getCell(r, COL.amount);
     const f = cellFormula(amtCell);
@@ -441,7 +441,7 @@ function hideZeroAmountRows(ws) {
     if (f && /SUBTOTAL/i.test(f)) {
       // Grand total always visible; a group subtotal is hidden only when its
       // whole group nets to zero (so empty categories collapse cleanly).
-      if (/grand total/i.test(name)) { ws.getRow(r).hidden = false; continue; }
+      if (/gran[dt]\s*totals?/i.test(name)) { ws.getRow(r).hidden = false; continue; }
       const m = f.match(/[A-Z]+(\d+):[A-Z]+(\d+)/i);
       const groupSum = m ? sumRange(Number(m[1]), Number(m[2])) : null;
       ws.getRow(r).hidden = (groupSum != null && Math.abs(groupSum) < 0.005);
@@ -471,7 +471,7 @@ function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
   let r = _ds;
   let grandTotalName = null; // written LAST so it sits below every group
   for (const g of priorGroups) {
-    const isGrand = /grand total/i.test(g.subtotalName || '');
+    const isGrand = /gran[dt]\s*totals?/i.test(g.subtotalName || '');
     // Defer the grand total: it must be written AFTER any current-only groups
     // that get appended below (otherwise its range misses them and it lands
     // mid-list instead of at the bottom).
@@ -843,6 +843,17 @@ async function rollForward(workbook, newCurrent, meta = {}) {
     }
   }
 
+  // Advance the period-end date. Some templates (e.g. Silsbee Phase 1) show the
+  // period date in B4 of the Budget-to-Actual tab, which the Current/Prior logs
+  // reference. Only rewrite B4 when it already holds a DATE, so we never clobber a
+  // text label (e.g. "Application Period") or the report-number line written just
+  // above. Runs last so a report-number string set above stays put.
+  if (meta.asOfDate) {
+    const _d = new Date(meta.asOfDate);
+    const _b4 = b2a.getCell('B4');
+    if (!isNaN(_d.getTime()) && _b4 && _b4.value instanceof Date) _b4.value = _d;
+  }
+
   return { landmarks, devFee: devFeeInfo, contingency, contingencyTables };
 }
 
@@ -1167,7 +1178,7 @@ function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
   if (landmarks.grandTotalRow && b2a.getCell('H49')) {
     b2a.getCell('H49').value = { formula: `H47='Prior Invoice Log'!I${landmarks.grandTotalRow}` };
   }
-  const curGT = findRowByLabel(curWs, ['Grand Total']);
+  const curGT = findRowByLabel(curWs, ['Grand Total', 'Grant Total']);
   if (curGT) {
     if (b2a.getCell('I49')) b2a.getCell('I49').value = { formula: `'Current Invoice Log'!I${curGT}=I47` };
     if (b2a.getCell('I50')) b2a.getCell('I50').value = { formula: `'Current Invoice Log'!I${curGT}-I47` };

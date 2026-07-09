@@ -345,10 +345,10 @@ function reconcile(prev, next, opts = {}) {
   // data-plus-subtotals figure; pass if it matches the data total, and flag the
   // double-count case as a known recalc artifact rather than a real break.
   {
-    const gt = nPrior.subtotals.find(s => /grand total/i.test(s.name));
+    const gt = nPrior.subtotals.find(s => /gran[dt]\s*totals?/i.test(s.name));
     if (gt && gt.result != null) {
       const subSum = nPrior.subtotals
-        .filter(s => !/grand total/i.test(s.name) && s.result != null)
+        .filter(s => !/gran[dt]\s*totals?/i.test(s.name) && s.result != null)
         .reduce((a, s) => a + s.result, 0);
       const pass = approxEq(gt.result, nPrior.total, tol);
       const doubleCounted = approxEq(gt.result, nPrior.total + subSum, tol);
@@ -375,7 +375,7 @@ function reconcile(prev, next, opts = {}) {
     const fails = [];
     const byRow = new Map(log.rows.map(rw => [rw.row, rw.amount]));
     for (const st of log.subtotals) {
-      if (/grand total/i.test(st.name)) continue;
+      if (/gran[dt]\s*totals?/i.test(st.name)) continue;
       const m = st.formula.match(/I(\d+):I(\d+)/i);
       if (!m) continue;
       const a = Number(m[1]), b = Number(m[2]);
