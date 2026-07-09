@@ -80,6 +80,22 @@ async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
 
     if (changed) out.file('xl/workbook.xml', wb);
 
+    // (2b) Remove empty <conditionalFormatting> elements. ExcelJS sometimes drops
+    //      the <cfRule> children it cannot represent but KEEPS the wrapper, leaving
+    //      <conditionalFormatting sqref="..."/> with no rule. A conditionalFormatting
+    //      must contain at least one cfRule, so this is a schema violation: the XML is
+    //      well-formed (generic parsers accept it) but Excel rejects the worksheet part
+    //      and shows "we found a problem... recover?". Strip the empty wrappers.
+    for (const name of Object.keys(out.files)) {
+      if (!/^xl\/worksheets\/sheet\d+\.xml$/.test(name) || out.files[name].dir) continue;
+      const ws = await out.file(name).async('string');
+      if (!/<conditionalFormatting\b/.test(ws)) continue;
+      const cleaned = ws
+        .replace(/<conditionalFormatting\b[^>]*\/>/g, '')
+        .replace(/<conditionalFormatting\b[^>]*>\s*<\/conditionalFormatting>/g, '');
+      if (cleaned !== ws) { out.file(name, cleaned); changed = true; }
+    }
+
     // (3) Strip bare directory entries. A proper OOXML/OPC package (like the one
     //     Excel writes) contains only file parts, never folder entries. JSZip
     //     re-emits a folder entry for every directory when it generates the zip,
