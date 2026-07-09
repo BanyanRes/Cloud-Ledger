@@ -439,6 +439,66 @@ function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, 
   }
 }
 
+// Tie the Dev Fee tab's "Due to <payee>" line to the Budget-to-Actual dev-fee
+// row so the payable reflects what's actually posted, and relabel the payee.
+// The template's "Development fees:" section has a header row (Dev fees incurred
+// to date | Current Month Dev Fee | Prior Month Balance) and a "Due to ..." row
+// below it. We point:
+//   B (Dev fees incurred to date) -> B2A dev-fee row, TO-DATE column   (e.g. J111)
+//   D (Prior Month Balance)       -> B2A dev-fee row, PRIOR column      (e.g. H111)
+//   C (Current Month Dev Fee)     -> left as-is (the 4%-of-costs driver)
+// Rows/columns are DETECTED, not hardcoded: the B2A dev-fee row is the row whose
+// GL code equals the dev code; its PRIOR column is the SUMIF-over-Prior-Log cell
+// and its TO-DATE column is the SUM(prior,current) cell. Cached results are
+// seeded (prior dev-fee sum + this period's fee) so values show before recalc.
+// Best-effort; gated to collapse entities (a payee is supplied).
+function tieDevFeeDueLine({ devFeeWs, b2aWs, priorWs, devFeeInfo, payeeLabel }) {
+  if (!devFeeWs || !b2aWs) return;
+  const devCode = devFeeInfo && devFeeInfo.code != null ? devFeeInfo.code : 12913;
+  // 1. B2A dev-fee row = GL code (col B) matches devCode.
+  const b2aLast = Math.max(b2aWs.rowCount || 0, b2aWs.actualRowCount || 0);
+  let devRow = null;
+  for (let r = 1; r <= b2aLast; r++) {
+    if (String(cellNum(b2aWs.getCell(r, 2))) === String(devCode)) { devRow = r; break; }
+  }
+  if (!devRow) return;
+  // 2. Detect PRIOR column (SUMIF over Prior Invoice Log) and TO-DATE column
+  //    (SUM of the prior+current cells) on that row.
+  let priorCol = null, toDateCol = null;
+  for (let c = 1; c <= 26; c++) {
+    const f = cellFormula(b2aWs.getCell(devRow, c));
+    if (!f) continue;
+    if (priorCol == null && /SUMIF/i.test(f) && /prior invoice log/i.test(f)) priorCol = c;
+    if (toDateCol == null && /^\s*SUM\s*\(/i.test(f)) toDateCol = c;
+  }
+  if (priorCol == null || toDateCol == null) return;
+  // 3. Dev-fee tab "Due to ..." row.
+  const dLast = Math.max(devFeeWs.rowCount || 0, devFeeWs.actualRowCount || 0, 40);
+  let dueRow = null;
+  for (let r = 1; r <= dLast; r++) {
+    if (/^\s*due to\b/i.test(cellStr(devFeeWs.getCell(r, 1)))) { dueRow = r; break; }
+  }
+  if (!dueRow) return;
+  // 4. Seed cached results: prior dev-fee sum from the Prior Log + this period's fee.
+  let priorDev = 0;
+  if (priorWs) {
+    const pl = Math.max(priorWs.rowCount || 0, priorWs.actualRowCount || 0);
+    for (let r = logDataStart(priorWs); r <= pl; r++) {
+      const f = cellFormula(priorWs.getCell(r, COL.amount));
+      if (f && /SUBTOTAL/i.test(f)) continue;
+      if (String(cellNum(priorWs.getCell(r, COL.code))) !== String(devCode)) continue;
+      const a = cellNum(priorWs.getCell(r, COL.amount));
+      if (a != null) priorDev += a;
+    }
+  }
+  const curFee = devFeeInfo && Number.isFinite(devFeeInfo.amount) ? devFeeInfo.amount : 0;
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const bName = b2aWs.name, PL = colLetter(priorCol), TD = colLetter(toDateCol);
+  if (payeeLabel) devFeeWs.getCell(dueRow, 1).value = payeeLabel;
+  devFeeWs.getCell(dueRow, 2).value = { formula: `'${bName}'!${TD}${devRow}`, result: round2(priorDev + curFee) };
+  devFeeWs.getCell(dueRow, 4).value = { formula: `'${bName}'!${PL}${devRow}`, result: round2(priorDev) };
+}
+
 // Hide zero/blank-amount line items on an invoice log to declutter the many $0
 // placeholder rows. Subtotal/grand-total rows and blank spacer rows are left
 // visible. Non-zero data rows are explicitly un-hidden so the state is
@@ -835,6 +895,13 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   //     without needing each invoice tagged Hard vs Soft. Best-effort.
   try {
     if (meta.collapseDevFeeCosts) updateDevFeeProjectCosts({ devFeeWs: devFee, priorWs, curWs, curGrandTotalRow: curInfo && curInfo.grandTotalRow, devFeeInfo });
+    // Tie the "Due to <payee>" line to the B2A dev-fee row (to-date -> B, prior -> D)
+    // and relabel the payee. County Line Rail Interest abbreviates to CLRI.
+    if (meta.devFeePayee) {
+      const payee = String(meta.devFeePayee);
+      const label = /county\s*line\s*rail\s*interest/i.test(payee) ? 'Due to CLRI' : ('Due to ' + payee);
+      tieDevFeeDueLine({ devFeeWs: devFee, b2aWs: b2a, priorWs, devFeeInfo, payeeLabel: label });
+    }
   } catch (e) { /* never block the roll-forward on the Dev Fee tab cosmetic */ }
 
   // 5. Update titles (date / requisition number).
