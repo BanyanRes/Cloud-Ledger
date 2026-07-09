@@ -35,6 +35,9 @@ const dataDir = path.dirname(DB_PATH);
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 if (!fs.existsSync(WORKPAPERS_DIR)) fs.mkdirSync(WORKPAPERS_DIR, { recursive: true });
+// Auto-save of roll-forward outputs into Workpapers. Held OFF during req-report
+// testing (set REQ_AUTOSAVE_WORKPAPERS=1 in the environment to re-enable).
+const REQ_AUTOSAVE_WORKPAPERS = process.env.REQ_AUTOSAVE_WORKPAPERS === '1';
 
 // Multer config
 const storage = multer.diskStorage({
@@ -3172,6 +3175,28 @@ app.delete('/api/entities/:eid/folders', auth, requireEntityAccess(), requireRol
   res.json({ success: true });
 });
 
+// Maintenance (Admin only): purge auto-saved Requisition Report workpapers.
+// Removes every entity_files row whose folder path is under a "Requisition
+// Reports" folder (and its blob on disk), plus the now-empty "Requisition
+// Reports" / month folder rows, across ALL entities. Destructive — requires
+// confirm=PURGE. Scope is strictly limited to "Requisition Reports" paths.
+app.post('/api/admin/purge-requisition-workpapers', auth, requireRole('Admin'), (req, res) => {
+  const confirm = (req.body && req.body.confirm) || req.query.confirm;
+  if (confirm !== 'PURGE') return res.status(400).json({ error: 'Add confirm=PURGE to run this destructive purge.' });
+  const LIKE = '%Requisition Reports%';
+  const files = db.prepare('SELECT id, entity_id, folder_path, original_name, stored_filename FROM entity_files WHERE folder_path LIKE ?').all(LIKE);
+  const del = db.prepare('DELETE FROM entity_files WHERE id=?');
+  const deletedFiles = [];
+  for (const f of files) {
+    try { fs.unlinkSync(path.join(WORKPAPERS_DIR, String(f.entity_id), f.stored_filename)); } catch {}
+    del.run(f.id);
+    deletedFiles.push({ entity_id: f.entity_id, folder: f.folder_path, name: f.original_name });
+  }
+  const folders = db.prepare('SELECT entity_id, folder_path FROM entity_folders WHERE folder_path LIKE ?').all(LIKE);
+  db.prepare('DELETE FROM entity_folders WHERE folder_path LIKE ?').run(LIKE);
+  res.json({ success: true, deletedFileCount: deletedFiles.length, deletedFolderCount: folders.length, deletedFiles, deletedFolders: folders });
+});
+
 app.put('/api/entity-files/:id/move', auth, requireRole('Admin','Accountant'), (req, res) => {
   const folder = normFolderPath(req.body.folder_path);
   const f = db.prepare('SELECT * FROM entity_files WHERE id=?').get(req.params.id);
@@ -5401,7 +5426,7 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
     // Auto-save the workbook + a merged invoice packet into the entity's
     // Workpapers under "<year>/Requisition Reports/<Month year>" (best-effort:
     // a save failure is logged but never blocks the user's download).
-    try {
+    if (REQ_AUTOSAVE_WORKPAPERS) try {
       const entRow = db.prepare('SELECT name, display_id FROM entities WHERE id = ?').get(eidInt) || {};
       const packetPrefix = (entRow.display_id && entRow.display_id.trim()) || entRow.name || '';
       const saved = await saveRequisitionOutputs({
