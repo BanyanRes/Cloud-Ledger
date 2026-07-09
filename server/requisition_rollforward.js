@@ -322,6 +322,68 @@ function rightAlignNumericColumns(ws, { codeAlign = 'right' } = {}) {
 // Rebuild the Prior Log in `nextPriorWs` from prior groups + folded current rows.
 // Returns a map of useful landmarks (row of each group subtotal, grand total row,
 // and rows of specially-referenced lines) so callers can rewrite absolute refs.
+// Collapse the Dev Fee tab's Hard/Soft cost rows into a single "Project costs"
+// line sourced directly from the invoice logs, so this month's costs appear
+// without needing each invoice classified Hard vs Soft:
+//   C (this month)    = Current Invoice Log grand total - this period's dev fee
+//   D (through prior) = Prior Invoice Log grand total - all prior dev fees
+//   B (to date)       = C + D
+// Formulas reference the logs (auditable, SUBTOTAL-safe via SUMIF on the dev
+// code) and are seeded with values so they display before Excel recalculates.
+// No-op on templates that don't split Hard/Soft.
+function updateDevFeeProjectCosts({ devFeeWs, priorWs, curWs, curGrandTotalRow, devFeeInfo }) {
+  if (!devFeeWs || !curWs || !priorWs || !curGrandTotalRow) return;
+  const AMT = colLetter(COL.amount), CODE = colLetter(COL.code);
+  const last = Math.max(devFeeWs.rowCount || 0, devFeeWs.actualRowCount || 0, 40);
+  let hardRow = null; const softRows = [];
+  for (let r = 1; r <= last; r++) {
+    const label = (cellStr(devFeeWs.getCell(r, 1)) || cellStr(devFeeWs.getCell(r, 2))).toLowerCase();
+    if (/conting/.test(label)) continue;
+    if (/hard\s*cost/.test(label)) { if (hardRow == null) hardRow = r; }
+    else if (/soft\s*cost/.test(label)) softRows.push(r);
+  }
+  if (hardRow == null) return; // template doesn't split Hard/Soft -> leave as-is
+
+  let priorGtRow = null;
+  const pl = Math.max(priorWs.rowCount || 0, priorWs.actualRowCount || 0);
+  for (let r = 3; r <= pl; r++) {
+    const f = cellFormula(priorWs.getCell(r, COL.amount));
+    if (f && /SUBTOTAL/i.test(f) && /grand total/i.test(cellStr(priorWs.getCell(r, COL.name)))) { priorGtRow = r; break; }
+  }
+  if (priorGtRow == null) return;
+
+  const round2 = (n) => Math.round(n * 100) / 100;
+  const devCode = devFeeInfo && devFeeInfo.code != null ? devFeeInfo.code : null;
+  const base = devFeeInfo && Number.isFinite(devFeeInfo.base) ? devFeeInfo.base : 0;
+
+  // Seed for column D: prior-log total excluding every dev-fee line.
+  let priorExDev = 0;
+  for (let r = 3; r <= pl; r++) {
+    const f = cellFormula(priorWs.getCell(r, COL.amount));
+    if (f && /SUBTOTAL/i.test(f)) continue;
+    const amt = cellNum(priorWs.getCell(r, COL.amount));
+    if (amt == null) continue;
+    const code = cellNum(priorWs.getCell(r, COL.code));
+    const nm = cellStr(priorWs.getCell(r, COL.name));
+    const isDev = (devCode != null && String(code) === String(devCode)) || isDevFeeLabel(nm);
+    if (!isDev) priorExDev += amt;
+  }
+  priorExDev = round2(priorExDev);
+
+  const curGT = `'Current Invoice Log'!${AMT}${curGrandTotalRow}`;
+  const priorGT = `'Prior Invoice Log'!${AMT}${priorGtRow}`;
+  const curDev = devCode != null ? `-SUMIF('Current Invoice Log'!$${CODE}:$${CODE},${devCode},'Current Invoice Log'!$${AMT}:$${AMT})` : '';
+  const priorDev = devCode != null ? `-SUMIF('Prior Invoice Log'!$${CODE}:$${CODE},${devCode},'Prior Invoice Log'!$${AMT}:$${AMT})` : '';
+
+  devFeeWs.getCell(hardRow, 3).value = { formula: `${curGT}${curDev}`, result: round2(base) };
+  devFeeWs.getCell(hardRow, 4).value = { formula: `${priorGT}${priorDev}`, result: priorExDev };
+  devFeeWs.getCell(hardRow, 2).value = { formula: `C${hardRow}+D${hardRow}`, result: round2(base + priorExDev) };
+
+  const labelCol = cellStr(devFeeWs.getCell(hardRow, 1)).trim() ? 1 : 2;
+  devFeeWs.getCell(hardRow, labelCol).value = 'Project costs';
+  for (const sr of softRows) for (const c of [1, 2, 3, 4]) devFeeWs.getCell(sr, c).value = null;
+}
+
 function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
   // Clear existing data region (keep header rows 1-2).
   const existingLast = Math.max(nextPriorWs.rowCount || 0, nextPriorWs.actualRowCount || 0);
@@ -636,7 +698,7 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   rightAlignNumericColumns(priorWs, { codeAlign: 'center' });
 
   // 3. Replace Current Log with the incoming period's invoices (incl. dev fee).
-  replaceCurrentLog(curWs, effectiveCurrent, meta);
+  const curInfo = replaceCurrentLog(curWs, effectiveCurrent, meta);
 
   // 3a. Right-align the same numeric columns on the Current Log.
   rightAlignNumericColumns(curWs);
@@ -658,6 +720,13 @@ async function rollForward(workbook, newCurrent, meta = {}) {
     hard: rollForwardContingencyTable(hardCt),
     soft: rollForwardContingencyTable(softCt),
   };
+
+  // 4d. Collapse the Dev Fee tab's Hard/Soft rows into one "Project costs" line
+  //     sourced from the invoice-log totals, so this month's costs populate
+  //     without needing each invoice tagged Hard vs Soft. Best-effort.
+  try {
+    updateDevFeeProjectCosts({ devFeeWs: devFee, priorWs, curWs, curGrandTotalRow: curInfo && curInfo.grandTotalRow, devFeeInfo });
+  } catch (e) { /* never block the roll-forward on the Dev Fee tab cosmetic */ }
 
   // 5. Update titles (date / requisition number).
   if (meta.asOfDate && b2a.getCell('L1')) b2a.getCell('L1').value = meta.asOfDate;
@@ -714,6 +783,7 @@ function replaceCurrentLog(ws, rows, meta) {
   // when only .value is rewritten, so the prior workbook's bold survives into
   // the new sheet; strip it explicitly across every cell that has a font.
   stripBold(ws);
+  return { grandTotalRow: gtRow };
 }
 
 // Remove bold from every cell on a worksheet, preserving all other font
