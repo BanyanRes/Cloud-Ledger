@@ -735,6 +735,20 @@ function stripBold(ws) {
 // "=24182.71+48139.68+9160") rather than collapsing it to a single number. A
 // plain-number E becomes the numeric sum. A seeded `result` keeps the value
 // readable without a spreadsheet recalc (prod has no LibreOffice).
+// True when a formula references another cell (e.g. C11, $A$1, SUM(F10:F15),
+// ='Budget to Actual'!F27) rather than being self-contained literal arithmetic
+// (e.g. =140716.49+327097.19). Used to leave subtotal/derived cells untouched
+// during the contingency roll-forward. This is more reliable than checking for a
+// cached numeric result: a formula like =ROUND(+C11+D11+E11,2) HAS a cached
+// result yet is still cell-referencing and must NOT be folded as a data value.
+function formulaHasCellRef(f) {
+  if (!f) return false;
+  let s = String(f);
+  if (s[0] === '=') s = s.slice(1);
+  if (s.indexOf('!') >= 0) return true; // any sheet-qualified reference
+  return /(^|[^A-Za-z0-9_])[$]?[A-Za-z]{1,3}[$]?[0-9]+(?![0-9(])/.test(s);
+}
+
 function rollForwardContingency(b2a) {
   if (!b2a) return { moved: 0 };
   const COL_E = 5, COL_F = 6;
@@ -747,8 +761,8 @@ function rollForwardContingency(b2a) {
     // Skip subtotal/total rows: any cell-referencing formula in E or F makes
     // cellNum return null. (Literal-arithmetic formulas DO resolve, so genuine
     // data rows like "=140716.49+327097.19" are still handled.)
-    const eIsRefFormula = !!cellFormula(eCell) && cellNum(eCell) == null;
-    const fIsRefFormula = !!cellFormula(fCell) && cellNum(fCell) == null;
+    const eIsRefFormula = formulaHasCellRef(cellFormula(eCell));
+    const fIsRefFormula = formulaHasCellRef(cellFormula(fCell));
     if (eIsRefFormula || fIsRefFormula) continue;
 
     const fVal = cellNum(fCell);
