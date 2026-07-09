@@ -823,20 +823,20 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   if (meta.asOfDate && b2a.getCell('L1')) b2a.getCell('L1').value = meta.asOfDate;
   if (meta.reqNumber) {
     if (meta.fixReportNumberHeader) {
-      // CLIP-style templates keep the report-number line at B5 (not B4), and the
-      // generic path would add a duplicate at B4. Clear B4, then update the real
-      // "Requisition Report #N" header line in place (correct spelling).
-      if (b2a.getCell('B4')) b2a.getCell('B4').value = null;
-      let hdrCell = null;
-      for (let r = 1; r <= 8 && !hdrCell; r++) for (let c = 1; c <= 6; c++) {
-        if (/requi\w*\s*report\s*#/i.test(cellStr(b2a.getCell(r, c)))) { hdrCell = b2a.getCell(r, c); break; }
+      // Update the existing "Requisition Report #N" line in place (preserving any
+      // suffix like ' (Phase 2)'), and remove any duplicate report line. Prefer a
+      // correctly-spelled 'Requisition Report' cell over a stray 'Requistion' one.
+      // If the budget tab has NO report line (e.g. Silsbee Phase 1, whose B4 holds
+      // the date), leave it untouched — never blindly write B4.
+      const rptCells = [];
+      for (let r = 1; r <= 8; r++) for (let c = 1; c <= 6; c++) {
+        if (/requi\w*\s*report\s*#/i.test(cellStr(b2a.getCell(r, c)))) rptCells.push(b2a.getCell(r, c));
       }
-      if (hdrCell) {
-        // Replace only the number after '#', preserving any suffix like ' (Phase 2)'.
-        const curTitle = cellStr(hdrCell).trim();
-        hdrCell.value = /#\s*\d+/.test(curTitle) ? curTitle.replace(/#\s*\d+/, '#' + meta.reqNumber) : ('Requisition Report #' + meta.reqNumber);
-      } else if (b2a.getCell('B4')) {
-        b2a.getCell('B4').value = 'Requisition Report #' + meta.reqNumber;
+      if (rptCells.length) {
+        const primary = rptCells.find(cl => /requisition\s*report/i.test(cellStr(cl))) || rptCells[rptCells.length - 1];
+        const curTitle = cellStr(primary).trim();
+        primary.value = /#\s*\d+/.test(curTitle) ? curTitle.replace(/#\s*\d+/, '#' + meta.reqNumber) : ('Requisition Report #' + meta.reqNumber);
+        for (const cl of rptCells) if (cl !== primary) cl.value = null;
       }
     } else if (b2a.getCell('B4')) {
       b2a.getCell('B4').value = 'Requistion Report # ' + meta.reqNumber;
