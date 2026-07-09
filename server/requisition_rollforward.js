@@ -1107,21 +1107,33 @@ function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
   };
   const round2 = (n) => Math.round(n * 100) / 100;
 
+  // These cross-reference cells only need "repointing" when the template holds a
+  // DIRECT invoice-log row reference (e.g. 'Prior Invoice Log'!I228) whose row
+  // shifts as the logs grow. Templates that instead use self-maintaining full-
+  // column SUMIFs (e.g. Silsbee's Budget-to-Actual, whose logs are phase-suffixed
+  // "... P1"/"... P2") must be left ALONE: overwriting them breaks the SUMIF and
+  // writes a bare "Prior Invoice Log" name that doesn't resolve, which makes Excel
+  // show a repair prompt. Use the ACTUAL sheet names + amount column so any cell we
+  // do repoint stays valid regardless of layout.
+  const AMT_L = colLetter(COL.amount);
+  const pN = priorWs.name, cN = curWs.name, bN = b2a ? b2a.name : 'Budget to Actual';
+  const repointable = (cell) => { const f = cellFormula(cell); return !!(f && /invoice log/i.test(f) && !/SUMIF/i.test(f)); };
+
   // Dev Fee J6 -> Prior "6 month upfront interest" data row
   const j6row = findRowByLabel(priorWs, ['6 month upfront interest']);
   let j6 = null;
-  if (j6row && devFee.getCell('J6')) {
+  if (j6row && devFee.getCell('J6') && repointable(devFee.getCell('J6'))) {
     const v = num(priorWs, j6row, COL.amount);
     j6 = v == null ? null : -v;
-    setFR(devFee.getCell('J6'), `-'Prior Invoice Log'!I${j6row}`, j6);
+    setFR(devFee.getCell('J6'), `-'${pN}'!${AMT_L}${j6row}`, j6);
   }
 
   // Dev Fee J10 -> Prior "Development Fee Total" subtotal
   const j10row = findRowByLabel(priorWs, ['Development Fee Total', 'Dev Fee Total']);
   let j10 = null;
-  if (j10row && devFee.getCell('J10')) {
+  if (j10row && devFee.getCell('J10') && repointable(devFee.getCell('J10'))) {
     j10 = sumSubtotalRange(priorWs, j10row);
-    setFR(devFee.getCell('J10'), `'Prior Invoice Log'!I${j10row}`, j10 == null ? null : round2(j10));
+    setFR(devFee.getCell('J10'), `'${pN}'!${AMT_L}${j10row}`, j10 == null ? null : round2(j10));
   }
 
   // Dev Fee J11 -> Current "Development Fee" data row. If this period has no
@@ -1130,10 +1142,10 @@ function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
   // check doesn't trip on an empty row.
   const j11row = findRowByLabel(curWs, ['Development Fee']);
   let j11 = 0;
-  if (devFee.getCell('J11')) {
+  if (devFee.getCell('J11') && repointable(devFee.getCell('J11'))) {
     if (j11row) {
       j11 = num(curWs, j11row, COL.amount) || 0;
-      setFR(devFee.getCell('J11'), `'Current Invoice Log'!I${j11row}`, round2(j11));
+      setFR(devFee.getCell('J11'), `'${cN}'!${AMT_L}${j11row}`, round2(j11));
     } else {
       // No Development Fee this period. Write a PLAIN 0 (not a formula): exceljs
       // silently drops result:0 from a formula cell, which would make reconcile's
@@ -1152,7 +1164,7 @@ function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
   const b2aJ40 = b2a ? cellNum(b2a.getCell('J40')) : null;
   if (e5 != null && e7 != null && b2aJ40 != null && devFee.getCell('J5')) {
     const j5 = e5 + e7 - b2aJ40;
-    setFR(devFee.getCell('J5'), cellFormula(devFee.getCell('J5')) || `E5+E7-'Budget to Actual'!J40`, round2(j5));
+    setFR(devFee.getCell('J5'), cellFormula(devFee.getCell('J5')) || `E5+E7-'${bN}'!J40`, round2(j5));
     if (j6 != null && devFee.getCell('J7')) {
       const j7 = j5 + j6;
       setFR(devFee.getCell('J7'), cellFormula(devFee.getCell('J7')) || `SUM(J5:J6)`, round2(j7));
@@ -1172,16 +1184,16 @@ function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
 
   // B2A H45 -> Prior "Working Capital" row
   const wcRow = findRowByLabel(priorWs, ['Working Capital']);
-  if (wcRow && b2a.getCell('H45')) b2a.getCell('H45').value = { formula: `'Prior Invoice Log'!I${wcRow}` };
+  if (wcRow && b2a.getCell('H45') && repointable(b2a.getCell('H45'))) b2a.getCell('H45').value = { formula: `'${pN}'!${AMT_L}${wcRow}` };
 
   // B2A H49 -> Prior Grand Total ; I49/I50 -> Current Grand Total
-  if (landmarks.grandTotalRow && b2a.getCell('H49')) {
-    b2a.getCell('H49').value = { formula: `H47='Prior Invoice Log'!I${landmarks.grandTotalRow}` };
+  if (landmarks.grandTotalRow && b2a.getCell('H49') && repointable(b2a.getCell('H49'))) {
+    b2a.getCell('H49').value = { formula: `H47='${pN}'!${AMT_L}${landmarks.grandTotalRow}` };
   }
   const curGT = findRowByLabel(curWs, ['Grand Total', 'Grant Total']);
   if (curGT) {
-    if (b2a.getCell('I49')) b2a.getCell('I49').value = { formula: `'Current Invoice Log'!I${curGT}=I47` };
-    if (b2a.getCell('I50')) b2a.getCell('I50').value = { formula: `'Current Invoice Log'!I${curGT}-I47` };
+    if (b2a.getCell('I49') && repointable(b2a.getCell('I49'))) b2a.getCell('I49').value = { formula: `'${cN}'!${AMT_L}${curGT}=I47` };
+    if (b2a.getCell('I50') && repointable(b2a.getCell('I50'))) b2a.getCell('I50').value = { formula: `'${cN}'!${AMT_L}${curGT}-I47` };
   }
 }
 
