@@ -249,11 +249,40 @@ export const api = {
     // required reconciliation check failed (the user opted in after seeing it).
     if (meta.force) fd.append('force', 'true');
     const token = getToken();
-    const res = await fetch(API_BASE + '/requisition/' + eid + '/rollforward', {
-      method: 'POST',
-      headers: token ? { Authorization: 'Bearer ' + token } : {},
-      body: fd,
-    });
+    let res;
+    try {
+      res = await fetch(API_BASE + '/requisition/' + eid + '/rollforward', {
+        method: 'POST',
+        headers: token ? { Authorization: 'Bearer ' + token } : {},
+        body: fd,
+      });
+    } catch (netErr) {
+      // The request never got an HTTP response (browser "Failed to fetch"). There
+      // is no server message behind this, so classify it: probe a lightweight
+      // endpoint to tell "server restarting/unreachable" apart from "the upload
+      // was too big or the roll-forward timed out", and note the upload size.
+      let serverUp = false;
+      try {
+        const h = await fetch(API_BASE + '/turnkey/health', { method: 'GET', cache: 'no-store' });
+        serverUp = h.ok;
+      } catch (_) { serverUp = false; }
+      let mb = 0;
+      try {
+        const b64 = (meta.invoices || []).reduce((n, i) => n + ((i && i.file_b64 ? i.file_b64.length : 0)), 0);
+        mb = Math.round((b64 * 0.75) / 1e5) / 10; // base64 chars -> bytes -> MB (1 dp)
+      } catch (_) {}
+      const sizeNote = mb >= 1
+        ? (' The upload was about ' + mb + ' MB of invoice files, which may have exceeded the size/time limit — try rolling forward with fewer or smaller invoice PDFs at once.')
+        : '';
+      const cause = serverUp
+        ? ('The server is reachable, so the roll-forward request itself failed to complete — usually the upload was too large or it took too long to return.' + sizeNote)
+        : 'Could not reach the server. It may be restarting after a recent update, or briefly offline. Wait about 30 seconds and try again.';
+      const raw = (netErr && netErr.message) ? netErr.message : 'network error';
+      const err = new Error('Roll-forward could not be sent (' + raw + '). ' + cause);
+      err.network = true;
+      err.detail = { networkError: raw, serverReachable: serverUp, approxUploadMB: mb };
+      throw err;
+    }
     if (res.status === 401) { clearToken(); window.location.reload(); return null; }
     const ctype = res.headers.get('content-type') || '';
     if (!res.ok || ctype.includes('application/json')) {
