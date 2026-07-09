@@ -785,7 +785,22 @@ async function rollForward(workbook, newCurrent, meta = {}) {
 
   // 5. Update titles (date / requisition number).
   if (meta.asOfDate && b2a.getCell('L1')) b2a.getCell('L1').value = meta.asOfDate;
-  if (meta.reqNumber && b2a.getCell('B4')) b2a.getCell('B4').value = 'Requistion Report # ' + meta.reqNumber;
+  if (meta.reqNumber) {
+    if (meta.fixReportNumberHeader) {
+      // CLIP-style templates keep the report-number line at B5 (not B4), and the
+      // generic path would add a duplicate at B4. Clear B4, then update the real
+      // "Requisition Report #N" header line in place (correct spelling).
+      if (b2a.getCell('B4')) b2a.getCell('B4').value = null;
+      let hdrCell = null;
+      for (let r = 1; r <= 8 && !hdrCell; r++) for (let c = 1; c <= 6; c++) {
+        if (/requi\w*\s*report\s*#/i.test(cellStr(b2a.getCell(r, c)))) { hdrCell = b2a.getCell(r, c); break; }
+      }
+      if (hdrCell) hdrCell.value = 'Requisition Report #' + meta.reqNumber;
+      else if (b2a.getCell('B4')) b2a.getCell('B4').value = 'Requisition Report #' + meta.reqNumber;
+    } else if (b2a.getCell('B4')) {
+      b2a.getCell('B4').value = 'Requistion Report # ' + meta.reqNumber;
+    }
+  }
 
   return { landmarks, devFee: devFeeInfo, contingency, contingencyTables };
 }

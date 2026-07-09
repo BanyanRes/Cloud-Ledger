@@ -5291,6 +5291,9 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
   // ids); defaults to County Line Industrial Park (CLIP = entity 42).
   const _dfCollapseIds = (process.env.REQ_DEVFEE_COLLAPSE_ENTITIES || '42').split(',').map(x => x.trim()).filter(Boolean);
   meta.collapseDevFeeCosts = _dfCollapseIds.includes(String(parseInt(req.params.entity_id)));
+  // Same CLIP-style entities also fix the report-number header (update the
+  // existing "Requisition Report #N" line in place instead of adding a duplicate).
+  meta.fixReportNumberHeader = meta.collapseDevFeeCosts;
 
   // Force flag: when set, a FAILED required reconciliation no longer blocks the
   // download. The roll-forward still runs and is verified, but instead of a 422
