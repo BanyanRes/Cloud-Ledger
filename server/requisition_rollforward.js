@@ -984,6 +984,16 @@ function replaceCurrentLog(ws, rows, meta) {
   styleAmountCell(ws, gtRow, { underline: true });
   ws.getRow(gtRow).height = DATA_ROW_HEIGHT;
 
+  // Un-hide every row we just wrote. replaceCurrentLog clears the region's
+  // VALUES but not each row's hidden flag, so rows the prior period hid (e.g.
+  // last month's $0 Development Fee placeholder, its subtotal, and the grand
+  // total) stayed hidden — the freshly written dev-fee line ($243.16), its
+  // subtotal, and the Grand Total then never appeared in the Current Log even
+  // though the values were correct. The current log only holds this period's
+  // real rows, so everything from the data start through the grand total should
+  // be visible.
+  for (let rr = _ds; rr <= gtRow; rr++) ws.getRow(rr).hidden = false;
+
   // Per request, the Current Invoice Log carries NO bold anywhere — header,
   // data, subtotal, or grand-total. exceljs preserves the template cell's font
   // when only .value is rewritten, so the prior workbook's bold survives into
