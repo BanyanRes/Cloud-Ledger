@@ -685,7 +685,18 @@ async function billcomListAccounts({ sessionId, devKey, baseUrl }) {
     if (!nextPage) break;
     if (out.length > 10000) break; // safety
   }
-  return out;
+  // Dedupe by account id. Bill.com can repeat the same account across paginated
+  // responses (nextPage overlap) or return archived + active copies, which bloats
+  // the mapping UI ("unusually long list") and makes the mapping save collide on
+  // UNIQUE(entity_id, billcom_account_id). One row per id is what every caller wants.
+  const _seen = new Set();
+  const _dedup = [];
+  for (const a of out) {
+    const id = a && a.id != null ? String(a.id) : null;
+    if (id !== null) { if (_seen.has(id)) continue; _seen.add(id); }
+    _dedup.push(a);
+  }
+  return _dedup;
 }
 
 // Generic v3 classification list (paginated) for any resource under
@@ -3800,7 +3811,9 @@ app.post('/api/billcom/mappings/:entity_id/auto', auth, requireEntityAccess('ent
   try {
     const tx = db.transaction(() => {
       db.prepare('DELETE FROM billcom_account_map WHERE entity_id = ?').run(eid);
-      const ins = db.prepare('INSERT INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)');
+      // OR IGNORE: two CL codes can name-match the same Bill.com account; the
+      // first mapping wins and the duplicate is skipped rather than throwing UNIQUE.
+      const ins = db.prepare('INSERT OR IGNORE INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)');
       for (const c of clAccounts) {
         const bc = bcByNum.get(String(c.code)) || bcByName.get(norm(c.name));
         if (bc && bc.id) { ins.run(eid, String(bc.id), bc.name || null, String(c.code), now); result.matched.push({ code: c.code, name: c.name, billcom_id: bc.id }); }
@@ -3824,16 +3837,23 @@ app.put('/api/billcom/mappings/:entity_id', auth, requireEntityAccess('entity_id
     }
   }
   const now = new Date().toISOString();
+  // The Bill.com account list can contain duplicate ids, so the UI may submit
+  // more than one row for the same billcom_account_id -> a UNIQUE(entity_id,
+  // billcom_account_id) collision on save. Collapse to one row per id (last wins)
+  // and INSERT OR REPLACE so a save can never throw the constraint error.
+  const _byId = new Map();
+  for (const m of mappings) { if (m && m.billcom_account_id) _byId.set(String(m.billcom_account_id), m); }
+  const deduped = [..._byId.values()];
   const tx = db.transaction((rows) => {
     db.prepare('DELETE FROM billcom_account_map WHERE entity_id = ?').run(entityId);
-    const ins = db.prepare('INSERT INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)');
+    const ins = db.prepare('INSERT OR REPLACE INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)');
     for (const m of rows) {
       ins.run(entityId, String(m.billcom_account_id), m.billcom_account_name || null, String(m.cl_account_code), now);
     }
   });
   try {
-    tx(mappings);
-    res.json({ saved: mappings.length });
+    tx(deduped);
+    res.json({ saved: deduped.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -4013,7 +4033,7 @@ app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_i
       let bcAccount = byNum.get(row.code) || byName.get(String(row.name).trim().toLowerCase());
       if (bcAccount) {
         if (!mappedClCodes.has(row.code)) {
-          db.prepare('INSERT INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)')
+          db.prepare('INSERT OR IGNORE INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)')
             .run(entityId, bcAccount.id, bcAccount.name, row.code, new Date().toISOString());
           out.mapped_only.push({ code: row.code, name: row.name, billcom_id: bcAccount.id });
         } else {
@@ -4032,7 +4052,7 @@ app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_i
         out.errors.push({ code: row.code, name: row.name, status: r.status, error: txt.slice(0, 400) });
         continue;
       }
-      db.prepare('INSERT INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)')
+      db.prepare('INSERT OR IGNORE INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)')
         .run(entityId, j.id, j.name || row.name, row.code, new Date().toISOString());
       out.pushed.push({ code: row.code, name: row.name, billcom_id: j.id });
     } catch (ex) {
