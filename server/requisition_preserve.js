@@ -31,6 +31,29 @@ async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
     // Strip the bogus NaN so the reference is valid again.
     if (/[A-Z]NaN/.test(wb)) { wb = wb.replace(/([A-Z])NaN/g, '$1'); changed = true; }
 
+    // Strip invalid defined names carried over from source templates that were
+    // built with data plugins (FactSet / S&P Capital IQ: EV__CVPARAMS__,
+    // HTML_Control, IQR*). Their value is a bare A1 range with NO sheet qualifier
+    // (e.g. "$C$17:$AAB$38"); a defined name must point to Sheet!range, so Excel
+    // rejects them on open and shows the "repaired records: Named range from
+    // /xl/workbook.xml" prompt. ExcelJS keeps a handful of them when it re-saves
+    // (Phase-2 Silsbee books carry thousands). Remove any <definedName> whose
+    // reference is a sheetless cell/range; constants and Sheet!-qualified names
+    // (which contain '!') are left untouched.
+    if (/<definedName\b/.test(wb)) {
+      const before = wb;
+      wb = wb.replace(/<definedName\b[^>]*>([\s\S]*?)<\/definedName>/g, (full, val) => {
+        const v = val.trim();
+        const sheetless = v.indexOf('!') === -1 &&
+          /^\$?[A-Za-z]{1,3}\$?\d+(?::\$?[A-Za-z]{1,3}\$?\d+)?$/.test(v);
+        return sheetless ? '' : full;
+      });
+      // Drop the container if stripping emptied it (empty <definedNames/> is itself
+      // a schema violation Excel would flag).
+      wb = wb.replace(/<definedNames>\s*<\/definedNames>/g, '');
+      if (wb !== before) changed = true;
+    }
+
     // (1) Force a full recalculation when the workbook opens.
     if (/<calcPr\b[^>]*\/>/.test(wb)) {
       if (!/fullCalcOnLoad=/.test(wb)) {
