@@ -43,6 +43,11 @@ async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
     if (/<definedName\b/.test(wb)) {
       const before = wb;
       wb = wb.replace(/<definedName\b[^>]*>([\s\S]*?)<\/definedName>/g, (full, val) => {
+        // A workbook-global _FilterDatabase (no localSheetId) is invalid — it must
+        // be sheet-scoped. exceljs sometimes drops the localSheetId when it
+        // round-trips a sheet's autofilter, and Excel then strips the name on open
+        // ("Removed Records: Named range from /xl/workbook.xml"). Drop it here.
+        if (/name="_xlnm\._FilterDatabase"/.test(full) && !/\blocalSheetId=/.test(full)) return '';
         const v = val.trim();
         const sheetless = v.indexOf('!') === -1 &&
           /^\$?[A-Za-z]{1,3}\$?\d+(?::\$?[A-Za-z]{1,3}\$?\d+)?$/.test(v);
@@ -123,6 +128,29 @@ async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
       // cached value lets Excel recompute the formula on open (fullCalcOnLoad set).
       cleaned = cleaned.replace(/<v>NaN<\/v>/g, '');
       if (cleaned !== ws) { out.file(name, cleaned); changed = true; }
+    }
+
+    // (2c) Remove WMF pictures from drawings. exceljs re-emits any drawing that
+    //      embeds a WMF image (a vector format it doesn't render) with a shape that
+    //      Excel repairs on open ("Repaired Records: Drawing shape"). The WMF bytes
+    //      are intact but the shape XML trips Excel's loader. On Bridge/Intacct books
+    //      (Braker) these are decorative images on hidden consolidation tabs, so drop
+    //      the WMF picture anchors + their relationships; the now-unreferenced .wmf
+    //      media are left in place (Excel ignores unreferenced parts).
+    for (const relName of Object.keys(out.files)) {
+      const dm = relName.match(/^xl\/drawings\/_rels\/(drawing\d+\.xml)\.rels$/);
+      if (!dm || out.files[relName].dir) continue;
+      let relXml = await out.file(relName).async('string');
+      const wmfRids = [...relXml.matchAll(/Id="([^"]+)"[^>]*Target="[^"]*\.wmf"/g)].map(m => m[1]);
+      if (!wmfRids.length) continue;
+      const drawName = 'xl/drawings/' + dm[1];
+      const df = out.file(drawName); if (!df) continue;
+      let drawXml = await df.async('string');
+      const before = drawXml;
+      drawXml = drawXml.replace(/<xdr:(oneCellAnchor|twoCellAnchor|absoluteAnchor)\b[^>]*>[\s\S]*?<\/xdr:\1>/g,
+        blk => wmfRids.some(r => blk.includes('r:embed="' + r + '"')) ? '' : blk);
+      relXml = relXml.replace(/<Relationship\b[^>]*Target="[^"]*\.wmf"[^>]*\/>/g, '');
+      if (drawXml !== before) { out.file(drawName, drawXml); out.file(relName, relXml); changed = true; }
     }
 
     // (3) Strip bare directory entries. A proper OOXML/OPC package (like the one
