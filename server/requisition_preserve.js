@@ -49,6 +49,21 @@ async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
         // ("Removed Records: Named range from /xl/workbook.xml"). Drop it here.
         if (/name="_xlnm\._FilterDatabase"/.test(full) && !/\blocalSheetId=/.test(full)) return '';
         const v = val.trim();
+        // Malformed quoted sheet reference: exceljs does NOT escape an apostrophe
+        // inside a sheet name, so "Members' Capital" is written 'Members' Capital'!…
+        // instead of the correct 'Members'' Capital'!… . Excel can't resolve it and
+        // strips the name ("Removed Records: Named range"). Detect a leading quoted
+        // sheet name whose closing quote isn't immediately followed by '!' (after
+        // un-doubling escaped quotes) and drop the whole defined name — these are
+        // Print_Area/Print_Titles print cosmetics.
+        {
+          const s = v.replace(/&apos;/g, "'").replace(/^[+\-]/, '');
+          if (s[0] === "'") {
+            let i = 1;
+            while (i < s.length) { if (s[i] === "'") { if (s[i + 1] === "'") { i += 2; continue; } break; } i++; }
+            if (s[i] !== "'" || s[i + 1] !== '!') return '';
+          }
+        }
         const sheetless = v.indexOf('!') === -1 &&
           /^\$?[A-Za-z]{1,3}\$?\d+(?::\$?[A-Za-z]{1,3}\$?\d+)?$/.test(v);
         return sheetless ? '' : full;
