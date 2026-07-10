@@ -540,17 +540,17 @@ function buildSimpleDevFeeTab({ devFeeWs, curWs, devFeeInfo, asOfDate, payeeLabe
   devFeeWs.getCell('B6').value = 'Project costs';
   devFeeWs.getCell('B7').value = 'Incurred - Month of';
   devFeeWs.getCell('B8').value = asOf ? { formula: 'A4', result: asOf } : { formula: 'A4' };
-  devFeeWs.getCell('A9').value = 'Project costs';
   devFeeWs.getCell('A10').value = 'Project costs';
   devFeeWs.getCell('B10').value = round2(base);
   devFeeWs.getCell('A13').value = 'Development fees:';
-  devFeeWs.getCell('B13').value = 'Current Month Dev Fee';
-  if (payeeLabel) devFeeWs.getCell('A14').value = payeeLabel;
-  devFeeWs.getCell('B14').value = { formula: `B10*${rate}`, result: fee != null ? round2(fee) : round2(base * rate) };
+  // Calculated dev fee shown directly in B13. (A9 label and the separate
+  // 'Current Month Dev Fee' header / 'Due to <payee>' value row are dropped
+  // per the simplified layout.)
+  devFeeWs.getCell('B13').value = { formula: `B10*${rate}`, result: fee != null ? round2(fee) : round2(base * rate) };
 
   // Repoint the Current Invoice Log's dev-fee line at the new fee cell (B14).
   if (curWs && devFeeInfo.code != null) {
-    const ref = `'${devFeeWs.name}'!B14`;
+    const ref = `'${devFeeWs.name}'!B13`;
     const cl = Math.max(curWs.rowCount || 0, curWs.actualRowCount || 0);
     for (let r = logDataStart(curWs); r <= cl; r++) {
       const f = cellFormula(curWs.getCell(r, COL.amount));
