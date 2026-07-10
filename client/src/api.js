@@ -173,7 +173,7 @@ export const api = {
     const fd = new FormData(); fd.append('file', file); fd.append('bank_account', bankAcct);
     return request('/entities/' + eid + '/bank-transactions/upload', { method: 'POST', body: fd });
   },
-  codeBankTransaction: (eid, id, account_code, memo) => request('/entities/' + eid + '/bank-transactions/' + id, { method: 'PUT', body: { account_code, memo } }),
+  codeBankTransaction: (eid, id, account_code, memo, dims) => request('/entities/' + eid + '/bank-transactions/' + id, { method: 'PUT', body: { account_code, memo, ...(dims || {}) } }),
   splitBankTransaction: (eid, id, splits) => request('/entities/' + eid + '/bank-transactions/' + id + '/splits', { method: 'PUT', body: { splits } }),
   postBankTransactions: (eid, ids) => request('/entities/' + eid + '/bank-transactions/post', { method: 'POST', body: { transaction_ids: ids } }),
   getBankMatchCandidates: (eid, id) => request('/entities/' + eid + '/bank-transactions/' + id + '/match-candidates'),

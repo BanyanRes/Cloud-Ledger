@@ -2009,13 +2009,23 @@ function BankMatchModal({txn, entityId, onClose, onMatched}){
 function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClose, onSaved}){
   const target = Math.abs(txn.amount);
   const initialLines = (txn.splits && txn.splits.length > 0)
-    ? txn.splits.map(s => ({ account_code: s.account_code, amount: String(s.amount), memo: s.memo || '' }))
+    ? txn.splits.map(s => ({ account_code: s.account_code, amount: String(s.amount), memo: s.memo || '', project_id: s.project_id||null, class_id: s.class_id||null, location_id: s.location_id||null }))
     : (txn.account_code
-        ? [{ account_code: txn.account_code, amount: target.toFixed(2), memo: txn.memo || '' }, { account_code: '', amount: '', memo: '' }]
+        ? [{ account_code: txn.account_code, amount: target.toFixed(2), memo: txn.memo || '', project_id: txn.project_id||null, class_id: txn.class_id||null, location_id: txn.location_id||null }, { account_code: '', amount: '', memo: '' }]
         : [{ account_code: '', amount: '', memo: '' }, { account_code: '', amount: '', memo: '' }]);
   const [lines, setLines] = useState(initialLines);
   const [err, setErr] = useState('');
   const [saving, setSaving] = useState(false);
+  const [locations, setLocations] = useState([]); const [classes, setClasses] = useState([]); const [dimProjects, setDimProjects] = useState([]);
+  useEffect(() => { api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>{}); api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>{}); api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>{}); }, [entityId]);
+  const dimOpts = [
+    ...dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)})),
+    ...locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name})),
+    ...classes.map(c=>({v:'class:'+c.id,label:'Class — '+(c.code?c.code+' — ':'')+c.name})),
+  ];
+  const showDims = dimOpts.length > 0;
+  const lineDimValue = l => l.project_id?'project:'+l.project_id:l.location_id?'location:'+l.location_id:l.class_id?'class:'+l.class_id:'';
+  const setLineDim = (i, val) => { const [kind,id] = val?val.split(':'):['','']; setLines(prev=>prev.map((l,idx)=>idx===i?{...l,project_id:kind==='project'?id:null,class_id:kind==='class'?id:null,location_id:kind==='location'?id:null}:l)); };
 
   const parseAmt = v => { const n = parseFloat(String(v).replace(/[,$]/g,'')); return isNaN(n) ? 0 : n; };
   const total = lines.reduce((s, l) => s + parseAmt(l.amount), 0);
@@ -2034,7 +2044,7 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClos
     if (!balanced) { setErr('Splits must total ' + fmt(target) + ' (currently off by ' + fmt(remaining) + ')'); return; }
     setSaving(true);
     try {
-      await api.splitBankTransaction(entityId, txn.id, valid.map(l => ({ account_code: l.account_code, amount: parseAmt(l.amount), memo: l.memo || null })));
+      await api.splitBankTransaction(entityId, txn.id, valid.map(l => ({ account_code: l.account_code, amount: parseAmt(l.amount), memo: l.memo || null, project_id: l.project_id||null, class_id: l.class_id||null, location_id: l.location_id||null })));
       onSaved();
     } catch (e) { setErr(e.message); } finally { setSaving(false); }
   };
@@ -2057,9 +2067,10 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClos
         <div style={{fontSize:22,fontWeight:700,color:balanced?T.green:T.orange,marginTop:2}}>${fmt(remaining)}</div></div>
     </div>
     <table style={{...S.table,marginBottom:10}}>
-      <thead><tr><th style={S.th}>GL Account</th><th style={{...S.thR,width:140}}>Amount</th><th style={{...S.th,width:180}}>Memo</th><th style={{...S.th,width:36}}></th></tr></thead>
+      <thead><tr><th style={S.th}>GL Account</th>{showDims&&<th style={{...S.th,width:170}}>Dimension</th>}<th style={{...S.thR,width:140}}>Amount</th><th style={{...S.th,width:180}}>Memo</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{lines.map((l, i) => <tr key={i}>
         <td style={{...S.td,padding:'4px 6px'}}><AccountAutocomplete accounts={accounts} value={l.account_code} exclude={excludeCode} onChange={v => updateLine(i, 'account_code', v)} placeholder="Search GL account..."/></td>
+        {showDims&&<td style={{...S.td,padding:'4px 6px'}}><select style={{...S.inputSm,width:'100%'}} value={lineDimValue(l)} onChange={e=>setLineDim(i,e.target.value)}><option value="">No dimension</option>{dimOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</select></td>}
         <td style={{...S.td,padding:'4px 6px'}}><input style={{...S.inputSm,textAlign:'right',fontFamily:'monospace'}} value={l.amount} onChange={e => updateLine(i, 'amount', e.target.value)} placeholder="0.00"/></td>
         <td style={{...S.td,padding:'4px 6px'}}><input style={S.inputSm} value={l.memo} onChange={e => updateLine(i, 'memo', e.target.value)} placeholder="Memo"/></td>
         <td style={{...S.td,padding:'4px 6px',textAlign:'center'}}>{lines.length > 1 && <button style={S.btnGhost} onClick={() => removeLine(i)}>x</button>}</td>
@@ -2086,6 +2097,8 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
   const[uploadProgress,setUploadProgress]=useState('');const[discarding,setDiscarding]=useState(false);
   const[splitTxn,setSplitTxn]=useState(null);
   const[matchTxn,setMatchTxn]=useState(null);
+  // Dimensions (Location / Class / Project) available to tag when coding a txn.
+  const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);const[dimProjects,setDimProjects]=useState([]);
   // Resizable column widths — persisted per-user in localStorage
   const BT_COLS_KEY='cl_bt_col_widths';
   const BT_DEFAULT_W={date:110,desc:260,amount:130,gl:280,memo:200,status:90};
@@ -2098,6 +2111,7 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
   const loadAccounts=useCallback(async()=>{const a=await api.getAccounts(entityId);setAccounts(a);setBankAccts(a.filter(x=>x.bank_acct||(['cash','bank','checking','savings'].some(w=>x.name.toLowerCase().includes(w))&&x.type==='Asset')));return a;},[entityId]);
   const loadTxns=useCallback(async(acct,status)=>{if(!acct)return;const t=await api.getBankTransactions(entityId,acct,status||undefined);setTxns(t);},[entityId,setTxns]);
   useEffect(()=>{loadAccounts();},[loadAccounts]);
+  useEffect(()=>{api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>setDimProjects([]));},[entityId]);
   useEffect(()=>{if(selAcct)loadTxns(selAcct,statusFilter);else setTxns([]);},[selAcct,entityId]);
   const reload=()=>loadTxns(selAcct,statusFilter);
 
@@ -2115,8 +2129,17 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
     try{let total=0;for(const bid of batchIds){const r=await api.deleteBankBatch(entityId,bid);total+=(r.deleted||0);}
       setMsg(total+' transaction(s) discarded');loadTxns(selAcct,statusFilter);}
     catch(ex){setErr(ex.message);}finally{setDiscarding(false);}};
-  const codeTransaction=async(id,acct_code,memo)=>{await api.codeBankTransaction(entityId,id,acct_code,memo);
-    setTxns(prev=>prev.map(t=>t.id===id?{...t,account_code:acct_code,memo:memo,status:acct_code?'coded':'pending'}:t));};
+  const codeTransaction=async(id,acct_code,memo,dims)=>{const cur=txns.find(t=>t.id===id)||{};
+    const d={project_id:dims&&'project_id'in dims?dims.project_id:(cur.project_id||null),class_id:dims&&'class_id'in dims?dims.class_id:(cur.class_id||null),location_id:dims&&'location_id'in dims?dims.location_id:(cur.location_id||null)};
+    await api.codeBankTransaction(entityId,id,acct_code,memo,d);
+    setTxns(prev=>prev.map(t=>t.id===id?{...t,account_code:acct_code,memo:memo,...d,status:acct_code?'coded':'pending'}:t));};
+  // One tagged dimension per transaction (Project / Location / Class), mirroring JEs.
+  const projOpts=dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}));
+  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
+  const clsOpts=classes.map(c=>({v:'class:'+c.id,label:'Class — '+(c.code?c.code+' — ':'')+c.name}));
+  const dimOpts=[...projOpts,...locOpts,...clsOpts];const showDims=dimOpts.length>0;
+  const txnDimValue=t=>t.project_id?'project:'+t.project_id:t.location_id?'location:'+t.location_id:t.class_id?'class:'+t.class_id:'';
+  const setTxnDim=(t,val)=>{const[kind,id]=val?val.split(':'):['',''];codeTransaction(t.id,t.account_code||null,t.memo,{project_id:kind==='project'?id:null,class_id:kind==='class'?id:null,location_id:kind==='location'?id:null});};
   const postCoded=async()=>{const ids=txns.filter(t=>t.status==='coded').map(t=>t.id);if(!ids.length){setErr('Nothing coded');return;}try{const r=await api.postBankTransactions(entityId,ids);setMsg(r.posted+' JEs created');loadTxns(selAcct,statusFilter);}catch(ex){setErr(ex.message);}};
   const changeAcct=v=>{setSelAcct(v);setTxns([]);if(v)loadTxns(v,statusFilter);};
   const changeStatus=v=>{setStatusFilter(v);if(selAcct)loadTxns(selAcct,v);};
@@ -2180,10 +2203,13 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
                   </div>
                 : t.splits && t.splits.length>0
                 ? <button style={{...S.btnS,padding:'5px 10px',fontSize:11,color:T.purple,borderColor:T.purple+'40',width:'100%',textAlign:'left'}} onClick={()=>setSplitTxn(t)} title={t.splits.map(s=>s.account_code+' $'+fmt(s.amount)).join(' | ')}>Split: {t.splits.length} accts &middot; ${fmt(t.splits.reduce((s,x)=>s+x.amount,0))}</button>
-                : <div style={{display:'flex',gap:4,alignItems:'center'}}>
+                : <div>
+                    <div style={{display:'flex',gap:4,alignItems:'center'}}>
                     <div style={{flex:1,minWidth:0}}><AccountAutocomplete accounts={accounts} value={t.account_code||''} exclude={selAcct} onChange={v=>codeTransaction(t.id,v,t.memo)} placeholder="Search GL account..."/></div>
                     <button style={{...S.btnGhost,fontSize:10,color:T.teal,padding:'4px 6px',whiteSpace:'nowrap'}} onClick={()=>setMatchTxn(t)} title="Match to an existing journal entry">Match</button>
                     <button style={{...S.btnGhost,fontSize:10,color:T.purple,padding:'4px 6px',whiteSpace:'nowrap'}} onClick={()=>setSplitTxn(t)} title="Split across multiple accounts">Split</button>
+                    </div>
+                    {showDims&&<select style={{...S.inputSm,marginTop:4,width:'100%'}} value={txnDimValue(t)} onChange={e=>setTxnDim(t,e.target.value)} title="Tag a Location / Class / Project dimension"><option value="">No dimension</option>{dimOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</select>}
                   </div>)}</td>
           <td style={{...S.td,padding:'4px 6px',overflow:'visible',borderRight:'1px solid '+T.borderLight}}>{(t.status==='posted'||!canEdit)?<span style={{fontSize:12,color:T.textDim}}>{t.memo}</span>:
             (t.splits && t.splits.length>0
@@ -3027,7 +3053,7 @@ function BankReconciliation({entityId,user,canEdit=true}){const[accounts,setAcco
         const undoRec=async r=>{if(!confirm('Undo the '+r.statement_date+' reconciliation for account '+r.account_code+'?\n\nIts '+r.cleared_count+' cleared item(s) will return to uncleared and reappear in the next reconciliation. No journal entries are changed.'))return;
           try{await api.deleteReconciliation(entityId,r.id);load();}catch(ex){alert(ex.message);}};
         return(<table style={S.table}><thead><tr><th style={S.th}>Date</th><th style={S.th}>Account</th><th style={S.thR}>Statement</th><th style={S.thR}>Book</th><th style={S.thR}>Cleared</th><th style={S.th}>By</th><th style={S.th}></th></tr></thead>
-        <tbody>{recs.map(r=><tr key={r.id}><td style={S.td}>{r.statement_date}</td><td style={S.td}>{r.account_code}</td><td style={S.tdR}>${fmt(r.statement_balance)}</td><td style={S.tdR}>${fmt(r.book_balance)}</td><td style={S.tdR}>{r.cleared_count}</td><td style={S.td}>{r.completed_by}</td><td style={S.td}><div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
+        <tbody>{recs.map(r=><tr key={r.id}><td style={S.td}>{r.statement_date}</td><td style={S.td}>{(()=>{const a=accounts.find(x=>x.code===r.account_code);return a?acctLabel(a.code,a.name):r.account_code;})()}</td><td style={S.tdR}>${fmt(r.statement_balance)}</td><td style={S.tdR}>${fmt(r.book_balance)}</td><td style={S.tdR}>{r.cleared_count}</td><td style={S.td}>{r.completed_by}</td><td style={S.td}><div style={{display:'flex',gap:6,justifyContent:'flex-end'}}>
           <button style={{...S.btnS,padding:'4px 12px',fontSize:11}} onClick={()=>setReportRec(r)}>Report</button>
           {canEdit&&latestByAcct[r.account_code]?.id===r.id&&<button style={{...S.btnS,padding:'4px 12px',fontSize:11,color:T.red,borderColor:T.red+'40'}} title="Undo this reconciliation — cleared items return to uncleared" onClick={()=>undoRec(r)}>Undo</button>}
         </div></td></tr>)}</tbody></table>);})()}</div>

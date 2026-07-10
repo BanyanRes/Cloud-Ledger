@@ -492,6 +492,16 @@ if (!jlCols.includes('project_id')) {
   db.exec("CREATE INDEX IF NOT EXISTS idx_jl_project ON journal_lines(project_id)");
   console.log('[db migrate] journal_lines.project_id added');
 }
+// Bank transactions and their split lines carry the same optional dimensions as
+// journal lines (Location / Class / Project), so coding a bank txn (or a split)
+// can tag the dimension that then flows onto the posted JE line.
+for (const _tbl of ['bank_transactions', 'bank_transaction_splits']) {
+  const _cols = db.prepare(`PRAGMA table_info(${_tbl})`).all().map(c => c.name);
+  if (!_cols.includes('project_id'))  db.exec(`ALTER TABLE ${_tbl} ADD COLUMN project_id TEXT`);
+  if (!_cols.includes('class_id'))    db.exec(`ALTER TABLE ${_tbl} ADD COLUMN class_id INTEGER`);
+  if (!_cols.includes('location_id')) db.exec(`ALTER TABLE ${_tbl} ADD COLUMN location_id INTEGER`);
+}
+console.log('[db migrate] bank_transactions/splits dimension columns ensured');
 // Dimension code columns (name was the only label originally; code added for reporting/sorting)
 const dcCols = db.prepare("PRAGMA table_info(dim_classes)").all().map(c => c.name);
 if (!dcCols.includes('code')) { db.exec("ALTER TABLE dim_classes ADD COLUMN code TEXT"); console.log('[db migrate] dim_classes.code added'); }
@@ -2864,12 +2874,12 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
 });
 
 app.put('/api/entities/:eid/bank-transactions/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
-  const { account_code, memo } = req.body;
+  const { account_code, memo, project_id, class_id, location_id } = req.body;
   // Setting a single account_code clears any existing splits
   db.transaction(() => {
     db.prepare('DELETE FROM bank_transaction_splits WHERE txn_id=?').run(req.params.id);
-    db.prepare('UPDATE bank_transactions SET account_code=?, memo=?, status=? WHERE id=? AND entity_id=?')
-      .run(account_code || null, memo || null, account_code ? 'coded' : 'pending', req.params.id, req.params.eid);
+    db.prepare('UPDATE bank_transactions SET account_code=?, memo=?, project_id=?, class_id=?, location_id=?, status=? WHERE id=? AND entity_id=?')
+      .run(account_code || null, memo || null, project_id || null, class_id || null, location_id || null, account_code ? 'coded' : 'pending', req.params.id, req.params.eid);
   })();
   res.json({ success: true });
 });
@@ -2892,10 +2902,10 @@ app.put('/api/entities/:eid/bank-transactions/:id/splits', auth, requireEntityAc
 
   db.transaction(() => {
     db.prepare('DELETE FROM bank_transaction_splits WHERE txn_id=?').run(txn.id);
-    const ins = db.prepare('INSERT INTO bank_transaction_splits (txn_id, account_code, amount, memo) VALUES (?,?,?,?)');
-    for (const s of splits) ins.run(txn.id, s.account_code, Number(s.amount), s.memo || null);
-    // Clear the single-code field and mark coded
-    db.prepare('UPDATE bank_transactions SET account_code=NULL, status=? WHERE id=?').run('coded', txn.id);
+    const ins = db.prepare('INSERT INTO bank_transaction_splits (txn_id, account_code, amount, memo, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?)');
+    for (const s of splits) ins.run(txn.id, s.account_code, Number(s.amount), s.memo || null, s.project_id || null, s.class_id || null, s.location_id || null);
+    // Clear the single-code field + its dimensions (dimensions now live per split) and mark coded
+    db.prepare('UPDATE bank_transactions SET account_code=NULL, project_id=NULL, class_id=NULL, location_id=NULL, status=? WHERE id=?').run('coded', txn.id);
   })();
   res.json({ success: true });
 });
@@ -2920,19 +2930,22 @@ app.post('/api/entities/:eid/bank-transactions/post', auth, requireEntityAccess(
       const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)')
         .run(req.params.eid, num, t.date, t.memo || t.description, req.user.name);
       const jeId = r.lastInsertRowid;
-      const insLine = db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit) VALUES (?,?,?,?)');
+      const insLine = db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?)');
       const abs = Math.abs(t.amount);
+      // Bank-account line carries no dimension; the coded offset line(s) do.
+      const tDims = [t.project_id || null, t.class_id || null, t.location_id || null];
+      const sDims = s => [s.project_id || null, s.class_id || null, s.location_id || null];
 
       if (t.amount > 0) {
         // Deposit: debit bank once, credit each coded account
-        insLine.run(jeId, t.bank_account_code, abs, 0);
-        if (hasSplits) { for (const s of splits) insLine.run(jeId, s.account_code, 0, s.amount); }
-        else { insLine.run(jeId, t.account_code, 0, abs); }
+        insLine.run(jeId, t.bank_account_code, abs, 0, null, null, null);
+        if (hasSplits) { for (const s of splits) insLine.run(jeId, s.account_code, 0, s.amount, ...sDims(s)); }
+        else { insLine.run(jeId, t.account_code, 0, abs, ...tDims); }
       } else {
         // Payment: debit each coded account, credit bank once
-        if (hasSplits) { for (const s of splits) insLine.run(jeId, s.account_code, s.amount, 0); }
-        else { insLine.run(jeId, t.account_code, abs, 0); }
-        insLine.run(jeId, t.bank_account_code, 0, abs);
+        if (hasSplits) { for (const s of splits) insLine.run(jeId, s.account_code, s.amount, 0, ...sDims(s)); }
+        else { insLine.run(jeId, t.account_code, abs, 0, ...tDims); }
+        insLine.run(jeId, t.bank_account_code, 0, abs, null, null, null);
       }
 
       db.prepare('UPDATE bank_transactions SET status=?, je_id=? WHERE id=?').run('posted', jeId, t.id);
