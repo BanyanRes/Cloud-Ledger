@@ -2274,8 +2274,65 @@ function WipSchedule({entityName,asOf,setAsOf}){
   </div></div>);
 }
 
+// ══ Financial-report options (Liting #2): date presets, period columns, prior-period comparative ══
+const RPT_DATE_FILTERS=[['all','All'],['month','Last Month'],['quarter','Last Quarter'],['year','Last Year']];
+const RPT_COL_MODES=[['total','Total Only'],['monthly','Monthly'],['quarterly','Quarterly'],['yearly','Yearly']];
+const _ymd=d=>new Date(d).toISOString().slice(0,10);
+const _mkDate=s=>new Date((/^\d{4}-\d{2}-\d{2}$/.test(s)?s:today())+'T00:00:00');
+// Overall [from,to] window for a date preset, anchored at `anchor` (YYYY-MM-DD).
+function rptWindow(filter,anchor){
+  const a=_mkDate(anchor);const to=_ymd(a);
+  const back=(n,unit)=>{const s=new Date(a);if(unit==='m')s.setMonth(s.getMonth()-n);else s.setFullYear(s.getFullYear()-n);s.setDate(s.getDate()+1);return _ymd(s);};
+  if(filter==='month')return{from:back(1,'m'),to};
+  if(filter==='quarter')return{from:back(3,'m'),to};
+  if(filter==='year')return{from:back(1,'y'),to};
+  return{from:null,to};// 'all' = inception → anchor
+}
+// Split a window into calendar-aligned sub-periods. Returns [{label,from,to}].
+function rptPeriods(filter,mode,anchor){
+  const w=rptWindow(filter,anchor);
+  if(mode==='total')return[{label:'Total',from:w.from,to:w.to}];
+  const to=_mkDate(w.to);
+  const cs=w.from?_mkDate(w.from):new Date(to.getFullYear(),0,1);
+  cs.setDate(1);
+  if(mode==='quarterly')cs.setMonth(Math.floor(cs.getMonth()/3)*3);
+  if(mode==='yearly')cs.setMonth(0);
+  const stepM=mode==='monthly'?1:mode==='quarterly'?3:12;
+  const cols=[];let cur=new Date(cs);
+  while(cur<=to&&cols.length<120){
+    const segStart=new Date(cur);const next=new Date(segStart);next.setMonth(next.getMonth()+stepM);
+    let segEnd=new Date(next);segEnd.setDate(segEnd.getDate()-1);if(segEnd>to)segEnd=new Date(to);
+    let segFrom=segStart;if(w.from&&_mkDate(w.from)>segStart)segFrom=_mkDate(w.from);
+    const label=mode==='monthly'?segStart.toLocaleString('en-US',{month:'short',year:'2-digit'})
+      :mode==='quarterly'?('Q'+(Math.floor(segStart.getMonth()/3)+1)+" '"+String(segStart.getFullYear()).slice(2))
+      :String(segStart.getFullYear());
+    cols.push({label,from:_ymd(segFrom),to:_ymd(segEnd)});
+    cur=next;
+  }
+  return cols;
+}
+// Immediately-preceding window of equal length (for the "previous period" comparative).
+function rptPriorWindow(p){
+  if(!p||!p.from)return null; // inception-based windows have no prior
+  const from=_mkDate(p.from),to=_mkDate(p.to);
+  const days=Math.round((to-from)/86400000)+1;
+  const pTo=new Date(from);pTo.setDate(pTo.getDate()-1);
+  const pFrom=new Date(pTo);pFrom.setDate(pFrom.getDate()-days+1);
+  return{label:'Prev',from:_ymd(pFrom),to:_ymd(pTo)};
+}
+const rptPct=(cur,prev)=>Math.abs(prev)<0.005?null:(cur-prev)/Math.abs(prev)*100;
+const rptChgCell=(cur,prev)=>{const d=cur-prev;const p=rptPct(cur,prev);return{d,p};};
+function ReportControls({dateFilter,setDateFilter,colMode,setColMode,compare,setCompare,anchorLabel}){
+  return(<div style={{...S.filterBar,flexWrap:'wrap'}}>
+    <div><label style={S.label}>Date range</label><select style={S.inputSm} value={dateFilter} onChange={e=>setDateFilter(e.target.value)}>{RPT_DATE_FILTERS.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div>
+    <div><label style={S.label}>Columns</label><select style={S.inputSm} value={colMode} onChange={e=>setColMode(e.target.value)}>{RPT_COL_MODES.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div>
+    <div><label style={S.label}>Compare</label><label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.textMuted,height:34}} title="Adds a Previous Period column with $ and % change (Total Only view)"><input type="checkbox" checked={compare} onChange={e=>setCompare(e.target.checked)} disabled={colMode!=='total'}/> Prev period ($ / %)</label></div>
+  </div>);
+}
+
 function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEdit=true}){
-  const[balances,setBalances]=useState([]);
+  const[data,setData]=useState([]);
+  const[dateFilter,setDateFilter]=useState('all');const[colMode,setColMode]=useState('total');const[compare,setCompare]=useState(false);
   const[rk,setRk]=useState(0);
   const[drillAcct,setDrillAcct]=useState(null);
   const[locations,setLocations]=useState([]);
@@ -2303,16 +2360,31 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   // (location and/or class/investor) is activity-based: it sums only lines carrying
   // the selected tag(s), so there is no period-close/RE roll — pass the dimension
   // id(s) with the as_of date only.
-  useEffect(()=>{
-    if(dimmed) api.getBalances(entityId,{as_of:validAsOf,...(locId?{location_id:locId}:{}),...(classId?{class_id:classId}:{}),...(projId?{project_id:projId}:{})}).then(setBalances);
-    else api.getBalances(entityId,{as_of:validAsOf,close_pl_before:fyS}).then(setBalances);
-  },[entityId,validAsOf,fyS,locId,classId,projId,dimmed,rk]);
+  const anchor=validAsOf;
+  const periods=useMemo(()=>rptPeriods(dateFilter,colMode,anchor),[dateFilter,colMode,anchor]);
+  const prior=(compare&&colMode==='total'&&periods[0]&&periods[0].from)?rptPriorWindow(periods[0]):null;
+  const cols=useMemo(()=>prior?[prior,...periods]:periods,[JSON.stringify(prior),JSON.stringify(periods)]);
+  const dimArgs=useMemo(()=>({...(locId?{location_id:locId}:{}),...(classId?{class_id:classId}:{}),...(projId?{project_id:projId}:{})}),[locId,classId,projId]);
+  useEffect(()=>{let ok=true;Promise.all(cols.map(c=>api.getBalances(entityId,dimmed?{as_of:c.to,...dimArgs}:{as_of:c.to,close_pl_before:c.to.slice(0,4)+'-01-01'}).catch(()=>[]))).then(r=>{if(ok)setData(r);});return()=>{ok=false;};},[entityId,JSON.stringify(cols),JSON.stringify(dimArgs),dimmed,rk]);
   useEffect(()=>{api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));},[entityId]);
   useEffect(()=>{api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
   useEffect(()=>{api.getProjects(entityId).then(d=>setProjects(d||[])).catch(()=>setProjects([]));},[entityId]);
-  let tDr=0,tCr=0;const rows=balances.filter(b=>Math.abs(b.balance)>0.005).map(b=>{const isDr=b.type==='Asset'||b.type==='Expense';const dr=(isDr&&b.balance>0)||(!isDr&&b.balance<0)?Math.abs(b.balance):0;const cr=(isDr&&b.balance<0)||(!isDr&&b.balance>0)?Math.abs(b.balance):0;tDr+=dr;tCr+=cr;return{...b,dr,cr};});
+  const meta=useMemo(()=>{const m=new Map();data.forEach(bs=>(bs||[]).forEach(b=>{if(!m.has(b.code))m.set(b.code,{code:b.code,name:b.name,type:b.type});}));return[...m.values()].sort((a,b)=>String(a.code).localeCompare(String(b.code)));},[data]);
+  const vmap=useMemo(()=>data.map(bs=>{const mm=new Map();(bs||[]).forEach(b=>mm.set(b.code,b.balance));return mm;}),[data]);
+  const balAt=(code,ci)=>(vmap[ci]&&vmap[ci].get(code))||0;
+  const typeOf=code=>(meta.find(m=>m.code===code)||{}).type;
+  const drcr=(code,ci)=>{const b=balAt(code,ci);const isDr=typeOf(code)==='Asset'||typeOf(code)==='Expense';return{dr:(isDr&&b>0)||(!isDr&&b<0)?Math.abs(b):0,cr:(isDr&&b<0)||(!isDr&&b>0)?Math.abs(b):0};};
+  const rows=meta.filter(m=>vmap.some(mm=>Math.abs((mm&&mm.get(m.code))||0)>0.005));
+  const nCols=cols.length;const curI=nCols-1;const priI=prior?0:-1;
+  const totDr=ci=>rows.reduce((s,r)=>s+drcr(r.code,ci).dr,0);const totCr=ci=>rows.reduce((s,r)=>s+drcr(r.code,ci).cr,0);
+  const pctTxt=p=>p==null?'—':(p>=0?'+':'')+p.toFixed(1)+'%';
+  const oneYrBefore=d=>{const x=new Date(d+'T00:00:00');x.setFullYear(x.getFullYear()-1);x.setDate(x.getDate()+1);return x.toISOString().slice(0,10);};
+  const colHead=(c,i)=>prior&&i===0?'Prev':(c.label==='Total'?'':c.label);
   const fnameTag=[locName,className,projName].filter(Boolean).map(s=>s.replace(/[^A-Za-z0-9]+/g,'_')).join('_');
-  const doExport=()=>{const lbl=scopeLabel?(' — '+scopeLabel):'';const d=[[entityName||'Trial Balance'],['Trial Balance'+lbl],['As of '+asOf],[],['Code','Account','Type','Debit','Credit']];rows.forEach(r=>d.push([r.code,r.name,r.type,r.dr||'',r.cr||'']));d.push([]);d.push(['','','Total',tDr,tCr]);exportToExcel(d,'TB'+(fnameTag?'_'+fnameTag:'')+'_'+asOf+'.xlsx');};
+  const doExport=()=>{const lbl=scopeLabel?(' — '+scopeLabel):'';const hdr=['Code','Account','Type'];cols.forEach((c,i)=>{const h=colHead(c,i);hdr.push((h?h+' ':'')+'Debit',(h?h+' ':'')+'Credit');});const d=[[entityName||'Trial Balance'],['Trial Balance'+lbl],['As of '+anchor],[],hdr];
+    rows.forEach(r=>{const row=[r.code,r.name,r.type];cols.forEach((c,i)=>{const x=drcr(r.code,i);row.push(x.dr||'',x.cr||'');});d.push(row);});
+    const tot=['','','Total'];cols.forEach((c,i)=>{tot.push(totDr(i),totCr(i));});d.push([]);d.push(tot);
+    exportToExcel(d,'TB'+(fnameTag?'_'+fnameTag:'')+'_'+anchor+'.xlsx');};
   const amtStyle={...S.tdR,cursor:'pointer'};
   // GL detail export (optionally scoped to the selected location and/or investor).
   // Pulls flat lines with running balance from /gl-detail through the as-of date;
@@ -2330,20 +2402,22 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   };
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
     <div style={S.filterBar}><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
+      <ReportControls dateFilter={dateFilter} setDateFilter={setDateFilter} colMode={colMode} setColMode={setColMode} compare={compare} setCompare={setCompare}/>
       {showProj&&<div><label style={S.label}>Project</label><select style={S.inputSm} value={projId} onChange={e=>setProjId(e.target.value)}><option value="">All (whole entity)</option>{projects.map(p=><option key={p.id} value={p.id}>{p.code&&p.code!==p.name?p.code+' — '+p.name:p.name}{p.line_count!=null?(' ('+p.line_count+')'):''}</option>)}</select></div>}
       {showLocInv&&<div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>}
       {showLocInv&&<div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div>}</div>
-    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='trial' currentConfig={{asOf}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={doExport}>Export TB</button></div></div>
+    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='trial' currentConfig={{asOf,dateFilter,colMode,compare}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={doExport}>Export TB</button></div></div>
     <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Trial Balance{scopeLabel?(' — '+scopeLabel):''}</div><div style={{fontSize:13,color:T.textMuted}}>As of {asOf}{dimmed?' · dimension-tagged activity only':''}</div></div>
-    <table style={{...S.table,tableLayout:'fixed',width:'100%'}}>
-      <colgroup><col style={{width:'90px'}}/><col/><col style={{width:'120px'}}/><col style={{width:'160px'}}/><col style={{width:'160px'}}/></colgroup>
-      <thead><tr><th style={S.th}>Code</th><th style={S.th}>Account</th><th style={S.th}>Type</th><th style={S.thR}>Debit</th><th style={S.thR}>Credit</th></tr></thead>
-      <tbody>{rows.map(r=><tr key={r.code}><td style={{...S.td,color:T.textBright}}>{r.code}</td><td style={{...S.td,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={r.name}>{r.name}</td><td style={S.td}><span style={S.tag(r.type)}>{r.type}</span></td>
-        <td style={amtStyle} onClick={()=>r.dr>0&&setDrillAcct(r)} title={r.dr>0?'Click for 12-month detail':''}>{r.dr>0?<span style={{color:T.accent,borderBottom:'1px dotted '+T.accent+'80'}}>{fmt(r.dr)}</span>:''}</td>
-        <td style={amtStyle} onClick={()=>r.cr>0&&setDrillAcct(r)} title={r.cr>0?'Click for 12-month detail':''}>{r.cr>0?<span style={{color:T.accent,borderBottom:'1px dotted '+T.accent+'80'}}>{fmt(r.cr)}</span>:''}</td></tr>)}
-        <tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={3}>Total</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td></tr></tbody></table>
-    <div style={{textAlign:'center',marginTop:14,fontSize:13,fontWeight:600,color:Math.abs(tDr-tCr)<0.005?T.green:T.red}}>{Math.abs(tDr-tCr)<0.005?'In balance':'Off by $'+fmt(tDr-tCr)}</div></div>
-    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillFrom} to={asOf} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
+    <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520}}>
+      <thead><tr><th style={S.th}>Code</th><th style={S.th}>Account</th><th style={S.th}>Type</th>
+        {cols.map((c,i)=>{const h=colHead(c,i);return[<th key={'hd'+i} style={S.thR}>{(h?h+' ':'')}Debit</th>,<th key={'hc'+i} style={S.thR}>{(h?h+' ':'')}Credit</th>];})}
+        {prior&&<><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}</tr></thead>
+      <tbody>{rows.map(r=><tr key={r.code}><td style={{...S.td,color:T.textBright}}>{r.code}</td><td style={S.td} title={r.name}>{r.name}</td><td style={S.td}><span style={S.tag(r.type)}>{r.type}</span></td>
+        {cols.map((c,i)=>{const x=drcr(r.code,i);const clk=()=>setDrillAcct({...r,from:oneYrBefore(c.to),to:c.to});return[<td key={'d'+i} style={{...S.tdR,cursor:x.dr>0?'pointer':'default',color:x.dr>0?T.accent:undefined}} onClick={()=>x.dr>0&&clk()}>{x.dr>0?fmt(x.dr):''}</td>,<td key={'c'+i} style={{...S.tdR,cursor:x.cr>0?'pointer':'default',color:x.cr>0?T.accent:undefined}} onClick={()=>x.cr>0&&clk()}>{x.cr>0?fmt(x.cr):''}</td>];})}
+        {prior&&(()=>{const cN=balAt(r.code,curI),pN=balAt(r.code,priI);return[<td key="dc" style={S.tdR}>{fmt(cN-pN)}</td>,<td key="pc" style={{...S.tdR,color:(cN-pN)>=0?T.green:T.red}}>{pctTxt(rptPct(cN,pN))}</td>];})()}</tr>)}
+        <tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={3}>Total</td>{cols.map((c,i)=>[<td key={'d'+i} style={{...S.tdBold,textAlign:'right'}}>${fmt(totDr(i))}</td>,<td key={'c'+i} style={{...S.tdBold,textAlign:'right'}}>${fmt(totCr(i))}</td>])}{prior&&<><td style={S.tdBold}/><td style={S.tdBold}/></>}</tr></tbody></table></div>
+    <div style={{textAlign:'center',marginTop:14,fontSize:13,fontWeight:600,color:Math.abs(totDr(curI)-totCr(curI))<0.005?T.green:T.red}}>{Math.abs(totDr(curI)-totCr(curI))<0.005?'In balance':'Off by $'+fmt(totDr(curI)-totCr(curI))}</div></div>
+    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillAcct.from||drillFrom} to={drillAcct.to||asOf} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
   </div>);
 }
 
@@ -2444,49 +2518,104 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
   </div></div>);
 }
 
-function BalanceSheet({entityId,entityName,asOf,setAsOf,canEdit=true}){const[balances,setBalances]=useState([]);const[drillAcct,setDrillAcct]=useState(null);const[rk,setRk]=useState(0);
-  // Guard: while the user is editing the date input, asOf can briefly be '' or a partial string like '2026-'.
-  const validAsOf=/^\d{4}-\d{2}-\d{2}$/.test(asOf)&&!isNaN(new Date(asOf+'T00:00:00').getTime())?asOf:today();
-  const fyS=validAsOf.slice(0,4)+'-01-01';
-  const drillFrom=useMemo(()=>{const d=new Date(validAsOf+'T00:00:00');d.setFullYear(d.getFullYear()-1);d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);},[validAsOf]);
-  useEffect(()=>{api.getBalances(entityId,{as_of:validAsOf,close_pl_before:fyS}).then(setBalances);},[entityId,validAsOf,fyS,rk]);
-  const get=t=>balances.filter(b=>b.type===t&&Math.abs(b.balance)>0.005);const sum=t=>get(t).reduce((s,b)=>s+b.balance,0);
-  const ni=sum('Revenue')-sum('Expense');const tA=sum('Asset');const tLE=sum('Liability')+sum('Equity')+ni;
-  const doExport=()=>{const d=[[entityName||'Balance Sheet'],['Balance Sheet'],['As of '+asOf],[]];[['Assets','Asset'],['Liabilities','Liability'],['Equity','Equity']].forEach(([t,ty])=>{d.push([t,'']);get(ty).forEach(b=>d.push(['  '+b.name,b.balance]));if(ty==='Equity'&&Math.abs(ni)>0.005)d.push(['  Net Income (current period)',ni]);d.push(['Total '+t,ty==='Equity'?sum(ty)+ni:sum(ty)]);d.push([]);});d.push(['Total L+E',tLE]);exportToExcel(d,'BS_'+asOf+'.xlsx');};
-  const Sec=({title,type,total})=>(<><tr><td style={S.sectionHeader} colSpan={2}>{title}</td></tr>{get(type).map(b=><tr key={b.code}><td style={{...S.indentTd,cursor:'pointer'}} onClick={()=>setDrillAcct(b)}><span style={{borderBottom:'1px dotted '+T.accent+'80',color:T.accent}}>{b.name}</span></td><td style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct(b)}>{fmt(b.balance)}</td></tr>)}
-    {type==='Equity'&&Math.abs(ni)>0.005&&<tr><td style={{...S.indentTd,fontStyle:'italic',color:T.textMuted}}>Net Income (current period)</td><td style={{...S.tdR,fontStyle:'italic'}}>{fmt(ni)}</td></tr>}
-    <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>${fmt(total)}</td></tr></>);
-  return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-    <div style={S.filterBar}><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div></div>
-    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='bs' currentConfig={{asOf}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExport}>Export Excel</button></div></div>
-    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Balance Sheet</div><div style={{fontSize:13,color:T.textMuted}}>As of {asOf}</div></div>
-    <table style={{...S.table,maxWidth:580,margin:'0 auto'}}><tbody><Sec title="Assets" type="Asset" total={tA}/><tr><td colSpan={2} style={{padding:8}}/></tr>
-      <Sec title="Liabilities" type="Liability" total={sum('Liability')}/><tr><td colSpan={2} style={{padding:4}}/></tr><Sec title="Equity" type="Equity" total={sum('Equity')+ni}/>
-      <tr style={S.grandTotalRow}><td style={S.tdBold}>Total Liabilities + Equity</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tLE)}</td></tr></tbody></table>
-    <div style={{textAlign:'center',marginTop:14,fontSize:13,fontWeight:600,color:Math.abs(tA-tLE)<0.005?T.green:T.red}}>{Math.abs(tA-tLE)<0.005?'A = L + E':'Off by $'+fmt(tA-tLE)}</div></div>
-    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillFrom} to={asOf} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
+function BalanceSheet({entityId,entityName,asOf,setAsOf,canEdit=true}){
+  const[drillAcct,setDrillAcct]=useState(null);const[rk,setRk]=useState(0);
+  const[dateFilter,setDateFilter]=useState('all');const[colMode,setColMode]=useState('total');const[compare,setCompare]=useState(false);
+  const anchor=/^\d{4}-\d{2}-\d{2}$/.test(asOf)?asOf:today();
+  const periods=useMemo(()=>rptPeriods(dateFilter,colMode,anchor),[dateFilter,colMode,anchor]);
+  const prior=(compare&&colMode==='total'&&periods[0]&&periods[0].from)?rptPriorWindow(periods[0]):null;
+  const cols=useMemo(()=>prior?[prior,...periods]:periods,[JSON.stringify(prior),JSON.stringify(periods)]);
+  const[data,setData]=useState([]);
+  useEffect(()=>{let ok=true;Promise.all(cols.map(c=>api.getBalances(entityId,{as_of:c.to,close_pl_before:c.to.slice(0,4)+'-01-01'}).catch(()=>[]))).then(r=>{if(ok)setData(r);});return()=>{ok=false;};},[entityId,JSON.stringify(cols),rk]);
+  const meta=useMemo(()=>{const m=new Map();data.forEach(bs=>(bs||[]).forEach(b=>{if(!m.has(b.code))m.set(b.code,{code:b.code,name:b.name,type:b.type});}));return m;},[data]);
+  const vmap=useMemo(()=>data.map(bs=>{const mm=new Map();(bs||[]).forEach(b=>mm.set(b.code,b.balance));return mm;}),[data]);
+  const val=(code,ci)=>(vmap[ci]&&vmap[ci].get(code))||0;
+  const grp=type=>[...meta.values()].filter(a=>a.type===type).filter(a=>vmap.some(mm=>Math.abs((mm&&mm.get(a.code))||0)>0.005));
+  const assets=grp('Asset'),liabs=grp('Liability'),eq=grp('Equity');
+  const sumC=(items,ci)=>items.reduce((s,a)=>s+val(a.code,ci),0);
+  const niCol=ci=>{let r=0,e=0;(data[ci]||[]).forEach(b=>{if(b.type==='Revenue')r+=b.balance;else if(b.type==='Expense')e+=b.balance;});return r-e;};
+  const tA=ci=>sumC(assets,ci);const tE=ci=>sumC(eq,ci)+niCol(ci);const tLE=ci=>sumC(liabs,ci)+tE(ci);
+  const nCols=cols.length;const curI=nCols-1;const priI=prior?0:-1;
+  const pctTxt=p=>p==null?'—':(p>=0?'+':'')+p.toFixed(1)+'%';
+  const chgCells=(getter)=>{if(!prior)return null;const c=getter(curI),p=getter(priI);return[<td key="d" style={S.tdR}>{fmt(c-p)}</td>,<td key="p" style={{...S.tdR,color:(c-p)>=0?T.green:T.red}}>{pctTxt(rptPct(c,p))}</td>];};
+  const nColSpan=1+nCols+(prior?2:0);
+  const oneYrBefore=d=>{const x=new Date(d+'T00:00:00');x.setFullYear(x.getFullYear()-1);x.setDate(x.getDate()+1);return x.toISOString().slice(0,10);};
+  const Sec=({title,items,totalGetter,extraNiRow})=>(<><tr><td style={S.sectionHeader} colSpan={nColSpan}>{title}</td></tr>
+    {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,from:oneYrBefore(c.to),to:c.to})}>{fmt(val(a.code,i))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
+    {extraNiRow&&<tr><td style={{...S.indentTd,fontStyle:'italic',color:T.textMuted}}>Net Income (current period)</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,fontStyle:'italic'}}>{fmt(niCol(i))}</td>)}{chgCells(niCol)}</tr>}
+    <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(totalGetter(i))}</td>)}{chgCells(totalGetter)}</tr></>);
+  const colHead=(c,i)=>prior&&i===0?'Prev':(c.label==='Total'?('As of '+anchor):c.label);
+  const doExport=()=>{const hdr=['',...cols.map((c,i)=>colHead(c,i)),...(prior?['$ Change','% Change']:[])];
+    const d=[[entityName||'Balance Sheet'],['Balance Sheet'],[],hdr];
+    const push=(label,getter)=>{const row=[label,...cols.map((c,i)=>getter(i))];if(prior)row.push(getter(curI)-getter(priI),rptPct(getter(curI),getter(priI)));d.push(row);};
+    d.push(['Assets']);assets.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));push('Total Assets',tA);
+    d.push(['Liabilities']);liabs.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));push('Total Liabilities',ci=>sumC(liabs,ci));
+    d.push(['Equity']);eq.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));push('  Net Income (current period)',niCol);push('Total Equity',tE);
+    push('Total Liabilities + Equity',tLE);exportToExcel(d,'BS_'+anchor+'.xlsx');};
+  return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginBottom:16,flexWrap:'wrap',gap:10}}>
+    <div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
+      <div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
+      <ReportControls dateFilter={dateFilter} setDateFilter={setDateFilter} colMode={colMode} setColMode={setColMode} compare={compare} setCompare={setCompare}/>
+    </div>
+    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='bs' currentConfig={{asOf,dateFilter,colMode,compare}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExport}>Export Excel</button></div></div>
+    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Balance Sheet</div><div style={{fontSize:13,color:T.textMuted}}>As of {anchor}{colMode!=='total'?(' · '+RPT_COL_MODES.find(m=>m[0]===colMode)[1]):''}</div></div>
+    <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520,margin:'0 auto'}}><thead><tr><th style={S.th}></th>{cols.map((c,i)=><th key={i} style={S.thR}>{colHead(c,i)}</th>)}{prior&&<><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}</tr></thead><tbody>
+      <Sec title="Assets" items={assets} totalGetter={tA}/><tr><td colSpan={nColSpan} style={{padding:6}}/></tr>
+      <Sec title="Liabilities" items={liabs} totalGetter={ci=>sumC(liabs,ci)}/><tr><td colSpan={nColSpan} style={{padding:3}}/></tr>
+      <Sec title="Equity" items={eq} totalGetter={tE} extraNiRow/>
+      <tr style={S.grandTotalRow}><td style={S.tdBold}>Total Liabilities + Equity</td>{cols.map((c,i)=><td key={i} style={{...S.tdBold,textAlign:'right',fontSize:15}}>{fmt(tLE(i))}</td>)}{chgCells(tLE)}</tr>
+    </tbody></table></div>
+    <div style={{textAlign:'center',marginTop:14,fontSize:13,fontWeight:600,color:Math.abs(tA(curI)-tLE(curI))<0.005?T.green:T.red}}>{Math.abs(tA(curI)-tLE(curI))<0.005?'A = L + E':'Off by $'+fmt(tA(curI)-tLE(curI))}</div></div>
+    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillAcct.from} to={drillAcct.to} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
     </div>);}
 
-function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true}){const[balances,setBalances]=useState([]);const[drillAcct,setDrillAcct]=useState(null);const[rk,setRk]=useState(0);
-  useEffect(()=>{api.getBalances(entityId,{from,to}).then(setBalances);},[entityId,from,to,rk]);
-  const get=t=>balances.filter(b=>b.type===t&&Math.abs(b.balance)>0.005);const sum=arr=>arr.reduce((s,b)=>s+b.balance,0);
-  const rev=get('Revenue');const cogs=get('Expense').filter(b=>b.subtype==='COGS');const opex=get('Expense').filter(b=>b.subtype==='Operating Expense');const other=get('Expense').filter(b=>b.subtype!=='COGS'&&b.subtype!=='Operating Expense');
-  const tRev=sum(rev);const gp=tRev-sum(cogs);const oi=gp-sum(opex);const ni=oi-sum(other);
-  const doExport=()=>{const d=[[entityName||'Income Statement'],['Income Statement'],['Period: '+from+' to '+to],[]];[['Revenue',rev],['COGS',cogs],['Operating Expenses',opex],['Other',other]].forEach(([t,items])=>{if(!items.length)return;d.push([t,'']);items.forEach(b=>d.push(['  '+b.name,b.balance]));d.push(['Total '+t,sum(items)]);d.push([]);});d.push(['Net Income',ni]);exportToExcel(d,'IS_'+from+'_'+to+'.xlsx');};
-  const Sec=({title,items,total})=>(<><tr><td style={S.sectionHeader} colSpan={2}>{title}</td></tr>{items.map(b=><tr key={b.code}><td style={{...S.indentTd,cursor:'pointer'}} onClick={()=>setDrillAcct(b)}><span style={{borderBottom:'1px dotted '+T.accent+'80',color:T.accent}}>{b.name}</span></td><td style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct(b)}>{fmt(b.balance)}</td></tr>)}
-    <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>${fmt(total)}</td></tr></>);
-  return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-    <div style={S.filterBar}><div><label style={S.label}>From</label><input style={S.inputSm} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
-      <div><label style={S.label}>To</label><input style={S.inputSm} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div></div>
-    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='is' currentConfig={{from,to}} onApply={(c)=>{if(c.from)setFrom(c.from);if(c.to)setTo(c.to);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExport}>Export Excel</button></div></div>
-    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Income Statement</div><div style={{fontSize:13,color:T.textMuted}}>Period: {from} to {to}</div></div>
-    <table style={{...S.table,maxWidth:580,margin:'0 auto'}}><tbody><Sec title="Revenue" items={rev} total={tRev}/>
-      {cogs.length>0&&<><Sec title="Cost of Goods Sold" items={cogs} total={sum(cogs)}/><tr style={{background:T.bgElevated}}><td style={{...S.td,fontWeight:700,color:T.textBright}}>Gross Profit</td><td style={{...S.tdR,fontWeight:700,color:T.textBright,fontSize:15}}>${fmt(gp)}</td></tr></>}
-      <Sec title="Operating Expenses" items={opex} total={sum(opex)}/>
-      <tr style={{background:T.bgElevated}}><td style={{...S.td,fontWeight:700,color:T.textBright}}>Operating Income</td><td style={{...S.tdR,fontWeight:700,color:T.textBright,fontSize:15}}>${fmt(oi)}</td></tr>
-      {other.length>0&&<Sec title="Other Expenses" items={other} total={sum(other)}/>}
-      <tr style={S.grandTotalRow}><td style={{...S.tdBold,fontSize:15}}>Net Income</td><td style={{...S.tdBold,textAlign:'right',fontSize:18,color:ni>=0?T.green:T.red}}>${fmt(ni)}</td></tr></tbody></table></div>
-    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={from} to={to} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
+function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true}){
+  const[drillAcct,setDrillAcct]=useState(null);const[rk,setRk]=useState(0);
+  const[dateFilter,setDateFilter]=useState('all');const[colMode,setColMode]=useState('total');const[compare,setCompare]=useState(false);
+  const anchor=/^\d{4}-\d{2}-\d{2}$/.test(to)?to:today();
+  const periods=useMemo(()=>rptPeriods(dateFilter,colMode,anchor),[dateFilter,colMode,anchor]);
+  const prior=(compare&&colMode==='total'&&periods[0]&&periods[0].from)?rptPriorWindow(periods[0]):null;
+  const cols=useMemo(()=>prior?[prior,...periods]:periods,[JSON.stringify(prior),JSON.stringify(periods)]);
+  const[data,setData]=useState([]);
+  useEffect(()=>{let ok=true;Promise.all(cols.map(c=>api.getBalances(entityId,{from:c.from||undefined,to:c.to}).catch(()=>[]))).then(r=>{if(ok)setData(r);});return()=>{ok=false;};},[entityId,JSON.stringify(cols),rk]);
+  const meta=useMemo(()=>{const m=new Map();data.forEach(bs=>(bs||[]).forEach(b=>{if(!m.has(b.code))m.set(b.code,{code:b.code,name:b.name,type:b.type,subtype:b.subtype});}));return m;},[data]);
+  const vmap=useMemo(()=>data.map(bs=>{const mm=new Map();(bs||[]).forEach(b=>mm.set(b.code,b.balance));return mm;}),[data]);
+  const val=(code,ci)=>(vmap[ci]&&vmap[ci].get(code))||0;
+  const grp=pred=>[...meta.values()].filter(pred).filter(a=>vmap.some(mm=>Math.abs((mm&&mm.get(a.code))||0)>0.005));
+  const rev=grp(a=>a.type==='Revenue');const cogs=grp(a=>a.type==='Expense'&&a.subtype==='COGS');
+  const opex=grp(a=>a.type==='Expense'&&a.subtype==='Operating Expense');const other=grp(a=>a.type==='Expense'&&a.subtype!=='COGS'&&a.subtype!=='Operating Expense');
+  const sumC=(items,ci)=>items.reduce((s,a)=>s+val(a.code,ci),0);
+  const ni=ci=>sumC(rev,ci)-sumC(cogs,ci)-sumC(opex,ci)-sumC(other,ci);
+  const nCols=cols.length;const curI=nCols-1;const priI=prior?0:-1;
+  const pctTxt=p=>p==null?'—':(p>=0?'+':'')+p.toFixed(1)+'%';
+  const chgCells=(getter)=>{if(!prior)return null;const c=getter(curI),p=getter(priI),pc=rptPct(c,p);return[<td key="d" style={S.tdR}>{fmt(c-p)}</td>,<td key="p" style={{...S.tdR,color:(c-p)>=0?T.green:T.red}}>{pctTxt(pc)}</td>];};
+  const nColSpan=1+nCols+(prior?2:0);
+  const Sec=({title,items})=>(<><tr><td style={S.sectionHeader} colSpan={nColSpan}>{title}</td></tr>
+    {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,from:c.from,to:c.to})}>{fmt(val(a.code,i))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
+    <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(sumC(items,i))}</td>)}{chgCells(ci=>sumC(items,ci))}</tr></>);
+  const TotalRow=({label,getter,big})=>(<tr style={big?S.grandTotalRow:{background:T.bgElevated}}><td style={big?{...S.tdBold,fontSize:15}:{...S.td,fontWeight:700,color:T.textBright}}>{label}</td>{cols.map((c,i)=><td key={i} style={big?{...S.tdBold,textAlign:'right',fontSize:16,color:getter(i)>=0?T.green:T.red}:{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(getter(i))}</td>)}{chgCells(getter)}</tr>);
+  const colHead=(c,i)=>prior&&i===0?'Prev':(c.label==='Total'?'Amount':c.label);
+  const doExport=()=>{const hdr=['Account',...cols.map((c,i)=>colHead(c,i)),...(prior?['$ Change','% Change']:[])];
+    const d=[[entityName||'Income Statement'],['Income Statement'],[(dateFilter==='all'?'Through '+anchor:RPT_DATE_FILTERS.find(f=>f[0]===dateFilter)[1]+' ending '+anchor)+(colMode!=='total'?' · '+RPT_COL_MODES.find(m=>m[0]===colMode)[1]:'')],[],hdr];
+    const push=(label,getter)=>{const row=[label,...cols.map((c,i)=>getter(i))];if(prior)row.push(getter(curI)-getter(priI),rptPct(getter(curI),getter(priI)));d.push(row);};
+    [['Revenue',rev],['Cost of Goods Sold',cogs],['Operating Expenses',opex],['Other Expenses',other]].forEach(([t,items])=>{if(!items.length)return;d.push([t]);items.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));push('Total '+t,ci=>sumC(items,ci));});
+    push('Net Income',ci=>ni(ci));exportToExcel(d,'IS_'+anchor+'.xlsx');};
+  return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginBottom:16,flexWrap:'wrap',gap:10}}>
+    <div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
+      <div><label style={S.label}>Period end</label><input style={S.inputSm} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
+      <ReportControls dateFilter={dateFilter} setDateFilter={setDateFilter} colMode={colMode} setColMode={setColMode} compare={compare} setCompare={setCompare}/>
+    </div>
+    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='is' currentConfig={{to,dateFilter,colMode,compare}} onApply={(c)=>{if(c.to)setTo(c.to);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExport}>Export Excel</button></div></div>
+    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Income Statement</div><div style={{fontSize:13,color:T.textMuted}}>{dateFilter==='all'?('Through '+anchor):(RPT_DATE_FILTERS.find(f=>f[0]===dateFilter)[1]+' ending '+anchor)}{colMode!=='total'?(' · '+RPT_COL_MODES.find(m=>m[0]===colMode)[1]):''}</div></div>
+    <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520,margin:'0 auto'}}><thead><tr><th style={S.th}>Account</th>{cols.map((c,i)=><th key={i} style={S.thR}>{colHead(c,i)}</th>)}{prior&&<><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}</tr></thead><tbody>
+      <Sec title="Revenue" items={rev}/>
+      {cogs.length>0&&<><Sec title="Cost of Goods Sold" items={cogs}/><TotalRow label="Gross Profit" getter={ci=>sumC(rev,ci)-sumC(cogs,ci)}/></>}
+      <Sec title="Operating Expenses" items={opex}/>
+      <TotalRow label="Operating Income" getter={ci=>sumC(rev,ci)-sumC(cogs,ci)-sumC(opex,ci)}/>
+      {other.length>0&&<Sec title="Other Expenses" items={other}/>}
+      <TotalRow label="Net Income" getter={ci=>ni(ci)} big/>
+    </tbody></table></div></div>
+    {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillAcct.from||from} to={drillAcct.to||to} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
     </div>);}
 
 // ═══ Custom Detail Report (Q6: multi-account, grouped by class/location, with subtotals) ═══
