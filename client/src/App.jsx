@@ -2323,11 +2323,11 @@ function rptPriorWindow(p){
 const rptPct=(cur,prev)=>Math.abs(prev)<0.005?null:(cur-prev)/Math.abs(prev)*100;
 const rptChgCell=(cur,prev)=>{const d=cur-prev;const p=rptPct(cur,prev);return{d,p};};
 function ReportControls({dateFilter,setDateFilter,colMode,setColMode,compare,setCompare,anchorLabel}){
-  return(<div style={{...S.filterBar,flexWrap:'wrap'}}>
+  return(<>
     <div><label style={S.label}>Date range</label><select style={S.inputSm} value={dateFilter} onChange={e=>setDateFilter(e.target.value)}>{RPT_DATE_FILTERS.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div>
     <div><label style={S.label}>Columns</label><select style={S.inputSm} value={colMode} onChange={e=>setColMode(e.target.value)}>{RPT_COL_MODES.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div>
     <div><label style={S.label}>Compare</label><label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.textMuted,height:34}} title="Adds a Previous Period column with $ and % change (Total Only view)"><input type="checkbox" checked={compare} onChange={e=>setCompare(e.target.checked)} disabled={colMode!=='total'}/> Prev period ($ / %)</label></div>
-  </div>);
+  </>);
 }
 
 function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEdit=true}){
