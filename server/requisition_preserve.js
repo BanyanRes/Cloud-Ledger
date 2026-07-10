@@ -112,10 +112,16 @@ async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
     for (const name of Object.keys(out.files)) {
       if (!/^xl\/worksheets\/sheet\d+\.xml$/.test(name) || out.files[name].dir) continue;
       const ws = await out.file(name).async('string');
-      if (!/<conditionalFormatting\b/.test(ws)) continue;
-      const cleaned = ws
+      let cleaned = ws
         .replace(/<conditionalFormatting\b[^>]*\/>/g, '')
         .replace(/<conditionalFormatting\b[^>]*>\s*<\/conditionalFormatting>/g, '');
+      // Drop invalid cached formula results of NaN. exceljs emits <v>NaN</v> when
+      // it re-writes a formula whose result it computed as NaN (e.g. references to
+      // #REF! or date math over an empty cell — present on Braker's hidden
+      // consolidation tabs). "NaN" is not a valid numeric cached value, so Excel
+      // flags the worksheet part and shows a repair prompt. Removing the stale
+      // cached value lets Excel recompute the formula on open (fullCalcOnLoad set).
+      cleaned = cleaned.replace(/<v>NaN<\/v>/g, '');
       if (cleaned !== ws) { out.file(name, cleaned); changed = true; }
     }
 

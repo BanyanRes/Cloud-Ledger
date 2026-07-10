@@ -198,6 +198,17 @@ function readRowCells(ws, r) {
     }
     return c.value;
   };
+  // Preserve any UNMAPPED columns within the cleared region (1-11) verbatim so
+  // layouts with extra columns survive the fold. Braker's logs carry a "Budget
+  // Code" column (C) that the Budget-to-Actual SUMIFs match on; without this it
+  // would be blanked on every rolled-forward row and the B2A would zero out.
+  const _mapped = new Set([COL.cat, COL.code, COL.bankcat, COL.gl, COL.name, COL.vendor, COL.bill, COL.amount, COL.req, COL.date]);
+  const passthrough = {};
+  for (let c = 1; c <= 11; c++) {
+    if (_mapped.has(c)) continue;
+    const v = get(c);
+    if (v !== null && v !== undefined && v !== '') passthrough[c] = v;
+  }
   return {
     srcRow: r,
     cat: get(COL.cat), code: cellCode(ws.getCell(r, COL.code)),
@@ -207,6 +218,7 @@ function readRowCells(ws, r) {
     bill: get(COL.bill),
     amount: get(COL.amount),   // may be {formula} or number
     req: get(COL.req), date: get(COL.date),
+    passthrough,
   };
 }
 
@@ -256,6 +268,10 @@ function writeRowCells(ws, r, row) {
   put(COL.amount, row.amount);
   put(COL.req, row.req);
   put(COL.date, row.date);
+  // Restore unmapped pass-through columns (e.g. Braker's "Budget Code") at their
+  // original column index so extra columns survive the rebuild (the clear loop
+  // wipes cols 1-11; these are the ones the engine doesn't otherwise rewrite).
+  if (row.passthrough) for (const c in row.passthrough) ws.getCell(r, Number(c)).value = row.passthrough[c];
   // Normalize the amount cell: comma/accounting numFmt, right-aligned, no stale
   // top border. Guarantees data rows render with the comma style and never carry
   // a leftover underline at a shifted row position.
@@ -938,6 +954,13 @@ async function rollForward(workbook, newCurrent, meta = {}) {
 
   // 4. Re-point absolute references by label (never by tracked row number).
   repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks });
+  // Flatten any shared-formula cells left on the rebuilt logs. Clearing/moving
+  // rows breaks the master↔clone linkage of shared formulas (e.g. Braker's QA
+  // "req#" checker column), which makes exceljs throw "Shared Formula master
+  // must exist..." on write. Convert them to standalone formulas/values so the
+  // workbook serializes cleanly. No-op on logs that use no shared formulas.
+  flattenSharedFormulas(priorWs);
+  flattenSharedFormulas(curWs);
 
   // 4b. Roll the B2A contingency columns forward: this period's "Current"
   //     (col F) folds into next period's "Previous" (col E), then F clears to 0.
@@ -1293,6 +1316,30 @@ function rollForwardContingencyTable(ws) {
 // here from data already present (sums of explicit ranges, plain-number cells)
 // the Dev Fee numbers are self-calculated and B5 evaluates without a spreadsheet
 // engine. (Excel/LibreOffice still recompute them on open; we only seed results.)
+// Convert shared-formula cells on a worksheet into standalone formulas (master)
+// or plain cached values (clones). exceljs cannot serialize a shared-formula
+// clone whose master was cleared/moved — which happens whenever we rebuild the
+// invoice-log rows over a template that stores per-row helper columns as shared
+// formulas (e.g. Braker's "req#" checker in col K). Ordinary formulas (SUBTOTAL
+// grand totals, SUMIFs) are NOT shared and are left untouched.
+function flattenSharedFormulas(ws) {
+  if (!ws) return;
+  const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
+  const lastCol = Math.max(ws.columnCount || 0, ws.actualColumnCount || 0, 11);
+  for (let r = 1; r <= last; r++) {
+    for (let c = 1; c <= lastCol; c++) {
+      const cell = ws.getCell(r, c);
+      const v = cell.value;
+      if (!v || typeof v !== 'object') continue;
+      if ('sharedFormula' in v) {                 // a clone → keep its cached value
+        cell.value = (v.result !== undefined && v.result !== null) ? v.result : null;
+      } else if (v.formula && (v.shared || v.ref)) { // a master → make it standalone
+        cell.value = (v.result !== undefined && v.result !== null) ? { formula: v.formula, result: v.result } : { formula: v.formula };
+      }
+    }
+  }
+}
+
 function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
   // Sum the data-row amounts inside a SUBTOTAL(9, I a:I b) range on a sheet,
   // excluding nested SUBTOTAL rows (mirrors how Excel's SUBTOTAL ignores them).
@@ -1340,6 +1387,12 @@ function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
   const pN = priorWs.name, cN = curWs.name, bN = b2a ? b2a.name : 'Budget to Actual';
   const repointable = (cell) => { const f = cellFormula(cell); return !!(f && /invoice log/i.test(f) && !/SUMIF/i.test(f)); };
 
+  // Dev-fee cross-refs only apply to the standard Dev Fee tab. Skip the whole
+  // block when the workbook has no recognized "Dev Fee" sheet — e.g. Braker's
+  // "Braker Dev Fee" uses a different budget/%-completion layout that is
+  // maintained manually — otherwise devFee is undefined and devFee.getCell()
+  // throws, aborting the entire roll-forward.
+  if (devFee) {
   // Dev Fee J6 -> Prior "6 month upfront interest" data row
   const j6row = findRowByLabel(priorWs, ['6 month upfront interest']);
   let j6 = null;
@@ -1402,6 +1455,7 @@ function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
       }
     }
   }
+  } // end if (devFee) — dev-fee cross-refs
 
   // B2A H45 -> Prior "Working Capital" row
   const wcRow = findRowByLabel(priorWs, ['Working Capital']);
