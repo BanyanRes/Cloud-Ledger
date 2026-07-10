@@ -30,6 +30,16 @@ const groupByType = list => {
   return g;
 };
 const acctLabel = (code, name) => code + ' - ' + name;
+// Per-entity relabel of the Class dimension. Turnkey Rail (TURNKEYR) is an
+// operating rail company, not a development entity, so it has no requisition /
+// Req# to tie invoices to draws — it uses the Class dimension to tag each
+// invoice's Pay Application (Bill.com already syncs Class). The underlying
+// dimension is unchanged; only the on-screen label differs. _activeEntityCode is
+// refreshed by <App> on every render (top-down), so child components read the
+// current entity's term. Extend the map to relabel Class for other entities.
+let _activeEntityCode = null;
+const CLASS_DIM_LABELS = { TURNKEYR: 'Pay Application' };
+const classTerm = () => CLASS_DIM_LABELS[_activeEntityCode] || 'Class';
 function exportToExcel(data, fn) { const ws = XLSX.utils.aoa_to_sheet(data); ws['!cols'] = data[0].map((_, ci) => ({ wch: Math.min(Math.max(...data.map(r => String(r[ci]||'').length), 8)+2, 40) })); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); XLSX.writeFile(wb, fn); }
 const BLANK_JE = () => ({date:today(),memo:'',lines:[{account_code:'',debit:'',credit:'',description:''},{account_code:'',debit:'',credit:'',description:''}]});
 const SIDEBAR_KEY = 'cl_sidebar';
@@ -291,7 +301,7 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
     ?dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}))
     :projects.map(pr=>({v:'project:'+pr.turnkey_project_id,label:'Project — '+pr.project_code+' — '+pr.project_name}));
   const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
-  const clsOpts=classes.map(c=>({v:'class:'+c.id,label:'Class — '+(c.code?c.code+' — ':'')+c.name}));
+  const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
   const lineDimValue=l=>l.project_id?'project:'+l.project_id:l.location_id?'location:'+l.location_id:l.class_id?'class:'+l.class_id:'';
   const setLineDim=(i,val)=>{
     if(val==='__new__'){addProjectInline(i);return;}
@@ -327,7 +337,7 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} title={l.account_code?acctLabel(l.account_code,(accounts.find(a=>a.code===l.account_code)||{}).name||''):''} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select account...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code} title={acctLabel(a.code,a.name)}>{acctLabel(a.code,a.name)}</option>)}</select></td>
-        {showDims&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={lineDimValue(l)} onChange={e=>setLineDim(i,e.target.value)}><option value="">— none —</option>{showProject&&<optgroup label="Project">{projOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</optgroup>}{showLocation&&<optgroup label="Location">{locOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}{showClass&&<optgroup label="Class">{clsOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}</select></td>}
+        {showDims&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={lineDimValue(l)} onChange={e=>setLineDim(i,e.target.value)}><option value="">— none —</option>{showProject&&<optgroup label="Project">{projOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</optgroup>}{showLocation&&<optgroup label="Location">{locOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}{showClass&&<optgroup label={classTerm()}>{clsOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} placeholder="(optional)" value={l.description||''} onChange={e=>updateLine(i,'description',e.target.value)}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'debit',f);}} onBlur={e=>updateLine(i,'debit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.credit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'credit',f);}} onBlur={e=>updateLine(i,'credit',blurAmt(e.target.value))}/></td>
@@ -563,6 +573,7 @@ export default function App(){
   const jeHasContent=jeForm.memo||jeForm.lines.some(l=>l.account_code||l.debit||l.credit)||jePendingFiles.length>0;
 
   const _activeEnt = entities.find(e=>e.id===activeEntity);
+  _activeEntityCode = _activeEnt ? _activeEnt.code : null; // drives per-entity Class relabel (classTerm)
   const isTurnkeyEntity = !!(_activeEnt && (_activeEnt.code==='TURNKEYR' || /turnkey\s*rail/i.test(_activeEnt.name||'')));
   const isDevEntity = !!(_activeEnt && _activeEnt.entity_type==='development');
   // County Line Rail Fund — the only entity with the Management Fee workpaper for now.
@@ -1551,7 +1562,7 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
     ?dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}))
     :projects.map(pr=>({v:'project:'+pr.turnkey_project_id,label:'Project — '+pr.project_code+' — '+pr.project_name}));
   const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
-  const clsOpts=classes.map(c=>({v:'class:'+c.id,label:'Class — '+(c.code?c.code+' — ':'')+c.name}));
+  const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
   const lineDimValue=l=>l.project_id?'project:'+l.project_id:l.location_id?'location:'+l.location_id:l.class_id?'class:'+l.class_id:'';
   const setLineDim=(i,val)=>{
     if(val==='__new__'){addProjectInline(i);return;}
@@ -1589,7 +1600,7 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} title={l.account_code?acctLabel(l.account_code,(accounts.find(a=>a.code===l.account_code)||{}).name||''):''} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code} title={acctLabel(a.code,a.name)}>{acctLabel(a.code,a.name)}</option>)}</select></td>
-        {showDims&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={lineDimValue(l)} onChange={e=>setLineDim(i,e.target.value)}><option value="">— none —</option>{showProject&&<optgroup label="Project">{projOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</optgroup>}{showLocation&&<optgroup label="Location">{locOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}{showClass&&<optgroup label="Class">{clsOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}</select></td>}
+        {showDims&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={lineDimValue(l)} onChange={e=>setLineDim(i,e.target.value)}><option value="">— none —</option>{showProject&&<optgroup label="Project">{projOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</optgroup>}{showLocation&&<optgroup label="Location">{locOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}{showClass&&<optgroup label={classTerm()}>{clsOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} value={l.description||''} placeholder="(optional)" onChange={e=>updateLine(i,'description',e.target.value)}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'debit',f);}} onBlur={e=>updateLine(i,'debit',blurAmt(e.target.value))}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} value={l.credit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'credit',f);}} onBlur={e=>updateLine(i,'credit',blurAmt(e.target.value))}/></td>
@@ -1813,7 +1824,7 @@ function DimensionsManager({entityId,entityName,canEdit}){
         onCreate={async d=>{await api.createLocation(entityId,d);await load();}}
         onUpdate={async(id,d)=>{await api.updateLocation(entityId,id,d);await load();}}
         onDelete={async id=>{await api.deleteLocation(entityId,id);await load();}}/>
-      <DimList title="Investor Classes" subtitle={(classes.length)+' class'+(classes.length===1?'':'es')+' (investors / capital classes)'} items={classes} canEdit={canEdit}
+      <DimList title={classTerm()==='Class'?'Investor Classes':classTerm()+'s'} subtitle={classTerm()==='Class'?((classes.length)+' class'+(classes.length===1?'':'es')+' (investors / capital classes)'):((classes.length)+' '+(classes.length===1?classTerm().toLowerCase():classTerm().toLowerCase()+'s'))} items={classes} canEdit={canEdit}
         onCreate={async d=>{await api.createClass(entityId,d);await load();}}
         onUpdate={async(id,d)=>{await api.updateClass(entityId,id,d);await load();}}
         onDelete={async id=>{await api.deleteClass(entityId,id);await load();}}/>
@@ -2021,7 +2032,7 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClos
   const dimOpts = [
     ...dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)})),
     ...locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name})),
-    ...classes.map(c=>({v:'class:'+c.id,label:'Class — '+(c.code?c.code+' — ':'')+c.name})),
+    ...classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name})),
   ];
   const showDims = dimOpts.length > 0;
   const lineDimValue = l => l.project_id?'project:'+l.project_id:l.location_id?'location:'+l.location_id:l.class_id?'class:'+l.class_id:'';
@@ -2136,7 +2147,7 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
   // One tagged dimension per transaction (Project / Location / Class), mirroring JEs.
   const projOpts=dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}));
   const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
-  const clsOpts=classes.map(c=>({v:'class:'+c.id,label:'Class — '+(c.code?c.code+' — ':'')+c.name}));
+  const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
   const dimOpts=[...projOpts,...locOpts,...clsOpts];const showDims=dimOpts.length>0;
   const txnDimValue=t=>t.project_id?'project:'+t.project_id:t.location_id?'location:'+t.location_id:t.class_id?'class:'+t.class_id:'';
   const setTxnDim=(t,val)=>{const[kind,id]=val?val.split(':'):['',''];codeTransaction(t.id,t.account_code||null,t.memo,{project_id:kind==='project'?id:null,class_id:kind==='class'?id:null,location_id:kind==='location'?id:null});};
@@ -2393,7 +2404,7 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
     try{
       const r=await api.getGLDetail(entityId,{to:validAsOf,...(locId?{location_id:locId}:{}),...(classId?{class_id:classId}:{}),...(projId?{project_id:projId}:{})});
       const lbl=scopeLabel?(' — '+scopeLabel):'';
-      const d=[[entityName||'General Ledger'],['GL Detail'+lbl],['Through '+asOf],[],['Date','Entry #','Account','Account Name','Memo / Description','Project','Location','Class','Debit','Credit','Running Bal']];
+      const d=[[entityName||'General Ledger'],['GL Detail'+lbl],['Through '+asOf],[],['Date','Entry #','Account','Account Name','Memo / Description','Project','Location',classTerm(),'Debit','Credit','Running Bal']];
       (r.lines||[]).forEach(l=>d.push([l.date,l.entry_num,l.account_code,l.account_name,l.description||l.memo||'',l.project_code&&l.project_code!==l.project_name?l.project_code:(l.project_name||''),l.location_name,l.class_name,l.debit||'',l.credit||'',l.running_balance]));
       d.push([]);d.push(['','','','','','','','','Total Dr','Total Cr','']);
       d.push(['','','','','','','','',r.total_debit,r.total_credit,'']);
@@ -2472,7 +2483,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
   const totalDr=lines.reduce((s,l)=>s+l.debit,0);
   const totalCr=lines.reduce((s,l)=>s+l.credit,0);
   const doExport=()=>{const acctLabel=acct.code+' - '+acct.name;
-    const d=[[entityName||'Account Detail'],[acctLabel],['Period: '+from+' to '+to],[],['Date','JE','Account','Class','Location','Memo','Debit','Credit','Balance']];
+    const d=[[entityName||'Account Detail'],[acctLabel],['Period: '+from+' to '+to],[],['Date','JE','Account',classTerm(),'Location','Memo','Debit','Credit','Balance']];
     d.push(['','','','','','Beginning Balance','','',begBal]);
     let r=begBal;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),acctLabel,l.class_name||'',l.location_name||'',l.memo,l.debit||'',l.credit||'',r]);});
     d.push(['','','','','','Totals',totalDr,totalCr,r]);
@@ -2686,7 +2697,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
         <div style={{flex:'0 0 200px'}}>
           <div style={{marginBottom:10}}><label style={S.label}>From</label><input style={{...S.inputSm,width:'100%'}} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
           <div style={{marginBottom:10}}><label style={S.label}>To</label><input style={{...S.inputSm,width:'100%'}} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
-          {dimsEnabled&&<div><label style={S.label}>Group by</label><select style={{...S.inputSm,width:'100%'}} value={groupBy} onChange={e=>setGroupBy(e.target.value)}><option value="none">No grouping</option><option value="class">Class / Investor</option><option value="location">Location</option></select></div>}
+          {dimsEnabled&&<div><label style={S.label}>Group by</label><select style={{...S.inputSm,width:'100%'}} value={groupBy} onChange={e=>setGroupBy(e.target.value)}><option value="none">No grouping</option><option value="class">{classTerm()==='Class'?'Class / Investor':classTerm()}</option><option value="location">Location</option></select></div>}
         </div>
       </div>
       {err&&<div style={S.err}>{err}</div>}
@@ -2726,8 +2737,8 @@ function PivotReport({entityId,entityName,canEdit=true,pendingConfig,clearPendin
   };
   const doExport=()=>{
     if(!data)return;
-    const head=[dim==='class'?'Class / Investor':dim==='location'?'Location':'Project',...data.columns.map(c=>c.code+' '+c.name),'Total'];
-    const d=[[entityName||'Pivot Report'],['Pivot Summary by '+(dim==='class'?'Class':dim)],['Period: '+(from||'Begin')+' to '+(to||today())],[],head];
+    const head=[dim==='class'?(classTerm()==='Class'?'Class / Investor':classTerm()):dim==='location'?'Location':'Project',...data.columns.map(c=>c.code+' '+c.name),'Total'];
+    const d=[[entityName||'Pivot Report'],['Pivot Summary by '+(dim==='class'?classTerm():dim)],['Period: '+(from||'Begin')+' to '+(to||today())],[],head];
     data.rows.forEach(r=>d.push([r.name,...data.columns.map(c=>r.cells[c.code]||0),r.total]));
     d.push(['Total',...data.columns.map(c=>data.column_totals[c.code]||0),data.grand_total]);
     exportToExcel(d,'Pivot_'+dim+'_'+(to||today())+'.xlsx');
@@ -2744,7 +2755,7 @@ function PivotReport({entityId,entityName,canEdit=true,pendingConfig,clearPendin
           <div style={{marginTop:4,display:'flex',gap:10}}><button style={{...S.btnGhost,fontSize:11,color:T.accent}} onClick={()=>setSel(filteredAccts.map(a=>a.code))}>Select all shown</button><button style={{...S.btnGhost,fontSize:11,color:T.textMuted}} onClick={()=>setSel([])}>Clear</button></div>
         </div>
         <div style={{flex:'0 0 200px'}}>
-          <div style={{marginBottom:10}}><label style={S.label}>Pivot by</label><select style={{...S.inputSm,width:'100%'}} value={dim} onChange={e=>setDim(e.target.value)}><option value="class">Class / Investor</option><option value="location">Location</option><option value="project">Project</option></select></div>
+          <div style={{marginBottom:10}}><label style={S.label}>Pivot by</label><select style={{...S.inputSm,width:'100%'}} value={dim} onChange={e=>setDim(e.target.value)}><option value="class">{classTerm()==='Class'?'Class / Investor':classTerm()}</option><option value="location">Location</option><option value="project">Project</option></select></div>
           <div style={{marginBottom:10}}><label style={S.label}>From</label><input style={{...S.inputSm,width:'100%'}} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
           <div><label style={S.label}>To</label><input style={{...S.inputSm,width:'100%'}} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
         </div>
@@ -2754,7 +2765,7 @@ function PivotReport({entityId,entityName,canEdit=true,pendingConfig,clearPendin
     </div>
     {data&&<div style={{...S.cardFlush,overflowX:'auto'}}>
       {data.rows.length===0?<div style={{padding:24,color:T.textDim}}>No activity for the selected accounts/period.</div>:
-      <table style={S.table}><thead><tr><th style={{...S.th,position:'sticky',left:0,background:T.bgCard}}>{dim==='class'?'Class / Investor':dim==='location'?'Location':'Project'}</th>{data.columns.map(c=><th key={c.code} style={S.thR} title={c.code+' '+c.name}>{c.name||c.code}</th>)}<th style={S.thR}>Total</th></tr></thead>
+      <table style={S.table}><thead><tr><th style={{...S.th,position:'sticky',left:0,background:T.bgCard}}>{dim==='class'?(classTerm()==='Class'?'Class / Investor':classTerm()):dim==='location'?'Location':'Project'}</th>{data.columns.map(c=><th key={c.code} style={S.thR} title={c.code+' '+c.name}>{c.name||c.code}</th>)}<th style={S.thR}>Total</th></tr></thead>
       <tbody>{data.rows.map(r=><tr key={r.id}><td style={{...S.td,position:'sticky',left:0,background:T.bgCard,fontWeight:500}}>{r.name}</td>{data.columns.map(c=><td key={c.code} style={S.tdR}>{r.cells[c.code]?fmt(r.cells[c.code]):''}</td>)}<td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(r.total)}</td></tr>)}
         <tr style={S.grandTotalRow}><td style={{...S.tdBold,position:'sticky',left:0,background:T.bgCard}}>Total</td>{data.columns.map(c=><td key={c.code} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(data.column_totals[c.code]||0)}</td>)}<td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(data.grand_total)}</td></tr>
       </tbody></table>}
