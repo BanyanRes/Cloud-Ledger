@@ -1064,15 +1064,32 @@ async function rollForward(workbook, newCurrent, meta = {}) {
     const _numOf = a => (a && typeof a === 'object') ? Number(a.result) : Number(a);
     const _GTV = (effectiveCurrent || []).reduce((s, x) => { const n = _numOf(x.amount); return s + (isFinite(n) ? n : 0); }, 0);
     const _DFTV = (devFeeInfo && typeof devFeeInfo.amount === 'number') ? devFeeInfo.amount : 0;
+    // E30/E15 originally sum the "Amount Paid" column, which is 0 for invoices
+    // requisitioned but not yet paid this period; the invoiced figure — and what
+    // E17 and the Budget-to-Actual use (SUMIF over 'Current Invoice Log'!$I:$I) —
+    // lives in the "Total" column. Repoint the references to the Total column so
+    // E30 = invoice total ex dev fee and matches E17 (F30 -> TRUE). This is
+    // identical in fully-paid months (Total == Amount Paid). No distinct Total
+    // column -> keep whatever column the formula already used.
+    let _totalCol = null;
+    {
+      const _hdr = Math.max(1, logDataStart(curWs) - 1);
+      const _mc = Math.max(curWs.actualColumnCount || 0, curWs.columnCount || 0, 11);
+      for (let _c = 1; _c <= _mc; _c++) { if (/^total$/i.test(cellStr(curWs.getCell(_hdr, _c)).trim())) { _totalCol = colLetter(_c); break; } }
+    }
     const esc = curWs.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const refPrefix = "('" + esc + "'!\\$?[A-Za-z]{1,3}\\$?)";
     for (const w of _devFeeCurWs) {
       w.eachRow({ includeEmpty: false }, (row) => row.eachCell({ includeEmpty: false }, (c) => {
         const f = cellFormula(c); if (!f || !/current invoice log/i.test(f)) return;
         let nf = f;
-        if (_cur_oldGT && newGT) nf = nf.replace(new RegExp(refPrefix + _cur_oldGT + '(?![0-9])', 'g'), '$1' + newGT);
+        // Match a Current-Log ref, capturing prefix / column / optional $, so we
+        // can repoint BOTH the row (old -> new) and the column (Amount Paid ->
+        // Total). _totalCol falls back to the original column when absent.
+        const _mkRe = (row) => new RegExp("('" + esc + "'!\\$?)([A-Za-z]{1,3})(\\$?)" + row + '(?![0-9])', 'g');
+        if (_cur_oldGT && newGT) nf = nf.replace(_mkRe(_cur_oldGT), (m, pre, col, dol) => pre + (_totalCol || col) + dol + newGT);
         if (_cur_oldDFT) {
-          if (newDFT) nf = nf.replace(new RegExp(refPrefix + _cur_oldDFT + '(?![0-9])', 'g'), '$1' + newDFT);
+          if (newDFT) nf = nf.replace(_mkRe(_cur_oldDFT), (m, pre, col, dol) => pre + (_totalCol || col) + dol + newDFT);
           else nf = nf.replace(new RegExp("'" + esc + "'!\\$?[A-Za-z]{1,3}\\$?" + _cur_oldDFT + '(?![0-9])', 'g'), '0');
         }
         if (nf === f) return;
@@ -1354,6 +1371,10 @@ function replaceCurrentLog(ws, rows, meta) {
     const subRow = r;
     ws.getCell(subRow, COL.name).value = (grp[0].name || ('Code ' + key)) + ' Total';
     ws.getCell(subRow, COL.amount).value = { formula: `SUBTOTAL(9,${colLetter(COL.amount)}${dataStart}:${colLetter(COL.amount)}${r - 1})` };
+    // Mirror the subtotal onto per-row derived columns (e.g. "Total") so formulas
+    // that reference the derived column's subtotal row (dev-fee tab E30/E15,
+    // which now sum the Total column) resolve instead of hitting a blank cell.
+    for (const d of derivedCols) ws.getCell(subRow, d.col).value = { formula: `SUBTOTAL(9,${colLetter(d.col)}${dataStart}:${colLetter(d.col)}${r - 1})` };
     styleAmountCell(ws, subRow, { underline: true });
     ws.getRow(subRow).height = DATA_ROW_HEIGHT;
     r = subRow + 1;
@@ -1362,7 +1383,8 @@ function replaceCurrentLog(ws, rows, meta) {
   // grand total
   const gtRow = r;
   ws.getCell(gtRow, COL.name).value = 'Grand Total';
-  ws.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,${colLetter(COL.amount)}3:${colLetter(COL.amount)}${gtRow - 1})` };
+  ws.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,${colLetter(COL.amount)}${_ds}:${colLetter(COL.amount)}${gtRow - 1})` };
+  for (const d of derivedCols) ws.getCell(gtRow, d.col).value = { formula: `SUBTOTAL(9,${colLetter(d.col)}${_ds}:${colLetter(d.col)}${gtRow - 1})` };
   styleAmountCell(ws, gtRow, { underline: true });
   ws.getRow(gtRow).height = DATA_ROW_HEIGHT;
 
