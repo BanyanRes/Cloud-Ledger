@@ -3232,11 +3232,23 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
       const ws=wb.Sheets['Prior Invoice Log'];
       if(!ws){setWbCoaMap({});return;}
       const rows=XLSX.utils.sheet_to_json(ws,{header:1,blankrows:false});
+      // Detect the Cost Code # and Cost Code Name columns by HEADER text. Layouts
+      // differ: SRN/Silsbee put the name in col F (index 5), but HP/Braker put it
+      // in col D (index 3) with the Bill # in col F — hard-coding index 5 there
+      // reads the bill number as the cost-code name (e.g. 349979). Fall back to the
+      // SRN positions (code=2, name=5) only if the headers aren't found.
+      let codeIdx=2,nameIdx=5,hdrRow=-1;
+      for(let i=0;i<Math.min(rows.length,8);i++){
+        const cells=(rows[i]||[]).map(c=>String(c==null?'':c).toLowerCase().replace(/\s+/g,' ').trim());
+        const ci=cells.findIndex(t=>/cost code\s*#|cost code\s*(number|no)\b|^cost code$/.test(t));
+        const ni=cells.findIndex(t=>/cost code name/.test(t));
+        if(ci>=0&&ni>=0){codeIdx=ci;nameIdx=ni;hdrRow=i;break;}
+      }
       const m={};
-      // Data starts after the 2-row header; col C=index 2 (code), col F=index 5 (name).
-      for(const row of rows){
-        const code=row&&row[2]!=null?String(row[2]).trim():'';
-        const name=row&&row[5]!=null?String(row[5]).trim():'';
+      for(let i=(hdrRow>=0?hdrRow+1:0);i<rows.length;i++){
+        const row=rows[i];
+        const code=row&&row[codeIdx]!=null?String(row[codeIdx]).trim():'';
+        const name=row&&row[nameIdx]!=null?String(row[nameIdx]).trim():'';
         if(!code||!/\d/.test(code))continue;          // skip headers / subtotal rows (no numeric code)
         if(/total/i.test(name))continue;               // skip "X Total" subtotal label rows
         if(name&&!m[code])m[code]=name;                // first (top-most) name for a code wins
@@ -3254,7 +3266,10 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
           _id:Date.now()+'-'+Math.random().toString(36).slice(2,7),
           filename:r.filename||f.name,
           cost_code:r.cost_code||'',
-          cost_code_name:r.cost_code_name||'',
+          // Prefer the name from THIS workbook's cost-code catalog (authoritative
+          // for the requisition) over the server prediction, whose learned history
+          // may carry a mis-columned name for templates like HP/Braker.
+          cost_code_name:(r.cost_code&&wbCoaMap[String(r.cost_code).trim()])||r.cost_code_name||'',
           vendor:r.vendor||'',
           bill:r.bill_number||'',
           amount:r.amount!=null?String(r.amount):'',
