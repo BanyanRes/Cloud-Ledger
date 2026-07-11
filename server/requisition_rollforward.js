@@ -1123,6 +1123,33 @@ async function rollForward(workbook, newCurrent, meta = {}) {
     }
   }
 
+  // 3.3 Reseed the dev-fee tab's fee summary. Formulas like E22=ROUND(E30*4%,2),
+  //     E24/E26=ROUND(E17*%,2), E31=ROUND(E30*3%,2) and F30 (=E17=E30) are NOT
+  //     rewritten by the roll-forward, so their CACHED values stay at LAST
+  //     period's numbers. If the viewer doesn't recalc on open, the fee lines
+  //     display stale (last month's fee) against this month's freshly-seeded E30.
+  //     Seed them from this period's base (= current invoices ex dev fee) so the
+  //     summary is self-consistent on open, mirroring the tab's own %-of-base
+  //     logic. (E11-E14 B2A inputs recompute on Excel's recalc.)
+  if (_devFeeCurWs.length) {
+    const _n = a => (a && typeof a === 'object') ? Number(a.result) : Number(a);
+    const _gt = (effectiveCurrent || []).reduce((s, x) => { const v = _n(x.amount); return s + (isFinite(v) ? v : 0); }, 0);
+    const _dft = (devFeeInfo && typeof devFeeInfo.amount === 'number') ? devFeeInfo.amount : 0;
+    const base = Math.round((_gt - _dft) * 100) / 100;
+    // The cells the fee ROUND() formulas multiply are the "base" cells (E17/E30).
+    const baseAddrs = new Set();
+    for (const w of _devFeeCurWs) w.eachRow({ includeEmpty: false }, (row) => row.eachCell({ includeEmpty: false }, (c) => {
+      const f = cellFormula(c); if (!f) return; const m = f.match(/ROUND\(\s*([A-Z]+\d+)\s*\*\s*[\d.]+\s*%/i); if (m) baseAddrs.add(m[1]);
+    }));
+    for (const w of _devFeeCurWs) w.eachRow({ includeEmpty: false }, (row) => row.eachCell({ includeEmpty: false }, (c) => {
+      const f = cellFormula(c); if (!f) return;
+      const m = f.match(/ROUND\(\s*[A-Z]+\d+\s*\*\s*([\d.]+)\s*%\s*,\s*2\)/i);
+      if (m) { c.value = { formula: f, result: Math.round(base * (parseFloat(m[1]) / 100) * 100) / 100 }; return; }
+      if (/^\s*[A-Z]+\d+\s*=\s*[A-Z]+\d+\s*$/.test(f)) { c.value = { formula: f, result: true }; return; }          // F30: E17=E30
+      if (baseAddrs.has(c.address) && !/current invoice log/i.test(f)) { c.value = { formula: f, result: base }; }   // E17 = base
+    }));
+  }
+
   // 3a. Right-align the same numeric columns on the Current Log.
   rightAlignNumericColumns(curWs);
 
