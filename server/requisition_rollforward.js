@@ -1058,6 +1058,12 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   if (_devFeeCurWs.length) {
     const newGT = (curInfo && curInfo.grandTotalRow) || findRowByLabel(curWs, ['Grand Total', 'Grant Total']);
     const newDFT = findRowByLabel(curWs, ['Development Fee Total', 'Dev Fee Total']);
+    // Values behind those two rows, used to seed a cached result on the
+    // repointed formulas below. Grand Total (amount col) = sum of this period's
+    // lines; Development Fee Total = the dev-fee line amount (0 if none).
+    const _numOf = a => (a && typeof a === 'object') ? Number(a.result) : Number(a);
+    const _GTV = (effectiveCurrent || []).reduce((s, x) => { const n = _numOf(x.amount); return s + (isFinite(n) ? n : 0); }, 0);
+    const _DFTV = (devFeeInfo && typeof devFeeInfo.amount === 'number') ? devFeeInfo.amount : 0;
     const esc = curWs.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const refPrefix = "('" + esc + "'!\\$?[A-Za-z]{1,3}\\$?)";
     for (const w of _devFeeCurWs) {
@@ -1069,7 +1075,20 @@ async function rollForward(workbook, newCurrent, meta = {}) {
           if (newDFT) nf = nf.replace(new RegExp(refPrefix + _cur_oldDFT + '(?![0-9])', 'g'), '$1' + newDFT);
           else nf = nf.replace(new RegExp("'" + esc + "'!\\$?[A-Za-z]{1,3}\\$?" + _cur_oldDFT + '(?![0-9])', 'g'), '0');
         }
-        if (nf !== f) c.value = { formula: nf };
+        if (nf === f) return;
+        // Seed the computed result so the cell shows its value even when the
+        // viewer doesn't recalc on open (e.g. Excel in Manual calc mode) —
+        // otherwise a formula with no cached value renders as 0. Only when every
+        // Current-Log reference resolves to the Grand Total / Dev Fee row.
+        const rowVal = {}; rowVal[String(newGT)] = _GTV; if (newDFT) rowVal[String(newDFT)] = _DFTV;
+        let ok = true;
+        const expr = nf.replace(new RegExp("'" + esc + "'!\\$?[A-Za-z]{1,3}\\$?(\\d+)", 'g'), (mm, rw) => {
+          if (rowVal[rw] === undefined) { ok = false; return mm; }
+          return '(' + rowVal[rw] + ')';
+        });
+        let seeded;
+        if (ok && /^[-+*/().\d\s]*$/.test(expr)) { try { seeded = Function('return (' + expr + ')')(); } catch (e) { /* leave unseeded */ } }
+        c.value = (typeof seeded === 'number' && isFinite(seeded)) ? { formula: nf, result: seeded } : { formula: nf };
       }));
     }
   }
