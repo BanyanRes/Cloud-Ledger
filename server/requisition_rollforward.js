@@ -1251,6 +1251,33 @@ function advanceB2AHeaderDates(b2a, asOfDate) {
 function replaceCurrentLog(ws, rows, meta) {
   const _ds = logDataStart(ws);
   const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
+
+  // Capture per-row DERIVED columns (outside the mapped set) that hold a
+  // same-row formula in the source log — e.g. HP's "Total" column = Amount Paid
+  // + Check (=G+H). These must be regenerated for every new line, because the
+  // Budget-to-Actual's "this period" figure SUMIFs the Current Log's Total
+  // column ($I:$I), not the Amount column. Without this the new invoices never
+  // reach the B2A, so every downstream to-date figure — and the Dev Fee tab's
+  // Hard/Soft cost block, current-month spend, and 1%/3% fee lines — stays stale.
+  const _mappedCols = new Set([COL.cat, COL.code, COL.bankcat, COL.gl, COL.name, COL.vendor, COL.bill, COL.amount, COL.req, COL.date]);
+  const derivedCols = [];
+  {
+    const maxCol = Math.max(ws.actualColumnCount || 0, ws.columnCount || 0, 11);
+    for (let c = 1; c <= maxCol; c++) {
+      if (_mappedCols.has(c)) continue;
+      for (let rr = _ds; rr <= last; rr++) {
+        const f = cellFormula(ws.getCell(rr, c));
+        if (!f) continue;
+        // Keep only columns whose formula references its OWN row (a per-line
+        // derived value); leave running-balance / cross-row columns alone.
+        if (new RegExp('([A-Za-z]{1,3}\\$?)' + rr + '(?![0-9])').test(f)) {
+          derivedCols.push({ col: c, template: f.replace(new RegExp('([A-Za-z]{1,3}\\$?)' + rr + '(?![0-9])', 'g'), '$1{R}') });
+        }
+        break; // sample only the first formula-bearing row for this column
+      }
+    }
+  }
+
   for (let r = _ds; r <= last; r++) for (let c = 1; c <= 11; c++) ws.getCell(r, c).value = null;
 
   // group incoming rows by code, preserving first-seen order
@@ -1272,6 +1299,9 @@ function replaceCurrentLog(ws, rows, meta) {
         amount: row.amount, req: row.req || (meta.reqNumber ? 'Req#' + meta.reqNumber : undefined),
         date: row.date,
       });
+      // Regenerate per-row derived columns (e.g. "Total" = Amount Paid + Check)
+      // so the B2A's SUMIF over the Current Log's Total column sees this line.
+      for (const d of derivedCols) ws.getCell(r, d.col).value = { formula: d.template.replace(/\{R\}/g, r) };
       r++;
     }
     ws.getCell(r, COL.amount).value = null; styleAmountCell(ws, r, { underline: false }); r++;            // spacer
