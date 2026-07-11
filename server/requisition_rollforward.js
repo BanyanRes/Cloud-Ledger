@@ -842,6 +842,69 @@ async function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta, callCl
   };
 }
 
+// Derive and build this period's Development Fee line for Bridge/Intacct-style
+// entities whose dev-fee tab is NAMED ("HP Dev Fee") and links to the Current
+// Invoice Log by fixed row. computeDevFeeRow only understands the collapse/
+// Silsbee dev-fee tab, so those entities otherwise get no auto-fee. Here we
+// self-calibrate the rate from the PRIOR report — posted dev fee / (grand total
+// ex dev fee) — reuse the existing Development Fee line's category/code/vendor,
+// and apply that rate to this period's new invoices (excluding any dev-fee line
+// already keyed). Returns { row, amount, code, base, rate } or null.
+function deriveBridgeDevFee(workbook, curWs, newCurrent, meta = {}) {
+  if (meta && meta.collapseDevFeeCosts) return null;
+  // Only for entities whose dev-fee tab links to the Current Invoice Log.
+  let hasCurRefTab = false;
+  for (const w of workbook.worksheets) {
+    if (!/dev\s*fee/i.test(w.name)) continue;
+    w.eachRow({ includeEmpty: false }, (row) => row.eachCell({ includeEmpty: false }, (c) => {
+      const f = cellFormula(c); if (f && /current invoice log/i.test(f)) hasCurRefTab = true;
+    }));
+  }
+  if (!hasCurRefTab) return null;
+
+  // Recover last period's base + Development Fee line from the source Current
+  // Log. Leaf line items are plain numbers; subtotals/grand total are SUBTOTAL
+  // formulas (skipped), so summing the plain numbers reproduces the grand total.
+  let devLine = null, grandTotal = 0;
+  const last = curWs.actualRowCount || curWs.rowCount || 0;
+  for (let r = 1; r <= last; r++) {
+    const amtCell = curWs.getCell(r, COL.amount);
+    if (cellFormula(amtCell)) continue;              // skip subtotal/total rows
+    const amt = cellNum(amtCell);
+    if (amt == null || !isFinite(amt)) continue;
+    grandTotal += amt;
+    const name = cellStr(curWs.getCell(r, COL.name)).trim();
+    const code = cellCode(curWs.getCell(r, COL.code));
+    if (!devLine && amt > 0 && code != null && String(code) !== '' && /development\s*fee/i.test(name)) {
+      devLine = {
+        cat: cellStr(curWs.getCell(r, COL.cat)).trim(),
+        code, name,
+        vendor: cellStr(curWs.getCell(r, COL.vendor)).trim(),
+        amount: amt,
+      };
+    }
+  }
+  if (!devLine || !(devLine.amount > 0)) return null;
+  const priorBase = grandTotal - devLine.amount;
+  if (!(priorBase > 0)) return null;
+  const rate = Math.round((devLine.amount / priorBase) * 1e4) / 1e4;   // clean 4-dp rate (e.g. 0.03)
+  if (!(rate > 0)) return null;
+
+  // Apply the rate to this period's invoices, excluding any dev-fee-coded line.
+  const newBase = (newCurrent || []).reduce((s, inv) => {
+    if (String(inv.code) === String(devLine.code)) return s;
+    const n = (inv.amount && typeof inv.amount === 'object') ? Number(inv.amount.result) : Number(inv.amount);
+    return s + (isFinite(n) ? n : 0);
+  }, 0);
+  const amount = Math.round(newBase * rate * 100) / 100;
+
+  const row = {
+    cat: devLine.cat, code: devLine.code, name: devLine.name, vendor: devLine.vendor,
+    bill: '', amount, date: (meta && meta.asOfDate) || null,
+  };
+  return { row, amount, code: devLine.code, base: newBase, rate };
+}
+
 // ----------------------------------------------------------------------------
 // Top-level: roll a workbook forward in place.
 //   workbook    : exceljs Workbook loaded from Req#N (will be mutated to Req#N+1)
@@ -929,6 +992,25 @@ async function rollForward(workbook, newCurrent, meta = {}) {
     devFeeInfo = { error: e.message, needsReview: true };
   }
 
+  // 1c. Bridge/Intacct entities (e.g. HP) keep a NAMED dev-fee tab ("HP Dev
+  //     Fee") whose structure computeDevFeeRow's Silsbee parser can't read, so
+  //     no fee was posted above. Derive it straight from the workbook and append
+  //     it to the Current Log so the dev fee posts automatically. Only when a
+  //     dev-fee line isn't already present for that code (avoids double-count).
+  try {
+    if (!effectiveCurrent.some(inv => devFeeInfo && String(inv.code) === String(devFeeInfo.code))) {
+      const bridge = deriveBridgeDevFee(workbook, curWs, effectiveCurrent, meta);
+      if (bridge && bridge.row && !effectiveCurrent.some(inv => String(inv.code) === String(bridge.code))) {
+        effectiveCurrent.push(bridge.row);
+        devFeeInfo = {
+          amount: bridge.amount, code: bridge.code, base: bridge.base,
+          rateText: +(bridge.rate * 100).toFixed(4) + '%',
+          source: 'bridge-derived', needsReview: false, row: bridge.row,
+        };
+      }
+    }
+  } catch (e) { /* best-effort; never block the roll-forward */ }
+
   // 2. Rebuild Prior Log = prior groups + folded current rows.
   const landmarks = rebuildPriorLog(priorWs, priorGroups, curByCode);
 
@@ -988,6 +1070,36 @@ async function rollForward(workbook, newCurrent, meta = {}) {
           else nf = nf.replace(new RegExp("'" + esc + "'!\\$?[A-Za-z]{1,3}\\$?" + _cur_oldDFT + '(?![0-9])', 'g'), '0');
         }
         if (nf !== f) c.value = { formula: nf };
+      }));
+    }
+  }
+
+  // 3.2 Advance the descriptive month labels on those dev-fee tabs so they don't
+  //     lag a period: static "... through <Month>" cutoff text moves to the new
+  //     report's prior month, and any period header built as
+  //     =TEXT('<sheet>'!<cell>,"mmmm...") has its source date advanced to the new
+  //     period end (e.g. HP's B11 -> 'Consolidated Balance Sheet'!F16).
+  if (_devFeeCurWs.length && meta.asOfDate) {
+    const [py, pm, pd] = String(meta.asOfDate).split('-').map(Number);
+    const periodEnd = new Date(py, (pm || 1) - 1, pd || 1);            // new period end (local)
+    const priorMonthName = new Date(py, (pm || 1) - 2, 1)
+      .toLocaleString('en-US', { month: 'long' });                     // month before the new period
+    const MONTHS = /\b(January|February|March|April|May|June|July|August|September|October|November|December)\b/;
+    for (const w of _devFeeCurWs) {
+      w.eachRow({ includeEmpty: false }, (row) => row.eachCell({ includeEmpty: false }, (c) => {
+        if (typeof c.value === 'string' && /through/i.test(c.value) && MONTHS.test(c.value)) {
+          const nv = c.value.replace(MONTHS, priorMonthName);
+          if (nv !== c.value) c.value = nv;
+          return;
+        }
+        const f = cellFormula(c);
+        if (f && /\bTEXT\s*\(/i.test(f) && /mmmm/i.test(f)) {
+          const m = f.match(/'?([^'!()]+?)'?!\$?([A-Za-z]{1,3})\$?(\d+)/);
+          if (m) {
+            const src = findSheet(workbook, m[1].trim()) || workbook.getWorksheet(m[1].trim());
+            if (src) src.getCell(m[2] + m[3]).value = periodEnd;
+          }
+        }
       }));
     }
   }
