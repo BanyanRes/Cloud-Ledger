@@ -899,7 +899,9 @@ function deriveBridgeDevFee(workbook, curWs, newCurrent, meta = {}) {
   const amount = Math.round(newBase * rate * 100) / 100;
 
   const row = {
-    cat: devLine.cat, code: devLine.code, name: devLine.name, vendor: devLine.vendor,
+    // Development fee is payable to the developer, Banyan Residential — not the
+    // fund entity that appeared on the prior line (e.g. "Banyan HP Fund, LLC").
+    cat: devLine.cat, code: devLine.code, name: devLine.name, vendor: 'Banyan Residential',
     bill: '', amount, date: (meta && meta.asOfDate) || null,
   };
   return { row, amount, code: devLine.code, base: newBase, rate };
