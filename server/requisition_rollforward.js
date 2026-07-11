@@ -947,7 +947,50 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   hideZeroAmountRows(priorWs);
 
   // 3. Replace Current Log with the incoming period's invoices (incl. dev fee).
+  // Bridge/Intacct-style dev-fee tabs (e.g. "HP Dev Fee") link to the Current
+  // Invoice Log by FIXED row — the Grand Total and the Development Fee subtotal.
+  // replaceCurrentLog rebuilds the log compactly and moves those rows, so capture
+  // their OLD positions now and repoint the tab(s) after the rebuild. (Skip for
+  // collapse entities; their dev-fee tab is handled by buildSimpleDevFeeTab.)
+  let _cur_oldGT = null, _cur_oldDFT = null; const _devFeeCurWs = [];
+  if (!meta.collapseDevFeeCosts) {
+    for (const w of workbook.worksheets) {
+      if (!/dev\s*fee/i.test(w.name)) continue;
+      let refsCur = false;
+      w.eachRow({ includeEmpty: false }, (row) => row.eachCell({ includeEmpty: false }, (c) => {
+        const f = cellFormula(c); if (f && /current invoice log/i.test(f)) refsCur = true;
+      }));
+      if (refsCur) _devFeeCurWs.push(w);
+    }
+    if (_devFeeCurWs.length) {
+      _cur_oldGT = findRowByLabel(curWs, ['Grand Total', 'Grant Total']);
+      _cur_oldDFT = findRowByLabel(curWs, ['Development Fee Total', 'Dev Fee Total']);
+    }
+  }
   const curInfo = replaceCurrentLog(curWs, effectiveCurrent, meta);
+
+  // 3.1 Repoint those dev-fee tabs' fixed Current-Invoice-Log references to the
+  //     new Grand Total / Development Fee Total rows. If there is no dev fee this
+  //     period, the Development Fee Total ref is replaced with 0. Formula cells are
+  //     rewritten (no cached result) so Excel recomputes on open (fullCalcOnLoad).
+  if (_devFeeCurWs.length) {
+    const newGT = (curInfo && curInfo.grandTotalRow) || findRowByLabel(curWs, ['Grand Total', 'Grant Total']);
+    const newDFT = findRowByLabel(curWs, ['Development Fee Total', 'Dev Fee Total']);
+    const esc = curWs.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const refPrefix = "('" + esc + "'!\\$?[A-Za-z]{1,3}\\$?)";
+    for (const w of _devFeeCurWs) {
+      w.eachRow({ includeEmpty: false }, (row) => row.eachCell({ includeEmpty: false }, (c) => {
+        const f = cellFormula(c); if (!f || !/current invoice log/i.test(f)) return;
+        let nf = f;
+        if (_cur_oldGT && newGT) nf = nf.replace(new RegExp(refPrefix + _cur_oldGT + '(?![0-9])', 'g'), '$1' + newGT);
+        if (_cur_oldDFT) {
+          if (newDFT) nf = nf.replace(new RegExp(refPrefix + _cur_oldDFT + '(?![0-9])', 'g'), '$1' + newDFT);
+          else nf = nf.replace(new RegExp("'" + esc + "'!\\$?[A-Za-z]{1,3}\\$?" + _cur_oldDFT + '(?![0-9])', 'g'), '0');
+        }
+        if (nf !== f) c.value = { formula: nf };
+      }));
+    }
+  }
 
   // 3a. Right-align the same numeric columns on the Current Log.
   rightAlignNumericColumns(curWs);
