@@ -102,6 +102,7 @@ db.exec(`
     PRIMARY KEY (group_id, entity_id)
   );
   INSERT OR IGNORE INTO user_groups (name) VALUES ('CLA');
+  INSERT OR IGNORE INTO user_groups (name) VALUES ('Weaver');
   CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
     code TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
