@@ -81,6 +81,27 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (user_id, entity_id)
   );
+  -- User groups: bundle users so entity access can be granted to the whole group
+  -- at once (e.g. all CLA / CliftonLarsonAllen staff). A user's effective entity
+  -- access is the UNION of their individual grants and every group they belong to.
+  CREATE TABLE IF NOT EXISTS user_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS user_group_members (
+    group_id INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, user_id)
+  );
+  CREATE TABLE IF NOT EXISTS user_group_entity_access (
+    group_id INTEGER NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, entity_id)
+  );
+  INSERT OR IGNORE INTO user_groups (name) VALUES ('CLA');
   CREATE TABLE IF NOT EXISTS accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
     code TEXT NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL,
@@ -964,15 +985,27 @@ function auth(req, res, next) {
 // Entity access control: Admin bypasses; otherwise user must have either no allowlist (full access) or a matching row.
 function userHasEntityAccess(userId, userRole, entityId) {
   if (userRole === 'Admin') return true;
-  const allow = db.prepare('SELECT entity_id FROM user_entity_access WHERE user_id = ?').all(userId);
-  if (allow.length === 0) return true; // empty allowlist = all entities
-  return allow.some(r => r.entity_id === parseInt(entityId));
+  const ids = listAccessibleEntityIds(userId, userRole);
+  if (ids === null) return true; // null = all entities
+  return ids.includes(parseInt(entityId));
 }
+// A user's effective entity access = the UNION of their individual grants and
+// the entities assigned to every group they belong to (e.g. the CLA group).
+// Legacy behavior is preserved: a user with NO individual grants AND NO group
+// membership has an empty allowlist, which still means "all entities". Once a
+// user has either an individual grant or a group membership, they are scoped to
+// the union (so putting an all-access user into CLA restricts them to CLA's
+// entities). Returns null for "all", otherwise an array of entity ids.
 function listAccessibleEntityIds(userId, userRole) {
   if (userRole === 'Admin') return null; // null = all
-  const allow = db.prepare('SELECT entity_id FROM user_entity_access WHERE user_id = ?').all(userId);
-  if (allow.length === 0) return null; // empty = all
-  return allow.map(r => r.entity_id);
+  const direct = db.prepare('SELECT entity_id FROM user_entity_access WHERE user_id = ?').all(userId);
+  const groups = db.prepare('SELECT group_id FROM user_group_members WHERE user_id = ?').all(userId);
+  if (direct.length === 0 && groups.length === 0) return null; // empty = all (legacy)
+  const groupEnt = groups.length
+    ? db.prepare('SELECT DISTINCT entity_id FROM user_group_entity_access WHERE group_id IN (' + groups.map(() => '?').join(',') + ')').all(...groups.map(g => g.group_id))
+    : [];
+  const set = new Set([...direct.map(r => r.entity_id), ...groupEnt.map(r => r.entity_id)]);
+  return [...set];
 }
 function requireEntityAccess(paramName) {
   return (req, res, next) => {
@@ -1137,6 +1170,63 @@ app.put('/api/users/:id/entity-access', auth, requireRole('Admin'), (req, res) =
 });
 
 
+
+// ═══ User Groups (Admin only) ═══
+// List groups with member + entity counts.
+app.get('/api/groups', auth, requireRole('Admin'), (req, res) => {
+  const groups = db.prepare('SELECT id, name, created_at FROM user_groups ORDER BY name').all();
+  const mc = db.prepare('SELECT group_id, COUNT(*) n FROM user_group_members GROUP BY group_id').all();
+  const ec = db.prepare('SELECT group_id, COUNT(*) n FROM user_group_entity_access GROUP BY group_id').all();
+  const mmap = Object.fromEntries(mc.map(r => [r.group_id, r.n]));
+  const emap = Object.fromEntries(ec.map(r => [r.group_id, r.n]));
+  res.json(groups.map(g => ({ ...g, member_count: mmap[g.id] || 0, entity_count: emap[g.id] || 0 })));
+});
+// Group detail: member user ids + granted entity ids.
+app.get('/api/groups/:id', auth, requireRole('Admin'), (req, res) => {
+  const g = db.prepare('SELECT id, name, created_at FROM user_groups WHERE id = ?').get(req.params.id);
+  if (!g) return res.status(404).json({ error: 'Group not found' });
+  const member_ids = db.prepare('SELECT user_id FROM user_group_members WHERE group_id = ?').all(g.id).map(r => r.user_id);
+  const entity_ids = db.prepare('SELECT entity_id FROM user_group_entity_access WHERE group_id = ? ORDER BY entity_id').all(g.id).map(r => r.entity_id);
+  res.json({ ...g, member_ids, entity_ids });
+});
+// Create a group.
+app.post('/api/groups', auth, requireRole('Admin'), (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Group name required' });
+  try { const r = db.prepare('INSERT INTO user_groups (name) VALUES (?)').run(name); res.json({ id: r.lastInsertRowid, name }); }
+  catch { res.status(400).json({ error: 'A group with that name already exists' }); }
+});
+// Delete a group (memberships + entity grants cascade).
+app.delete('/api/groups/:id', auth, requireRole('Admin'), (req, res) => {
+  db.prepare('DELETE FROM user_groups WHERE id = ?').run(req.params.id);
+  res.json({ success: true });
+});
+// Replace a group's members.
+app.put('/api/groups/:id/members', auth, requireRole('Admin'), (req, res) => {
+  const gid = parseInt(req.params.id);
+  if (!db.prepare('SELECT id FROM user_groups WHERE id = ?').get(gid)) return res.status(404).json({ error: 'Group not found' });
+  const ids = Array.isArray(req.body.user_ids) ? req.body.user_ids.map(n => parseInt(n)).filter(n => Number.isInteger(n)) : [];
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM user_group_members WHERE group_id = ?').run(gid);
+    const ins = db.prepare('INSERT OR IGNORE INTO user_group_members (group_id, user_id) VALUES (?, ?)');
+    for (const uid of ids) ins.run(gid, uid);
+  });
+  tx();
+  res.json({ group_id: gid, user_ids: ids });
+});
+// Replace a group's entity access. Every member gains access to these entities.
+app.put('/api/groups/:id/entities', auth, requireRole('Admin'), (req, res) => {
+  const gid = parseInt(req.params.id);
+  if (!db.prepare('SELECT id FROM user_groups WHERE id = ?').get(gid)) return res.status(404).json({ error: 'Group not found' });
+  const ids = Array.isArray(req.body.entity_ids) ? req.body.entity_ids.map(n => parseInt(n)).filter(n => Number.isInteger(n)) : [];
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM user_group_entity_access WHERE group_id = ?').run(gid);
+    const ins = db.prepare('INSERT OR IGNORE INTO user_group_entity_access (group_id, entity_id) VALUES (?, ?)');
+    for (const eid of ids) ins.run(gid, eid);
+  });
+  tx();
+  res.json({ group_id: gid, entity_ids: ids });
+});
 
 // ═══ Entities ═══
 app.get('/api/entities', auth, (req, res) => {

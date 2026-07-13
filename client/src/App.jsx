@@ -3680,6 +3680,17 @@ function UserManagement({currentUser}){
     setAccessSaving(false);
   };
   useEffect(()=>{loadUsers();},[loadUsers]);
+  // ── User groups (e.g. CLA): bundle members + grant entity access at once ──
+  const[groups,setGroups]=useState([]);
+  const[groupModal,setGroupModal]=useState(null);
+  const[gMembers,setGMembers]=useState([]);const[gEntities,setGEntities]=useState([]);const[gAllEntities,setGAllEntities]=useState([]);
+  const[gSaving,setGSaving]=useState(false);const[gErr,setGErr]=useState('');
+  const loadGroups=useCallback(()=>{api.getGroups().then(setGroups).catch(()=>{});},[]);
+  useEffect(()=>{loadGroups();},[loadGroups]);
+  const openGroup=async(g)=>{setGroupModal(g);setGErr('');setGSaving(false);try{const[detail,ents]=await Promise.all([api.getGroup(g.id),api.getEntities()]);setGMembers(detail.member_ids||[]);setGEntities(detail.entity_ids||[]);setGAllEntities(ents);}catch(e){setGErr(e.message);}};
+  const toggleGMember=(id)=>setGMembers(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
+  const toggleGEntity=(id)=>setGEntities(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
+  const saveGroup=async()=>{setGSaving(true);setGErr('');try{await api.setGroupMembers(groupModal.id,gMembers);await api.setGroupEntities(groupModal.id,gEntities);setGroupModal(null);loadGroups();}catch(e){setGErr(e.message);}setGSaving(false);};
   const changeRole=async(userId,newRole)=>{try{await api.updateUser(userId,{name:users.find(u=>u.id===userId)?.name,role:newRole});setEditingRole(null);loadUsers();}catch(e){alert(e.message);}};
 
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
@@ -3695,6 +3706,17 @@ function UserManagement({currentUser}){
         <div style={S.col}><label style={S.label}>Role</label><select style={S.select} value={form.role} onChange={e=>setForm(f=>({...f,role:e.target.value}))}><option>Admin</option><option>Accountant</option><option>Viewer</option></select></div></div>
       <div style={{fontSize:11,color:T.textMuted,marginBottom:10}}>This email and password will be used to sign in from any device.</div>
       {err&&<div style={S.err}>{err}</div>}<button style={S.btnP} onClick={async()=>{if(!form.name||!form.email||!form.password){setErr('All fields required');return;}try{await api.signup(form.name,form.email,form.password,form.role);setForm({name:'',email:'',password:'',role:'Viewer'});setShowAdd(false);setErr('');loadUsers();}catch(e){setErr(e.message);}}}>Create User</button></div>}
+    {groups.length>0&&<div style={{...S.card,marginBottom:16}}>
+      <div style={{fontSize:14,fontWeight:600,color:T.textBright,marginBottom:4}}>User Groups</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Grant entity access to a whole team at once. Everyone in a group can access all entities assigned to that group (in addition to any individual access). Adding someone to a group limits them to the group's entities.</div>
+      <table style={S.table}><thead><tr><th style={S.th}>Group</th><th style={S.th}>Members</th><th style={S.th}>Entities</th><th style={{...S.th,width:120}}></th></tr></thead>
+      <tbody>{groups.map(g=><tr key={g.id}>
+        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{g.name}</td>
+        <td style={S.td}>{g.member_count}</td>
+        <td style={S.td}>{g.entity_count}</td>
+        <td style={S.td}><button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>openGroup(g)}>Manage</button></td>
+      </tr>)}</tbody></table>
+    </div>}
     <div style={S.cardFlush}>
       <table style={S.table}><thead><tr>
         <th style={S.th}>Name</th>
@@ -3738,6 +3760,44 @@ function UserManagement({currentUser}){
           <button style={S.btnGhost} onClick={()=>setAccessUser(null)} disabled={accessSaving}>Cancel</button>
           <button style={S.btnP} onClick={saveAccess} disabled={accessSaving}>{accessSaving?'Saving...':'Save'}</button>
         </div>
+      </div>
+    </div></div>}
+    {groupModal&&<div style={S.modal} onClick={()=>setGroupModal(null)}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:640}} onClick={e=>e.stopPropagation()}>
+      <button style={S.modalClose} onClick={()=>setGroupModal(null)}>&times;</button>
+      <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:6}}>{groupModal.name} Group</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>Everyone checked under Members gets access to every entity checked under Entities (plus any individual access they already have).</div>
+      <div style={{display:'flex',gap:16}}>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:12,fontWeight:600,color:T.textBright,marginBottom:6}}>Members ({gMembers.length})</div>
+          <div style={{maxHeight:300,overflowY:'auto',border:'1px solid '+T.border,borderRadius:6}}>
+            {users.filter(u=>u.role!=='Admin').map(u=>(
+              <label key={u.id} style={{display:'flex',alignItems:'center',padding:'7px 10px',borderBottom:'1px solid '+T.border,cursor:'pointer',gap:8}}>
+                <input type="checkbox" checked={gMembers.includes(u.id)} onChange={()=>toggleGMember(u.id)}/>
+                <span style={{color:T.textBright,fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{u.name}</span>
+              </label>
+            ))}
+            {users.filter(u=>u.role!=='Admin').length===0&&<div style={{padding:12,color:T.textMuted,fontSize:12,textAlign:'center'}}>No non-admin users</div>}
+          </div>
+          <div style={{fontSize:10,color:T.textMuted,marginTop:4}}>Admins already have all-entity access, so they aren't listed.</div>
+        </div>
+        <div style={{flex:1,minWidth:0}}>
+          <div style={{fontSize:12,fontWeight:600,color:T.textBright,marginBottom:6}}>Entities ({gEntities.length})</div>
+          <div style={{maxHeight:300,overflowY:'auto',border:'1px solid '+T.border,borderRadius:6}}>
+            {gAllEntities.map(e=>(
+              <label key={e.id} style={{display:'flex',alignItems:'center',padding:'7px 10px',borderBottom:'1px solid '+T.border,cursor:'pointer',gap:8}}>
+                <input type="checkbox" checked={gEntities.includes(e.id)} onChange={()=>toggleGEntity(e.id)}/>
+                <span style={{color:T.textBright,fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{e.name}</span>
+                {e.code&&<span style={{color:T.textMuted,fontSize:10,fontFamily:'monospace'}}>{e.code}</span>}
+              </label>
+            ))}
+            {gAllEntities.length===0&&<div style={{padding:12,color:T.textMuted,fontSize:12,textAlign:'center'}}>No entities</div>}
+          </div>
+        </div>
+      </div>
+      {gErr&&<div style={{...S.err,marginTop:10}}>{gErr}</div>}
+      <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:14}}>
+        <button style={S.btnGhost} onClick={()=>setGroupModal(null)} disabled={gSaving}>Cancel</button>
+        <button style={S.btnP} onClick={saveGroup} disabled={gSaving}>{gSaving?'Saving...':'Save'}</button>
       </div>
     </div></div>}
         {resetId&&<div style={S.modal} onClick={()=>setResetId(null)}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:400,textAlign:'center'}} onClick={e=>e.stopPropagation()}>

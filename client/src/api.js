@@ -35,6 +35,12 @@ export const api = {
   getUserEntityAccess: (id) => request('/users/' + id + '/entity-access'),
   setUserEntityAccess: (id, entity_ids) => request('/users/' + id + '/entity-access', { method: 'PUT', body: { entity_ids } }),
 
+  // User groups (bundle users + grant entity access to all at once, e.g. CLA)
+  getGroups: () => request('/groups'),
+  getGroup: (id) => request('/groups/' + id),
+  setGroupMembers: (id, user_ids) => request('/groups/' + id + '/members', { method: 'PUT', body: { user_ids } }),
+  setGroupEntities: (id, entity_ids) => request('/groups/' + id + '/entities', { method: 'PUT', body: { entity_ids } }),
+
   // Entities
   getEntities: () => request('/entities'),
   // Turnkey Rail WIP schedule (in-app report). JWT-authed admin endpoint.
