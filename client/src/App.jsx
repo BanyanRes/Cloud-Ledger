@@ -3664,12 +3664,16 @@ function UserManagement({currentUser}){
   const[accessAllEntities,setAccessAllEntities]=useState([]); // all entities for picker
   const[accessSaving,setAccessSaving]=useState(false);
   const[accessErr,setAccessErr]=useState('');
+  const[accessGroups,setAccessGroups]=useState([]); // groups the user belongs to (with entity_ids)
+  const[accessEffective,setAccessEffective]=useState(null); // null=all, else union of individual+group
   const openAccess=async(u)=>{
-    setAccessUser(u);setAccessErr('');setAccessSaving(false);
+    setAccessUser(u);setAccessErr('');setAccessSaving(false);setAccessGroups([]);setAccessEffective(null);
     try{
       const[ents,acc]=await Promise.all([api.getEntities(),api.getUserEntityAccess(u.id)]);
       setAccessAllEntities(ents);
       setAccessEntities(acc.entity_ids||[]);
+      setAccessGroups(acc.groups||[]);
+      setAccessEffective(acc.effective===undefined?null:acc.effective);
     }catch(e){setAccessErr(e.message);}
   };
   const toggleAccessEntity=(id)=>setAccessEntities(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);
@@ -3740,22 +3744,31 @@ function UserManagement({currentUser}){
       <button style={S.modalClose} onClick={()=>setAccessUser(null)}>&times;</button>
       <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:6}}>Entity Access</div>
       <div style={{fontSize:13,color:T.textMuted,marginBottom:14}}>User: <strong style={{color:T.textBright}}>{accessUser.name}</strong> ({accessUser.role})</div>
+      {accessGroups.length>0&&<div style={{fontSize:12,color:T.textBright,marginBottom:8,padding:'8px 12px',background:T.accent+'12',border:'1px solid '+T.accent+'33',borderRadius:6}}>
+        Member of {accessGroups.map(g=>g.name).join(', ')} — also has access to {new Set(accessGroups.flatMap(g=>g.entity_ids)).size} entit{new Set(accessGroups.flatMap(g=>g.entity_ids)).size===1?'y':'ies'} via group{accessGroups.length>1?'s':''} (marked "via …" below). Manage group entities in User Groups.
+      </div>}
       <div style={{fontSize:12,color:T.textMuted,marginBottom:10,padding:'8px 12px',background:T.bgInset,borderRadius:6}}>
-        {accessEntities.length===0?'No restrictions — user can access ALL entities. Check entities below to restrict access to only those.':'User can access only the '+accessEntities.length+' checked entit'+(accessEntities.length===1?'y':'ies')+' below. Uncheck all to grant access to all entities.'}
+        {accessEffective===null
+          ? 'This user can currently access ALL entities (no individual or group restrictions). Check entities below to restrict to only those.'
+          : 'Effective access: '+accessEffective.length+' entit'+(accessEffective.length===1?'y':'ies')+' (individual grants + groups). The checkboxes below set this user’s INDIVIDUAL access, added on top of any group access.'}
       </div>
       <div style={{maxHeight:320,overflowY:'auto',border:'1px solid '+T.border,borderRadius:6,marginBottom:12}}>
-        {accessAllEntities.map(e=>(
+        {accessAllEntities.map(e=>{
+          const viaGroups=accessGroups.filter(g=>g.entity_ids.includes(e.id)).map(g=>g.name);
+          return (
           <label key={e.id} style={{display:'flex',alignItems:'center',padding:'8px 12px',borderBottom:'1px solid '+T.border,cursor:'pointer',gap:10}}>
             <input type="checkbox" checked={accessEntities.includes(e.id)} onChange={()=>toggleAccessEntity(e.id)}/>
             <span style={{color:T.textBright,fontSize:13}}>{e.name}</span>
             {e.code&&<span style={{color:T.textMuted,fontSize:11,fontFamily:'monospace'}}>{e.code}</span>}
+            {viaGroups.length>0&&<span style={{marginLeft:'auto',fontSize:10,color:T.accent,background:T.accent+'18',padding:'2px 6px',borderRadius:4,whiteSpace:'nowrap'}}>via {viaGroups.join(', ')}</span>}
           </label>
-        ))}
+          );
+        })}
         {accessAllEntities.length===0&&<div style={{padding:16,color:T.textMuted,textAlign:'center'}}>No entities</div>}
       </div>
       {accessErr&&<div style={S.err}>{accessErr}</div>}
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}}>
-        <button style={S.btnGhost} onClick={()=>setAccessEntities([])} disabled={accessSaving}>Clear (= all access)</button>
+        <button style={S.btnGhost} onClick={()=>setAccessEntities([])} disabled={accessSaving}>{accessGroups.length>0?'Clear individual grants':'Clear (= all access)'}</button>
         <div style={{display:'flex',gap:8}}>
           <button style={S.btnGhost} onClick={()=>setAccessUser(null)} disabled={accessSaving}>Cancel</button>
           <button style={S.btnP} onClick={saveAccess} disabled={accessSaving}>{accessSaving?'Saving...':'Save'}</button>

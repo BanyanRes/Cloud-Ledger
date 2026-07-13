@@ -1152,8 +1152,24 @@ app.put('/api/users/:id', auth, requireRole('Admin'), (req, res) => { db.prepare
 
 // Entity access management (Admin only)
 app.get('/api/users/:id/entity-access', auth, requireRole('Admin'), (req, res) => {
-  const rows = db.prepare('SELECT entity_id FROM user_entity_access WHERE user_id = ? ORDER BY entity_id').all(req.params.id);
-  res.json({ user_id: parseInt(req.params.id), entity_ids: rows.map(r => r.entity_id) });
+  const uid = parseInt(req.params.id);
+  const rows = db.prepare('SELECT entity_id FROM user_entity_access WHERE user_id = ? ORDER BY entity_id').all(uid);
+  // Also surface access the user gets through group membership, so the modal can
+  // show effective access (individual grants alone are misleading once a user is
+  // in a group like CLA/Weaver).
+  const groups = db.prepare('SELECT g.id, g.name FROM user_groups g JOIN user_group_members m ON m.group_id = g.id WHERE m.user_id = ? ORDER BY g.name').all(uid);
+  const groupsDetail = groups.map(g => ({
+    id: g.id, name: g.name,
+    entity_ids: db.prepare('SELECT entity_id FROM user_group_entity_access WHERE group_id = ? ORDER BY entity_id').all(g.id).map(r => r.entity_id),
+  }));
+  const groupEntityIds = [...new Set(groupsDetail.flatMap(g => g.entity_ids))];
+  const user = db.prepare('SELECT role FROM users WHERE id = ?').get(uid);
+  // effective === null means "all entities"; otherwise the union of individual + group.
+  let effective;
+  if (user && user.role === 'Admin') effective = null;
+  else if (rows.length === 0 && groups.length === 0) effective = null;
+  else effective = [...new Set([...rows.map(r => r.entity_id), ...groupEntityIds])];
+  res.json({ user_id: uid, entity_ids: rows.map(r => r.entity_id), groups: groupsDetail, group_entity_ids: groupEntityIds, effective });
 });
 app.put('/api/users/:id/entity-access', auth, requireRole('Admin'), (req, res) => {
   const userId = parseInt(req.params.id);
