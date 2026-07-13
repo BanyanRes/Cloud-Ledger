@@ -3755,12 +3755,14 @@ function UserManagement({currentUser}){
       <div style={{maxHeight:320,overflowY:'auto',border:'1px solid '+T.border,borderRadius:6,marginBottom:12}}>
         {accessAllEntities.map(e=>{
           const viaGroups=accessGroups.filter(g=>g.entity_ids.includes(e.id)).map(g=>g.name);
+          const inGroup=viaGroups.length>0;
+          const checked=inGroup||accessEntities.includes(e.id);
           return (
-          <label key={e.id} style={{display:'flex',alignItems:'center',padding:'8px 12px',borderBottom:'1px solid '+T.border,cursor:'pointer',gap:10}}>
-            <input type="checkbox" checked={accessEntities.includes(e.id)} onChange={()=>toggleAccessEntity(e.id)}/>
+          <label key={e.id} title={inGroup?'Granted via '+viaGroups.join(', ')+' — manage in User Groups':''} style={{display:'flex',alignItems:'center',padding:'8px 12px',borderBottom:'1px solid '+T.border,cursor:inGroup?'default':'pointer',gap:10}}>
+            <input type="checkbox" checked={checked} disabled={inGroup} onChange={()=>{if(!inGroup)toggleAccessEntity(e.id);}}/>
             <span style={{color:T.textBright,fontSize:13}}>{e.name}</span>
             {e.code&&<span style={{color:T.textMuted,fontSize:11,fontFamily:'monospace'}}>{e.code}</span>}
-            {viaGroups.length>0&&<span style={{marginLeft:'auto',fontSize:10,color:T.accent,background:T.accent+'18',padding:'2px 6px',borderRadius:4,whiteSpace:'nowrap'}}>via {viaGroups.join(', ')}</span>}
+            {inGroup&&<span style={{marginLeft:'auto',fontSize:10,color:T.accent,background:T.accent+'18',padding:'2px 6px',borderRadius:4,whiteSpace:'nowrap'}}>via {viaGroups.join(', ')}</span>}
           </label>
           );
         })}
