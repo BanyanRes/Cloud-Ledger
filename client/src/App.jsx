@@ -17,6 +17,11 @@ const blurAmt = v => { const t = String(v).trim(); return (t && t !== '.') ? par
 const today = () => new Date().toISOString().slice(0, 10);
 const fy_start = () => new Date().getFullYear() + '-01-01';
 const fmtSize = b => b > 1048576 ? (b/1048576).toFixed(1)+' MB' : (b/1024).toFixed(0)+' KB';
+// Display people's names with each part's first letter capitalized (e.g.
+// "omar dominguez" -> "Omar Dominguez"), regardless of how they were entered.
+// Non-destructive: only upper-cases the first letter of each whitespace-
+// separated part, leaving the rest of each part as typed.
+const titleName = s => String(s == null ? '' : s).replace(/(^|\s)(\S)/g, (m, p, c) => p + c.toUpperCase());
 // Entity-type grouping metadata, shared by Dashboard + Entity Management.
 const ENTITY_TYPES = [
   { key:'accounting',  label:'Accounting',  icon:'📒' },
@@ -603,7 +608,7 @@ export default function App(){
       <div style={{width:1,height:28,background:T.border}}/>{_activeEnt&&<button style={{...S.btnGhost,fontSize:18,padding:'4px 8px',lineHeight:1}} title={'Open '+_activeEnt.name+' Workpapers'} onClick={()=>setWpEntity(_activeEnt)}>📁</button>}<EntityPicker entities={entities} activeId={activeEntity} onSelect={setActiveEntity} onManage={()=>setPage('entities')}/>{entities.length>0&&<GlobalSearch entities={entities} activeEntity={activeEntity} onSelectEntity={setActiveEntity} onGo={setPage} onPickJE={(id)=>{setPendingJEId(id);setPage('journal');}} onPickAccount={(code)=>{setPendingAcctCode(code);setPage('coa');}}/>}</div>
       <div style={{display:'flex',alignItems:'center',gap:10}}>
         {canEdit&&activeEntity&&<button style={{...S.btnP,position:'relative'}} onClick={()=>setShowJE(true)}>+ Journal Entry{jeHasContent&&<span style={{position:'absolute',top:-3,right:-3,width:8,height:8,borderRadius:4,background:T.orange,border:'2px solid #fff'}}/>}</button>}
-        <span style={{fontSize:13,fontWeight:500}}>{user.name}</span><span style={S.badge}>{user.role}</span>
+        <span style={{fontSize:13,fontWeight:500}}>{titleName(user.name)}</span><span style={S.badge}>{user.role}</span>
         <button style={S.btnS} onClick={()=>setShowChangePw(true)}>Settings</button>
         <button style={S.btnS} onClick={()=>{api.clearToken();setUser(null);}}>Sign Out</button></div></div>
     <div style={S.body}><div style={S.sidebar(sidebarCol)}>
@@ -3729,7 +3734,7 @@ function UserManagement({currentUser}){
         <th style={{...S.th,width:240}}>Actions</th></tr></thead>
       <tbody>{users.length===0&&!loadErr?<tr><td colSpan={4} style={{...S.td,textAlign:'center',padding:40,color:T.textDim}}>No users found</td></tr>:
         users.map(u=><tr key={u.id}>
-          <td style={{...S.td,fontWeight:600,color:T.textBright}}>{u.name}{u.id===currentUser.id?<span style={{color:T.accent,fontSize:10,marginLeft:8,fontWeight:500}}>(you)</span>:''}</td>
+          <td style={{...S.td,fontWeight:600,color:T.textBright}}>{titleName(u.name)}{u.id===currentUser.id?<span style={{color:T.accent,fontSize:10,marginLeft:8,fontWeight:500}}>(you)</span>:''}</td>
           <td style={{...S.td,fontFamily:'monospace',fontSize:12,color:T.textMuted}}>{u.email}</td>
           <td style={S.td}>{editingRole===u.id?
             <select style={S.selectSm} value={u.role} onChange={e=>changeRole(u.id,e.target.value)} onBlur={()=>setEditingRole(null)} autoFocus><option>Admin</option><option>Accountant</option><option>Viewer</option></select>
@@ -3743,7 +3748,7 @@ function UserManagement({currentUser}){
     {accessUser&&<div style={S.modal} onClick={()=>setAccessUser(null)}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:520}} onClick={e=>e.stopPropagation()}>
       <button style={S.modalClose} onClick={()=>setAccessUser(null)}>&times;</button>
       <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:6}}>Entity Access</div>
-      <div style={{fontSize:13,color:T.textMuted,marginBottom:14}}>User: <strong style={{color:T.textBright}}>{accessUser.name}</strong> ({accessUser.role})</div>
+      <div style={{fontSize:13,color:T.textMuted,marginBottom:14}}>User: <strong style={{color:T.textBright}}>{titleName(accessUser.name)}</strong> ({accessUser.role})</div>
       {accessGroups.length>0&&<div style={{fontSize:12,color:T.textBright,marginBottom:8,padding:'8px 12px',background:T.accent+'12',border:'1px solid '+T.accent+'33',borderRadius:6}}>
         Member of {accessGroups.map(g=>g.name).join(', ')} — also has access to {new Set(accessGroups.flatMap(g=>g.entity_ids)).size} entit{new Set(accessGroups.flatMap(g=>g.entity_ids)).size===1?'y':'ies'} via group{accessGroups.length>1?'s':''} (marked "via …" below). Manage group entities in User Groups.
       </div>}
@@ -3788,7 +3793,7 @@ function UserManagement({currentUser}){
             {users.filter(u=>u.role!=='Admin').map(u=>(
               <label key={u.id} style={{display:'flex',alignItems:'center',padding:'7px 10px',borderBottom:'1px solid '+T.border,cursor:'pointer',gap:8}}>
                 <input type="checkbox" checked={gMembers.includes(u.id)} onChange={()=>toggleGMember(u.id)}/>
-                <span style={{color:T.textBright,fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{u.name}</span>
+                <span style={{color:T.textBright,fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{titleName(u.name)}</span>
               </label>
             ))}
             {users.filter(u=>u.role!=='Admin').length===0&&<div style={{padding:12,color:T.textMuted,fontSize:12,textAlign:'center'}}>No non-admin users</div>}
@@ -3817,7 +3822,7 @@ function UserManagement({currentUser}){
     </div></div>}
         {resetId&&<div style={S.modal} onClick={()=>setResetId(null)}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:400,textAlign:'center'}} onClick={e=>e.stopPropagation()}>
       <button style={S.modalClose} onClick={()=>setResetId(null)}>&times;</button><div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:20}}>Reset Password</div>
-      <div style={{fontSize:13,color:T.textMuted,marginBottom:6}}>User: <strong style={{color:T.textBright}}>{users.find(u=>u.id===resetId)?.name}</strong></div>
+      <div style={{fontSize:13,color:T.textMuted,marginBottom:6}}>User: <strong style={{color:T.textBright}}>{titleName(users.find(u=>u.id===resetId)?.name)}</strong></div>
       <div style={{fontSize:12,color:T.textMuted,marginBottom:16,fontFamily:'monospace'}}>{users.find(u=>u.id===resetId)?.email}</div>
       <input style={S.input} type="password" placeholder="New password" value={resetPw} onChange={e=>{setResetPw(e.target.value);setResetMsg('');}}/>
       {resetMsg&&<div style={{fontSize:12,marginTop:8,color:resetMsg.includes('!')?T.green:T.red}}>{resetMsg}</div>}
