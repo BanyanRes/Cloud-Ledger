@@ -675,7 +675,7 @@ async function billcomListAccounts({ sessionId, devKey, baseUrl }) {
   // Paginate via nextPage token if present in the response
   while (true) {
     const params = new URLSearchParams({ max: String(max) });
-    if (nextPage) params.set('nextPage', nextPage);
+    if (nextPage) params.set('page', nextPage);
     const url = base + '/classifications/chart-of-accounts?' + params.toString();
     const resp = await fetch(url, {
       method: 'GET',
@@ -718,7 +718,7 @@ async function billcomListClassification({ sessionId, devKey, baseUrl, resource 
   let nextPage = null;
   while (true) {
     const params = new URLSearchParams({ max: '100' });
-    if (nextPage) params.set('nextPage', nextPage);
+    if (nextPage) params.set('page', nextPage);
     const url = base + '/classifications/' + resource + '?' + params.toString();
     const resp = await fetch(url, { method: 'GET', headers: { 'sessionId': sessionId, 'devKey': devKey, 'Accept': 'application/json' } });
     const text = await resp.text();
@@ -755,7 +755,7 @@ async function billcomListV3({ sessionId, devKey, baseUrl, resourcePath, extraPa
   let pageCount = 0;
   while (true) {
     const params = new URLSearchParams({ max: String(max), ...(extraParams || {}) });
-    if (nextPage) params.set('nextPage', nextPage);
+    if (nextPage) params.set('page', nextPage);
     const url = base + resourcePath + '?' + params.toString();
     const resp = await billcomFetch(url, {
       method: 'GET',
