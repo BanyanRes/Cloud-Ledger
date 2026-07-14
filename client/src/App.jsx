@@ -2740,6 +2740,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
         <div style={{flex:'0 0 200px'}}>
           <div style={{marginBottom:10}}><label style={S.label}>From</label><input style={{...S.inputSm,width:'100%'}} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
           <div style={{marginBottom:10}}><label style={S.label}>To</label><input style={{...S.inputSm,width:'100%'}} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
+          <div style={{marginBottom:10,display:'flex',gap:6,flexWrap:'wrap'}}>{PRESETS.map(([k,lbl])=><button key={k} onClick={()=>{const r=presetRange(k);setFrom(r.from);setTo(r.to);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'5px 9px',cursor:'pointer'}}>{lbl}</button>)}</div>
           {dimsEnabled&&<div><label style={S.label}>Group by</label><select style={{...S.inputSm,width:'100%'}} value={groupBy} onChange={e=>setGroupBy(e.target.value)}><option value="none">No grouping</option><option value="class">{classTerm()==='Class'?'Class / Investor':classTerm()}</option><option value="location">Location</option></select></div>}
         </div>
       </div>
