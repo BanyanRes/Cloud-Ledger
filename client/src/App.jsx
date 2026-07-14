@@ -26,6 +26,39 @@ const presetRange = (kind) => {
   return { from: '', to: '' };
 };
 const PRESETS = [['all', 'All'], ['month', 'Last Month'], ['quarter', 'Last Quarter'], ['year', 'Last Year']];
+const _iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+// Split [from,to] into period columns for report column-display modes.
+const buildPeriodCols = (from, to, mode) => {
+  if (mode === 'total' || !from || !to) return [{ from: from || '', to: to || '', label: 'Amount' }];
+  const cols = []; let s = new Date(from + 'T00:00:00'); const end = new Date(to + 'T00:00:00'); let guard = 0;
+  while (s <= end && guard++ < 800) {
+    const y = s.getFullYear(); let e, label;
+    if (mode === 'monthly') { e = new Date(y, s.getMonth() + 1, 0); label = s.toLocaleString('en-US', { month: 'short', year: '2-digit' }); }
+    else if (mode === 'quarterly') { const q = Math.floor(s.getMonth() / 3); e = new Date(y, q * 3 + 3, 0); label = 'Q' + (q + 1) + " '" + String(y).slice(2); }
+    else { e = new Date(y, 11, 31); label = String(y); }
+    cols.push({ from: _iso(s), to: _iso(e > end ? end : e), label });
+    s = new Date(e); s.setDate(s.getDate() + 1);
+  }
+  return cols;
+};
+// The equal-length window immediately before [from,to] (for comparative columns).
+const priorWindow = (from, to) => {
+  if (!from || !to) return null;
+  const s = new Date(from + 'T00:00:00'), e = new Date(to + 'T00:00:00');
+  // Whole-month windows (month/quarter/year) -> previous equivalent CALENDAR
+  // period. Otherwise fall back to the equal-length window immediately before.
+  const monthStart = s.getDate() === 1;
+  const monthEnd = (() => { const n = new Date(e); n.setDate(n.getDate() + 1); return n.getDate() === 1; })();
+  if (monthStart && monthEnd) {
+    const months = (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth()) + 1;
+    return { from: _iso(new Date(s.getFullYear(), s.getMonth() - months, 1)), to: _iso(new Date(s.getFullYear(), s.getMonth(), 0)) };
+  }
+  const days = Math.round((e - s) / 86400000) + 1;
+  const pe = new Date(s); pe.setDate(pe.getDate() - 1);
+  const ps = new Date(pe); ps.setDate(ps.getDate() - (days - 1));
+  return { from: _iso(ps), to: _iso(pe) };
+};
+const COL_MODES = [['total', 'Total Only'], ['monthly', 'Monthly'], ['quarterly', 'Quarterly'], ['yearly', 'Yearly']];
 const fy_start = () => new Date().getFullYear() + '-01-01';
 const fmtSize = b => b > 1048576 ? (b/1048576).toFixed(1)+' MB' : (b/1024).toFixed(0)+' KB';
 // Display people's names with each part's first letter capitalized (e.g.
@@ -2677,6 +2710,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
   const[accounts,setAccounts]=useState([]);const[sel,setSel]=useState([]);const[acctSearch,setAcctSearch]=useState('');
   const[from,setFrom]=useState('');const[to,setTo]=useState('');
   const[groupBy,setGroupBy]=useState(dimsEnabled?'class':'none');
+  const[colMode,setColMode]=useState('total');const[compare,setCompare]=useState(false);const[priorRows,setPriorRows]=useState([]);
   const[rows,setRows]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
   const[begRows,setBegRows]=useState([]); // beginning balances for selected balance-sheet accounts
   const prevDay=(d)=>{const x=new Date(d+'T00:00:00');x.setDate(x.getDate()-1);return x.toISOString().slice(0,10);};
@@ -2693,6 +2727,8 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
       const all=await api.getGLDetail(entityId,{from:from||undefined,to:to||undefined});
       const selSet=new Set(sel);
       setRows((all.lines||all||[]).filter(l=>selSet.has(l.account_code)));
+      // Comparative: pull the equal-length prior window's activity for the same accounts.
+      if(compare&&from&&to){const pw=priorWindow(from,to);if(pw){const pall=await api.getGLDetail(entityId,{from:pw.from,to:pw.to});setPriorRows((pall.lines||pall||[]).filter(l=>selSet.has(l.account_code)));}else setPriorRows([]);}else setPriorRows([]);
       // Beginning balance only applies to balance-sheet accounts and only when a
       // start date is set (otherwise the period runs from inception → beg = 0).
       const bsSel=accounts.filter(a=>selSet.has(a.code)&&isBS(a.type));
@@ -2708,6 +2744,17 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
   const amt=l=>(l.debit||0)-(l.credit||0);
   const grand=rows?rows.reduce((s,l)=>s+amt(l),0):0;
   const begTotal=begRows.reduce((s,b)=>s+(b.balance||0),0);
+  // Column-display + comparative computeds (Liting #2).
+  const cols=buildPeriodCols(from,to,colMode);
+  const showTotal=colMode!=='total';
+  const colIdxOf=(date)=>{if(colMode==='total')return 0;for(let i=0;i<cols.length;i++){if(date>=cols[i].from&&date<=cols[i].to)return i;}return -1;};
+  const sumByCol=(lines)=>{const arr=cols.map(()=>0);let tot=0;(lines||[]).forEach(l=>{const a=amt(l);tot+=a;const ci=colIdxOf(l.date);if(ci>=0)arr[ci]+=a;});return{arr,tot};};
+  const priorGroupMap=(()=>{const m=new Map();priorRows.forEach(l=>{const k=groupKey(l);m.set(k,(m.get(k)||0)+amt(l));});return m;})();
+  const priorGrand=priorRows.reduce((s,l)=>s+amt(l),0);
+  const descCols=4;
+  const totalColCount=descCols+cols.length+(showTotal?1:0)+(compare?3:0);
+  const pctTxt=p=>p==null?'—':(p>=0?'+':'')+p.toFixed(1)+'%';
+  const cmpCells=(cur,pri)=>{const d=cur-pri;const p=pri!==0?(d/Math.abs(pri))*100:null;return[<td key="pp" style={{...S.tdR,fontWeight:700}}>{fmt(pri)}</td>,<td key="dd" style={{...S.tdR,fontWeight:700,color:d>=0?T.green:T.red}}>{fmt(d)}</td>,<td key="pc" style={{...S.tdR,fontWeight:700,color:d>=0?T.green:T.red}}>{pctTxt(p)}</td>];};
   const doExport=()=>{
     const d=[[entityName||'Custom Detail Report'],['Custom Detail Report'],['Period: '+(from||'Begin')+' to '+(to||today())],[]];
     if(begRows.length>0){
@@ -2716,17 +2763,21 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
       begRows.forEach(b=>d.push(['',b.code+' '+b.name,'','','','',b.balance]));
       d.push(['','','','','','Total Beginning Balance',begTotal]);d.push([]);
     }
+    const amtHdr=cols.map(c=>c.label);const cmpHdr=compare?['Prev Period','$ Change','% Change']:[];
+    const pctN=(cur,pri)=>pri!==0?+(((cur-pri)/Math.abs(pri))*100).toFixed(1):'';
     groups.forEach(([g,lines])=>{
       if(groupBy!=='none')d.push([g]);
-      d.push([groupBy==='none'?'Group':'',('Account'),'Date','Type','Num','Description','Amount']);
-      let sub=0;lines.forEach(l=>{sub+=amt(l);d.push(['',l.account_code+' '+l.account_name,l.date,'Journal','JE-'+String(l.entry_num).padStart(4,'0'),l.description||l.memo||'',amt(l)]);});
-      d.push(['','','','','','Total for '+g,sub]);d.push([]);
+      d.push(['Account','Date','JE','Description',...amtHdr,...(showTotal?['Total']:[]),...cmpHdr]);
+      lines.forEach(l=>{const a=amt(l);const ci=colIdxOf(l.date);const cells=cols.map((c,k)=>(colMode==='total'||k===ci)?a:'');d.push([l.account_code+' '+l.account_name,l.date,'JE-'+String(l.entry_num).padStart(4,'0'),l.description||l.memo||'',...cells,...(showTotal?[a]:[]),...(compare?['','','']:[])]);});
+      const {arr,tot}=sumByCol(lines);const pri=priorGroupMap.get(g)||0;
+      d.push(['Total'+(groupBy!=='none'?' for '+g:''),'','','',...arr,...(showTotal?[tot]:[]),...(compare?[pri,tot-pri,pctN(tot,pri)]:[])]);d.push([]);
     });
-    d.push(['','','','','','PERIOD ACTIVITY',grand]);
-    if(begRows.length>0)d.push(['','','','','','ENDING BALANCE (BS accts: beginning + activity)',begTotal+grand]);
+    const gg=sumByCol(rows||[]);
+    d.push(['PERIOD ACTIVITY','','','',...gg.arr,...(showTotal?[gg.tot]:[]),...(compare?[priorGrand,gg.tot-priorGrand,pctN(gg.tot,priorGrand)]:[])]);
+    if(begRows.length>0)d.push(['ENDING BALANCE (BS accts: beginning + activity)','','','',...(colMode==='total'?[begTotal+grand]:[...cols.map(()=>''),begTotal+grand]),...(compare?['','','']:[])]);
     exportToExcel(d,'Custom_Detail_'+(to||today())+'.xlsx');
   };
-  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Custom Detail Report</div><div style={S.sub}>Pick accounts, optionally group by class or location</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='customdetail' currentConfig={{sel,from,to,groupBy}} onApply={(c)=>{setSel(c.sel||[]);setFrom(c.from||'');setTo(c.to||'');if(c.groupBy)setGroupBy(c.groupBy);}} canEdit={canEdit}/>{rows&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Custom Detail Report</div><div style={S.sub}>Pick accounts, optionally group by class or location</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='customdetail' currentConfig={{sel,from,to,groupBy,colMode,compare}} onApply={(c)=>{setSel(c.sel||[]);setFrom(c.from||'');setTo(c.to||'');if(c.groupBy)setGroupBy(c.groupBy);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/>{rows&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
     <div style={S.card}>
       <div style={{display:'flex',gap:24,flexWrap:'wrap'}}>
         <div style={{flex:'1 1 320px',minWidth:280}}>
@@ -2741,6 +2792,8 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
           <div style={{marginBottom:10}}><label style={S.label}>From</label><input style={{...S.inputSm,width:'100%'}} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
           <div style={{marginBottom:10}}><label style={S.label}>To</label><input style={{...S.inputSm,width:'100%'}} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
           <div style={{marginBottom:10,display:'flex',gap:6,flexWrap:'wrap'}}>{PRESETS.map(([k,lbl])=><button key={k} onClick={()=>{const r=presetRange(k);setFrom(r.from);setTo(r.to);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'5px 9px',cursor:'pointer'}}>{lbl}</button>)}</div>
+          <div style={{marginBottom:10}}><label style={S.label}>Columns</label><select style={{...S.inputSm,width:'100%'}} value={colMode} onChange={e=>setColMode(e.target.value)}>{COL_MODES.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div>
+          <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,marginBottom:10,cursor:'pointer',color:T.textMuted}}><input type="checkbox" checked={compare} onChange={e=>setCompare(e.target.checked)}/>Compare to prior period</label>
           {dimsEnabled&&<div><label style={S.label}>Group by</label><select style={{...S.inputSm,width:'100%'}} value={groupBy} onChange={e=>setGroupBy(e.target.value)}><option value="none">No grouping</option><option value="class">{classTerm()==='Class'?'Class / Investor':classTerm()}</option><option value="location">Location</option></select></div>}
         </div>
       </div>
@@ -2752,15 +2805,25 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
         <tbody>{begRows.map((b,i)=><tr key={'beg'+i}><td style={S.td} colSpan={4}>{b.code} {b.name}</td><td style={{...S.tdR,color:b.balance<0?T.red:T.textBright}}>{fmt(b.balance)}</td></tr>)}
           <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600}} colSpan={4}>Total Beginning Balance</td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(begTotal)}</td></tr></tbody></table>}
       {groups.length===0&&begRows.length===0?<div style={{padding:24,color:T.textDim}}>No activity for the selected accounts/period.</div>:
-      <table style={S.table}><thead><tr><th style={S.th}>Account</th><th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Description</th><th style={S.thR}>Amount</th></tr></thead>
-      <tbody>{groups.map(([g,lines])=>{const sub=lines.reduce((s,l)=>s+amt(l),0);return<Fragment key={g}>
-        {groupBy!=='none'&&<tr style={{background:T.bgElevated}}><td style={{...S.tdBold,color:T.textBright}} colSpan={5}>{g}</td></tr>}
-        {lines.map((l,i)=><tr key={i}><td style={S.td}>{l.account_code} {l.account_name}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.date}</td><td style={S.td}>JE-{String(l.entry_num).padStart(4,'0')}</td><td style={S.td}>{l.description||l.memo||''}</td><td style={{...S.tdR,color:amt(l)<0?T.red:T.textBright}}>{fmt(amt(l))}</td></tr>)}
-        {groupBy!=='none'&&<tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600}} colSpan={4}>Total for {g}</td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(sub)}</td></tr>}
+      <div style={{overflowX:'auto'}}><table className="cl-colresize" style={S.table}><thead><tr>
+        <th style={S.th}>Account</th><th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Description</th>
+        {cols.map((c,i)=><th key={i} style={S.thR}>{c.label}</th>)}
+        {showTotal&&<th style={S.thR}>Total</th>}
+        {compare&&<><th style={S.thR}>Prev Period</th><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}
+      </tr></thead>
+      <tbody>{groups.map(([g,lines])=>{const {arr,tot}=sumByCol(lines);const pri=priorGroupMap.get(g)||0;return<Fragment key={g}>
+        {groupBy!=='none'&&<tr style={{background:T.bgElevated}}><td style={{...S.tdBold,color:T.textBright}} colSpan={totalColCount}>{g}</td></tr>}
+        {lines.map((l,i)=>{const a=amt(l);const ci=colIdxOf(l.date);return<tr key={i}>
+          <td style={S.td}>{l.account_code} {l.account_name}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.date}</td><td style={S.td}>JE-{String(l.entry_num).padStart(4,'0')}</td><td style={S.td}>{l.description||l.memo||''}</td>
+          {cols.map((c,k)=><td key={k} style={{...S.tdR,color:a<0?T.red:T.textBright}}>{(colMode==='total'||k===ci)?fmt(a):''}</td>)}
+          {showTotal&&<td style={{...S.tdR,color:a<0?T.red:T.textBright}}>{fmt(a)}</td>}
+          {compare&&<><td style={S.tdR}></td><td style={S.tdR}></td><td style={S.tdR}></td></>}
+        </tr>;})}
+        {groupBy!=='none'&&<tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600}} colSpan={descCols}>Total for {g}</td>{arr.map((v,k)=><td key={k} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(v)}</td>)}{showTotal&&<td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(tot)}</td>}{compare&&cmpCells(tot,pri)}</tr>}
       </Fragment>;})}
-        <tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={4}>PERIOD ACTIVITY</td><td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(grand)}</td></tr>
-        {begRows.length>0&&<tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={4}>ENDING BALANCE (Balance Sheet accts: beginning + activity)</td><td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(begTotal+grand)}</td></tr>}
-      </tbody></table>}
+        {(()=>{const {arr,tot}=sumByCol(rows||[]);return<tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={descCols}>PERIOD ACTIVITY</td>{arr.map((v,k)=><td key={k} style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(v)}</td>)}{showTotal&&<td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(tot)}</td>}{compare&&cmpCells(tot,priorGrand)}</tr>;})()}
+        {begRows.length>0&&<tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={descCols+cols.length-1}>ENDING BALANCE (Balance Sheet accts: beginning + activity)</td><td style={{...S.tdBold,textAlign:'right',color:T.textBright}} colSpan={1+(showTotal?1:0)}>{fmt(begTotal+grand)}</td>{compare&&<><td/><td/><td/></>}</tr>}
+      </tbody></table></div>}
     </div>}
   </div>);
 }
