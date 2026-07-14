@@ -2473,8 +2473,12 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
           api.getBalances(entityId,{as_of:prevDay(from)})
         ]);
         setAllEntries(entries);setAllAccounts(accts);
+        const nameMap=Object.fromEntries((accts||[]).map(a=>[a.code,a.name]));
+        // Offset / payee account for a line = the other account(s) on the same JE.
+        // One distinct other account -> its label; more than one -> "-Split-".
+        const offsetOf=(e)=>{const others=[...new Set((e.lines||[]).filter(x=>x.account_code!==acct.code).map(x=>x.account_code))];if(others.length===0)return '';if(others.length===1)return others[0]+' - '+(nameMap[others[0]]||'');return '-Split-';};
         const txns=[];
-        entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code)txns.push({date:e.date,entry_num:e.entry_num,jeId:e.id,memo:e.memo,debit:l.debit||0,credit:l.credit||0,created_by:e.created_by,created_at:e.created_at,class_name:l.class_name||'',location_name:l.location_name||''});});});
+        entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code)txns.push({date:e.date,entry_num:e.entry_num,jeId:e.id,memo:e.memo,offset:offsetOf(e),vendor:e.vendor||'',debit:l.debit||0,credit:l.credit||0,created_by:e.created_by,created_at:e.created_at,class_name:l.class_name||'',location_name:l.location_name||''});});});
         txns.sort((a,b)=>a.date.localeCompare(b.date)||a.entry_num-b.entry_num);
         const bb=(begBalances||[]).find(x=>x.code===acct.code);
         setBegBal(bb?bb.balance:0);
@@ -2488,10 +2492,10 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
   const totalDr=lines.reduce((s,l)=>s+l.debit,0);
   const totalCr=lines.reduce((s,l)=>s+l.credit,0);
   const doExport=()=>{const acctLabel=acct.code+' - '+acct.name;
-    const d=[[entityName||'Account Detail'],[acctLabel],['Period: '+from+' to '+to],[],['Date','JE','Account',classTerm(),'Location','Memo','Debit','Credit','Balance']];
-    d.push(['','','','','','Beginning Balance','','',begBal]);
-    let r=begBal;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),acctLabel,l.class_name||'',l.location_name||'',l.memo,l.debit||'',l.credit||'',r]);});
-    d.push(['','','','','','Totals',totalDr,totalCr,r]);
+    const d=[[entityName||'Account Detail'],[acctLabel],['Period: '+from+' to '+to],[],['Date','JE','Account',classTerm(),'Location','Memo','Offset Account','Vendor/Payee','Debit','Credit','Balance']];
+    d.push(['','','','','','Beginning Balance','','','','',begBal]);
+    let r=begBal;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),acctLabel,l.class_name||'',l.location_name||'',l.memo,l.offset||'',l.vendor||'',l.debit||'',l.credit||'',r]);});
+    d.push(['','','','','','Totals','','',totalDr,totalCr,r]);
     exportToExcel(d,'GL_'+acct.code+'_'+to+'.xlsx');};
   return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:1100,maxHeight:'90vh',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
@@ -2506,26 +2510,28 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
      <div style={{flex:1,overflowY:'auto',border:'1px solid '+T.border,borderRadius:T.radiusSm}}>
        <table style={S.table}>
          <thead style={{position:'sticky',top:0,background:T.bgCard,zIndex:1}}><tr>
-           <th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Memo</th>
+           <th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Memo</th><th style={S.th}>Offset Account</th><th style={S.th}>Vendor/Payee</th>
            <th style={S.thR}>Debit</th><th style={S.thR}>Credit</th><th style={S.thR}>Balance</th></tr></thead>
          <tbody>
            <tr style={{background:T.bgElevated}}>
-             <td style={{...S.td,color:T.textMuted,fontStyle:'italic'}} colSpan={3}>Beginning balance as of {from}</td>
+             <td style={{...S.td,color:T.textMuted,fontStyle:'italic'}} colSpan={5}>Beginning balance as of {from}</td>
              <td style={S.tdR}></td><td style={S.tdR}></td>
              <td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(begBal)}</td></tr>
            {lines.length===0?
-             <tr><td colSpan={6} style={{...S.td,textAlign:'center',padding:30,color:T.textDim}}>No activity in this period{from>'2015-01-01'&&<div style={{marginTop:10}}><button onClick={()=>{setFromDraft('2015-01-01');setFrom('2015-01-01');}} style={{...S.btnS,fontSize:12,padding:'6px 14px'}}>View all activity</button><div style={{fontSize:11,color:T.textMuted,marginTop:6}}>The default view shows the last 12 months. This account's activity may be older \u2014 e.g. an investment purchase.</div></div>}</td></tr>
+             <tr><td colSpan={8} style={{...S.td,textAlign:'center',padding:30,color:T.textDim}}>No activity in this period{from>'2015-01-01'&&<div style={{marginTop:10}}><button onClick={()=>{setFromDraft('2015-01-01');setFrom('2015-01-01');}} style={{...S.btnS,fontSize:12,padding:'6px 14px'}}>View all activity</button><div style={{fontSize:11,color:T.textMuted,marginTop:6}}>The default view shows the last 12 months. This account's activity may be older \u2014 e.g. an investment purchase.</div></div>}</td></tr>
              :lines.map((l,i)=>{running+=isDr?(l.debit-l.credit):(l.credit-l.debit);
                const tip=(l.created_by?'Posted by '+l.created_by:'')+(l.created_at?(l.created_by?' on ':'Posted on ')+new Date(l.created_at+(l.created_at.includes('Z')||l.created_at.includes('+')?'':'Z')).toLocaleString('en-US',{timeZone:'America/Los_Angeles',year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true,timeZoneName:'short'}):'');
                return<tr key={i}>
                  <td style={{...S.td,color:T.textMuted,whiteSpace:'nowrap'}}>{l.date}</td>
                  <td style={S.td} title={tip}><button style={{background:'none',border:0,padding:0,color:T.accent,fontWeight:600,cursor:'pointer',fontSize:'inherit',fontFamily:'inherit'}} onClick={()=>openJE(l.jeId)}>JE-{String(l.entry_num).padStart(4,'0')}</button></td>
                  <td style={S.td}>{l.memo}</td>
+                 <td style={S.td}>{l.offset}</td>
+                 <td style={S.td}>{l.vendor}</td>
                  <td style={S.tdR}>{l.debit>0?fmt(l.debit):''}</td>
                  <td style={S.tdR}>{l.credit>0?fmt(l.credit):''}</td>
                  <td style={{...S.tdR,fontWeight:600,color:T.textBright}}>{fmt(running)}</td></tr>;})}
            <tr style={S.grandTotalRow}>
-             <td style={{...S.tdBold}} colSpan={3}>Period Totals</td>
+             <td style={{...S.tdBold}} colSpan={5}>Period Totals</td>
              <td style={{...S.tdBold,textAlign:'right'}}>${fmt(totalDr)}</td>
              <td style={{...S.tdBold,textAlign:'right'}}>${fmt(totalCr)}</td>
              <td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>${fmt(running)}</td></tr>

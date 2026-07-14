@@ -393,6 +393,9 @@ if (userCount.c === 0) {
 const jeCols = db.prepare("PRAGMA table_info(journal_entries)").all().map(c => c.name);
 if (!jeCols.includes('updated_by')) db.exec("ALTER TABLE journal_entries ADD COLUMN updated_by TEXT");
 if (!jeCols.includes('updated_at')) db.exec("ALTER TABLE journal_entries ADD COLUMN updated_at TEXT");
+// Vendor/payee name for the entry (e.g. Bill.com bill JEs), so account detail can
+// show who an A/P transaction is with. Populated at Bill.com sync.
+if (!jeCols.includes('vendor')) db.exec("ALTER TABLE journal_entries ADD COLUMN vendor TEXT");
 
 // Entity type: 'accounting' (default, standard ledger entity) | 'development' | 'shell' (tracks location + investor/class dimensions)
 // (real-estate development project; unlocks Requisition Report / Invoice Packet features)
@@ -4503,6 +4506,16 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     "SELECT 1 FROM billcom_sync_log WHERE entity_id = ? AND sync_type = ? AND billcom_id = ? AND status = 'success' LIMIT 1"
   );
 
+  // Resolve Bill.com vendor names once so each bill JE can store its vendor (and
+  // so we can backfill vendor on already-synced bills). Best-effort; non-fatal.
+  const vendorById = new Map();
+  try {
+    const vlist = await billcomListVendors({ ...listArgs, maxItems: 5000 });
+    for (const v of vlist) { const id = String(pick(v, 'id') || ''); const n = pick(v, 'name', 'vendorName', 'companyName'); if (id && n) vendorById.set(id, n); }
+  } catch (e) { /* vendor names are optional */ }
+  const vendorOf = (obj) => vendorById.get(String(pick(obj, 'vendorId', 'vendor_id') || (pick(obj, 'vendor') || {}).id || '')) || pick(pick(obj, 'vendor') || {}, 'name', 'vendorName') || null;
+  const backfillVendor = db.prepare("UPDATE journal_entries SET vendor = ? WHERE entity_id = ? AND memo = ? AND (vendor IS NULL OR vendor = '')");
+
   let billsProcessed = 0;
   result.bills.budget_reached = false;
   for (const bill of bills) {
@@ -4514,6 +4527,12 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       continue;
     }
     if (alreadySynced.get(entityId, 'bill', billId)) {
+      // Backfill the vendor on the existing JE if it's missing (covers bills
+      // synced before vendor was captured). Uses the list object's invoice # +
+      // vendor id; falls back to billId, matching the original memo.
+      const vn = vendorOf(bill);
+      const bnum = pick(bill, 'invoiceNumber', 'invoice_number') || billId;
+      if (vn && bnum) { try { backfillVendor.run(vn, entityId, 'Bill.com bill #' + bnum); } catch (e) {} }
       result.bills.skipped++;
       result.bills.details.push({ id: billId, status: 'skip', reason: 'already synced' });
       continue;
@@ -4610,12 +4629,13 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
 
     const lines = [...debitLines, { account_code: apAccount, debit: 0, credit: totalDr, class_id: null, location_id: null }];
     const memo = 'Bill.com bill #' + billNumber;
+    const billVendor = vendorOf(detail);
 
     try {
       const insertedId = db.transaction(() => {
         const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
-        const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)')
-          .run(entityId, num, invoiceDate, memo, actor);
+        const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, vendor, created_by) VALUES (?,?,?,?,?,?)')
+          .run(entityId, num, invoiceDate, memo, billVendor, actor);
         for (const l of lines) {
           db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, class_id, location_id) VALUES (?,?,?,?,?,?)')
             .run(r.lastInsertRowid, l.account_code, l.debit, l.credit, l.class_id || null, l.location_id || null);
