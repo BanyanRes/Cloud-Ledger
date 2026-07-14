@@ -15,6 +15,17 @@ const fmtAmt = (raw) => {
 const parseAmt = v => { const n = parseFloat(String(v).replace(/,/g, '')); return isNaN(n) ? 0 : n; };
 const blurAmt = v => { const t = String(v).trim(); return (t && t !== '.') ? parseAmt(t).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : t; };
 const today = () => new Date().toISOString().slice(0, 10);
+// Quick date-range presets (previous complete calendar period) for report filters.
+const presetRange = (kind) => {
+  const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  const n = new Date(), y = n.getFullYear(), m = n.getMonth();
+  if (kind === 'all') return { from: '2015-01-01', to: iso(n) };
+  if (kind === 'month') return { from: iso(new Date(y, m - 1, 1)), to: iso(new Date(y, m, 0)) };
+  if (kind === 'quarter') { const cq = Math.floor(m / 3); let sy = y, sm = (cq - 1) * 3; if (sm < 0) { sy = y - 1; sm = 9; } return { from: iso(new Date(sy, sm, 1)), to: iso(new Date(sy, sm + 3, 0)) }; }
+  if (kind === 'year') return { from: iso(new Date(y - 1, 0, 1)), to: iso(new Date(y - 1, 11, 31)) };
+  return { from: '', to: '' };
+};
+const PRESETS = [['all', 'All'], ['month', 'Last Month'], ['quarter', 'Last Quarter'], ['year', 'Last Year']];
 const fy_start = () => new Date().getFullYear() + '-01-01';
 const fmtSize = b => b > 1048576 ? (b/1048576).toFixed(1)+' MB' : (b/1024).toFixed(0)+' KB';
 // Display people's names with each part's first letter capitalized (e.g.
@@ -338,7 +349,7 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo / Description</label><input style={S.input} placeholder="What is this entry for?" value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
-    <div style={{...S.cardFlush,marginBottom:16,maxHeight:'52vh',overflowY:'auto'}}><table style={S.table}><thead style={{position:'sticky',top:0,zIndex:2,background:T.bgElevated}}><tr><th style={{...S.th,minWidth:300}}>Account</th>{showDims&&<th style={{...S.th,width:140}}>Dimension</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
+    <div style={{...S.cardFlush,marginBottom:16,maxHeight:'52vh',overflowY:'auto'}}><table className="cl-colresize" style={S.table}><thead style={{position:'sticky',top:0,zIndex:2,background:T.bgElevated}}><tr><th style={{...S.th,minWidth:300}}>Account</th>{showDims&&<th style={{...S.th,width:140}}>Dimension</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} title={l.account_code?acctLabel(l.account_code,(accounts.find(a=>a.code===l.account_code)||{}).name||''):''} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select account...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code} title={acctLabel(a.code,a.name)}>{acctLabel(a.code,a.name)}</option>)}</select></td>
@@ -515,7 +526,9 @@ export default function App(){
   // Make all modal windows draggable by their top header strip
   useEffect(() => {
     const styleEl = document.createElement('style');
-    styleEl.textContent = '.cl-modal-box::before{content:"";position:absolute;top:0;left:0;right:56px;height:44px;cursor:move;border-top-left-radius:14px;border-top-right-radius:14px;z-index:1;}';
+    styleEl.textContent = '.cl-modal-box::before{content:"";position:absolute;top:0;left:0;right:56px;height:44px;cursor:move;border-top-left-radius:14px;border-top-right-radius:14px;z-index:1;}'
+      + '.cl-colresize th{position:relative;}'
+      + '.cl-colresize th::after{content:"";position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize;}';
     document.head.appendChild(styleEl);
     const onDown = (e) => {
       const box = e.target.closest && e.target.closest('.cl-modal-box');
@@ -533,8 +546,23 @@ export default function App(){
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     };
+    // Column resizing: drag the right edge of a header cell in a .cl-colresize
+    // table to set that column's width.
+    const onColDown = (e) => {
+      const th = e.target.closest && e.target.closest('.cl-colresize th');
+      if (!th) return;
+      const rect = th.getBoundingClientRect();
+      if (rect.right - e.clientX > 8) return; // only when grabbing the right edge
+      e.preventDefault(); e.stopPropagation();
+      const startX = e.clientX, startW = rect.width;
+      document.body.style.cursor = 'col-resize';
+      const onMove = (ev) => { const w = Math.max(40, startW + ev.clientX - startX); th.style.width = th.style.minWidth = th.style.maxWidth = w + 'px'; };
+      const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.body.style.cursor = ''; };
+      document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousedown', onColDown, true);
     document.addEventListener('mousedown', onDown);
-    return () => { document.removeEventListener('mousedown', onDown); if (styleEl.parentNode) styleEl.parentNode.removeChild(styleEl); };
+    return () => { document.removeEventListener('mousedown', onColDown, true); document.removeEventListener('mousedown', onDown); if (styleEl.parentNode) styleEl.parentNode.removeChild(styleEl); };
   }, []);
   const[showJE,setShowJE]=useState(false);const[showChangePw,setShowChangePw]=useState(false);const[rk,setRk]=useState(0);const[pendingReportConfig,setPendingReportConfig]=useState(null);
   const[sidebarCol,setSidebarCol]=useState(()=>{try{return localStorage.getItem(SIDEBAR_KEY)==='true';}catch{return false;}});
@@ -1588,7 +1616,10 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
     catch(ex){setErr(ex.message);}finally{setAttUploading(false);if(attInputRef.current)attInputRef.current.value='';}};
   const deleteAtt=async a=>{if(!confirm('Delete '+a.original_name+'?'))return;try{await api.deleteAttachment(a.id);setAttachments(p=>p.filter(x=>x.id!==a.id));}catch(ex){setErr(ex.message);}};
   const fmtPst=ts=>ts?new Date(ts+(ts.includes('Z')||ts.includes('+')?'':'Z')).toLocaleString('en-US',{timeZone:'America/Los_Angeles',year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true,timeZoneName:'short'}):'';
-  return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,width:'min(1200px, 96vw)',maxWidth:'96vw',height:'auto',maxHeight:'92vh',resize:'both',overflow:'auto',minWidth:'min(560px, 96vw)',minHeight:360}} onClick={e=>e.stopPropagation()}>
+  // Only close on a genuine backdrop click (press AND release on the overlay) —
+  // otherwise releasing a resize/drag onto the backdrop would close the window.
+  const jeObDown=useRef(false);
+  return(<div style={S.modal} onMouseDown={e=>{jeObDown.current=(e.target===e.currentTarget);}} onClick={e=>{if(jeObDown.current&&e.target===e.currentTarget)onClose();}}><div className="cl-modal-box" style={{...S.modalBox,width:'min(1200px, 96vw)',maxWidth:'96vw',height:'auto',maxHeight:'92vh',resize:'both',overflow:'auto',minWidth:'min(560px, 96vw)',minHeight:360}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Edit JE-{String(entry.entry_num).padStart(4,'0')}</div>
     {(entry.created_by||entry.created_at)&&<div style={{fontSize:11,color:T.textMuted,marginBottom:2}}>
@@ -1601,7 +1632,7 @@ function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,o
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo</label><input style={S.input} value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
-    <div style={{...S.cardFlush,marginBottom:16,maxHeight:'52vh',overflowY:'auto'}}><table style={S.table}><thead style={{position:'sticky',top:0,zIndex:2,background:T.bgElevated}}><tr><th style={{...S.th,minWidth:300}}>Account</th>{showDims&&<th style={{...S.th,width:140}}>Dimension</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
+    <div style={{...S.cardFlush,marginBottom:16,maxHeight:'52vh',overflowY:'auto'}}><table className="cl-colresize" style={S.table}><thead style={{position:'sticky',top:0,zIndex:2,background:T.bgElevated}}><tr><th style={{...S.th,minWidth:300}}>Account</th>{showDims&&<th style={{...S.th,width:140}}>Dimension</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <select style={S.select} title={l.account_code?acctLabel(l.account_code,(accounts.find(a=>a.code===l.account_code)||{}).name||''):''} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select...</option>
           {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code} title={acctLabel(a.code,a.name)}>{acctLabel(a.code,a.name)}</option>)}</select></td>
@@ -2497,18 +2528,19 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
     let r=begBal;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),acctLabel,l.class_name||'',l.location_name||'',l.memo,l.offset||'',l.vendor||'',l.debit||'',l.credit||'',r]);});
     d.push(['','','','','','Totals','','',totalDr,totalCr,r]);
     exportToExcel(d,'GL_'+acct.code+'_'+to+'.xlsx');};
-  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:1100,maxHeight:'90vh',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
+  return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,width:'min(1100px,96vw)',maxWidth:'98vw',height:'88vh',maxHeight:'96vh',minWidth:'min(680px,96vw)',minHeight:420,resize:'both',overflow:'hidden',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14,gap:16}}>
       <div><div style={{fontSize:18,fontWeight:700,color:T.textBright}}>{acct.code} &mdash; {acct.name}</div>
-        <div style={{display:'flex',alignItems:'center',gap:8,marginTop:6}}><label style={{fontSize:11,color:T.textMuted}}>From</label><input type="date" value={fromDraft} max={toDraft} onChange={e=>setFromDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')applyDates();}} style={{...S.inputSm,padding:'4px 8px',fontSize:12}}/><label style={{fontSize:11,color:T.textMuted}}>To</label><input type="date" value={toDraft} min={fromDraft} onChange={e=>setToDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')applyDates();}} style={{...S.inputSm,padding:'4px 8px',fontSize:12}}/><button onClick={applyDates} disabled={!datesDirty} style={{background:datesDirty?T.accent:T.bgElevated,border:'1px solid '+(datesDirty?T.accent:T.border),borderRadius:6,color:datesDirty?'#fff':T.textMuted,fontSize:11,fontWeight:600,padding:'4px 12px',cursor:datesDirty?'pointer':'default'}}>Refresh</button><button onClick={()=>{setFromDraft(fromProp);setToDraft(toProp);setFrom(fromProp);setTo(toProp);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'4px 8px',cursor:'pointer'}}>Reset</button></div>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginTop:6}}><label style={{fontSize:11,color:T.textMuted}}>From</label><input type="date" value={fromDraft} max={toDraft} onChange={e=>setFromDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')applyDates();}} style={{...S.inputSm,padding:'4px 8px',fontSize:12}}/><label style={{fontSize:11,color:T.textMuted}}>To</label><input type="date" value={toDraft} min={fromDraft} onChange={e=>setToDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')applyDates();}} style={{...S.inputSm,padding:'4px 8px',fontSize:12}}/><button onClick={applyDates} disabled={!datesDirty} style={{background:datesDirty?T.accent:T.bgElevated,border:'1px solid '+(datesDirty?T.accent:T.border),borderRadius:6,color:datesDirty?'#fff':T.textMuted,fontSize:11,fontWeight:600,padding:'4px 12px',cursor:datesDirty?'pointer':'default'}}>Refresh</button><button onClick={()=>{setFromDraft(fromProp);setToDraft(toProp);setFrom(fromProp);setTo(toProp);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'4px 8px',cursor:'pointer'}}>Reset</button>
+        <span style={{width:1,height:16,background:T.border,margin:'0 2px'}}/>{PRESETS.map(([k,lbl])=><button key={k} onClick={()=>{const r=presetRange(k);setFromDraft(r.from);setToDraft(r.to);setFrom(r.from);setTo(r.to);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'4px 8px',cursor:'pointer'}}>{lbl}</button>)}</div>
         <div style={{marginTop:6}}><span style={S.tag(acct.type)}>{acct.type}</span></div></div>
       <button style={S.btnExport} onClick={doExport}>Export Excel</button>
     </div>
     {loading?<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Loading...</div>:
      err?<div style={S.err}>{err}</div>:
      <div style={{flex:1,overflowY:'auto',border:'1px solid '+T.border,borderRadius:T.radiusSm}}>
-       <table style={S.table}>
+       <table className="cl-colresize" style={S.table}>
          <thead style={{position:'sticky',top:0,background:T.bgCard,zIndex:1}}><tr>
            <th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Memo</th><th style={S.th}>Offset Account</th><th style={S.th}>Vendor/Payee</th>
            <th style={S.thR}>Debit</th><th style={S.thR}>Credit</th><th style={S.thR}>Balance</th></tr></thead>
@@ -2827,6 +2859,7 @@ function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPend
     <div style={S.card}>
       <div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
         <div style={{flex:'0 0 180px'}}><label style={S.label}>As of date</label><input style={{...S.inputSm,width:'100%'}} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
+        <div style={{display:'flex',alignItems:'flex-end',gap:6,flexWrap:'wrap'}}>{PRESETS.map(([k,lbl])=><button key={k} onClick={()=>setAsOf(k==='all'?today():presetRange(k).to)} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'6px 10px',cursor:'pointer'}}>{lbl}</button>)}</div>
         <button style={{...S.btnP}} onClick={run} disabled={loading}>{loading?'Building from GL…':'Run Aging'}</button>
       </div>
       {err&&<div style={S.err}>{err}</div>}
