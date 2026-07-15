@@ -216,7 +216,10 @@ function readRowCells(ws, r) {
     name: cellStr(ws.getCell(r, COL.name)).trim(),
     vendor: cellStr(ws.getCell(r, COL.vendor)).trim(),
     bill: get(COL.bill),
-    amount: get(COL.amount),   // may be {formula} or number
+    // Prior-log rows must hold STATIC historical amounts. A formula amount (e.g. a
+    // dev-fee row = 'Development Fee Calculation'!C30) would re-point to the NEW
+    // period once written into the prior log, so flatten it to its cached value.
+    amount: (() => { const a = get(COL.amount); if (a && typeof a === 'object' && a.formula != null) { const n = Number(a.result); return isFinite(n) ? n : 0; } return a; })(),
     req: get(COL.req), date: get(COL.date),
     passthrough,
   };
@@ -243,7 +246,7 @@ function currentRowsByCode(ws) {
     const code = cellCode(ws.getCell(r, COL.code));
     const key = code == null ? '__none__' : String(code);
     if (!byCode.has(key)) byCode.set(key, []);
-    byCode.get(key).push(readRowCells(ws, r));
+    byCode.get(key).push(readRowCells(ws, r));  // amount is flattened to a static value in readRowCells
   }
   return byCode;
 }
@@ -953,6 +956,16 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   const priorGroups = parseLogGroups(priorWs);
   const curByCode = currentRowsByCode(curWs);
 
+  // Bank Cost Category (col D) map: cost code -> the bank category used in the
+  // prior/current logs. The B2A "this period" SUMIF keys on this column, so every
+  // current-log row must carry it; app-provided invoices often omit it. Build the
+  // map now (before the prior log is rebuilt) from both logs' existing rows.
+  const bankcatByCode = new Map();
+  {
+    const addFrom = (ws) => { if (!ws) return; const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0); for (let r = 1; r <= last; r++) { const code = cellCode(ws.getCell(r, COL.code)); const bc = cellStr(ws.getCell(r, COL.bankcat)).trim(); if (code != null && String(code) !== '' && bc && !bankcatByCode.has(String(code))) bankcatByCode.set(String(code), bc); } };
+    addFrom(curWs); addFrom(priorWs);
+  }
+
   // 1a. Clean up the prior log: drop zero/blank-amount duplicate rows where the
   //     same invoice (vendor + bill#) also appears with a real amount elsewhere
   //     (one invoice coded to two cost codes — one real, one $0 placeholder).
@@ -1049,6 +1062,14 @@ async function rollForward(workbook, newCurrent, meta = {}) {
     if (_devFeeCurWs.length) {
       _cur_oldGT = findRowByLabel(curWs, ['Grand Total', 'Grant Total']);
       _cur_oldDFT = findRowByLabel(curWs, ['Development Fee Total', 'Dev Fee Total']);
+    }
+  }
+  // Fill Bank Cost Category on any current row that lacks it, so the B2A's
+  // "this period" SUMIF (keyed on col D) picks the row up.
+  for (const inv of effectiveCurrent) {
+    if (inv && !(inv.bankcat != null && String(inv.bankcat).trim())) {
+      const bc = bankcatByCode.get(String(inv.code));
+      if (bc) inv.bankcat = bc;
     }
   }
   const curInfo = replaceCurrentLog(curWs, effectiveCurrent, meta);
@@ -1291,12 +1312,19 @@ function advanceB2AHeaderDates(b2a, asOfDate) {
   const cells = [];
   const R = Math.min(12, Math.max(b2a.rowCount || 0, b2a.actualRowCount || 0, 12));
   const C = Math.min(30, Math.max(b2a.columnCount || 0, b2a.actualColumnCount || 0, 15));
+  // A date-TYPED header cell (e.g. "Payment this period" / "Balance remaining")
+  // carries no text of its own, so classify it previous-vs-current from its
+  // column's header labels.
+  const colIsPrev = (c) => { for (let r = 1; r <= R; r++) { const s = b2a.getCell(r, c).value; if (typeof s === 'string' && /(previous|prior|inception)/.test(s.toLowerCase())) return true; } return false; };
   for (let r = 1; r <= R; r++) for (let c = 1; c <= C; c++) {
     const cell = b2a.getCell(r, c);
     const v = cell.value;
-    if (typeof v !== 'string' || !DATE_RE.test(v)) continue;       // strings only; skips Date/formula/number cells
-    const low = v.toLowerCase();
-    cells.push({ cell, text: v, isPrev: /(previous|prior|inception)/.test(low), cur: parse(v) });
+    if (typeof v === 'string' && DATE_RE.test(v)) {                // text date label
+      const low = v.toLowerCase();
+      cells.push({ cell, kind: 'str', text: v, isPrev: /(previous|prior|inception)/.test(low), cur: parse(v) });
+    } else if (v instanceof Date) {                                 // literal date-typed header cell (not a formula)
+      cells.push({ cell, kind: 'date', text: '', isPrev: colIsPrev(c), cur: v });
+    }
   }
   if (!cells.length) return 0;
   let prevEnd = null;                                              // latest current-period date = prior period-end
@@ -1305,8 +1333,16 @@ function advanceB2AHeaderDates(b2a, asOfDate) {
   for (const x of cells) {
     const target = x.isPrev ? (prevEnd || x.cur) : newAsOf;
     if (!target) continue;
-    const next = x.text.replace(DATE_RE, fmtLike(x.text, target));
-    if (next !== x.text) { x.cell.value = next; changed++; }
+    if (x.kind === 'date') {
+      const cur = x.cur instanceof Date ? x.cur : null;
+      if (!cur || cur.getFullYear() !== target.getFullYear() || cur.getMonth() !== target.getMonth() || cur.getDate() !== target.getDate()) {
+        x.cell.value = new Date(target.getFullYear(), target.getMonth(), target.getDate());
+        changed++;
+      }
+    } else {
+      const next = x.text.replace(DATE_RE, fmtLike(x.text, target));
+      if (next !== x.text) { x.cell.value = next; changed++; }
+    }
   }
   return changed;
 }
@@ -1456,43 +1492,60 @@ function formulaHasCellRef(f) {
   return /(^|[^A-Za-z0-9_])[$]?[A-Za-z]{1,3}[$]?[0-9]+(?![0-9(])/.test(s);
 }
 
+// Locate the two contingency columns ("Previous Contingency" + "Current
+// Contingency" / "Funding & Reallocation") by scanning the header band, so the
+// roll never touches the adjacent "Current Approved Budget" column. Returns
+// { prev, curr } 1-based, or null when the headers aren't found (in which case
+// we skip the roll rather than guess and corrupt the budget).
+function detectContingencyCols(b2a) {
+  const maxC = Math.min(30, Math.max(b2a.actualColumnCount || 0, b2a.columnCount || 0, 12));
+  let prev = null, curr = null;
+  for (let r = 1; r <= 10 && !(prev && curr); r++) {
+    for (let c = 1; c <= maxC; c++) {
+      const t = cellStr(b2a.getCell(r, c)).toLowerCase();
+      if (!t || !/conting/.test(t)) continue;         // must mention "contingency"
+      if (/previous|prior/.test(t)) prev = c;
+      else if (/current/.test(t)) curr = c;
+    }
+  }
+  return (prev && curr && prev !== curr) ? { prev, curr } : null;
+}
+
 function rollForwardContingency(b2a) {
   if (!b2a) return { moved: 0 };
-  const COL_E = 5, COL_F = 6;
+  // Roll on the detected Previous/Current Contingency columns. Older code
+  // hardcoded E/F, which on this template family (Previous=D, Current=E,
+  // Current Approved Budget=F) folded the BUDGET into contingency and zeroed it.
+  const cc = detectContingencyCols(b2a);
+  if (!cc) return { moved: 0 };
+  const COL_PREV = cc.prev, COL_CURR = cc.curr;
   let moved = 0;
   const last = Math.max(b2a.rowCount || 0, b2a.actualRowCount || 0);
   for (let r = 3; r <= last; r++) {
-    const eCell = b2a.getCell(r, COL_E);
-    const fCell = b2a.getCell(r, COL_F);
+    const pCell = b2a.getCell(r, COL_PREV);
+    const cCell = b2a.getCell(r, COL_CURR);
 
-    // Skip subtotal/total rows: any cell-referencing formula in E or F makes
-    // cellNum return null. (Literal-arithmetic formulas DO resolve, so genuine
-    // data rows like "=140716.49+327097.19" are still handled.)
-    const eIsRefFormula = formulaHasCellRef(cellFormula(eCell));
-    const fIsRefFormula = formulaHasCellRef(cellFormula(fCell));
-    if (eIsRefFormula || fIsRefFormula) continue;
+    // Skip subtotal/total rows: any cell-referencing formula in prev or curr
+    // makes cellNum return null. (Literal-arithmetic formulas still resolve.)
+    if (formulaHasCellRef(cellFormula(pCell)) || formulaHasCellRef(cellFormula(cCell))) continue;
 
-    const fVal = cellNum(fCell);
-    if (fVal == null || fVal === 0) continue; // nothing to fold in this row
+    const cVal = cellNum(cCell);
+    if (cVal == null || cVal === 0) continue; // nothing to fold in this row
 
-    const eFormula = cellFormula(eCell); // literal-arithmetic formula, or null
-    const eVal = cellNum(eCell) || 0;
-    const newE = round2(eVal + fVal);
+    const pFormula = cellFormula(pCell); // literal-arithmetic formula, or null
+    const pVal = cellNum(pCell) || 0;
+    const newP = round2(pVal + cVal);
 
-    if (eFormula) {
-      // Preserve the existing additive breakdown; append F as another term so
-      // the worksheet still shows where each dollar came from.
-      let body = eFormula.trim();
+    if (pFormula) {
+      let body = pFormula.trim();
       if (body[0] === '=') body = body.slice(1);
-      const term = fVal < 0 ? `-${Math.abs(fVal)}` : `+${fVal}`;
-      eCell.value = { formula: body + term, result: newE };
+      const term = cVal < 0 ? `-${Math.abs(cVal)}` : `+${cVal}`;
+      pCell.value = { formula: body + term, result: newP };
     } else {
-      eCell.value = newE;
+      pCell.value = newP;
     }
-
-    // Clear the current-period column (keep it numeric 0, matching the sheet's
-    // existing convention where untouched current cells are 0, not blank).
-    fCell.value = 0;
+    // Reset the current-period contingency column to 0 for the new period.
+    cCell.value = 0;
     moved++;
   }
   return { moved };
