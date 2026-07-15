@@ -1334,9 +1334,13 @@ function advanceB2AHeaderDates(b2a, asOfDate) {
     const target = x.isPrev ? (prevEnd || x.cur) : newAsOf;
     if (!target) continue;
     if (x.kind === 'date') {
+      // Store at UTC midnight of the target day so the date is timezone-stable
+      // (a local-midnight Date serializes with an offset and can render as the
+      // prior day in far-west zones). ExcelJS reads date cells back as UTC.
       const cur = x.cur instanceof Date ? x.cur : null;
-      if (!cur || cur.getFullYear() !== target.getFullYear() || cur.getMonth() !== target.getMonth() || cur.getDate() !== target.getDate()) {
-        x.cell.value = new Date(target.getFullYear(), target.getMonth(), target.getDate());
+      const same = cur && cur.getUTCFullYear() === target.getFullYear() && cur.getUTCMonth() === target.getMonth() && cur.getUTCDate() === target.getDate();
+      if (!same) {
+        x.cell.value = new Date(Date.UTC(target.getFullYear(), target.getMonth(), target.getDate()));
         changed++;
       }
     } else {
