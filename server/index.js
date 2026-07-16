@@ -3827,14 +3827,30 @@ app.put('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id')
     keyEnc = dev_key ? billcomEncrypt(dev_key) : (existing ? existing.dev_key_enc : null);
   } catch (e) { return res.status(500).json({ error: 'Encryption failed: ' + e.message }); }
   if (!pwEnc || !keyEnc) return res.status(400).json({ error: 'password and dev_key required for first save' });
+  // Auto-fill the Money Out Clearing account when the caller doesn't supply one,
+  // by matching the entity's chart of accounts on name (prefer "Money Out
+  // Clearing" / "Bill.com Clearing", else any account with "clearing" in the
+  // name). So setting up a new entity's Bill.com config wires up the clearing
+  // account without hunting for the GL code. An explicit value always wins.
+  let clearingAcct = default_clearing_account || null;
+  if (!clearingAcct) {
+    const cand = db.prepare(
+      "SELECT code FROM accounts WHERE entity_id = ? AND lower(name) LIKE '%clearing%' " +
+      "ORDER BY (CASE " +
+      "WHEN lower(name) LIKE '%money out clearing%' THEN 0 " +
+      "WHEN lower(name) LIKE '%bill%com clearing%' THEN 1 " +
+      "ELSE 2 END), code LIMIT 1"
+    ).get(req.params.entity_id);
+    if (cand) clearingAcct = cand.code;
+  }
   const now = new Date().toISOString();
   const updater = req.user.name || req.user.email;
   if (existing) {
     db.prepare('UPDATE billcom_config SET environment=?, api_base_url=?, username=?, password_enc=?, org_id=?, dev_key_enc=?, default_ap_account=?, default_cash_account=?, default_clearing_account=?, sync_cutoff_date=?, updated_by=?, updated_at=? WHERE entity_id=?')
-      .run(environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, default_cash_account || null, default_clearing_account || null, sync_cutoff_date || null, updater, now, req.params.entity_id);
+      .run(environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, default_cash_account || null, clearingAcct, sync_cutoff_date || null, updater, now, req.params.entity_id);
   } else {
     db.prepare('INSERT INTO billcom_config (entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, default_cash_account, default_clearing_account, sync_cutoff_date, updated_by, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(req.params.entity_id, environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, default_cash_account || null, default_clearing_account || null, sync_cutoff_date || null, updater, now);
+      .run(req.params.entity_id, environment, baseUrl, username, pwEnc, org_id, keyEnc, default_ap_account || null, default_cash_account || null, clearingAcct, sync_cutoff_date || null, updater, now);
   }
   res.json({ success: true });
 });
