@@ -3728,8 +3728,8 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
             <span style={{fontSize:11,color:T.textMuted}}>e.g. "1000 · Cash" → 1000 + Cash</span></div>}
         </div>
         <div style={{fontSize:11,fontWeight:600,color:T.textBright,marginBottom:6}}>Preview (first {glPreview.preview.length} rows)</div>
-        <div style={{overflowX:'auto',marginBottom:14,border:'1px solid '+T.borderLight,borderRadius:6}}>
-          <table style={{...S.table,fontSize:10,minWidth:1100,width:'max-content'}}><thead><tr>{glPreview.columns.map(c=><th key={c} style={{...S.th,fontSize:10,whiteSpace:'nowrap',padding:'5px 8px'}}>{c}</th>)}</tr></thead>
+        <div style={{overflow:'auto',maxHeight:320,marginBottom:14,border:'1px solid '+T.borderLight,borderRadius:6}}>
+          <table style={{...S.table,fontSize:10,minWidth:1100,width:'max-content'}}><thead><tr>{glPreview.columns.map(c=><th key={c} style={{...S.th,fontSize:10,whiteSpace:'nowrap',padding:'5px 8px',position:'sticky',top:0,background:T.bgElevated,zIndex:1}}>{c}</th>)}</tr></thead>
             <tbody>{glPreview.preview.map((row,i)=><tr key={i}>{glPreview.columns.map(c=><td key={c} style={{...S.td,fontSize:10,whiteSpace:'nowrap',padding:'4px 8px'}}>{String(row[c]??'')}</td>)}</tr>)}</tbody></table></div>
         {glErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:10}}>{glErr}</div>}
         {glUnbalanced&&glUnbalanced.unbalanced_groups&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:10}}>
