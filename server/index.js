@@ -4397,20 +4397,23 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
 
   const apAccount = cfg.default_ap_account;
   const cashAccount = cfg.default_cash_account;
-  // Clearing account (1072) for the two-leg payment flow. Required so Sync can
-  // route disbursements through Money Out Clearing (Dr AP/Cr 1072, Dr 1072/Cr Cash)
-  // via the shared reconcile core, matching the payment-reconcile endpoint.
   const clearingAccount = cfg.default_clearing_account;
+  // Bills require only the AP account. The payment (Money Out Clearing) leg
+  // additionally needs the cash + clearing accounts; when either is missing or
+  // doesn't exist we skip JUST the payment leg (with a note) instead of failing
+  // the whole sync — so a partially-configured entity still gets its bills.
+  // Applies to every entity, not just Turnkey.
   if (!apAccount) return res.status(400).json({ error: 'default_ap_account not set in Bill.com config' });
-  if (!cashAccount) return res.status(400).json({ error: 'default_cash_account not set in Bill.com config' });
-  if (!clearingAccount) return res.status(400).json({ error: 'default_clearing_account (Money Out Clearing) not set in Bill.com config' });
-
   const apExists = db.prepare('SELECT 1 FROM accounts WHERE entity_id = ? AND code = ?').get(entityId, apAccount);
-  const cashExists = db.prepare('SELECT 1 FROM accounts WHERE entity_id = ? AND code = ?').get(entityId, cashAccount);
-  const clearingExists = db.prepare('SELECT 1 FROM accounts WHERE entity_id = ? AND code = ?').get(entityId, clearingAccount);
   if (!apExists) return res.status(400).json({ error: 'AP account ' + apAccount + ' does not exist on entity' });
-  if (!cashExists) return res.status(400).json({ error: 'Cash account ' + cashAccount + ' does not exist on entity' });
-  if (!clearingExists) return res.status(400).json({ error: 'Clearing account ' + clearingAccount + ' does not exist on entity' });
+  const cashExists = cashAccount && db.prepare('SELECT 1 FROM accounts WHERE entity_id = ? AND code = ?').get(entityId, cashAccount);
+  const clearingExists = clearingAccount && db.prepare('SELECT 1 FROM accounts WHERE entity_id = ? AND code = ?').get(entityId, clearingAccount);
+  // Reason the payment leg can't run (if any). Bills sync regardless.
+  let paymentSkipReason = null;
+  if (!clearingAccount) paymentSkipReason = 'Money Out Clearing (default_clearing_account) is not set in Bill.com config';
+  else if (!clearingExists) paymentSkipReason = 'Clearing account ' + clearingAccount + ' does not exist on this entity';
+  else if (!cashAccount) paymentSkipReason = 'default_cash_account is not set in Bill.com config';
+  else if (!cashExists) paymentSkipReason = 'Cash account ' + cashAccount + ' does not exist on this entity';
 
   const mapRows = db.prepare('SELECT billcom_account_id, billcom_account_name, cl_account_code FROM billcom_account_map WHERE entity_id = ?').all(entityId);
   const mapById = new Map(mapRows.map(r => [String(r.billcom_account_id), r]));
@@ -4729,23 +4732,34 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     const idt = pick(b, 'invoiceDate', 'invoice_date', 'dueDate') || pick(pick(b, 'invoice') || {}, 'invoiceDate', 'invoice_date');
     if (bid != null && idt) billInvoiceDateById.set(String(bid), String(idt));
   }
-  const payResult = performPaymentReconcileCore({
-    entityId, apAccount, clearingAccount, cashAccount,
-    payments, asOf: new Date().toISOString().slice(0, 10), cutoffDate,
-    dryRun: false, actor, now, billInvoiceDateById,
-  });
-  // Fold the two-leg result into the sync response shape the client expects
-  // (synced = bill reliefs + funds transfers created; errors/skipped summed).
-  result.payments.synced = payResult.leg1.relieved + payResult.leg2.transfers;
-  result.payments.skipped = payResult.leg1.skipped + payResult.leg2.skipped;
-  result.payments.errors = payResult.leg1.errors + payResult.leg2.errors;
-  result.payments.details = [
-    ...payResult.leg1.details.map(d => ({ ...d, leg: 'relieve' })),
-    ...payResult.leg2.details.map(d => ({ ...d, leg: 'funds_transfer' })),
-  ];
-  result.payments.clearing_account = clearingAccount;
-  result.payments.leg1_amount = payResult.leg1.amount;
-  result.payments.leg2_amount = payResult.leg2.amount;
+  if (paymentSkipReason) {
+    // Can't post the two-leg payment flow without cash + clearing; skip just the
+    // payment leg so the bill sync still succeeds. Surface why in the result.
+    result.payments.synced = 0;
+    result.payments.errors = 0;
+    result.payments.skipped = Array.isArray(payments) ? payments.length : 0;
+    result.payments.details = [];
+    result.payments.skip_reason = paymentSkipReason;
+    result.payments.note = 'Payments were not synced — ' + paymentSkipReason + '. Bills synced normally; set the Money Out Clearing (and cash) account in Bill.com config to sync payments.';
+  } else {
+    const payResult = performPaymentReconcileCore({
+      entityId, apAccount, clearingAccount, cashAccount,
+      payments, asOf: new Date().toISOString().slice(0, 10), cutoffDate,
+      dryRun: false, actor, now, billInvoiceDateById,
+    });
+    // Fold the two-leg result into the sync response shape the client expects
+    // (synced = bill reliefs + funds transfers created; errors/skipped summed).
+    result.payments.synced = payResult.leg1.relieved + payResult.leg2.transfers;
+    result.payments.skipped = payResult.leg1.skipped + payResult.leg2.skipped;
+    result.payments.errors = payResult.leg1.errors + payResult.leg2.errors;
+    result.payments.details = [
+      ...payResult.leg1.details.map(d => ({ ...d, leg: 'relieve' })),
+      ...payResult.leg2.details.map(d => ({ ...d, leg: 'funds_transfer' })),
+    ];
+    result.payments.clearing_account = clearingAccount;
+    result.payments.leg1_amount = payResult.leg1.amount;
+    result.payments.leg2_amount = payResult.leg2.amount;
+  }
 
   result.missing_mappings = Array.from(missingMap.values());
   res.json(result);

@@ -1298,6 +1298,11 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
           </ul>
         </div>}
 
+        {syncResult&&syncResult.payments&&syncResult.payments.skip_reason&&<div style={{padding:12,marginBottom:14,background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:T.radiusSm}}>
+          <div style={{fontSize:13,fontWeight:600,color:'#92400e',marginBottom:6}}>Payments not synced</div>
+          <div style={{fontSize:12,color:'#92400e'}}>{syncResult.payments.note||syncResult.payments.skip_reason}</div>
+        </div>}
+
         <div style={{fontSize:12,fontWeight:600,color:T.textMuted,textTransform:'uppercase',marginBottom:8}}>Recent Sync Log</div>
         {syncLogs.length===0?<div style={{color:T.textMuted,padding:20,textAlign:'center',fontSize:13}}>No sync activity yet. Click "Sync Now" to start.</div>:
          <div style={{border:'1px solid '+T.border,borderRadius:T.radiusSm,overflow:'hidden',maxHeight:400,overflowY:'auto'}}>
