@@ -5449,6 +5449,52 @@ function explainSharedFormulaWriteError(workbook, rawMsg) {
 //
 // On success streams the rolled-forward .xlsx. On a required-check failure
 // returns 422 with the reconciliation detail so the caller can see what broke.
+//
+// Reorder packet invoices to match the rolled-forward Current Invoice Log. The
+// client sends invoices in on-screen order, but the roll-forward GROUPS the log
+// by cost code — so the packet must follow the final log order, not the upload
+// order. Reads the output log's leaf rows and sorts the invoice rows to match;
+// unmatched rows keep their relative order at the end. Universal, best-effort.
+function orderInvoicesByCurrentLog(workbook, invoiceRows) {
+  if (!Array.isArray(invoiceRows) || invoiceRows.length < 2) return invoiceRows;
+  try {
+    const { COL, cellStr, cellNum, cellFormula, applyInvoiceCols } = require('./requisition_reconcile.js');
+    const ws = findReqSheet(workbook, 'Current Invoice Log');
+    if (!ws) return invoiceRows;
+    applyInvoiceCols(ws); // ensure COL matches this workbook's layout
+    const order = [];
+    const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
+    for (let r = 1; r <= last; r++) {
+      const amtCell = ws.getCell(r, COL.amount);
+      if (cellFormula(amtCell)) continue;                 // skip SUBTOTAL / grand-total rows
+      const vendor = cellStr(ws.getCell(r, COL.vendor)).trim();
+      const bill = cellStr(ws.getCell(r, COL.bill)).trim();
+      const code = cellStr(ws.getCell(r, COL.code)).trim();
+      const amt = cellNum(amtCell);
+      if (!vendor && !bill && amt == null) continue;       // spacer/blank
+      order.push({ code, bill, vendor, amt });
+    }
+    if (!order.length) return invoiceRows;
+    const norm = s => String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim();
+    const used = new Array(order.length).fill(false);
+    const posOf = (inv) => {
+      const ib = norm(inv.bill_number), ic = norm(inv.cost_code), iv = norm(inv.vendor);
+      const ia = inv.amount != null ? Math.round(inv.amount * 100) : null;
+      const pick = (pred) => { for (let i = 0; i < order.length; i++) if (!used[i] && pred(order[i])) { used[i] = true; return i; } return -1; };
+      let idx = ib && ic ? pick(o => norm(o.code) === ic && norm(o.bill) === ib) : -1;
+      if (idx < 0 && ib) idx = pick(o => norm(o.bill) === ib && (ia == null || o.amt == null || Math.round(o.amt * 100) === ia));
+      if (idx < 0 && ib) idx = pick(o => norm(o.bill) === ib);
+      if (idx < 0 && iv && ia != null) idx = pick(o => norm(o.vendor) === iv && o.amt != null && Math.round(o.amt * 100) === ia);
+      if (idx < 0 && iv) idx = pick(o => norm(o.vendor) === iv);
+      return idx;
+    };
+    return invoiceRows
+      .map((inv, i) => ({ inv, p: posOf(inv), i }))
+      .sort((a, b) => (a.p < 0 ? Infinity : a.p) - (b.p < 0 ? Infinity : b.p) || a.i - b.i)
+      .map(x => x.inv);
+  } catch (e) { return invoiceRows; }
+}
+
 app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res, next) => {
   reqRollUpload.single('workbook')(req, res, (err) => {
     if (err) {
@@ -5636,6 +5682,8 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
     try {
       const entRow = db.prepare('SELECT name, display_id FROM entities WHERE id = ?').get(eidInt) || {};
       const packetPrefix = (entRow.display_id && entRow.display_id.trim()) || entRow.name || '';
+      // Reorder the packet to follow the Current Invoice Log (grouped by cost code).
+      invoiceRows = orderInvoicesByCurrentLog(workbook, invoiceRows);
       const saved = await saveRequisitionOutputs({
         db, workpapersDir: WORKPAPERS_DIR, eid: eidInt,
         reqNumber: meta.reqNumber, asOfDate: meta.asOfDate,
