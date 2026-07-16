@@ -970,6 +970,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
   const[devKey,setDevKey]=useState('');
   const[defaultApAcct,setDefaultApAcct]=useState('');
   const[defaultCashAcct,setDefaultCashAcct]=useState('');
+  const[defaultClearingAcct,setDefaultClearingAcct]=useState('');
 
   // Phase 2: account mapping state
   const[tab,setTab]=useState('config'); // 'config' | 'mapping' | 'sync'
@@ -1082,9 +1083,10 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
         setOrgId(r.org_id||'');
         setDefaultApAcct(r.default_ap_account||'');
         setDefaultCashAcct(r.default_cash_account||'');
+        setDefaultClearingAcct(r.default_clearing_account||'');
         setPassword('');setDevKey('');
       }else{
-        setEnv('sandbox');setUsername('');setOrgId('');setDefaultApAcct('');setDefaultCashAcct('');
+        setEnv('sandbox');setUsername('');setOrgId('');setDefaultApAcct('');setDefaultCashAcct('');setDefaultClearingAcct('');
         setPassword('');setDevKey('');
       }
     }catch(e){setErr(e.message);}
@@ -1104,7 +1106,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
     if(!selectedEntity){setErr('Select an entity first');return;}
     setSaving(true);setMsg('');setErr('');
     try{
-      const body={environment:env,username,org_id:orgId,default_ap_account:defaultApAcct||null,default_cash_account:defaultCashAcct||null};
+      const body={environment:env,username,org_id:orgId,default_ap_account:defaultApAcct||null,default_cash_account:defaultCashAcct||null,default_clearing_account:defaultClearingAcct||null};
       if(password)body.password=password;
       if(devKey)body.dev_key=devKey;
       await api.saveBillcomConfig(selectedEntity,body);
@@ -1204,6 +1206,10 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
           <div>
             <label style={S.label}>Default Cash Account</label>
             <input type="text" value={defaultCashAcct} onChange={e=>setDefaultCashAcct(e.target.value)} style={S.input} placeholder="e.g. 10000" autoComplete="new-password"/>
+          </div>
+          <div>
+            <label style={S.label}>Default Clearing Account (Money Out Clearing)</label>
+            <input type="text" value={defaultClearingAcct} onChange={e=>setDefaultClearingAcct(e.target.value)} style={S.input} placeholder="e.g. 10072" autoComplete="new-password"/>
           </div>
         </div>
 
