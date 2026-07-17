@@ -657,7 +657,7 @@ export default function App(){
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
     ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
     ...(arEnabled?[{id:'d3c',divider:1,label:'RECEIVABLES'},{id:'ar_customers',label:'Customers',icon:'👥',section:'coa'}]:[]),
-    {id:'dwp',divider:1,label:'WORKPAPERS'},...(isCLRF?[{id:'wp_mgmtfee',label:'Management Fee',icon:'📄',section:'workpapers'}]:[]),
+    {id:'dwp',divider:1,label:'WORKPAPERS'},{id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'workpapers'},...(isCLRF?[{id:'wp_mgmtfee',label:'Management Fee',icon:'📄',section:'workpapers'}]:[]),
     {id:'d4',divider:1,label:'ADMIN'},{id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},{id:'users',label:'Users',icon:NI.users,section:'all'},
     {id:'d5',divider:1,label:'INTEGRATIONS'},{id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
   ];
@@ -699,6 +699,7 @@ export default function App(){
         {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} canEdit={canEdit} reqState={reqState} setReqState={setReqState}/>}
         {page==='wp_mgmtfee'&&activeEntity&&isCLRF&&<MgmtFeeWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
       </>})()}</div></div>
     {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
@@ -3108,6 +3109,108 @@ function MgmtFeeWorkpaper({entityId,entityName,canEdit=true}){
         <div style={{marginTop:8,fontSize:12,color:T.textMuted}}>The .xlsx has downloaded. Review the calc tab before sending.</div>
       </div>}
     </>}
+  </div>);
+}
+
+// ═══ Workpapers › Financial Statements — GL-derived statement package (PDF) ═══
+function FinancialStatements({entityId,entityName,canEdit=true}){
+  const[asOf,setAsOf]=useState(today());
+  const[period,setPeriod]=useState('monthly');
+  const[execFile,setExecFile]=useState(null);
+  const[reqFile,setReqFile]=useState(null);
+  const[preview,setPreview]=useState(null);
+  const[busy,setBusy]=useState(false);
+  const[gen,setGen]=useState(false);
+  const[err,setErr]=useState('');
+  const[result,setResult]=useState(null);
+  const fmt=n=>n==null?'-':Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  // Re-run the numeric preview whenever the date or period changes.
+  useEffect(()=>{let cancelled=false;setPreview(null);setErr('');setResult(null);
+    if(!entityId||!/^\d{4}-\d{2}-\d{2}$/.test(asOf))return;
+    setBusy(true);
+    api.financialStatementsPreview(entityId,asOf,period)
+      .then(p=>{if(!cancelled)setPreview(p);})
+      .catch(e=>{if(!cancelled)setErr(e.message);})
+      .finally(()=>{if(!cancelled)setBusy(false);});
+    return()=>{cancelled=true;};
+  },[entityId,asOf,period]);
+  const generate=async()=>{
+    setErr('');setGen(true);setResult(null);
+    try{
+      const out=await api.financialStatementsGenerate(entityId,asOf,period,execFile,reqFile);
+      if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
+      setResult(out.summary||{});
+    }catch(e){setErr(e.message);}finally{setGen(false);}
+  };
+  const periods=[['monthly','Monthly'],['quarterly','Quarterly'],['annually','Annually']];
+  const tieOk=preview&&preview.checks&&preview.checks.balanceSheetTies;
+  const cfTie=preview&&preview.checks&&preview.checks.cashFlowTies;
+  return(<div>
+    <div style={S.h1}>Financial Statements</div>
+    <div style={{color:T.textMuted,marginBottom:16,fontSize:13,maxWidth:820}}>Generates a GL-derived statement package for {entityName||'this entity'} — Balance Sheet, Statements of Operations, Statement of Cash Flows, and Statement of Changes in Members' Equity — as of a date, then merges it into a single PDF with your uploaded executive summary and requisition report. The requisition report's Current & Prior Invoice Log pages are removed automatically.</div>
+    {err&&<div style={S.err}>{err}</div>}
+
+    <div style={{...S.card,marginBottom:16}}>
+      <div style={{...S.h2,marginBottom:10}}>1 · Statement date &amp; basis</div>
+      <div style={{display:'flex',gap:20,flexWrap:'wrap',alignItems:'flex-end'}}>
+        <div><label style={S.label}>As of date</label><input type="date" value={asOf} disabled={!canEdit} onChange={e=>setAsOf(e.target.value)} style={{...S.input,width:170}}/></div>
+        <div><label style={S.label}>Period basis</label>
+          <div style={{display:'flex',gap:6}}>{periods.map(([v,l])=>(
+            <button key={v} onClick={()=>setPeriod(v)} disabled={!canEdit} style={{...(period===v?S.btnP:S.btnS),padding:'7px 14px'}}>{l}</button>
+          ))}</div>
+        </div>
+      </div>
+      <div style={{marginTop:10,fontSize:12,color:T.textMuted}}>The operations statement compares the {period==='monthly'?'current month vs. prior month':period==='quarterly'?'current quarter vs. prior quarter':'trailing year vs. prior year'}; the year-to-date column and cash-flow statement are always calendar year-to-date.</div>
+    </div>
+
+    <div style={{...S.card,marginBottom:16}}>
+      <div style={{...S.h2,marginBottom:10}}>2 · Tie-out preview</div>
+      {busy&&!preview&&<div style={{color:T.textMuted,fontSize:12}}>Computing statements…</div>}
+      {preview&&<div>
+        <div style={{display:'flex',gap:24,flexWrap:'wrap',fontSize:13,marginBottom:10}}>
+          <div><div style={{color:T.textDim,fontSize:11}}>TOTAL ASSETS</div><div style={{color:T.textBright,fontWeight:600}}>{fmt(preview.totals.totalAssets.cur)}</div></div>
+          <div><div style={{color:T.textDim,fontSize:11}}>TOTAL LIAB + EQUITY</div><div style={{color:T.textBright,fontWeight:600}}>{fmt(preview.totals.totalLiabEquity.cur)}</div></div>
+          <div><div style={{color:T.textDim,fontSize:11}}>NET INCOME (YTD)</div><div style={{color:T.textBright,fontWeight:600}}>{fmt(preview.totals.netIncomeYtd)}</div></div>
+          <div><div style={{color:T.textDim,fontSize:11}}>CASH, END</div><div style={{color:T.textBright,fontWeight:600}}>{fmt(preview.totals.cashEnd)}</div></div>
+        </div>
+        <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+          <span style={{fontSize:12,padding:'4px 10px',borderRadius:6,background:(tieOk?T.green:T.red)+'22',color:tieOk?T.green:T.red,fontWeight:600}}>{tieOk?'✓ Balance sheet balances':'✗ Balance sheet out by '+fmt(preview.checks.balanceSheetDiff)}</span>
+          <span style={{fontSize:12,padding:'4px 10px',borderRadius:6,background:(cfTie?T.green:T.orange)+'22',color:cfTie?T.green:T.orange,fontWeight:600}}>{cfTie?'✓ Cash flow ties':'⚠ Cash flow off by '+fmt(preview.totals.cashFlowTieOut)}</span>
+        </div>
+        {!cfTie&&<div style={{marginTop:8,fontSize:12,color:T.textMuted}}>A cash-flow difference is usually a mid-year chart change or an opening-balance gap; the statement still generates, with the residual disclosed in a note.</div>}
+      </div>}
+    </div>
+
+    <div style={{...S.card,marginBottom:16}}>
+      <div style={{...S.h2,marginBottom:10}}>3 · Attach supporting PDFs <span style={{fontWeight:400,color:T.textMuted,fontSize:12}}>(optional)</span></div>
+      <div style={{display:'flex',flexDirection:'column',gap:12}}>
+        <div>
+          <label style={S.label}>Executive summary (merged as-is, after the cover)</label>
+          <input type="file" accept=".pdf" disabled={!canEdit} onChange={e=>setExecFile(e.target.files[0]||null)} style={{fontSize:13}}/>
+          {execFile&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{execFile.name}</span>}
+        </div>
+        <div>
+          <label style={S.label}>Requisition report (Invoice Log pages removed automatically)</label>
+          <input type="file" accept=".pdf" disabled={!canEdit} onChange={e=>setReqFile(e.target.files[0]||null)} style={{fontSize:13}}/>
+          {reqFile&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{reqFile.name}</span>}
+        </div>
+      </div>
+    </div>
+
+    <div style={{display:'flex',gap:10,alignItems:'center'}}>
+      <button style={{...S.btnP,opacity:(gen||!preview)?0.6:1}} disabled={gen||!preview||!canEdit} onClick={generate}>{gen?'Generating…':'Generate financial statements PDF'}</button>
+    </div>
+
+    {result&&<div style={{...S.card,marginTop:16,borderColor:T.green+'55'}}>
+      <div style={{...S.h2,marginBottom:8,color:T.green}}>✓ Package generated ({result.pages} pages)</div>
+      <div style={{fontSize:13,color:T.text}}>
+        {(result.sections||[]).map((s,i)=><span key={i} style={{marginRight:14}}>{s.label}: <b>{s.pages}</b>p</span>)}
+      </div>
+      {result.reqTotal!=null&&<div style={{marginTop:8,fontSize:12,color:T.textMuted}}>Requisition report: kept {result.reqKept} of {result.reqTotal} pages{(result.reqRemoved&&result.reqRemoved.length)?(' (removed '+result.reqRemoved.length+' invoice-log page'+(result.reqRemoved.length>1?'s':'')+')'):''}.</div>}
+      {(result.warnings||[]).length>0&&<div style={{marginTop:8,fontSize:12,color:T.orange}}>{result.warnings.map((w,i)=><div key={i}>⚠ {w}</div>)}</div>}
+      <div style={{marginTop:8,fontSize:12,color:T.textMuted}}>The PDF has downloaded. Review before distributing.</div>
+    </div>}
   </div>);
 }
 

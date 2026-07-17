@@ -18,6 +18,7 @@ const { verifyRollforward } = require('./requisition_rollforward_verify');
 const { finalizeRequisitionWorkbook } = require('./requisition_preserve');
 const { makeDevFeeClaudeCaller } = require('./requisition_devfee');
 const { saveRequisitionOutputs } = require('./requisition_workpaper_save');
+const financials = require('./financials');
 const ExcelJS = require('exceljs');
 const JSZip = require('jszip');
 
@@ -3135,46 +3136,49 @@ app.delete('/api/entities/:eid/bank-transactions/batch/:batchId', auth, requireE
 });
 
 // ═══ Balances (with soft close) ═══
-app.get('/api/entities/:eid/balances', auth, requireEntityAccess(), (req, res) => {
-  const { as_of, from, to, close_pl_before, location_id, class_id } = req.query;
-  let dateFilter = ''; const params = [req.params.eid];
+// Core balances computation, shared by the HTTP endpoint and the financial-
+// statement generator. Returns natural-signed balances per account for a date
+// window, with optional prior-period P&L close into Retained Earnings.
+// opts: { as_of, from, to, close_pl_before, location_id, class_id }
+function computeBalances(eid, opts = {}) {
+  const { as_of, from, to, close_pl_before, location_id, class_id } = opts;
+  let dateFilter = ''; const params = [eid];
   if (as_of) { dateFilter = ' AND je.date <= ?'; params.push(as_of); }
   else if (from && to) { dateFilter = ' AND je.date >= ? AND je.date <= ?'; params.push(from, to); }
   else if (from) { dateFilter = ' AND je.date >= ?'; params.push(from); }
   else if (to) { dateFilter = ' AND je.date <= ?'; params.push(to); }
-  // Dimension filter: restrict to lines tagged with a specific location/class. Used
-  // for a per-location trial balance. Only location-tagged lines are picked up, by
-  // design — an untagged line belongs to no location's TB.
   let dimFilter = '';
   if (location_id) { dimFilter += ' AND jl.location_id = ?'; params.push(location_id); }
   if (class_id) { dimFilter += ' AND jl.class_id = ?'; params.push(class_id); }
 
   if (close_pl_before && as_of) {
-    const priorPL = db.prepare(`SELECT a.type, SUM(jl.debit) as td, SUM(jl.credit) as tc FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=? AND je.date<? AND a.type IN ('Revenue','Expense') GROUP BY a.type`).all(req.params.eid, close_pl_before);
+    const priorPL = db.prepare(`SELECT a.type, SUM(jl.debit) as td, SUM(jl.credit) as tc FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=? AND je.date<? AND a.type IN ('Revenue','Expense') GROUP BY a.type`).all(eid, close_pl_before);
     let priorNI = 0; priorPL.forEach(r => { if (r.type==='Revenue') priorNI+=(r.tc-r.td); if (r.type==='Expense') priorNI-=(r.td-r.tc); });
-    // Find the retained earnings account for this entity: code 31000, or any Equity account named "Retained Earnings"
-    let reAcct = db.prepare("SELECT * FROM accounts WHERE entity_id=? AND code='31000'").get(req.params.eid)
-      || db.prepare("SELECT * FROM accounts WHERE entity_id=? AND type='Equity' AND LOWER(name) LIKE '%retained earning%' ORDER BY code LIMIT 1").get(req.params.eid);
-    // Auto-create 39000 Retained Earnings if no RE account exists and there is prior-period P&L to close
+    let reAcct = db.prepare("SELECT * FROM accounts WHERE entity_id=? AND code='31000'").get(eid)
+      || db.prepare("SELECT * FROM accounts WHERE entity_id=? AND type='Equity' AND LOWER(name) LIKE '%retained earning%' ORDER BY code LIMIT 1").get(eid);
     if (!reAcct && Math.abs(priorNI) > 0.005) {
       try {
-        db.prepare("INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct) VALUES (?, '39000', 'Retained Earnings', 'Equity', '', 0)").run(req.params.eid);
-        reAcct = db.prepare("SELECT * FROM accounts WHERE entity_id=? AND code='39000'").get(req.params.eid);
+        db.prepare("INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct) VALUES (?, '39000', 'Retained Earnings', 'Equity', '', 0)").run(eid);
+        reAcct = db.prepare("SELECT * FROM accounts WHERE entity_id=? AND code='39000'").get(eid);
       } catch (e) { console.error('Auto-create RE 39000 failed:', e.message); }
     }
     const reCode = reAcct ? reAcct.code : null;
-    const bsRows = db.prepare(`SELECT jl.account_code, a.type, a.name, a.subtype, a.bank_acct, SUM(jl.debit) as total_debit, SUM(jl.credit) as total_credit FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=? AND je.date<=? AND (a.type NOT IN ('Revenue','Expense') OR je.date>=?) GROUP BY jl.account_code`).all(req.params.eid, as_of, close_pl_before);
+    const bsRows = db.prepare(`SELECT jl.account_code, a.type, a.name, a.subtype, a.bank_acct, SUM(jl.debit) as total_debit, SUM(jl.credit) as total_credit FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=? AND je.date<=? AND (a.type NOT IN ('Revenue','Expense') OR je.date>=?) GROUP BY jl.account_code`).all(eid, as_of, close_pl_before);
     const results = bsRows.map(r => { const isDr=r.type==='Asset'||r.type==='Expense'; let bal=isDr?(r.total_debit-r.total_credit):(r.total_credit-r.total_debit);
       if (reCode && r.account_code===reCode) bal+=priorNI;
       return { code:r.account_code, name:r.name, type:r.type, subtype:r.subtype, bank_acct:r.bank_acct, balance:bal, total_debit:r.total_debit, total_credit:r.total_credit }; });
     if (Math.abs(priorNI)>0.005 && reCode && !results.find(r=>r.code===reCode)) {
       results.push({ code:reCode, name:reAcct.name, type:reAcct.type, subtype:reAcct.subtype, bank_acct:0, balance:priorNI, total_debit:0, total_credit:0 });
     }
-    return res.json(results);
+    return results;
   }
 
   const rows = db.prepare(`SELECT jl.account_code, a.type, a.name, a.subtype, a.bank_acct, SUM(jl.debit) as total_debit, SUM(jl.credit) as total_credit FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=?${dateFilter}${dimFilter} GROUP BY jl.account_code`).all(...params);
-  res.json(rows.map(r => { const isDr=r.type==='Asset'||r.type==='Expense'; return { code:r.account_code, name:r.name, type:r.type, subtype:r.subtype, bank_acct:r.bank_acct, balance:isDr?(r.total_debit-r.total_credit):(r.total_credit-r.total_debit), total_debit:r.total_debit, total_credit:r.total_credit }; }));
+  return rows.map(r => { const isDr=r.type==='Asset'||r.type==='Expense'; return { code:r.account_code, name:r.name, type:r.type, subtype:r.subtype, bank_acct:r.bank_acct, balance:isDr?(r.total_debit-r.total_credit):(r.total_credit-r.total_debit), total_debit:r.total_debit, total_credit:r.total_credit }; });
+}
+
+app.get('/api/entities/:eid/balances', auth, requireEntityAccess(), (req, res) => {
+  res.json(computeBalances(req.params.eid, req.query));
 });
 
 // ═══ Entity Workpapers (files + folders) ═══
@@ -6455,6 +6459,78 @@ app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAcce
       res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
       res.setHeader('X-Mgmt-Fee-Summary', JSON.stringify({ quarter: label, new_tab: newTab, investors }).replace(/[\r\n]/g, ' '));
       res.send(outBuf);
+    } catch (e) {
+      res.status(500).json({ error: 'Generate error: ' + e.message });
+    }
+  });
+});
+
+// ═══ Financial Statements package generator ═══
+// Generates GL-derived financial statements (Balance Sheet, Operations, Cash
+// Flows, Members' Equity) for an entity as of a date, on a monthly/quarterly/
+// annually basis, then assembles a single merged PDF package:
+//   cover -> executive summary (uploaded) -> GL statements -> requisition report
+//   (uploaded, with Current/Prior Invoice Log pages stripped).
+const finStmtUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
+const finStmtFields = finStmtUpload.fields([{ name: 'execSummary', maxCount: 1 }, { name: 'reqReport', maxCount: 1 }]);
+
+// Preview endpoint: returns the numeric statements + tie-out checks as JSON,
+// so the UI can show balance-sheet / cash-flow tie-outs before generating.
+app.post('/api/workpapers/financial-statements/:entity_id/preview', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  try {
+    const eid = req.params.entity_id;
+    const asOf = (req.body && req.body.as_of) || (req.query && req.query.as_of);
+    const period = ((req.body && req.body.period) || (req.query && req.query.period) || 'monthly');
+    if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
+    const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
+    const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
+    const s = await financials.buildStatements(getBalances, { asOf, period, entityName: ent ? ent.name : ('Entity ' + eid) });
+    res.json({
+      meta: s.meta,
+      checks: s.checks,
+      totals: {
+        totalAssets: s.balanceSheet.totalAssets, totalLiabEquity: s.balanceSheet.totalLiabEquity,
+        totalEquity: s.balanceSheet.totalEquity, netIncomeYtd: s.operations.netIncome.ytd,
+        cashEnd: s.cashFlow.cashEnd, cashFlowTieOut: s.cashFlow.tieOut,
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Preview error: ' + e.message });
+  }
+});
+
+app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
+  finStmtFields(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    try {
+      const eid = req.params.entity_id;
+      const asOf = req.body.as_of;
+      const period = req.body.period || 'monthly';
+      if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
+      const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
+      const entityName = ent ? ent.name : ('Entity ' + eid);
+
+      const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
+      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName });
+
+      const files = req.files || {};
+      const execSummaryBytes = files.execSummary && files.execSummary[0] ? files.execSummary[0].buffer : null;
+      const reqReportBytes = files.reqReport && files.reqReport[0] ? files.reqReport[0].buffer : null;
+
+      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, reqReportBytes });
+
+      const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
+      const safeName = entityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      const fname = safeName + '_Financial_Statements_' + mm + '_' + yyyy + '.pdf';
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
+      res.setHeader('X-Financials-Summary', JSON.stringify({
+        pages: info.pages, sections: info.sections, warnings: info.warnings,
+        reqRemoved: info.reqRemoved || [], reqKept: info.reqKept, reqTotal: info.reqTotal,
+        balanceSheetTies: info.balanceSheetTies, cashFlowTies: info.cashFlowTies, cashFlowDiff: info.cashFlowDiff,
+        checks: statements.checks,
+      }).replace(/[\r\n]/g, ' '));
+      res.send(Buffer.from(bytes));
     } catch (e) {
       res.status(500).json({ error: 'Generate error: ' + e.message });
     }

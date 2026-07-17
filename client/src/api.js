@@ -354,5 +354,43 @@ export const api = {
     return { blob, filename, summary };
   },
 
+  // Workpapers › Financial Statements: preview tie-outs, then generate the
+  // merged PDF package (cover + exec summary + GL statements + requisition).
+  financialStatementsPreview: async (eid, asOf, period) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/financial-statements/' + eid + '/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: JSON.stringify({ as_of: asOf, period: period || 'monthly' }),
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Preview failed');
+    return data;
+  },
+  financialStatementsGenerate: async (eid, asOf, period, execSummaryFile, reqReportFile) => {
+    const fd = new FormData();
+    fd.append('as_of', asOf);
+    fd.append('period', period || 'monthly');
+    if (execSummaryFile) fd.append('execSummary', execSummaryFile);
+    if (reqReportFile) fd.append('reqReport', reqReportFile);
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/financial-statements/' + eid + '/generate', {
+      method: 'POST', headers: token ? { Authorization: 'Bearer ' + token } : {}, body: fd,
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) {
+      let data = {}; try { data = await res.json(); } catch {}
+      throw new Error(data.error || 'Generate failed');
+    }
+    let summary = {}; try { summary = JSON.parse(res.headers.get('x-financials-summary') || '{}'); } catch {}
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const filename = m ? m[1] : 'Financial_Statements.pdf';
+    const blob = await res.blob();
+    return { blob, filename, summary };
+  },
+
   setToken, getToken, clearToken,
 };
