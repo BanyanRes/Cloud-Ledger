@@ -826,8 +826,9 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       });
       y -= 9 * nLines;
       y -= 3;
-      // Blank space between the underlined date headers and the first data line.
-      y -= 12;
+      // Minimal gap so the date column headers sit directly above the first
+      // section title (ASSETS), lined up with it rather than floating above.
+      y -= 1;
     },
     sectionTitle(str) {
       ensure(16);
