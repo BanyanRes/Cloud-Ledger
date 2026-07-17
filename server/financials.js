@@ -137,11 +137,21 @@ function resolvePeriod(asOf, period) {
   };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Balance-sheet grouping. Development-entity charts (SRN) use descriptive
-// subtypes; we map each account to a BS section, falling back to sensible
-// defaults so any entity produces a reasonable statement.
-// ═══════════════════════════════════════════════════════════════════════════
+// Cash & cash-equivalents detection. Development-entity charts (SRN) name their
+// operating bank accounts by account number (e.g. "SRNR x3505") with no "cash"
+// in the name and no bank_acct flag set, so a name-only test misses them. The
+// reliable signal on these QuickBooks-derived charts is the account-code block:
+// 100xx–101xx are operating cash/bank and 107xx are Bill.com clearing accounts
+// (cash-equivalent pass-throughs). We combine the code block with the name and
+// bank_acct heuristics so any chart style is covered.
+function isCashCode(code) {
+  const c = String(code || '');
+  return /^10[01]\d/.test(c) || /^107\d/.test(c);
+}
+function isCashAccount(r) {
+  return r.type === 'Asset' && (isCashCode(r.code) || /cash|checking|savings|money market|operating acct|bank/i.test(r.name || '') || r.bank_acct);
+}
+
 function bsSection(row) {
   const sub = (row.subtype || '').toLowerCase();
   const name = (row.name || '').toLowerCase();
@@ -302,7 +312,7 @@ async function buildStatements(getBalances, opts) {
     }
     return r2(d);
   };
-  const isCashRow = r => r.type === 'Asset' && (/cash/i.test(r.name) || r.bank_acct);
+  const isCashRow = isCashAccount;
   const cashBeg = sumRows(bsOpen.filter(isCashRow), () => true);
   const cashEnd = sumRows(bsCur.filter(isCashRow), () => true);
 
