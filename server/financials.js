@@ -815,23 +815,55 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     setCols(rightEdges) { cols.length = 0; rightEdges.forEach(e => cols.push(e)); },
     // Column headers (right-aligned above each numeric column). Only the header
     // cells themselves are underlined (per the reference), not a full-width rule.
+    //
+    // hopts:
+    //   underline   — draw an underline beneath each header cell (default off)
+    //   bottomAlign — align every multi-line label to a COMMON bottom baseline
+    //                 (taller labels grow upward) so all columns' last lines sit
+    //                 on one row. Off (default) = top-aligned from the cursor
+    //                 downward (legacy behavior for single-line BS/Operations
+    //                 headers).
+    //   colBox      — when underlining, span each rule across a fixed per-column
+    //                 box (right edge = cols[i], width = inter-column pitch minus
+    //                 a gutter) instead of only the text width, so the rules read
+    //                 as one-per-column with a narrow gap between them.
     colHeaders(labels, hopts = {}) {
-      ensure(18);
       const nLines = Math.max(1, ...labels.map(l => String(l).split('\n').length));
+      // Reserve height for all header lines (bottom-aligned labels can be taller
+      // than one line) plus the underline + trailing gap.
+      ensure(9 * nLines + 8);
+      // With bottomAlign the common baseline is `y`, and taller labels stack
+      // UPWARD from it. Drop the baseline first by the extra line count so the
+      // topmost line clears the heading above instead of overprinting it.
+      if (hopts.bottomAlign) y -= (nLines - 1) * 9;
+      // Per-column underline box: inter-column pitch minus a gutter, so adjacent
+      // underlines are visually separated (the "narrow column in between"). Use
+      // the smallest pitch so no two boxes overlap.
+      const GUTTER = 12; // blank points between adjacent underlines
+      let pitch = Infinity;
+      for (let i = 1; i < cols.length; i++) pitch = Math.min(pitch, cols[i] - cols[i - 1]);
+      const boxW = Number.isFinite(pitch) ? Math.max(20, pitch - GUTTER) : null;
       labels.forEach((lab, i) => {
         const parts = String(lab).split('\n');
         let maxW = 0;
+        parts.forEach(pl => { const w = bold.widthOfTextAtSize(pl, FS.head); if (w > maxW) maxW = w; });
+        // With bottomAlign, the LAST line of every label sits on the common
+        // baseline `y` and earlier lines stack above it; shorter labels thus
+        // bottom-align with taller ones. Otherwise the first line sits at `y`.
         parts.forEach((pl, pi) => {
           const w = bold.widthOfTextAtSize(pl, FS.head);
-          if (w > maxW) maxW = w;
-          page.drawText(pl, { x: cols[i] - w, y: y - pi * 9, size: FS.head, font: bold });
+          const lineY = hopts.bottomAlign
+            ? y - (parts.length - 1 - pi) * 9
+            : y - pi * 9;
+          page.drawText(pl, { x: cols[i] - w, y: lineY, size: FS.head, font: bold });
         });
-        // Underline each header cell only when explicitly requested. Per the
-        // round-2 feedback the balance-sheet dates should NOT be underlined, so
-        // the default is no underline.
+        // Underline each header cell only when explicitly requested. Default is
+        // no underline (BS dates stay bare per round-2). colBox → fixed per-
+        // column span with a gutter; otherwise hug the widest line.
         if (hopts.underline) {
-          const uy = y - (nLines - 1) * 9 - 3;
-          page.drawLine({ start: { x: cols[i] - maxW, y: uy }, end: { x: cols[i], y: uy }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
+          const uy = y - 3; // just under the common bottom baseline
+          const span = (hopts.colBox && boxW) ? boxW : maxW;
+          page.drawLine({ start: { x: cols[i] - span, y: uy }, end: { x: cols[i], y: uy }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
         }
       });
       y -= 9 * nLines;
@@ -1061,7 +1093,7 @@ async function renderStatementsPdf(s, outOffsets) {
       'Distributions',
       'Net Income\n(Loss)',
       'Equity\nBalances at\n' + endDate,
-    ]);
+    ], { bottomAlign: true, underline: true, colBox: true });
     // Money cell with a "$" prefix at the column's left and the value right-aligned.
     const dollarRow = (label, vals, o = {}) => {
       L.row(label, vals.map(v => acct(v)), Object.assign({ indent: 10, dollarPrefix: true }, o));
