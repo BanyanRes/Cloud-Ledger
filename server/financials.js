@@ -373,10 +373,12 @@ async function buildStatements(getBalances, opts) {
         return { title: sub, rows, subtotal, contra: isContra };
       })
       .filter(Boolean);
-    // Section net total: add non-contra subsection subtotals, subtract contra ones.
+    // Section net total. GL balances are already signed (contra accounts such
+    // as accumulated amortization carry a natural negative balance), so we sum
+    // subsection subtotals directly — no extra sign flip for contra.
     const total = subs.reduce((t, s) => ({
-      cur: r2(t.cur + (s.contra ? -s.subtotal.cur : s.subtotal.cur)),
-      pri: r2(t.pri + (s.contra ? -s.subtotal.pri : s.subtotal.pri)),
+      cur: r2(t.cur + s.subtotal.cur),
+      pri: r2(t.pri + s.subtotal.pri),
     }), { cur: 0, pri: 0 });
     return { title: section, subs, total };
   }
@@ -714,9 +716,9 @@ async function renderStatementsPdf(s) {
         const rowIndent = showSubHeaders ? 26 : 16;
         for (const r of su.rows) L.row(r.name, [money(r.cur), money(r.pri)], { indent: rowIndent });
         if (showSubHeaders && su.rows.length > 1) {
-          const sc = su.contra ? -su.subtotal.cur : su.subtotal.cur;
-          const sp = su.contra ? -su.subtotal.pri : su.subtotal.pri;
-          L.row('Total ' + su.title, [money(sc), money(sp)], { indent: 20, ruleAbove: true });
+          // GL balances are already signed; a contra subtotal (accumulated
+          // amortization) is naturally negative and prints in parentheses.
+          L.row('Total ' + su.title, [money(su.subtotal.cur), money(su.subtotal.pri)], { indent: 20, ruleAbove: true });
         }
       }
       L.row(sectionTotalLabel, [money(sec.total.cur), money(sec.total.pri)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
