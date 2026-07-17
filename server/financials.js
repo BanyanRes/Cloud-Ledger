@@ -31,6 +31,20 @@
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const { xlsxSheetToPdf, looksLikeXlsx } = require('./xlsxToPdf');
 
+// ── entity display-name normalization ───────────────────────────────
+// The report presents this development entity as "County Line SRN". The GL
+// entity record is named "Sabine River & Northern Railroad" (entity 37) and is
+// NOT renamed — only the statement package uses the display name. Map known
+// aliases; anything else passes through unchanged.
+const ENTITY_DISPLAY_NAMES = [
+  { match: /sabine|(county\s*line\s*)?srn/i, display: 'County Line SRN' },
+];
+function displayEntityName(name) {
+  const n = String(name || '').trim();
+  for (const { match, display } of ENTITY_DISPLAY_NAMES) if (match.test(n)) return display;
+  return n || 'Entity';
+}
+
 // ── numeric helpers ────────────────────────────────────────────────────────
 const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
 const isZero = n => Math.abs(Number(n) || 0) < 0.005;
@@ -174,33 +188,34 @@ function isCashAccount(r) {
 //   Members Equity      → Members Equity / Retained Earnings
 const BS_ACCOUNT_MAP = {
   // Current Assets
-  '10161': ['Current Assets', 'Cash and Cash Equivalents'],
+  //   Cash and Cash Equivalents
   '10162': ['Current Assets', 'Cash and Cash Equivalents'],
   '10163': ['Current Assets', 'Cash and Cash Equivalents'],
-  '10770': ['Current Assets', 'Cash and Cash Equivalents'],
+  //   Accounts Receivable, Net
   '12000': ['Current Assets', 'Accounts Receivable, Net'],
+  //   Intercompany Receivable
   '18311': ['Current Assets', 'Intercompany Receivable'],
+  //   Other Current Assets
   '13001': ['Current Assets', 'Other Current Assets'],
   '13100': ['Current Assets', 'Other Current Assets'],
   '18002': ['Current Assets', 'Other Current Assets'],
   // Fixed Assets, Net
   '15100': ['Fixed Assets, Net', 'Fixed Assets'],
   '15165': ['Fixed Assets, Net', 'Fixed Assets'],
-  // Intangible Assets, Net
+  // Intangible Assets, Net  (Intangible Assets less accumulated Amortization contra)
   '11009': ['Intangible Assets, Net', 'Intangible Assets'],
   '11013': ['Intangible Assets, Net', 'Intangible Assets'],
   '11014': ['Intangible Assets, Net', 'Intangible Assets'],
   '11016': ['Intangible Assets, Net', 'Intangible Assets'],
   '16600': ['Intangible Assets, Net', 'Amortization'],
-  // Investments
+  // Investments → Long Term Investments
   '11011': ['Investments', 'Long Term Investments'],
   '11012': ['Investments', 'Long Term Investments'],
   '12021': ['Investments', 'Long Term Investments'],
-  // Other Assets (everything else asset-side, incl. 15160 & capitalized dev costs)
+  // Other Assets (capitalized development costs, etc. — mirrors reference list)
   '11713': ['Other Assets', 'Other Assets'],
   '11760': ['Other Assets', 'Other Assets'],
   '11920': ['Other Assets', 'Other Assets'],
-  '12020': ['Other Assets', 'Other Assets'],
   '12115': ['Other Assets', 'Other Assets'],
   '12127': ['Other Assets', 'Other Assets'],
   '12230': ['Other Assets', 'Other Assets'],
@@ -213,22 +228,13 @@ const BS_ACCOUNT_MAP = {
   '12596': ['Other Assets', 'Other Assets'],
   '12600': ['Other Assets', 'Other Assets'],
   '12720': ['Other Assets', 'Other Assets'],
-  '12721': ['Other Assets', 'Other Assets'],
   '12913': ['Other Assets', 'Other Assets'],
   '15160': ['Other Assets', 'Other Assets'],
-  '11010': ['Other Assets', 'Other Assets'],
   // Current Liabilities
   '20000': ['Current Liabilities', 'Accounts Payable'],
-  '20002': ['Current Liabilities', 'Accounts Payable'],
-  '20210': ['Current Liabilities', 'Other Current Liabilities'],
-  '20220': ['Current Liabilities', 'Other Current Liabilities'],
-  '20230': ['Current Liabilities', 'Other Current Liabilities'],
   '21006': ['Current Liabilities', 'Other Current Liabilities'],
   '21110': ['Current Liabilities', 'Other Current Liabilities'],
-  '23000': ['Current Liabilities', 'Other Current Liabilities'],
-  '23375': ['Current Liabilities', 'Other Current Liabilities'],
-  // Long Term Liabilities
-  '25060': ['Long Term Liabilities', 'Loans'],
+  // Long Term Liabilities → Loans
   '25063': ['Long Term Liabilities', 'Loans'],
   // Members Equity (Retained Earnings & Net Income handled specially in renderer)
   '34006': ['Members Equity', 'Members Equity'],
@@ -702,7 +708,7 @@ async function buildStatements(getBalances, opts) {
   }), { beginning: 0, contributions: 0, distributions: 0, netIncome: 0, ending: 0 });
 
   return {
-    meta: { entityName: opts.entityName || 'Entity', asOf, priorDate: priorBsDate, longDate: longDate(asOf),
+    meta: { entityName: displayEntityName(opts.entityName), asOf, priorDate: priorBsDate, longDate: longDate(asOf),
             priorLongDate: longDate(priorBsDate), monthsEnded: monthsEndedLabel(asOf),
             period: (opts.period || 'monthly').toLowerCase(), periodLabel: period.periodLabel, colLabel: period.colLabel },
     balanceSheet: { assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
@@ -752,7 +758,8 @@ function makeLayout(pdf, fonts, meta, statementTitle) {
     if (layout._subline) textC(layout._subline, FS.sub, reg, PAGE.h - PAGE.mT - 2);
   }
   function drawFooter() {
-    const label = meta.entityName + ', ' + meta.longDate + '  |  See Executive Summary and accompanying notes';
+    // Footnote: entity display name only — no "accompanying notes" text.
+    const label = meta.entityName + ', ' + meta.longDate;
     page.drawText(label, { x: PAGE.mL, y: PAGE.mB - 12, size: FS.foot, font: reg, color: rgb(0.4, 0.4, 0.4) });
   }
   function ensure(space) { if (y - space < PAGE.mB + 8) newPage(); }
@@ -760,6 +767,26 @@ function makeLayout(pdf, fonts, meta, statementTitle) {
   const layout = {
     _subline: null,
     setSubline(s) { this._subline = s; },
+    // Draw a centered "<d1> and <d2>" line at the current cursor with ONLY the
+    // two dates underlined. Used by the Balance Sheets page.
+    drawCenteredDates(d1, d2) {
+      const { reg: rf } = fonts;
+      const sz = FS.sub;
+      const conj = ' and ';
+      const w1 = rf.widthOfTextAtSize(d1, sz);
+      const wc = rf.widthOfTextAtSize(conj, sz);
+      const w2 = rf.widthOfTextAtSize(d2, sz);
+      const total = w1 + wc + w2;
+      let x = (PAGE.w - total) / 2;
+      page.drawText(d1, { x, y, size: sz, font: rf });
+      page.drawLine({ start: { x, y: y - 2 }, end: { x: x + w1, y: y - 2 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
+      x += w1;
+      page.drawText(conj, { x, y, size: sz, font: rf });
+      x += wc;
+      page.drawText(d2, { x, y, size: sz, font: rf });
+      page.drawLine({ start: { x, y: y - 2 }, end: { x: x + w2, y: y - 2 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
+      y -= 16; // blank space between the dates and the first line
+    },
     start() { newPage(); },
     get y() { return y; },
     set y(v) { y = v; },
@@ -768,21 +795,27 @@ function makeLayout(pdf, fonts, meta, statementTitle) {
     ensure,
     // Column layout: array of right-edge x positions for numeric columns.
     setCols(rightEdges) { cols.length = 0; rightEdges.forEach(e => cols.push(e)); },
-    // Column headers (right-aligned above each numeric column).
+    // Column headers (right-aligned above each numeric column). Only the header
+    // cells themselves are underlined (per the reference), not a full-width rule.
     colHeaders(labels) {
       ensure(18);
+      const nLines = Math.max(1, ...labels.map(l => String(l).split('\n').length));
       labels.forEach((lab, i) => {
         const parts = String(lab).split('\n');
+        let maxW = 0;
         parts.forEach((pl, pi) => {
           const w = bold.widthOfTextAtSize(pl, FS.head);
+          if (w > maxW) maxW = w;
           page.drawText(pl, { x: cols[i] - w, y: y - pi * 9, size: FS.head, font: bold });
         });
+        // underline just under this header cell, spanning the widest line of it
+        const uy = y - (nLines - 1) * 9 - 3;
+        page.drawLine({ start: { x: cols[i] - maxW, y: uy }, end: { x: cols[i], y: uy }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
       });
-      y -= 9 * Math.max(1, ...labels.map(l => String(l).split('\n').length));
+      y -= 9 * nLines;
       y -= 3;
-      // thin rule under headers
-      page.drawLine({ start: { x: PAGE.mL, y }, end: { x: PAGE.mR ? PAGE.w - PAGE.mR : PAGE.w, y }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
-      y -= 10;
+      // Blank space between the underlined date headers and the first data line.
+      y -= 12;
     },
     sectionTitle(str) {
       ensure(16);
@@ -827,9 +860,12 @@ async function renderStatementsPdf(s) {
 
   // ── 1. Balance Sheet ───────────────────────────────────────────────────────
   {
-    const L = makeLayout(pdf, fonts, m, 'Balance Sheet');
-    L.setSubline(m.longDate + '   (with comparative totals as of ' + m.priorLongDate + ')');
+    const L = makeLayout(pdf, fonts, m, 'Balance Sheets');
     L.start();
+    // Centered "<current date> and <prior date>" with only the dates underlined,
+    // then a blank space before the columns/first line.
+    L.drawCenteredDates(m.longDate, m.priorLongDate);
+    L.space(4);
     L.setCols(twoCols);
     L.colHeaders([m.longDate, m.priorLongDate]);
     L.sectionTitle('ASSETS');
@@ -1028,15 +1064,28 @@ async function renderCoverPdf(meta) {
     const w = font.widthOfTextAtSize(str, size);
     page.drawText(str, { x: (PAGE.w - w) / 2, y: yy, size, font, color: color || rgb(0.1, 0.1, 0.1) });
   };
-  center(meta.entityName, 20, bold, 520);
-  center('Financial Statements', 15, reg, 486);
-  center(meta.periodLabel, 12, reg, 462);
-  page.drawLine({ start: { x: 180, y: 448 }, end: { x: PAGE.w - 180, y: 448 }, thickness: 0.8, color: rgb(0.3, 0.3, 0.3) });
-  center('Table of Contents', 11, bold, 380);
-  const toc = ['Executive Summary', 'Balance Sheet', 'Statements of Operations', 'Statement of Cash Flows', 'Statement of Changes in Members\u2019 Equity', 'Requisition Report'];
-  let ty = 358;
-  toc.forEach(t => { center(t, 10, reg, ty); ty -= 20; });
-  center('Prepared by CloudLedger \u2014 ' + meta.longDate, 9, reg, 90, rgb(0.45, 0.45, 0.45));
+  // ── Cover page ────────────────────────────────────────────────────────────
+  // Clean, professional cover: entity name, "Financial Statements", the as-of
+  // date, framed by two thin rules. No table of contents here (it lives on its
+  // own page that follows).
+  center(meta.entityName, 22, bold, 512);
+  page.drawLine({ start: { x: 150, y: 494 }, end: { x: PAGE.w - 150, y: 494 }, thickness: 0.8, color: rgb(0.3, 0.3, 0.3) });
+  center('Financial Statements', 15, reg, 470);
+  center(meta.longDate, 12, reg, 448);
+  page.drawLine({ start: { x: 150, y: 430 }, end: { x: PAGE.w - 150, y: 430 }, thickness: 0.8, color: rgb(0.3, 0.3, 0.3) });
+
+  // ── Table of Contents page (separate) ────────────────────────────────────
+  const toc2 = pdf.addPage([PAGE.w, PAGE.h]);
+  const centerOn = (pg, str, size, font, yy, color) => {
+    const w = font.widthOfTextAtSize(str, size);
+    pg.drawText(str, { x: (PAGE.w - w) / 2, y: yy, size, font, color: color || rgb(0.1, 0.1, 0.1) });
+  };
+  centerOn(toc2, meta.entityName, 13, bold, PAGE.h - PAGE.mT + 10);
+  centerOn(toc2, 'Table of Contents', 15, bold, PAGE.h - 150);
+  toc2.drawLine({ start: { x: 180, y: PAGE.h - 168 }, end: { x: PAGE.w - 180, y: PAGE.h - 168 }, thickness: 0.6, color: rgb(0.3, 0.3, 0.3) });
+  const toc = ['Executive Summary', 'Balance Sheets', 'Statements of Operations', 'Statement of Cash Flows', 'Statement of Changes in Members\u2019 Equity', 'Budget to Actual'];
+  let ty = PAGE.h - 210;
+  toc.forEach(t => { centerOn(toc2, t, 11, reg, ty); ty -= 26; });
   return await pdf.save();
 }
 
