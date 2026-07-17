@@ -735,32 +735,40 @@ const FS = { title: 11, sub: 9.5, head: 8, row: 8.5, foot: 7.5 }; // point sizes
 
 // A tiny page-layout cursor over a pdf-lib page. Handles the y-cursor, centered
 // headers, a footer, right-aligned numeric columns, and automatic page breaks.
-function makeLayout(pdf, fonts, meta, statementTitle) {
+function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
   const { reg, bold } = fonts;
+  // Page geometry: portrait by default, landscape when requested (opts.landscape).
+  const PW = opts.landscape ? PAGE.h : PAGE.w;
+  const PH = opts.landscape ? PAGE.w : PAGE.h;
+  const dateLine = opts.dateLine || null; // repeated heading date-line (every page)
   let page, y;
   const cols = []; // right edges for numeric columns, set per statement
 
   function newPage() {
-    page = pdf.addPage([PAGE.w, PAGE.h]);
-    y = PAGE.h - PAGE.mT;
+    page = pdf.addPage([PW, PH]);
+    y = PH - PAGE.mT;
     drawHeader();
     drawFooter();
-    y -= 6;
+    // On every page: draw the repeated date-line heading + a blank space between
+    // the heading and the first row (or the column headers).
+    if (dateLine) { textC(dateLine, FS.sub, reg, PH - PAGE.mT - 2); y -= 14; }
+    y -= 8;
   }
   function textC(str, size, font, yy) {
     const w = font.widthOfTextAtSize(str, size);
-    page.drawText(str, { x: (PAGE.w - w) / 2, y: yy, size, font });
+    page.drawText(str, { x: (PW - w) / 2, y: yy, size, font });
   }
   function drawHeader() {
-    textC(meta.entityName, FS.title, bold, PAGE.h - PAGE.mT + 22);
-    textC(statementTitle, FS.sub, bold, PAGE.h - PAGE.mT + 10);
-    // Sub-line: as-of date (BS) or period label — set by each statement via setSubline.
-    if (layout._subline) textC(layout._subline, FS.sub, reg, PAGE.h - PAGE.mT - 2);
+    textC(meta.entityName, FS.title, bold, PH - PAGE.mT + 22);
+    textC(statementTitle, FS.sub, bold, PH - PAGE.mT + 10);
+    // Optional extra sub-line set by a statement (rarely used now).
+    if (layout._subline) textC(layout._subline, FS.sub, reg, PH - PAGE.mT - 2);
   }
   function drawFooter() {
-    // Footnote: entity display name only — no "accompanying notes" text.
-    const label = meta.entityName + ', ' + meta.longDate;
-    page.drawText(label, { x: PAGE.mL, y: PAGE.mB - 12, size: FS.foot, font: reg, color: rgb(0.4, 0.4, 0.4) });
+    // Centered footer on every page: "<entity>, <date>   See Executive Summary".
+    const label = meta.entityName + ', ' + meta.longDate + '   See Executive Summary';
+    const w = reg.widthOfTextAtSize(label, FS.foot);
+    page.drawText(label, { x: (PW - w) / 2, y: PAGE.mB - 12, size: FS.foot, font: reg, color: rgb(0.4, 0.4, 0.4) });
   }
   function ensure(space) { if (y - space < PAGE.mB + 8) newPage(); }
 
@@ -797,7 +805,7 @@ function makeLayout(pdf, fonts, meta, statementTitle) {
     setCols(rightEdges) { cols.length = 0; rightEdges.forEach(e => cols.push(e)); },
     // Column headers (right-aligned above each numeric column). Only the header
     // cells themselves are underlined (per the reference), not a full-width rule.
-    colHeaders(labels) {
+    colHeaders(labels, hopts = {}) {
       ensure(18);
       const nLines = Math.max(1, ...labels.map(l => String(l).split('\n').length));
       labels.forEach((lab, i) => {
@@ -808,9 +816,13 @@ function makeLayout(pdf, fonts, meta, statementTitle) {
           if (w > maxW) maxW = w;
           page.drawText(pl, { x: cols[i] - w, y: y - pi * 9, size: FS.head, font: bold });
         });
-        // underline just under this header cell, spanning the widest line of it
-        const uy = y - (nLines - 1) * 9 - 3;
-        page.drawLine({ start: { x: cols[i] - maxW, y: uy }, end: { x: cols[i], y: uy }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
+        // Underline each header cell only when explicitly requested. Per the
+        // round-2 feedback the balance-sheet dates should NOT be underlined, so
+        // the default is no underline.
+        if (hopts.underline) {
+          const uy = y - (nLines - 1) * 9 - 3;
+          page.drawLine({ start: { x: cols[i] - maxW, y: uy }, end: { x: cols[i], y: uy }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
+        }
       });
       y -= 9 * nLines;
       y -= 3;
@@ -823,20 +835,31 @@ function makeLayout(pdf, fonts, meta, statementTitle) {
       y -= 13;
     },
     // A data row: label (optionally indented) + numeric cells (strings already formatted).
-    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapAfter = 0 } = {}) {
+    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapAfter = 0, dollarPrefix = false } = {}) {
       ensure(13);
       const font = boldRow ? bold : reg;
-      if (ruleAbove) { page.drawLine({ start: { x: cols[0] - 78, y: y + 9 }, end: { x: cols[cols.length - 1], y: y + 9 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) }); }
+      // Per-numeric-column width: distance from the previous column's right edge
+      // (or a default) to this column's right edge. Used to place a left "$".
+      const colWidth = (i) => (i === 0 ? 78 : Math.max(40, cols[i] - cols[i - 1]));
+      const ruleLeft = cols[0] - colWidth(0) + 2;
+      const ruleRight = cols[cols.length - 1];
+      if (ruleAbove) { page.drawLine({ start: { x: ruleLeft, y: y + 9 }, end: { x: ruleRight, y: y + 9 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) }); }
       page.drawText(String(label), { x: PAGE.mL + indent, y, size: FS.row, font });
       cells.forEach((c, i) => {
         if (c == null || c === '') return;
-        const w = font.widthOfTextAtSize(String(c), FS.row);
-        page.drawText(String(c), { x: cols[i] - w, y, size: FS.row, font });
+        const s = String(c);
+        const w = font.widthOfTextAtSize(s, FS.row);
+        page.drawText(s, { x: cols[i] - w, y, size: FS.row, font });
+        if (dollarPrefix) {
+          // "$" anchored at the left of this column's cell box.
+          const dx = cols[i] - colWidth(i) + 2;
+          page.drawText('$', { x: dx, y, size: FS.row, font });
+        }
       });
-      if (ruleBelow) { page.drawLine({ start: { x: cols[0] - 78, y: y - 3 }, end: { x: cols[cols.length - 1], y: y - 3 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) }); }
+      if (ruleBelow) { page.drawLine({ start: { x: ruleLeft, y: y - 3 }, end: { x: ruleRight, y: y - 3 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) }); }
       if (doubleBelow) {
-        page.drawLine({ start: { x: cols[0] - 78, y: y - 3 }, end: { x: cols[cols.length - 1], y: y - 3 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
-        page.drawLine({ start: { x: cols[0] - 78, y: y - 5 }, end: { x: cols[cols.length - 1], y: y - 5 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
+        page.drawLine({ start: { x: ruleLeft, y: y - 3 }, end: { x: ruleRight, y: y - 3 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
+        page.drawLine({ start: { x: ruleLeft, y: y - 5 }, end: { x: ruleRight, y: y - 5 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
       }
       y -= 12 + gapAfter;
     },
@@ -845,7 +868,11 @@ function makeLayout(pdf, fonts, meta, statementTitle) {
 }
 
 // Render the four statements into a fresh PDFDocument and return its bytes.
-async function renderStatementsPdf(s) {
+// If an `outOffsets` array is passed, it is filled with { label, page } entries
+// giving each statement's 0-based starting page index within this PDF (used to
+// compute Table-of-Contents page references).
+async function renderStatementsPdf(s, outOffsets) {
+  const track = (label) => { if (outOffsets) outOffsets.push({ label, page: pdf.getPageCount() }); };
   const pdf = await PDFDocument.create();
   const reg = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -860,12 +887,11 @@ async function renderStatementsPdf(s) {
 
   // ── 1. Balance Sheet ───────────────────────────────────────────────────────
   {
-    const L = makeLayout(pdf, fonts, m, 'Balance Sheets');
+    // Heading date-line repeats on every page (incl. continuation pages) and a
+    // blank space follows it before the first row. Dates are NOT underlined.
+    const L = makeLayout(pdf, fonts, m, 'Balance Sheets', { dateLine: m.longDate + ' and ' + m.priorLongDate });
+    track('Balance Sheets');
     L.start();
-    // Centered "<current date> and <prior date>" with only the dates underlined,
-    // then a blank space before the columns/first line.
-    L.drawCenteredDates(m.longDate, m.priorLongDate);
-    L.space(4);
     L.setCols(twoCols);
     L.colHeaders([m.longDate, m.priorLongDate]);
     L.sectionTitle('ASSETS');
@@ -905,13 +931,13 @@ async function renderStatementsPdf(s) {
 
   // ── 2. Statements of Operations ─────────────────────────────────────────────
   {
-    const L = makeLayout(pdf, fonts, m, 'Statements of Operations');
-    L.setSubline(m.periodLabel + '   (with year-to-date)');
+    const L = makeLayout(pdf, fonts, m, 'Statements of Operations', { dateLine: 'For the Months Ended ' + m.longDate + ' and ' + m.priorLongDate });
+    track('Statements of Operations');
     L.start();
     L.setCols(threeCols);
-    const curHdr = (m.period === 'monthly' ? 'Current Month' : (m.period === 'quarterly' ? 'Current Quarter' : 'Current Year'));
-    const priHdr = (m.period === 'monthly' ? 'Prior Month' : (m.period === 'quarterly' ? 'Prior Quarter' : 'Prior Year'));
-    L.colHeaders([curHdr, priHdr, 'Year to Date']);
+    // Current-month column shows the current period-end date; prior-month column
+    // shows the prior period-end date (per round-2 feedback).
+    L.colHeaders([m.longDate, m.priorLongDate, 'Year to Date']);
     const line = (r, o = {}) => L.row(r.name, [money(r.cur), money(r.pri), money(r.ytd)], { indent: 16, ...o });
 
     L.sectionTitle('Revenue');
@@ -946,11 +972,13 @@ async function renderStatementsPdf(s) {
 
   // ── 3. Statement of Cash Flows ──────────────────────────────────────────────
   {
-    const L = makeLayout(pdf, fonts, m, 'Statement of Cash Flows');
-    L.setSubline(m.monthsEnded);
+    const L = makeLayout(pdf, fonts, m, 'Statement of Cash Flows', { dateLine: m.monthsEnded });
+    track('Statement of Cash Flows');
     L.start();
     L.setCols([RIGHT]);
-    L.colHeaders(['Year to Date']);
+    // No "Year to Date" column heading (single YTD column, per round-2 feedback);
+    // add a little space where the header row would have been.
+    L.space(6);
     const cf = s.cashFlow;
     L.sectionTitle('Cash Flows from Operating Activities');
     L.row('Net Income (Loss)', [money(cf.netIncome)], { indent: 16 });
@@ -984,17 +1012,49 @@ async function renderStatementsPdf(s) {
 
   // ── 4. Statement of Changes in Members' Equity ──────────────────────────────
   {
-    const L = makeLayout(pdf, fonts, m, 'Statement of Changes in Members\u2019 Equity');
-    L.setSubline(m.monthsEnded);
+    // Landscape page mirroring the CPA reference: five columns, each money value
+    // prefixed with "$", a Distributions column shown even when all zero, and a
+    // Net Income (Loss) column wide enough to keep the value on one row.
+    const L = makeLayout(pdf, fonts, m, 'Statement of Changes in Members\u2019 Equity',
+      { landscape: true, dateLine: m.monthsEnded });
+    const LRIGHT = PAGE.h - PAGE.mR; // landscape printable right edge (PAGE.h is the long side)
+    track('Statement of Changes in Members\u2019 Equity');
     L.start();
-    const eCols = [RIGHT - 285, RIGHT - 190, RIGHT - 95, RIGHT];
+    // Column right-edges across the landscape width. Two-line headers, dates
+    // shown as m/d/yyyy short form to match the reference.
+    const shortMD = (long) => {
+      // "April 30, 2026" -> "4/30/2026"
+      const map = { January:1,February:2,March:3,April:4,May:5,June:6,July:7,August:8,September:9,October:10,November:11,December:12 };
+      const mm = long.match(/^(\w+)\s+(\d+),\s+(\d+)$/);
+      if (!mm) return long;
+      return map[mm[1]] + '/' + mm[2] + '/' + mm[3];
+    };
+    const begDate = '1/1/' + String(m.asOf).slice(0, 4);
+    const endDate = shortMD(m.longDate);
+    // Right-edges evenly spaced across the right ~60% of the landscape width,
+    // leaving the left ~250pt for the member-name labels. Each column is ~88pt,
+    // enough for a "$" prefix plus a large right-aligned value on one row.
+    const c1 = LRIGHT - 350, c2 = LRIGHT - 262, c3 = LRIGHT - 174, c4 = LRIGHT - 86, c5 = LRIGHT;
+    const eCols = [c1, c2, c3, c4, c5];
     L.setCols(eCols);
-    L.colHeaders(['Beginning', 'Contributions', 'Net Income\n(Loss)', 'Ending']);
+    L.colHeaders([
+      'Equity\nBalances at\n' + begDate,
+      'Contributions',
+      'Distributions',
+      'Net Income\n(Loss)',
+      'Equity\nBalances at\n' + endDate,
+    ]);
+    // Money cell with a "$" prefix at the column's left and the value right-aligned.
+    const dollarRow = (label, vals, o = {}) => {
+      L.row(label, vals.map(v => acct(v)), Object.assign({ indent: 10, dollarPrefix: true }, o));
+    };
+    L.row('Member', [], { indent: 6, boldRow: true });
     for (const r of s.equity.rows) {
-      L.row(r.name, [acct(r.beginning), acct(r.contributions), acct(r.netIncome), acct(r.ending)], { indent: 10 });
+      dollarRow(r.name, [r.beginning, r.contributions, r.distributions, r.netIncome, r.ending], { indent: 16 });
     }
     const t = s.equity.totals;
-    L.row('Total Members\u2019 Equity', [acct(t.beginning), acct(t.contributions), acct(t.netIncome), acct(t.ending)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+    dollarRow('Total', [t.beginning, t.contributions, t.distributions, t.netIncome, t.ending],
+      { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
   }
 
   return await pdf.save();
@@ -1055,7 +1115,7 @@ async function stripInvoiceLogPages(pdfBytes) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Cover page — plain, centered, matching the CPA package's first page.
 // ═══════════════════════════════════════════════════════════════════════════
-async function renderCoverPdf(meta) {
+async function renderCoverPdf(meta, tocEntries) {
   const pdf = await PDFDocument.create();
   const reg = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -1065,16 +1125,13 @@ async function renderCoverPdf(meta) {
     page.drawText(str, { x: (PAGE.w - w) / 2, y: yy, size, font, color: color || rgb(0.1, 0.1, 0.1) });
   };
   // ── Cover page ────────────────────────────────────────────────────────────
-  // Clean, professional cover: entity name, "Financial Statements", the as-of
-  // date, framed by two thin rules. No table of contents here (it lives on its
-  // own page that follows).
   center(meta.entityName, 22, bold, 512);
   page.drawLine({ start: { x: 150, y: 494 }, end: { x: PAGE.w - 150, y: 494 }, thickness: 0.8, color: rgb(0.3, 0.3, 0.3) });
   center('Financial Statements', 15, reg, 470);
   center(meta.longDate, 12, reg, 448);
   page.drawLine({ start: { x: 150, y: 430 }, end: { x: PAGE.w - 150, y: 430 }, thickness: 0.8, color: rgb(0.3, 0.3, 0.3) });
 
-  // ── Table of Contents page (separate) ────────────────────────────────────
+  // ── Table of Contents page (separate) with page references ────────────────
   const toc2 = pdf.addPage([PAGE.w, PAGE.h]);
   const centerOn = (pg, str, size, font, yy, color) => {
     const w = font.widthOfTextAtSize(str, size);
@@ -1083,9 +1140,30 @@ async function renderCoverPdf(meta) {
   centerOn(toc2, meta.entityName, 13, bold, PAGE.h - PAGE.mT + 10);
   centerOn(toc2, 'Table of Contents', 15, bold, PAGE.h - 150);
   toc2.drawLine({ start: { x: 180, y: PAGE.h - 168 }, end: { x: PAGE.w - 180, y: PAGE.h - 168 }, thickness: 0.6, color: rgb(0.3, 0.3, 0.3) });
-  const toc = ['Executive Summary', 'Balance Sheets', 'Statements of Operations', 'Statement of Cash Flows', 'Statement of Changes in Members\u2019 Equity', 'Budget to Actual'];
+  // Fall back to a label-only list if no page references were supplied.
+  const entries = (tocEntries && tocEntries.length)
+    ? tocEntries
+    : ['Executive Summary', 'Balance Sheets', 'Statements of Operations', 'Statement of Cash Flows', 'Statement of Changes in Members\u2019 Equity', 'Budget to Actual'].map(label => ({ label, page: null }));
+  const LX = 120, RX = PAGE.w - 120;
   let ty = PAGE.h - 210;
-  toc.forEach(t => { centerOn(toc2, t, 11, reg, ty); ty -= 26; });
+  const sz = 11;
+  for (const e of entries) {
+    const label = e.label;
+    toc2.drawText(label, { x: LX, y: ty, size: sz, font: reg, color: rgb(0.1, 0.1, 0.1) });
+    if (e.page != null) {
+      const num = String(e.page);
+      const numW = reg.widthOfTextAtSize(num, sz);
+      toc2.drawText(num, { x: RX - numW, y: ty, size: sz, font: reg, color: rgb(0.1, 0.1, 0.1) });
+      // Dotted leader between label and page number.
+      const labW = reg.widthOfTextAtSize(label, sz);
+      const dotStart = LX + labW + 6, dotEnd = RX - numW - 6;
+      const dotY = ty + 2;
+      for (let dx = dotStart; dx < dotEnd; dx += 4) {
+        toc2.drawText('.', { x: dx, y: dotY - 2, size: sz, font: reg, color: rgb(0.5, 0.5, 0.5) });
+      }
+    }
+    ty -= 26;
+  }
   return await pdf.save();
 }
 
@@ -1121,13 +1199,40 @@ async function generatePackage({ statements, execSummaryBytes, reqReportBytes, r
     return pages.length;
   };
 
-  // 1. Cover
-  await appendPdf(await renderCoverPdf(statements.meta), 'Cover');
-  // 2. Executive summary (uploaded, merged as-is)
-  if (execSummaryBytes) await appendPdf(execSummaryBytes, 'Executive Summary');
-  else info.warnings.push('No executive summary uploaded.');
-  // 3. GL statements
-  await appendPdf(await renderStatementsPdf(statements), 'Financial Statements');
+  // ── Two-phase assembly so the Table of Contents can show real page numbers. ─
+  // Phase 1: build the BODY (everything after cover+TOC) into a separate doc,
+  // recording the absolute start page of each TOC section. The cover + TOC are
+  // two pages, so body page N (0-based within the body) is printed page N+3.
+  const COVER_TOC_PAGES = 2;
+  const body = await PDFDocument.create();
+  const tocEntries = [];
+  const appendToBody = async (bytes, label, addToc) => {
+    if (!bytes) return 0;
+    let srcDoc;
+    try { srcDoc = await PDFDocument.load(bytes, { ignoreEncryption: true }); }
+    catch (e) { info.warnings.push('Could not read ' + label + ' PDF: ' + e.message); return 0; }
+    const startPage = body.getPageCount();
+    const idx = srcDoc.getPageIndices();
+    const pages = await body.copyPages(srcDoc, idx);
+    pages.forEach(p => body.addPage(p));
+    info.sections.push({ label, pages: pages.length });
+    if (addToc) tocEntries.push({ label, page: startPage + COVER_TOC_PAGES + 1 });
+    return pages.length;
+  };
+
+  // Executive summary (uploaded, merged as-is).
+  if (execSummaryBytes) await appendToBody(execSummaryBytes, 'Executive Summary', true);
+  else { info.warnings.push('No executive summary uploaded.'); }
+
+  // GL statements — capture each statement's start page within the statements
+  // PDF, then offset by where the statements PDF lands in the body.
+  const stmtOffsets = [];
+  const stmtBytes = await renderStatementsPdf(statements, stmtOffsets);
+  const stmtBodyStart = body.getPageCount();
+  await appendToBody(stmtBytes, 'Financial Statements', false);
+  for (const off of stmtOffsets) {
+    tocEntries.push({ label: off.label, page: stmtBodyStart + off.page + COVER_TOC_PAGES + 1 });
+  }
   // 4. Requisition report (uploaded). Accepts a PDF or an .xlsx workbook. When a
   //    workbook is uploaded, extract the requested sheet (default "Budget to
   //    Actual") and render it to a PDF page first — the rendered PDF carries a
@@ -1159,7 +1264,7 @@ async function generatePackage({ statements, execSummaryBytes, reqReportBytes, r
       // to Actual report), so there is no invoice log to strip. Append the
       // converted page directly and skip stripInvoiceLogPages — that heuristic
       // is for multi-page PDF packets and could wrongly drop the one B2A page.
-      const kept = await appendPdf(reqPdfBytes, 'Requisition Report');
+      const kept = await appendToBody(reqPdfBytes, 'Budget to Actual', true);
       info.reqRemoved = [];
       info.reqKept = kept;
       info.reqTotal = kept;
@@ -1171,15 +1276,25 @@ async function generatePackage({ statements, execSummaryBytes, reqReportBytes, r
       if (!stripped.textDetected) info.warnings.push(stripped.parseFailed
         ? 'Requisition PDF could not be parsed for invoice-log detection; all pages were kept.'
         : 'Requisition PDF had no extractable text; invoice-log pages could not be detected and were left in.');
-      await appendPdf(stripped.bytes, 'Requisition Report');
+      await appendToBody(stripped.bytes, 'Budget to Actual', true);
     }
   } else {
     info.warnings.push('No requisition report uploaded.');
   }
 
+  // Phase 2: render cover + TOC (with page references) and assemble the final
+  // PDF as cover/TOC first, then the body.
+  const coverBytes = await renderCoverPdf(statements.meta, tocEntries);
+  const coverDoc = await PDFDocument.load(coverBytes, { ignoreEncryption: true });
+  const coverPages = await merged.copyPages(coverDoc, coverDoc.getPageIndices());
+  coverPages.forEach(p => merged.addPage(p));
+  const bodyPages = await merged.copyPages(body, body.getPageIndices());
+  bodyPages.forEach(p => merged.addPage(p));
+
   info.cashFlowTies = statements.checks.cashFlowTies;
   info.cashFlowDiff = statements.checks.cashFlowDiff;
   info.balanceSheetTies = statements.checks.balanceSheetTies;
+  info.tocEntries = tocEntries;
   info.pages = merged.getPageCount();
   const bytes = await merged.save();
   return { bytes, info };
