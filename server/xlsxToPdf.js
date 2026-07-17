@@ -147,9 +147,10 @@ function sheetToGrid(ws) {
   return { rows: trimmed, nCols: outNCols, colWidths, merges, styles: trimmedStyles };
 }
 
-// Resolve final column widths in points: use the sheet's native width where it
-// has one; otherwise size from content. Then, if the total exceeds the
-// printable width, scale everything down proportionally to fit.
+// Resolve natural column widths in points: use the sheet's native width where
+// it has one; otherwise size from content. NO scaling here — the caller decides
+// a single uniform fit-to-page scale from the resulting totals so the whole
+// sheet lands on one page (columns AND rows scaled by the same factor).
 function resolveColWidths(rows, nCols, colWidths, styles, font, bold, fontSize) {
   const widths = new Array(nCols).fill(0);
   for (let c = 0; c < nCols; c++) {
@@ -165,12 +166,6 @@ function resolveColWidths(rows, nCols, colWidths, styles, font, bold, fontSize) 
       w = Math.max(w, tw + CELL_PAD * 2);
     }
     widths[c] = w;
-  }
-  const printable = LP.w - LP.mL - LP.mR;
-  const total = widths.reduce((a, b) => a + b, 0);
-  if (total > printable && total > 0) {
-    const scale = printable / total;
-    for (let c = 0; c < nCols; c++) widths[c] = widths[c] * scale;
   }
   return widths;
 }
@@ -207,7 +202,18 @@ function wrapText(str, font, fontSize, maxWidth) {
 }
 
 // Render one worksheet (SheetJS worksheet object) to PDF bytes, reproducing its
-// column widths, merges, bold, and alignment. opts: { title }.
+// column widths, merges, bold, and alignment.
+//
+// The whole sheet is fit onto ONE landscape page (like Excel's "Fit Sheet on
+// One Page" print option): a single uniform scale derived from the natural
+// content width AND height is applied to column widths, row heights, and font
+// size together, so the requisition report's own layout is preserved rather than
+// reflowed across pages. opts:
+//   title    — a heading line drawn above the sheet. Off by default in
+//              single-page mode (the sheet carries its own title block); pass a
+//              string only if you want an injected caption.
+//   paginate — legacy row-pagination mode (kept for callers that want it); when
+//              false (default) the sheet is fit onto a single page.
 async function worksheetToPdfBytes(ws, opts = {}) {
   const { rows, nCols, colWidths, merges, styles } = sheetToGrid(ws);
   const pdf = await PDFDocument.create();
@@ -221,16 +227,19 @@ async function worksheetToPdfBytes(ws, opts = {}) {
     return await pdf.save({ useObjectStreams: false });
   }
 
-  const fontSize = nCols > 12 ? BODY_FONT : BODY_FONT + 0.5;
-  const widths = resolveColWidths(rows, nCols, colWidths, styles, reg, bold, fontSize);
-  const lineH = fontSize + 1.5;                    // leading between wrapped lines
-  const colX = [LP.mL];
-  for (let c = 0; c < nCols; c++) colX.push(colX[c] + widths[c]);
+  const printableW = LP.w - LP.mL - LP.mR;
+  const printableH = LP.h - LP.mT - LP.mB;
+  const BASE_FONT = nCols > 12 ? BODY_FONT : BODY_FONT + 0.5;
+  const MIN_FONT = 4.2;          // legibility floor; below this we accept overflow
+  const titleGap = opts.title ? 16 : 0;
 
-  // Map each cell that is covered by a merge (but not the top-left anchor) so we
-  // skip drawing it; the anchor draws across the full merged width.
-  const covered = new Set();       // "r,c" of non-anchor covered cells
-  const anchorSpan = new Map();    // "r,c" (anchor) -> colspan in columns
+  // Natural (unscaled) column widths and total content width.
+  const natWidths = resolveColWidths(rows, nCols, colWidths, styles, reg, bold, BASE_FONT);
+  const natTotalW = natWidths.reduce((a, b) => a + b, 0) || 1;
+
+  // Merge lookup (independent of scale) so height estimation honors colspans.
+  const covered = new Set();
+  const anchorSpan = new Map();
   for (const m of merges) {
     for (let dr = 0; dr < m.rs; dr++) {
       for (let dc = 0; dc < m.cs; dc++) {
@@ -240,56 +249,82 @@ async function worksheetToPdfBytes(ws, opts = {}) {
     }
     anchorSpan.set(m.r + ',' + m.c, m.cs);
   }
-  const mergedWidth = (r, c) => {
-    const cs = anchorSpan.get(r + ',' + c) || 1;
-    let w = 0;
-    for (let k = 0; k < cs && (c + k) < nCols; k++) w += widths[c + k];
-    return { w, cs };
+
+  // Given a uniform scale, compute scaled widths/font and the wrapped layout +
+  // total height. Wrapping (hence row height) depends on the scale, so this is
+  // recomputed as we converge on a scale that fits both width and height.
+  const layoutAt = (scale) => {
+    const fontSize = Math.max(MIN_FONT, BASE_FONT * scale);
+    const lineH = fontSize + 1.5 * scale;
+    const rowPad = ROW_PAD * scale;
+    const cellPad = CELL_PAD * scale;
+    const widths = natWidths.map(w => w * scale);
+    const colX = [LP.mL];
+    for (let c = 0; c < nCols; c++) colX.push(colX[c] + widths[c]);
+    const mergedWidth = (r, c) => {
+      const cs = anchorSpan.get(r + ',' + c) || 1;
+      let w = 0;
+      for (let k = 0; k < cs && (c + k) < nCols; k++) w += widths[c + k];
+      return { w, cs };
+    };
+    const wrapped = [];
+    const rowHeights = [];
+    for (let ri = 0; ri < rows.length; ri++) {
+      const row = rows[ri];
+      const isHeaderish = ri < 2;
+      const firstLabel = (row.find(v => (v || '').trim()) || '').toLowerCase();
+      const isTotalRow = /(^total|costs? total|project costs|grand total|balance remaining$)/.test(firstLabel);
+      const cells = [];
+      let maxLines = 1;
+      for (let c = 0; c < nCols; c++) {
+        if (covered.has(ri + ',' + c)) { cells.push(null); continue; }
+        const raw = row[c] || '';
+        const st = styles[ri] && styles[ri][c];
+        const cellFont = (st && st.bold) || isHeaderish || isTotalRow ? bold : reg;
+        const numeric = isNumericDisplay(raw) && !(st && st.align);
+        const align = (st && st.align) || (numeric ? 'right' : 'left');
+        const { w: cw } = mergedWidth(ri, c);
+        const avail = cw - cellPad * 2;
+        const lines = (!raw) ? [''] : (numeric ? [raw] : wrapText(raw, cellFont, fontSize, avail));
+        if (lines.length > maxLines) maxLines = lines.length;
+        cells.push({ lines, align, font: cellFont });
+      }
+      wrapped.push({ cells, isTotalRow, headerish: isHeaderish });
+      rowHeights.push(maxLines * lineH + rowPad * 2);
+    }
+    const totalH = rowHeights.reduce((a, b) => a + b, 0);
+    return { fontSize, lineH, rowPad, cellPad, widths, colX, mergedWidth, wrapped, rowHeights, totalH };
   };
 
-  // Pre-wrap every cell so we know each row's height (tallest wrapped cell).
-  // Numeric cells are never wrapped (they fit their column by construction).
-  const wrapped = [];   // wrapped[ri][c] = { lines, align, font } | null (covered)
-  const rowHeights = [];
-  for (let ri = 0; ri < rows.length; ri++) {
-    const row = rows[ri];
-    const isHeaderish = ri < 2;
-    const firstLabel = (row.find(v => (v || '').trim()) || '').toLowerCase();
-    const isTotalRow = /(^total|costs? total|project costs|grand total|balance remaining$)/.test(firstLabel);
-    const cells = [];
-    let maxLines = 1;
-    for (let c = 0; c < nCols; c++) {
-      if (covered.has(ri + ',' + c)) { cells.push(null); continue; }
-      const raw = row[c] || '';
-      const st = styles[ri] && styles[ri][c];
-      const cellFont = (st && st.bold) || isHeaderish || isTotalRow ? bold : reg;
-      const numeric = isNumericDisplay(raw) && !(st && st.align);
-      // Alignment: explicit style wins; else numeric→right, else left.
-      const align = (st && st.align) || (numeric ? 'right' : 'left');
-      const { w: cw } = mergedWidth(ri, c);
-      const avail = cw - CELL_PAD * 2;
-      const lines = (!raw) ? [''] : (numeric ? [raw] : wrapText(raw, cellFont, fontSize, avail));
-      if (lines.length > maxLines) maxLines = lines.length;
-      cells.push({ lines, align, font: cellFont });
+  // Fit-to-one-page scale. Start from the width constraint (never upscale past
+  // 1×), then, if the resulting height still overflows, tighten the scale by the
+  // height ratio and recompute once. One extra pass converges because shrinking
+  // the font only ever reduces the number of wrapped lines (never increases it),
+  // so the second layout's height is a safe upper bound for the final scale.
+  let scale = Math.min(1, printableW / natTotalW);
+  let L = layoutAt(scale);
+  if (L.totalH > printableH) {
+    scale = scale * (printableH / L.totalH);
+    L = layoutAt(scale);
+    // A tiny safety margin in case rounding leaves it a hair over.
+    let guard = 0;
+    while (L.totalH > printableH && guard++ < 4) {
+      scale *= 0.98;
+      L = layoutAt(scale);
     }
-    wrapped.push({ cells, isTotalRow, headerish: isHeaderish });
-    rowHeights.push(maxLines * lineH + ROW_PAD * 2);
   }
 
-  let page = null, y = 0;
-  const newPage = (withTitle) => {
-    page = pdf.addPage([LP.w, LP.h]);
-    y = LP.h - LP.mT;
-    if (withTitle && opts.title) {
-      page.drawText(opts.title, { x: LP.mL, y, size: 11, font: bold });
-      y -= 18;
-    }
-  };
-  newPage(true);
+  const { fontSize, lineH, rowPad, cellPad, colX, mergedWidth, wrapped, rowHeights } = L;
+
+  const page = pdf.addPage([LP.w, LP.h]);
+  let y = LP.h - LP.mT;
+  if (opts.title) {
+    page.drawText(String(opts.title), { x: LP.mL, y, size: Math.max(8, 11 * scale), font: bold });
+    y -= titleGap;
+  }
 
   for (let ri = 0; ri < wrapped.length; ri++) {
     const rowH = rowHeights[ri];
-    if (y - rowH < LP.mB) newPage(false);
     const { cells, isTotalRow } = wrapped[ri];
     for (let c = 0; c < nCols; c++) {
       const cell = cells[c];
@@ -302,10 +337,10 @@ async function worksheetToPdfBytes(ws, opts = {}) {
         if (!txt) continue;
         const tw = strW(font, txt, fontSize);
         let x;
-        if (align === 'right') x = colX[c] + cw - CELL_PAD - tw;
+        if (align === 'right') x = colX[c] + cw - cellPad - tw;
         else if (align === 'center') x = colX[c] + (cw - tw) / 2;
-        else x = colX[c] + CELL_PAD;
-        const ly = y - ROW_PAD - fontSize - li * lineH;
+        else x = colX[c] + cellPad;
+        const ly = y - rowPad - fontSize - li * lineH;
         page.drawText(txt, { x, y: ly, size: fontSize, font, color: rgb(0.1, 0.1, 0.1) });
       }
     }
@@ -330,7 +365,9 @@ async function xlsxSheetToPdf(xlsxBuffer, sheetName, opts = {}) {
     name = found || wb.SheetNames[0];
   }
   const ws = wb.Sheets[name];
-  const bytes = await worksheetToPdfBytes(ws, { title: opts.title || name });
+  // Pass through only an explicitly-provided title; the requisition sheet carries
+  // its own header block, so we don't inject the sheet name as a caption.
+  const bytes = await worksheetToPdfBytes(ws, { title: opts.title });
   return { bytes, sheetUsed: name, availableSheets: wb.SheetNames };
 }
 

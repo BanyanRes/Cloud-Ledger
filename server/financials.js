@@ -1293,9 +1293,10 @@ async function generatePackage({ statements, execSummaryBytes, reqReportBytes, r
     if (looksLikeXlsx(reqReportBytes, reqReportName)) {
       try {
         const wantSheet = reqSheetName || 'Budget to Actual';
-        const conv = await xlsxSheetToPdf(reqReportBytes, wantSheet, {
-          title: (statements.meta.entityName || 'Requisition') + ' \u2014 ' + wantSheet,
-        });
+        // No injected title: the requisition sheet carries its own header block
+        // ("Project Funding Requisition" / entity / period / report #), and the
+        // converter fits the whole sheet onto one landscape page as-is.
+        const conv = await xlsxSheetToPdf(reqReportBytes, wantSheet, {});
         reqPdfBytes = Buffer.from(conv.bytes);
         fromXlsx = true;
         info.reqConvertedFromXlsx = true;
