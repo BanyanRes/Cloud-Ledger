@@ -301,29 +301,21 @@ async function buildStatements(getBalances, opts) {
   const bsOpen = await getBalances({ as_of: priorMonthEnd(ys), close_pl_before: ys });
   const openMap = new Map(); for (const r of bsOpen) openMap.set(r.code, r);
   const curMap = new Map(); for (const r of bsCur) if (r.type !== 'Revenue' && r.type !== 'Expense') curMap.set(r.code, r);
-  const deltaBy = pred => {
-    let d = 0;
-    const codes = new Set([...openMap.keys(), ...curMap.keys()]);
-    for (const code of codes) {
-      const rc = curMap.get(code), ro = openMap.get(code);
-      const ref = rc || ro; if (!ref || (rc && (rc.type === 'Revenue' || rc.type === 'Expense'))) continue;
-      if (!pred(ref)) continue;
-      d += (rc ? bal(rc) : 0) - (ro ? bal(ro) : 0);
-    }
-    return r2(d);
-  };
   const isCashRow = isCashAccount;
   const cashBeg = sumRows(bsOpen.filter(isCashRow), () => true);
   const cashEnd = sumRows(bsCur.filter(isCashRow), () => true);
 
-  // Non-cash add-back: amortization/depreciation EXPENSE from the YTD P&L. Using
-  // the P&L expense (always present, exact) is more reliable than differencing
-  // the accumulated-amortization contra-asset, which can be disturbed by
-  // disposals or reclasses. Falls back to the accum-amort delta if no such
-  // expense line exists.
+  // Non-cash add-back for amortization/depreciation. Add back ONLY the portion
+  // booked as a P&L expense — that is the only part that reduced net income and
+  // must be restored in operating activities. On development entities (SRN),
+  // depreciation is typically CAPITALIZED (Dr asset, Cr accumulated amort) with
+  // no P&L expense; that is a purely non-cash reclass between two asset accounts,
+  // so there is nothing to add back — both legs flow through investing where they
+  // net out. Basing the add-back on the P&L expense (0 when capitalized) and
+  // letting the contra flow normally in that case is what keeps the statement
+  // tying; verified against live SRN GL (actual cash change reproduced exactly).
   const amortExpense = r2(sumRows(isYtd, r => r.type === 'Expense' && /amortization|depreciation/i.test(r.name)));
-  const amortFromContra = r2(deltaBy(r => r.type === 'Asset' && /accum|amortization|depreciation/i.test(r.name)) * -1);
-  const amortization = !isZero(amortExpense) ? amortExpense : amortFromContra;
+  const amortization = amortExpense;
 
   // Classify every non-cash balance-sheet account into a cash-flow bucket by a
   // single pass, so nothing is silently dropped. Each account's period delta
@@ -343,8 +335,10 @@ async function buildStatements(getBalances, opts) {
     if (!ref) continue;
     if (ref.type === 'Revenue' || ref.type === 'Expense') continue;
     if (isCashRow(ref)) continue; // cash itself is the reconciling target
-    // Skip the accumulated-amortization contra when we're adding back the P&L
-    // expense (its delta is already represented by the amortization line).
+    // Skip the accumulated-amortization/depreciation contra ONLY when its move was
+    // booked as a P&L expense (added back above) — otherwise it would be counted
+    // twice. When depreciation is capitalized (no P&L expense), let the contra flow
+    // through investing, where it nets against the capitalized asset leg.
     if (ref.type === 'Asset' && /accum|amortization|depreciation/i.test(ref.name) && !isZero(amortExpense)) continue;
     const delta = r2((rc ? bal(rc) : 0) - (ro ? bal(ro) : 0));
     if (isZero(delta)) continue;
