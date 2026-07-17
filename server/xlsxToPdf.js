@@ -1,11 +1,13 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // xlsxToPdf — pure-Node conversion of a single worksheet to a PDF (no
 // LibreOffice, Railway-safe). Reads a sheet with SheetJS and renders it with
-// pdf-lib, reproducing the sheet's own layout as faithfully as a pure-Node
-// renderer can: native column widths (!cols), merged cells (!merges), per-cell
-// bold and horizontal alignment (cell styles), and the workbook's number
-// formats (SheetJS `w` = formatted text). Paginates by rows onto landscape
-// Letter pages and scales to fit only when the sheet is wider than the page.
+// pdf-lib. It prints the sheet's own values as-is — native column widths
+// (!cols), merged cells (!merges), each cell's own bold and horizontal
+// alignment, and the workbook's number formats (SheetJS `w` = formatted text) —
+// and fits the whole sheet onto ONE landscape page. It deliberately does NOT
+// invent any formatting: no rules/underlines are drawn and bold is never
+// inferred from a row's position or label (that inference previously added
+// spurious underlines to the requisition report's reconciliation block).
 //
 // Used by the Financial Statements engine so an uploaded .xlsx requisition
 // report's "Budget to Actual" sheet can be merged into the package faithfully
@@ -271,16 +273,17 @@ async function worksheetToPdfBytes(ws, opts = {}) {
     const rowHeights = [];
     for (let ri = 0; ri < rows.length; ri++) {
       const row = rows[ri];
-      const isHeaderish = ri < 2;
-      const firstLabel = (row.find(v => (v || '').trim()) || '').toLowerCase();
-      const isTotalRow = /(^total|costs? total|project costs|grand total|balance remaining$)/.test(firstLabel);
       const cells = [];
       let maxLines = 1;
       for (let c = 0; c < nCols; c++) {
         if (covered.has(ri + ',' + c)) { cells.push(null); continue; }
         const raw = row[c] || '';
         const st = styles[ri] && styles[ri][c];
-        const cellFont = (st && st.bold) || isHeaderish || isTotalRow ? bold : reg;
+        // Use ONLY the cell's own reported bold — never infer bold from the
+        // row's position or label. Inferring formatting is what produced the
+        // spurious underlines/bolding in the reconciliation block; the goal is
+        // to print the sheet's values as-is with no added formatting.
+        const cellFont = (st && st.bold) ? bold : reg;
         const numeric = isNumericDisplay(raw) && !(st && st.align);
         const align = (st && st.align) || (numeric ? 'right' : 'left');
         const { w: cw } = mergedWidth(ri, c);
@@ -289,7 +292,7 @@ async function worksheetToPdfBytes(ws, opts = {}) {
         if (lines.length > maxLines) maxLines = lines.length;
         cells.push({ lines, align, font: cellFont });
       }
-      wrapped.push({ cells, isTotalRow, headerish: isHeaderish });
+      wrapped.push({ cells });
       rowHeights.push(maxLines * lineH + rowPad * 2);
     }
     const totalH = rowHeights.reduce((a, b) => a + b, 0);
@@ -325,7 +328,7 @@ async function worksheetToPdfBytes(ws, opts = {}) {
 
   for (let ri = 0; ri < wrapped.length; ri++) {
     const rowH = rowHeights[ri];
-    const { cells, isTotalRow } = wrapped[ri];
+    const { cells } = wrapped[ri];
     for (let c = 0; c < nCols; c++) {
       const cell = cells[c];
       if (!cell) continue; // covered by a merge anchor
@@ -344,10 +347,10 @@ async function worksheetToPdfBytes(ws, opts = {}) {
         page.drawText(txt, { x, y: ly, size: fontSize, font, color: rgb(0.1, 0.1, 0.1) });
       }
     }
-    // Keep the light rule under the header band and under total rows.
-    if (ri === 1 || isTotalRow) {
-      page.drawLine({ start: { x: LP.mL, y: y - rowH + 1 }, end: { x: colX[nCols], y: y - rowH + 1 }, thickness: 0.4, color: rgb(0.55, 0.55, 0.55) });
-    }
+    // No invented rules/underlines. We print only the sheet's own values; the
+    // requisition report already carries whatever underlines belong in it as
+    // part of its cell content, so drawing extra ones (under "total" rows or the
+    // header band) is exactly the artifact we're removing.
     y -= rowH;
   }
   return await pdf.save({ useObjectStreams: false });
