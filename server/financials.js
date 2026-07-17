@@ -764,6 +764,7 @@ async function generatePackage({ statements, execSummaryBytes, reqReportBytes, r
   //    real text layer, so invoice-log stripping runs on it identically.
   if (reqReportBytes) {
     let reqPdfBytes = reqReportBytes;
+    let fromXlsx = false;
     if (looksLikeXlsx(reqReportBytes, reqReportName)) {
       try {
         const wantSheet = reqSheetName || 'Budget to Actual';
@@ -771,6 +772,7 @@ async function generatePackage({ statements, execSummaryBytes, reqReportBytes, r
           title: (statements.meta.entityName || 'Requisition') + ' \u2014 ' + wantSheet,
         });
         reqPdfBytes = Buffer.from(conv.bytes);
+        fromXlsx = true;
         info.reqConvertedFromXlsx = true;
         info.reqSheetUsed = conv.sheetUsed;
         info.reqAvailableSheets = conv.availableSheets;
@@ -782,7 +784,16 @@ async function generatePackage({ statements, execSummaryBytes, reqReportBytes, r
         reqPdfBytes = null;
       }
     }
-    if (reqPdfBytes) {
+    if (reqPdfBytes && fromXlsx) {
+      // xlsx path: we already extracted exactly the requested sheet (the Budget
+      // to Actual report), so there is no invoice log to strip. Append the
+      // converted page directly and skip stripInvoiceLogPages — that heuristic
+      // is for multi-page PDF packets and could wrongly drop the one B2A page.
+      const kept = await appendPdf(reqPdfBytes, 'Requisition Report');
+      info.reqRemoved = [];
+      info.reqKept = kept;
+      info.reqTotal = kept;
+    } else if (reqPdfBytes) {
       const stripped = await stripInvoiceLogPages(reqPdfBytes);
       info.reqRemoved = stripped.removed;
       info.reqKept = stripped.kept;
