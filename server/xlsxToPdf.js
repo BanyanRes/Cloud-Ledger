@@ -17,6 +17,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 const XLSX = require('xlsx');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+const { readSheetFills } = require('./xlsxFills');
 
 // Landscape Letter.
 const LP = { w: 792, h: 612, mL: 30, mR: 30, mT: 40, mB: 34 };
@@ -52,15 +53,19 @@ function isNumericDisplay(s) {
 // style hints (bold, horizontal alignment). Blank leading/trailing rows/cols
 // are trimmed; the same trim offset is applied to widths and merges so
 // everything stays aligned.
-//   returns { rows, nCols, colWidths, merges, styles }
+//   returns { rows, nCols, colWidths, merges, styles, fills }
 //     rows[r][c]     = display string
 //     colWidths[c]   = points (or null → auto)
 //     merges         = [{ r, c, rs, cs }] (top-left row/col + row/col span),
 //                      already shifted into the trimmed coordinate space
 //     styles[r][c]   = { bold, align } | undefined
-function sheetToGrid(ws) {
+//     fills[r][c]    = "RRGGBB" | undefined  (solid cell background, if any)
+// `absFills` (optional) is a Map "r,c"→"RRGGBB" in ABSOLUTE sheet coordinates
+// (from xlsxFills.readSheetFills); it is shifted into the trimmed space so the
+// renderer can paint each cell's background before drawing text.
+function sheetToGrid(ws, absFills) {
   const ref = ws['!ref'];
-  if (!ref) return { rows: [], nCols: 0, colWidths: [], merges: [], styles: [] };
+  if (!ref) return { rows: [], nCols: 0, colWidths: [], merges: [], styles: [], fills: [] };
   const range = XLSX.utils.decode_range(ref);
   const grid = [];
   const styles = [];
@@ -146,7 +151,24 @@ function sheetToGrid(ws) {
     });
   }
 
-  return { rows: trimmed, nCols: outNCols, colWidths, merges, styles: trimmedStyles };
+  // Cell fills → trimmed coordinate space. absFills keys are ABSOLUTE sheet
+  // coords "r,c" (0-based from the sheet origin, i.e. including range.s); the
+  // grid we build starts at range.s and is then left-trimmed by firstCol and
+  // bottom-trimmed by the popped blank rows, so a fill at absolute (R,C) lands
+  // at grid row (R - range.s.r) and col (C - range.s.c - firstCol).
+  const fills = trimmed.map(row => new Array(row.length));
+  if (absFills && absFills.size) {
+    for (const [key, color] of absFills) {
+      const [ar, ac] = key.split(',').map(Number);
+      const gr = ar - range.s.r;
+      const gc = ac - range.s.c - firstCol;
+      if (gr < 0 || gr >= fills.length) continue;
+      if (gc < 0 || gc >= outNCols) continue;
+      fills[gr][gc] = color;
+    }
+  }
+
+  return { rows: trimmed, nCols: outNCols, colWidths, merges, styles: trimmedStyles, fills };
 }
 
 // Resolve natural column widths in points: use the sheet's native width where
@@ -216,8 +238,10 @@ function wrapText(str, font, fontSize, maxWidth) {
 //              string only if you want an injected caption.
 //   paginate — legacy row-pagination mode (kept for callers that want it); when
 //              false (default) the sheet is fit onto a single page.
+//   fills    — optional Map "r,c"→"RRGGBB" (absolute sheet coords) of solid cell
+//              backgrounds to reproduce (from xlsxFills.readSheetFills).
 async function worksheetToPdfBytes(ws, opts = {}) {
-  const { rows, nCols, colWidths, merges, styles } = sheetToGrid(ws);
+  const { rows, nCols, colWidths, merges, styles, fills } = sheetToGrid(ws, opts.fills);
   const pdf = await PDFDocument.create();
   const reg = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -329,6 +353,27 @@ async function worksheetToPdfBytes(ws, opts = {}) {
   for (let ri = 0; ri < wrapped.length; ri++) {
     const rowH = rowHeights[ri];
     const { cells } = wrapped[ri];
+    // Pass 1: paint cell background fills BEFORE any text, so colored bands sit
+    // behind their values. A merged region is painted once, across the merged
+    // width, using the anchor cell's fill. Cells covered by a merge are skipped
+    // (their color, if any, is the anchor's). Fills come straight from the
+    // workbook — we don't invent them.
+    if (fills && fills.length) {
+      for (let c = 0; c < nCols; c++) {
+        if (covered.has(ri + ',' + c)) continue;
+        const hex = fills[ri] && fills[ri][c];
+        if (!hex) continue;
+        const { w: cw } = mergedWidth(ri, c);
+        if (cw <= 0) continue;
+        const col = rgb(
+          parseInt(hex.slice(0, 2), 16) / 255,
+          parseInt(hex.slice(2, 4), 16) / 255,
+          parseInt(hex.slice(4, 6), 16) / 255,
+        );
+        page.drawRectangle({ x: colX[c], y: y - rowH, width: cw, height: rowH, color: col });
+      }
+    }
+    // Pass 2: text on top of any fills.
     for (let c = 0; c < nCols; c++) {
       const cell = cells[c];
       if (!cell) continue; // covered by a merge anchor
@@ -347,10 +392,11 @@ async function worksheetToPdfBytes(ws, opts = {}) {
         page.drawText(txt, { x, y: ly, size: fontSize, font, color: rgb(0.1, 0.1, 0.1) });
       }
     }
-    // No invented rules/underlines. We print only the sheet's own values; the
-    // requisition report already carries whatever underlines belong in it as
-    // part of its cell content, so drawing extra ones (under "total" rows or the
-    // header band) is exactly the artifact we're removing.
+    // No invented rules/underlines. We print only the sheet's own values and
+    // its own cell fills; the requisition report already carries whatever
+    // underlines belong in it as part of its cell content, so drawing extra
+    // ones (under "total" rows or the header band) is exactly the artifact
+    // we're removing.
     y -= rowH;
   }
   return await pdf.save({ useObjectStreams: false });
@@ -368,9 +414,14 @@ async function xlsxSheetToPdf(xlsxBuffer, sheetName, opts = {}) {
     name = found || wb.SheetNames[0];
   }
   const ws = wb.Sheets[name];
+  // Read solid cell fills straight from the OOXML (SheetJS community build does
+  // not surface fills), so the rendered page reproduces the report's header
+  // band, subtotal rows, and Date cell. Degrades to no fills on any parse error.
+  let fills;
+  try { fills = await readSheetFills(xlsxBuffer, name); } catch { fills = undefined; }
   // Pass through only an explicitly-provided title; the requisition sheet carries
   // its own header block, so we don't inject the sheet name as a caption.
-  const bytes = await worksheetToPdfBytes(ws, { title: opts.title });
+  const bytes = await worksheetToPdfBytes(ws, { title: opts.title, fills });
   return { bytes, sheetUsed: name, availableSheets: wb.SheetNames };
 }
 
