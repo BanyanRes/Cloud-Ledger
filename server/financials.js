@@ -897,16 +897,23 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     // A data row: label (optionally indented) + numeric cells (strings already formatted).
     //   valueInset — right-inset (pt) so a right-aligned value doesn't jam the
     //                column's right edge (used on the wide equity columns).
-    //   colRules   — when set with ruleAbove/ruleBelow/doubleBelow, draw the
-    //                subtotal/total rules PER COLUMN (each spanning that column's
-    //                "$"-to-value box with a gutter) instead of one continuous
-    //                line across all columns.
-    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapAfter = 0, dollarPrefix = false, valueInset = 0, colRules = false } = {}) {
+    //   colRules   — draw the subtotal/total rules PER COLUMN (each spanning that
+    //                column's value box with a gutter) instead of one continuous
+    //                line across all columns. Defaults ON so every statement's
+    //                subtotal/total underlines sit under each number separately,
+    //                never as one long line running across the whole row.
+    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapAfter = 0, dollarPrefix = false, valueInset = 0, colRules = true } = {}) {
       ensure(13);
       const font = boldRow ? bold : reg;
-      // Per-numeric-column width: distance from the previous column's right edge
-      // (or a default) to this column's right edge. Used to place a left "$".
+      // Per-column rule width. For the per-column rules we want a uniform box
+      // sized to the numeric columns (the inter-column pitch), NOT the wide
+      // first-column default used for "$" placement — otherwise the leftmost
+      // rule would run far left under the label. Use the smallest inter-column
+      // pitch so no two rules overlap and each sits under just its number.
       const colWidth = (i) => (i === 0 ? 78 : Math.max(40, cols[i] - cols[i - 1]));
+      let pitch = Infinity;
+      for (let i = 1; i < cols.length; i++) pitch = Math.min(pitch, cols[i] - cols[i - 1]);
+      const ruleBoxW = Number.isFinite(pitch) ? Math.max(40, pitch) : colWidth(0);
       const ruleLeft = cols[0] - colWidth(0) + 2;
       const ruleRight = cols[cols.length - 1];
       // Per-column rule segments: one short line under each column's value box,
@@ -916,8 +923,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       const drawRule = (yy) => {
         if (colRules) {
           cols.forEach((cx, i) => {
-            const w = colWidth(i);
-            const x0 = cx - w + 2 + GUTTER / 2;
+            const x0 = cx - ruleBoxW + 2 + GUTTER / 2;
             const x1 = cx;
             page.drawLine({ start: { x: x0, y: yy }, end: { x: x1, y: yy }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
           });
