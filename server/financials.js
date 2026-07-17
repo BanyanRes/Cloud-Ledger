@@ -845,49 +845,46 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       // Remember the spec so newPage() can repeat this header on continuation
       // pages. Only record on the FIRST (body-driven) call, not during replay.
       if (!_replaying) _hdrSpec = { labels, hopts };
+      const LH = 9;                 // header line height
       const nLines = Math.max(1, ...labels.map(l => String(l).split('\n').length));
-      // Reserve height for all header lines (bottom-aligned labels can be taller
-      // than one line) plus the underline + trailing gap.
-      ensure(9 * nLines + 8);
-      // With bottomAlign the common baseline is `y`, and taller labels stack
-      // UPWARD from it. Drop the baseline first by the extra line count so the
-      // topmost line clears the heading above instead of overprinting it.
-      if (hopts.bottomAlign) y -= (nLines - 1) * 9;
-      // Per-column underline box: inter-column pitch minus a gutter, so adjacent
-      // underlines are visually separated (the "narrow column in between"). Use
-      // the smallest pitch so no two boxes overlap.
-      const GUTTER = 12; // blank points between adjacent underlines
+      // Reserve height for the tallest label block + the underline + trailing gap.
+      ensure(LH * nLines + 10);
+      // ALL column headers are bottom-aligned: the LAST line of every label sits
+      // on one common baseline, and taller (multi-line) labels grow UPWARD from
+      // it. That common baseline is `baseY`. Start the block by dropping from the
+      // cursor so the tallest label's top line clears the heading above.
+      const topY = y;                       // top of the header block
+      const baseY = topY - (nLines - 1) * LH; // common bottom baseline for last lines
+      // Per-column underline box: the inter-column pitch minus a gutter, so
+      // adjacent underlines are separated. Use the smallest pitch so no two
+      // boxes overlap.
+      const GUTTER = 14; // blank points between adjacent underline boxes
       let pitch = Infinity;
       for (let i = 1; i < cols.length; i++) pitch = Math.min(pitch, cols[i] - cols[i - 1]);
       const boxW = Number.isFinite(pitch) ? Math.max(20, pitch - GUTTER) : null;
+      // Underline sits just BELOW the last line's baseline for every column, at a
+      // single common y so all column rules line up on one row at the bottom of
+      // the header block (never crossing through the text).
+      const uy = baseY - 3;
       labels.forEach((lab, i) => {
         const parts = String(lab).split('\n');
         let maxW = 0;
         parts.forEach(pl => { const w = bold.widthOfTextAtSize(pl, FS.head); if (w > maxW) maxW = w; });
-        // With bottomAlign, the LAST line of every label sits on the common
-        // baseline `y` and earlier lines stack above it; shorter labels thus
-        // bottom-align with taller ones. Otherwise the first line sits at `y`.
+        // Bottom-align: the last line sits on baseY; earlier lines stack above it.
         parts.forEach((pl, pi) => {
           const w = bold.widthOfTextAtSize(pl, FS.head);
-          const lineY = hopts.bottomAlign
-            ? y - (parts.length - 1 - pi) * 9
-            : y - pi * 9;
+          const lineY = baseY + (parts.length - 1 - pi) * LH;
           page.drawText(pl, { x: cols[i] - w, y: lineY, size: FS.head, font: bold });
         });
-        // Underline each header cell only when explicitly requested. Default is
-        // no underline (BS dates stay bare per round-2). colBox → fixed per-
-        // column span with a gutter; otherwise hug the widest line.
         if (hopts.underline) {
-          const uy = y - 3; // just under the common bottom baseline
+          // colBox → fixed per-column span (with a gutter) so the rule reads as
+          // one-per-column; otherwise hug just the widest line of this label.
           const span = (hopts.colBox && boxW) ? boxW : maxW;
           page.drawLine({ start: { x: cols[i] - span, y: uy }, end: { x: cols[i], y: uy }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
         }
       });
-      y -= 9 * nLines;
-      y -= 3;
-      // Minimal gap so the date column headers sit directly above the first
-      // section title (ASSETS), lined up with it rather than floating above.
-      y -= 1;
+      // Advance the cursor to just below the underline plus a small gap.
+      y = uy - 8;
     },
     sectionTitle(str) {
       ensure(16);
