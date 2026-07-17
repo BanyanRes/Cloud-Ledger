@@ -153,31 +153,132 @@ function isCashAccount(r) {
   return r.type === 'Asset' && (isCashCode(r.code) || /cash|checking|savings|money market|operating acct|bank/i.test(r.name || '') || r.bank_acct);
 }
 
-function bsSection(row) {
-  const sub = (row.subtype || '').toLowerCase();
+// ── Balance-sheet classification ───────────────────────────────────────────
+// The SRN chart has no populated `subtype`, and account codes do not fall into
+// clean numeric ranges by section (e.g. 15100 Land and 15165 Railroad Track are
+// Fixed Assets, but 15160 Railroad & Building Improvements is Other Assets).
+// To reproduce the CPA package's exact groupings, we classify by an explicit
+// two-level map: section → subsection. Each balance-sheet account is assigned a
+// { section, sub } pair. Anything unmapped falls through to a name/code
+// heuristic so the statement never silently drops an account.
+//
+// Sections (in presentation order) and their subsections mirror the reference:
+//   Current Assets      → Cash and Cash Equivalents / Accounts Receivable, Net
+//                         / Intercompany Receivable / Other Current Assets
+//   Fixed Assets, Net   → Fixed Assets
+//   Intangible Assets, Net → Intangible Assets / Amortization (contra)
+//   Investments         → Long Term Investments
+//   Other Assets        → Other Assets
+//   Current Liabilities → Accounts Payable / Other Current Liabilities
+//   Long Term Liabilities → Loans
+//   Members Equity      → Members Equity / Retained Earnings
+const BS_ACCOUNT_MAP = {
+  // Current Assets
+  '10161': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10162': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10163': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10770': ['Current Assets', 'Cash and Cash Equivalents'],
+  '12000': ['Current Assets', 'Accounts Receivable, Net'],
+  '18311': ['Current Assets', 'Intercompany Receivable'],
+  '13001': ['Current Assets', 'Other Current Assets'],
+  '13100': ['Current Assets', 'Other Current Assets'],
+  '18002': ['Current Assets', 'Other Current Assets'],
+  // Fixed Assets, Net
+  '15100': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15165': ['Fixed Assets, Net', 'Fixed Assets'],
+  // Intangible Assets, Net
+  '11009': ['Intangible Assets, Net', 'Intangible Assets'],
+  '11013': ['Intangible Assets, Net', 'Intangible Assets'],
+  '11014': ['Intangible Assets, Net', 'Intangible Assets'],
+  '11016': ['Intangible Assets, Net', 'Intangible Assets'],
+  '16600': ['Intangible Assets, Net', 'Amortization'],
+  // Investments
+  '11011': ['Investments', 'Long Term Investments'],
+  '11012': ['Investments', 'Long Term Investments'],
+  '12021': ['Investments', 'Long Term Investments'],
+  // Other Assets (everything else asset-side, incl. 15160 & capitalized dev costs)
+  '11713': ['Other Assets', 'Other Assets'],
+  '11760': ['Other Assets', 'Other Assets'],
+  '11920': ['Other Assets', 'Other Assets'],
+  '12020': ['Other Assets', 'Other Assets'],
+  '12115': ['Other Assets', 'Other Assets'],
+  '12127': ['Other Assets', 'Other Assets'],
+  '12230': ['Other Assets', 'Other Assets'],
+  '12315': ['Other Assets', 'Other Assets'],
+  '12325': ['Other Assets', 'Other Assets'],
+  '12343': ['Other Assets', 'Other Assets'],
+  '12364': ['Other Assets', 'Other Assets'],
+  '12420': ['Other Assets', 'Other Assets'],
+  '12423': ['Other Assets', 'Other Assets'],
+  '12596': ['Other Assets', 'Other Assets'],
+  '12600': ['Other Assets', 'Other Assets'],
+  '12720': ['Other Assets', 'Other Assets'],
+  '12721': ['Other Assets', 'Other Assets'],
+  '12913': ['Other Assets', 'Other Assets'],
+  '15160': ['Other Assets', 'Other Assets'],
+  '11010': ['Other Assets', 'Other Assets'],
+  // Current Liabilities
+  '20000': ['Current Liabilities', 'Accounts Payable'],
+  '20002': ['Current Liabilities', 'Accounts Payable'],
+  '20210': ['Current Liabilities', 'Other Current Liabilities'],
+  '20220': ['Current Liabilities', 'Other Current Liabilities'],
+  '20230': ['Current Liabilities', 'Other Current Liabilities'],
+  '21006': ['Current Liabilities', 'Other Current Liabilities'],
+  '21110': ['Current Liabilities', 'Other Current Liabilities'],
+  '23000': ['Current Liabilities', 'Other Current Liabilities'],
+  '23375': ['Current Liabilities', 'Other Current Liabilities'],
+  // Long Term Liabilities
+  '25060': ['Long Term Liabilities', 'Loans'],
+  '25063': ['Long Term Liabilities', 'Loans'],
+  // Members Equity (Retained Earnings & Net Income handled specially in renderer)
+  '34006': ['Members Equity', 'Members Equity'],
+  '34014': ['Members Equity', 'Members Equity'],
+  '34165': ['Members Equity', 'Members Equity'],
+  '39000': ['Members Equity', 'Retained Earnings'],
+};
+
+// Contra accounts shown as a subtraction within their section (amortization).
+const BS_CONTRA_CODES = new Set(['16600']);
+
+function bsClassify(row) {
+  const explicit = BS_ACCOUNT_MAP[String(row.code)];
+  if (explicit) return { section: explicit[0], sub: explicit[1] };
+  // Heuristic fallback for accounts not in the map, so nothing is dropped.
   const name = (row.name || '').toLowerCase();
   if (row.type === 'Asset') {
-    if (/current/.test(sub)) return 'Current Assets';
-    if (/fixed/.test(sub)) return 'Fixed Assets';
-    if (/intangible/.test(sub)) return 'Intangible Assets';
-    if (/investment/.test(sub)) return 'Investments';
-    if (/other/.test(sub)) return 'Other Assets';
-    // Name/heuristic fallbacks for un-subtyped charts.
-    if (/cash|receivable|prepaid|reserve|due from|deposit/.test(name)) return 'Current Assets';
-    return 'Other Assets';
+    if (/cash|checking|savings|bank|clearing/.test(name)) return { section: 'Current Assets', sub: 'Cash and Cash Equivalents' };
+    if (/receivable/.test(name) && /due from|intercompany/.test(name)) return { section: 'Current Assets', sub: 'Intercompany Receivable' };
+    if (/receivable/.test(name)) return { section: 'Current Assets', sub: 'Accounts Receivable, Net' };
+    if (/prepaid|reserve|deposit/.test(name)) return { section: 'Current Assets', sub: 'Other Current Assets' };
+    return { section: 'Other Assets', sub: 'Other Assets' };
   }
   if (row.type === 'Liability') {
-    if (/current/.test(sub)) return 'Current Liabilities';
-    if (/long|note|loan/.test(sub)) return 'Long Term Liabilities';
-    if (/loan|note payable|bot/.test(name)) return 'Long Term Liabilities';
-    return 'Current Liabilities';
+    if (/loan|note payable|bot|bond/.test(name)) return { section: 'Long Term Liabilities', sub: 'Loans' };
+    if (/payable/.test(name)) return { section: 'Current Liabilities', sub: 'Accounts Payable' };
+    return { section: 'Current Liabilities', sub: 'Other Current Liabilities' };
   }
-  if (row.type === 'Equity') return 'Equity';
-  return 'Other';
+  if (row.type === 'Equity') {
+    if (/retained earning/.test(name)) return { section: 'Members Equity', sub: 'Retained Earnings' };
+    return { section: 'Members Equity', sub: 'Members Equity' };
+  }
+  return { section: 'Other', sub: 'Other' };
 }
 
-const BS_ASSET_ORDER = ['Current Assets', 'Fixed Assets', 'Intangible Assets', 'Investments', 'Other Assets'];
+// Back-compat shim: some callers/tests use bsSection(row) → section string.
+function bsSection(row) { return bsClassify(row).section; }
+
+// Presentation order for sections and, within each, their subsections.
+const BS_ASSET_ORDER = ['Current Assets', 'Fixed Assets, Net', 'Intangible Assets, Net', 'Investments', 'Other Assets'];
 const BS_LIAB_ORDER = ['Current Liabilities', 'Long Term Liabilities'];
+const BS_SUB_ORDER = {
+  'Current Assets': ['Cash and Cash Equivalents', 'Accounts Receivable, Net', 'Intercompany Receivable', 'Other Current Assets'],
+  'Fixed Assets, Net': ['Fixed Assets'],
+  'Intangible Assets, Net': ['Intangible Assets', 'Amortization'],
+  'Investments': ['Long Term Investments'],
+  'Other Assets': ['Other Assets'],
+  'Current Liabilities': ['Accounts Payable', 'Other Current Liabilities'],
+  'Long Term Liabilities': ['Loans'],
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // buildStatements — the numeric core. Pure given getBalances; no I/O.
@@ -231,38 +332,96 @@ async function buildStatements(getBalances, opts) {
   const bsCodes = Array.from(new Set([...colCur.map.keys(), ...colPri.map.keys()]))
     .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
 
-  function bsRowsFor(section, type) {
+  // Rows for a single (section, subsection) pair, in account-code order. Contra
+  // accounts (accumulated amortization) keep their natural sign; the renderer
+  // subtracts the subsection total at the section level.
+  function bsRowsForSub(section, sub, type) {
     return bsCodes
       .map(code => {
         const rc = colCur.map.get(code), rp = colPri.map.get(code);
         const ref = rc || rp;
         if (!ref || ref.type !== type) return null;
-        if (bsSection(ref) !== section) return null;
+        const cls = bsClassify(ref);
+        if (cls.section !== section || cls.sub !== sub) return null;
+        const cur = rc ? bal(rc) : 0, pri = rp ? bal(rp) : 0;
+        if (isZero(cur) && isZero(pri)) return null;
+        return { code, name: ref.name, cur: r2(cur), pri: r2(pri), change: r2(cur - pri), contra: BS_CONTRA_CODES.has(String(code)) };
+      })
+      .filter(Boolean);
+  }
+
+  // Build a section as an ordered list of subsections, each with its own rows and
+  // subtotal. A section's net total treats contra subsections as subtractions.
+  function bsSectionFor(section, type) {
+    const subOrder = BS_SUB_ORDER[section] || [];
+    // Include any subsection that appears in the order list first, then any
+    // unexpected subsections (defensive: never drop a classified account).
+    const seen = new Set(subOrder);
+    const extraSubs = [];
+    for (const code of bsCodes) {
+      const ref = colCur.map.get(code) || colPri.map.get(code);
+      if (!ref || ref.type !== type) continue;
+      const cls = bsClassify(ref);
+      if (cls.section === section && !seen.has(cls.sub)) { seen.add(cls.sub); extraSubs.push(cls.sub); }
+    }
+    const subs = [...subOrder, ...extraSubs]
+      .map(sub => {
+        const rows = bsRowsForSub(section, sub, type);
+        if (!rows.length) return null;
+        const isContra = rows.every(r => r.contra);
+        const subtotal = { cur: r2(rows.reduce((a, r) => a + r.cur, 0)), pri: r2(rows.reduce((a, r) => a + r.pri, 0)) };
+        return { title: sub, rows, subtotal, contra: isContra };
+      })
+      .filter(Boolean);
+    // Section net total: add non-contra subsection subtotals, subtract contra ones.
+    const total = subs.reduce((t, s) => ({
+      cur: r2(t.cur + (s.contra ? -s.subtotal.cur : s.subtotal.cur)),
+      pri: r2(t.pri + (s.contra ? -s.subtotal.pri : s.subtotal.pri)),
+    }), { cur: 0, pri: 0 });
+    return { title: section, subs, total };
+  }
+
+  const assetSections = BS_ASSET_ORDER
+    .map(s => bsSectionFor(s, 'Asset'))
+    .filter(s => s.subs.length);
+  const liabSections = BS_LIAB_ORDER
+    .map(s => bsSectionFor(s, 'Liability'))
+    .filter(s => s.subs.length);
+
+  // Equity: flat list of contributed-capital accounts (Members Equity subsection),
+  // with Retained Earnings and Net Income surfaced as their own lines by the
+  // renderer. equityRows here is only the contributed-capital accounts.
+  function equityRowsForSub(sub) {
+    return bsCodes
+      .map(code => {
+        const rc = colCur.map.get(code), rp = colPri.map.get(code);
+        const ref = rc || rp;
+        if (!ref || ref.type !== 'Equity') return null;
+        const cls = bsClassify(ref);
+        if (cls.sub !== sub) return null;
         const cur = rc ? bal(rc) : 0, pri = rp ? bal(rp) : 0;
         if (isZero(cur) && isZero(pri)) return null;
         return { code, name: ref.name, cur: r2(cur), pri: r2(pri), change: r2(cur - pri) };
       })
       .filter(Boolean);
   }
+  const equityRows = equityRowsForSub('Members Equity');
+  const retainedRows = equityRowsForSub('Retained Earnings');
 
-  const assetSections = BS_ASSET_ORDER
-    .map(s => ({ title: s, rows: bsRowsFor(s, 'Asset') }))
-    .filter(s => s.rows.length);
-  const liabSections = BS_LIAB_ORDER
-    .map(s => ({ title: s, rows: bsRowsFor(s, 'Liability') }))
-    .filter(s => s.rows.length);
-  const equityRows = bsRowsFor('Equity', 'Equity');
-
-  const totalAssets = { cur: r2(assetSections.reduce((s, x) => s + x.rows.reduce((a, r) => a + r.cur, 0), 0)),
-                        pri: r2(assetSections.reduce((s, x) => s + x.rows.reduce((a, r) => a + r.pri, 0), 0)) };
-  const totalLiab = { cur: r2(liabSections.reduce((s, x) => s + x.rows.reduce((a, r) => a + r.cur, 0), 0)),
-                      pri: r2(liabSections.reduce((s, x) => s + x.rows.reduce((a, r) => a + r.pri, 0), 0)) };
+  const totalAssets = { cur: r2(assetSections.reduce((s, x) => s + x.total.cur, 0)),
+                        pri: r2(assetSections.reduce((s, x) => s + x.total.pri, 0)) };
+  const totalLiab = { cur: r2(liabSections.reduce((s, x) => s + x.total.cur, 0)),
+                      pri: r2(liabSections.reduce((s, x) => s + x.total.pri, 0)) };
   const totalContribEquity = { cur: r2(equityRows.reduce((a, r) => a + r.cur, 0)),
                                pri: r2(equityRows.reduce((a, r) => a + r.pri, 0)) };
+  // Retained-earnings subsection total (frozen opening RE carried on the BS as
+  // its own line, separate from the current-year Net Income line).
+  const totalRetained = { cur: r2(retainedRows.reduce((a, r) => a + r.cur, 0)),
+                          pri: r2(retainedRows.reduce((a, r) => a + r.pri, 0)) };
   // Net income line: current-year YTD (cur column) and prior-year-through-prior-
   // month YTD (pri column) — matches the hand-prepared "Net Income (Loss)" row.
   const niLine = { cur: niYtd, pri: niPriYtd };
-  const totalEquity = { cur: r2(totalContribEquity.cur + niLine.cur), pri: r2(totalContribEquity.pri + niLine.pri) };
+  const totalEquity = { cur: r2(totalContribEquity.cur + totalRetained.cur + niLine.cur), pri: r2(totalContribEquity.pri + totalRetained.pri + niLine.pri) };
   const totalLiabEquity = { cur: r2(totalLiab.cur + totalEquity.cur), pri: r2(totalLiab.pri + totalEquity.pri) };
 
   // ── Statements of Operations ───────────────────────────────────────────────
@@ -414,7 +573,7 @@ async function buildStatements(getBalances, opts) {
     meta: { entityName: opts.entityName || 'Entity', asOf, priorDate: priorBsDate, longDate: longDate(asOf),
             priorLongDate: longDate(priorBsDate), monthsEnded: monthsEndedLabel(asOf),
             period: (opts.period || 'monthly').toLowerCase(), periodLabel: period.periodLabel, colLabel: period.colLabel },
-    balanceSheet: { assetSections, liabSections, equityRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
+    balanceSheet: { assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
     operations: { revenue, cogs, opex, totRev, totCogs, grossProfit, totOpex, netIncome },
     cashFlow,
     equity: { rows: equityStmt, totals: equityTotals },
@@ -542,20 +701,35 @@ async function renderStatementsPdf(s) {
     L.setCols(twoCols);
     L.colHeaders([m.longDate, m.priorLongDate]);
     L.sectionTitle('ASSETS');
-    for (const sec of s.balanceSheet.assetSections) {
+    // Two-level: section header → subsection header → accounts → subsection
+    // subtotal, then a bold section total. Subsection headers/subtotals appear
+    // only when a section has multiple subsections or a contra subsection;
+    // otherwise the section collapses to accounts directly under its header to
+    // avoid a redundant subtotal that just repeats a single account line.
+    const renderBsSection = (sec, sectionTotalLabel) => {
       L.row(sec.title, [], { indent: 6, boldRow: true });
-      for (const r of sec.rows) L.row(r.name, [money(r.cur), money(r.pri)], { indent: 16 });
-    }
+      const showSubHeaders = sec.subs.length > 1 || sec.subs.some(su => su.contra);
+      for (const su of sec.subs) {
+        if (showSubHeaders) L.row(su.title, [], { indent: 16 });
+        const rowIndent = showSubHeaders ? 26 : 16;
+        for (const r of su.rows) L.row(r.name, [money(r.cur), money(r.pri)], { indent: rowIndent });
+        if (showSubHeaders && su.rows.length > 1) {
+          const sc = su.contra ? -su.subtotal.cur : su.subtotal.cur;
+          const sp = su.contra ? -su.subtotal.pri : su.subtotal.pri;
+          L.row('Total ' + su.title, [money(sc), money(sp)], { indent: 20, ruleAbove: true });
+        }
+      }
+      L.row(sectionTotalLabel, [money(sec.total.cur), money(sec.total.pri)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    };
+    for (const sec of s.balanceSheet.assetSections) renderBsSection(sec, 'Total ' + sec.title);
     L.row('Total Assets', [money(s.balanceSheet.totalAssets.cur), money(s.balanceSheet.totalAssets.pri)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, gapAfter: 8 });
 
     L.sectionTitle('LIABILITIES AND MEMBERS\u2019 EQUITY');
-    for (const sec of s.balanceSheet.liabSections) {
-      L.row(sec.title, [], { indent: 6, boldRow: true });
-      for (const r of sec.rows) L.row(r.name, [money(r.cur), money(r.pri)], { indent: 16 });
-    }
+    for (const sec of s.balanceSheet.liabSections) renderBsSection(sec, 'Total ' + sec.title);
     L.row('Total Liabilities', [money(s.balanceSheet.totalLiab.cur), money(s.balanceSheet.totalLiab.pri)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     L.row('Members\u2019 Equity', [], { indent: 6, boldRow: true });
     for (const r of s.balanceSheet.equityRows) L.row(r.name, [money(r.cur), money(r.pri)], { indent: 16 });
+    for (const r of (s.balanceSheet.retainedRows || [])) L.row(r.name, [money(r.cur), money(r.pri)], { indent: 16 });
     L.row('Net Income (Loss)', [money(s.balanceSheet.niLine.cur), money(s.balanceSheet.niLine.pri)], { indent: 16 });
     L.row('Total Members\u2019 Equity', [money(s.balanceSheet.totalEquity.cur), money(s.balanceSheet.totalEquity.pri)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     L.row('Total Liabilities and Members\u2019 Equity', [money(s.balanceSheet.totalLiabEquity.cur), money(s.balanceSheet.totalLiabEquity.pri)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
