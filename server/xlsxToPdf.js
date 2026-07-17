@@ -1,12 +1,17 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // xlsxToPdf — pure-Node conversion of a single worksheet to a PDF (no
-// LibreOffice, Railway-safe). Reads a sheet with SheetJS, renders it with
-// pdf-lib as an auto-sized table on landscape Letter pages, paginating by rows.
+// LibreOffice, Railway-safe). Reads a sheet with SheetJS and renders it with
+// pdf-lib, reproducing the sheet's own layout as faithfully as a pure-Node
+// renderer can: native column widths (!cols), merged cells (!merges), per-cell
+// bold and horizontal alignment (cell styles), and the workbook's number
+// formats (SheetJS `w` = formatted text). Paginates by rows onto landscape
+// Letter pages and scales to fit only when the sheet is wider than the page.
 //
 // Used by the Financial Statements engine so an uploaded .xlsx requisition
-// report (e.g. the "Budget to Actual" sheet) can be merged into the package
-// the same way a PDF requisition report is. The resulting PDF has a real text
-// layer, so downstream stripInvoiceLogPages() works unchanged.
+// report's "Budget to Actual" sheet can be merged into the package faithfully
+// (we pull the report and convert it, rather than re-formatting it). The
+// resulting PDF has a real text layer, so downstream stripInvoiceLogPages()
+// works unchanged.
 // ═══════════════════════════════════════════════════════════════════════════
 const XLSX = require('xlsx');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
@@ -16,10 +21,21 @@ const LP = { w: 792, h: 612, mL: 30, mR: 30, mT: 40, mB: 34 };
 const BODY_FONT = 7;       // pt for body rows
 const ROW_PAD = 3;         // vertical padding within a row
 const CELL_PAD = 4;        // horizontal padding within a cell
-const MIN_COL_W = 14;      // never collapse a column narrower than this
+const MIN_COL_W = 10;      // never collapse a column narrower than this
+
+// Excel column width (in "characters" of the default font) → points. Excel's
+// width unit is roughly the width of the '0' glyph; the common conversion is
+// px = round(width * 7 + 5), and pt = px * 72/96. We use that so a sheet whose
+// columns were sized in Excel keeps its proportions.
+function excelWidthToPoints(w) {
+  if (w == null) return null;
+  const px = Math.round(w * 7 + 5);
+  return px * 72 / 96;
+}
 
 // A cell value looks numeric if, after stripping accounting punctuation, it is
-// a number. We right-align those. Percentages and parenthesized negatives count.
+// a number. We right-align those (unless a style says otherwise). Percentages
+// and parenthesized negatives count.
 function isNumericDisplay(s) {
   if (s == null) return false;
   const t = String(s).trim();
@@ -29,20 +45,31 @@ function isNumericDisplay(s) {
   return cleaned !== '' && !isNaN(Number(cleaned));
 }
 
-// Read a worksheet into a dense 2D array of display strings, honoring the
-// workbook's number formats (SheetJS `w` = formatted text) and cached values.
-// Blank cells become ''. Leading/trailing all-blank rows/cols are trimmed.
+// Read a worksheet into a structured grid honoring number formats and cached
+// values, plus the sheet's native column widths, merged ranges, and per-cell
+// style hints (bold, horizontal alignment). Blank leading/trailing rows/cols
+// are trimmed; the same trim offset is applied to widths and merges so
+// everything stays aligned.
+//   returns { rows, nCols, colWidths, merges, styles }
+//     rows[r][c]     = display string
+//     colWidths[c]   = points (or null → auto)
+//     merges         = [{ r, c, rs, cs }] (top-left row/col + row/col span),
+//                      already shifted into the trimmed coordinate space
+//     styles[r][c]   = { bold, align } | undefined
 function sheetToGrid(ws) {
   const ref = ws['!ref'];
-  if (!ref) return { rows: [], nCols: 0 };
+  if (!ref) return { rows: [], nCols: 0, colWidths: [], merges: [], styles: [] };
   const range = XLSX.utils.decode_range(ref);
   const grid = [];
+  const styles = [];
   for (let r = range.s.r; r <= range.e.r; r++) {
     const row = [];
+    const styleRow = [];
     for (let c = range.s.c; c <= range.e.c; c++) {
       const addr = XLSX.utils.encode_cell({ r, c });
       const cell = ws[addr];
       let text = '';
+      let st;
       if (cell) {
         if (cell.w != null) text = String(cell.w);
         else if (cell.v != null) {
@@ -51,46 +78,99 @@ function sheetToGrid(ws) {
             text = (d.getMonth() + 1) + '/' + d.getDate() + '/' + d.getFullYear();
           } else text = String(cell.v);
         }
+        // Cell style (present when the workbook was read with cellStyles: true).
+        const s = cell.s;
+        if (s) {
+          const bold = !!(s.font && s.font.bold);
+          const align = s.alignment && s.alignment.horizontal; // 'left'|'center'|'right'|undefined
+          if (bold || align) st = { bold, align };
+        }
       }
       row.push(text);
+      styleRow.push(st);
     }
     grid.push(row);
+    styles.push(styleRow);
   }
+
+  // Native column widths (points), indexed from range.s.c.
+  const colsMeta = ws['!cols'] || [];
+  const rawWidths = [];
+  for (let c = range.s.c; c <= range.e.c; c++) {
+    const meta = colsMeta[c];
+    let pts = null;
+    if (meta) {
+      if (meta.hidden) pts = 0;
+      else if (meta.wpx != null) pts = meta.wpx * 72 / 96;
+      else if (meta.wch != null) pts = excelWidthToPoints(meta.wch);
+      else if (meta.width != null) pts = excelWidthToPoints(meta.width);
+    }
+    rawWidths.push(pts);
+  }
+
+  // Trim trailing/leading empty columns and trailing empty rows, keeping widths,
+  // styles, and merges aligned.
   let nCols = grid.reduce((m, row) => Math.max(m, row.length), 0);
   const colHasContent = new Array(nCols).fill(false);
   for (const row of grid) for (let c = 0; c < nCols; c++) if ((row[c] || '').trim()) colHasContent[c] = true;
   let lastCol = -1;
   for (let c = 0; c < nCols; c++) if (colHasContent[c]) lastCol = c;
   nCols = lastCol + 1;
-  const trimmed = grid.map(row => row.slice(0, nCols));
-  while (trimmed.length && trimmed[trimmed.length - 1].every(v => !(v || '').trim())) trimmed.pop();
   let firstCol = nCols;
   for (let c = 0; c < nCols; c++) if (colHasContent[c]) { firstCol = c; break; }
-  if (firstCol > 0 && firstCol < nCols) {
-    return { rows: trimmed.map(row => row.slice(firstCol)), nCols: nCols - firstCol };
+  if (firstCol === nCols) firstCol = 0; // all-empty guard
+
+  const sliceRow = row => row.slice(firstCol, nCols);
+  let trimmed = grid.map(sliceRow);
+  let trimmedStyles = styles.map(sliceRow);
+  // Drop trailing all-blank rows (keep interior blanks — they are layout).
+  while (trimmed.length && trimmed[trimmed.length - 1].every(v => !(v || '').trim())) {
+    trimmed.pop(); trimmedStyles.pop();
   }
-  return { rows: trimmed, nCols };
+  const outNCols = nCols - firstCol;
+  const colWidths = rawWidths.slice(firstCol, nCols);
+
+  // Merged ranges → trimmed coordinate space; drop any fully outside the kept area.
+  const merges = [];
+  for (const m of (ws['!merges'] || [])) {
+    const r0 = m.s.r - range.s.r, c0 = m.s.c - range.s.c - firstCol;
+    const r1 = m.e.r - range.s.r, c1 = m.e.c - range.s.c - firstCol;
+    if (c1 < 0 || c0 >= outNCols) continue;
+    if (r0 >= trimmed.length) continue;
+    merges.push({
+      r: Math.max(0, r0), c: Math.max(0, c0),
+      rs: Math.min(r1, trimmed.length - 1) - Math.max(0, r0) + 1,
+      cs: Math.min(c1, outNCols - 1) - Math.max(0, c0) + 1,
+    });
+  }
+
+  return { rows: trimmed, nCols: outNCols, colWidths, merges, styles: trimmedStyles };
 }
 
-// Compute column widths from content, then scale to fit the printable width.
-function computeColWidths(rows, nCols, font, bold, fontSize) {
-  const widths = new Array(nCols).fill(MIN_COL_W);
-  for (let ri = 0; ri < rows.length; ri++) {
-    const row = rows[ri];
-    for (let c = 0; c < nCols; c++) {
-      const txt = row[c] || '';
+// Resolve final column widths in points: use the sheet's native width where it
+// has one; otherwise size from content. Then, if the total exceeds the
+// printable width, scale everything down proportionally to fit.
+function resolveColWidths(rows, nCols, colWidths, styles, font, bold, fontSize) {
+  const widths = new Array(nCols).fill(0);
+  for (let c = 0; c < nCols; c++) {
+    if (colWidths[c] != null) { widths[c] = Math.max(colWidths[c] === 0 ? 0 : MIN_COL_W, colWidths[c]); continue; }
+    // Content-based fallback for columns Excel didn't size.
+    let w = MIN_COL_W;
+    for (let ri = 0; ri < rows.length; ri++) {
+      const txt = rows[ri][c] || '';
       if (!txt) continue;
-      const f = ri < 2 ? bold : font; // header-ish rows use bold metrics
-      let w;
-      try { w = f.widthOfTextAtSize(txt, fontSize); } catch { w = txt.length * fontSize * 0.5; }
-      widths[c] = Math.max(widths[c], w + CELL_PAD * 2);
+      const f = (styles[ri] && styles[ri][c] && styles[ri][c].bold) || ri < 2 ? bold : font;
+      let tw;
+      try { tw = f.widthOfTextAtSize(txt, fontSize); } catch { tw = txt.length * fontSize * 0.5; }
+      w = Math.max(w, tw + CELL_PAD * 2);
     }
+    widths[c] = w;
   }
   const printable = LP.w - LP.mL - LP.mR;
   const total = widths.reduce((a, b) => a + b, 0);
-  if (total > printable) {
+  if (total > printable && total > 0) {
     const scale = printable / total;
-    for (let c = 0; c < nCols; c++) widths[c] = Math.max(MIN_COL_W * 0.6, widths[c] * scale);
+    for (let c = 0; c < nCols; c++) widths[c] = widths[c] * scale;
   }
   return widths;
 }
@@ -102,6 +182,7 @@ const strW = (font, s, sz) => { try { return font.widthOfTextAtSize(s, sz); } ca
 function wrapText(str, font, fontSize, maxWidth) {
   const s = String(str || '');
   if (!s) return [''];
+  if (maxWidth <= 0) return [s];
   if (strW(font, s, fontSize) <= maxWidth) return [s];
   const words = s.split(/\s+/);
   const lines = [];
@@ -125,10 +206,10 @@ function wrapText(str, font, fontSize, maxWidth) {
   return lines.length ? lines : [''];
 }
 
-// Render one worksheet (SheetJS worksheet object) to PDF bytes.
-// opts: { title } — optional heading drawn atop the first page.
+// Render one worksheet (SheetJS worksheet object) to PDF bytes, reproducing its
+// column widths, merges, bold, and alignment. opts: { title }.
 async function worksheetToPdfBytes(ws, opts = {}) {
-  const { rows, nCols } = sheetToGrid(ws);
+  const { rows, nCols, colWidths, merges, styles } = sheetToGrid(ws);
   const pdf = await PDFDocument.create();
   const reg = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -141,31 +222,57 @@ async function worksheetToPdfBytes(ws, opts = {}) {
   }
 
   const fontSize = nCols > 12 ? BODY_FONT : BODY_FONT + 0.5;
-  const widths = computeColWidths(rows, nCols, reg, bold, fontSize);
+  const widths = resolveColWidths(rows, nCols, colWidths, styles, reg, bold, fontSize);
   const lineH = fontSize + 1.5;                    // leading between wrapped lines
   const colX = [LP.mL];
   for (let c = 0; c < nCols; c++) colX.push(colX[c] + widths[c]);
 
+  // Map each cell that is covered by a merge (but not the top-left anchor) so we
+  // skip drawing it; the anchor draws across the full merged width.
+  const covered = new Set();       // "r,c" of non-anchor covered cells
+  const anchorSpan = new Map();    // "r,c" (anchor) -> colspan in columns
+  for (const m of merges) {
+    for (let dr = 0; dr < m.rs; dr++) {
+      for (let dc = 0; dc < m.cs; dc++) {
+        if (dr === 0 && dc === 0) continue;
+        covered.add((m.r + dr) + ',' + (m.c + dc));
+      }
+    }
+    anchorSpan.set(m.r + ',' + m.c, m.cs);
+  }
+  const mergedWidth = (r, c) => {
+    const cs = anchorSpan.get(r + ',' + c) || 1;
+    let w = 0;
+    for (let k = 0; k < cs && (c + k) < nCols; k++) w += widths[c + k];
+    return { w, cs };
+  };
+
   // Pre-wrap every cell so we know each row's height (tallest wrapped cell).
-  // Numeric cells are never wrapped (they always fit their auto-sized column).
-  const wrapped = [];   // wrapped[ri][c] = { lines, numeric, font }
+  // Numeric cells are never wrapped (they fit their column by construction).
+  const wrapped = [];   // wrapped[ri][c] = { lines, align, font } | null (covered)
   const rowHeights = [];
   for (let ri = 0; ri < rows.length; ri++) {
     const row = rows[ri];
-    const isHeader = ri < 2;
+    const isHeaderish = ri < 2;
     const firstLabel = (row.find(v => (v || '').trim()) || '').toLowerCase();
     const isTotalRow = /(^total|costs? total|project costs|grand total|balance remaining$)/.test(firstLabel);
-    const cellFont = isHeader ? bold : (isTotalRow ? bold : reg);
     const cells = [];
     let maxLines = 1;
     for (let c = 0; c < nCols; c++) {
+      if (covered.has(ri + ',' + c)) { cells.push(null); continue; }
       const raw = row[c] || '';
-      const numeric = !isHeader && isNumericDisplay(raw);
-      const lines = (!raw) ? [''] : (numeric ? [raw] : wrapText(raw, cellFont, fontSize, widths[c] - CELL_PAD * 2));
+      const st = styles[ri] && styles[ri][c];
+      const cellFont = (st && st.bold) || isHeaderish || isTotalRow ? bold : reg;
+      const numeric = isNumericDisplay(raw) && !(st && st.align);
+      // Alignment: explicit style wins; else numeric→right, else left.
+      const align = (st && st.align) || (numeric ? 'right' : 'left');
+      const { w: cw } = mergedWidth(ri, c);
+      const avail = cw - CELL_PAD * 2;
+      const lines = (!raw) ? [''] : (numeric ? [raw] : wrapText(raw, cellFont, fontSize, avail));
       if (lines.length > maxLines) maxLines = lines.length;
-      cells.push({ lines, numeric, font: cellFont });
+      cells.push({ lines, align, font: cellFont });
     }
-    wrapped.push({ cells, isHeader, isTotalRow });
+    wrapped.push({ cells, isTotalRow, headerish: isHeaderish });
     rowHeights.push(maxLines * lineH + ROW_PAD * 2);
   }
 
@@ -185,17 +292,24 @@ async function worksheetToPdfBytes(ws, opts = {}) {
     if (y - rowH < LP.mB) newPage(false);
     const { cells, isTotalRow } = wrapped[ri];
     for (let c = 0; c < nCols; c++) {
-      const { lines, numeric, font } = cells[c];
+      const cell = cells[c];
+      if (!cell) continue; // covered by a merge anchor
+      const { lines, align, font } = cell;
       if (lines.length === 1 && !lines[0]) continue;
+      const { w: cw } = mergedWidth(ri, c);
       for (let li = 0; li < lines.length; li++) {
         const txt = lines[li];
         if (!txt) continue;
         const tw = strW(font, txt, fontSize);
-        const x = numeric ? colX[c] + widths[c] - CELL_PAD - tw : colX[c] + CELL_PAD;
+        let x;
+        if (align === 'right') x = colX[c] + cw - CELL_PAD - tw;
+        else if (align === 'center') x = colX[c] + (cw - tw) / 2;
+        else x = colX[c] + CELL_PAD;
         const ly = y - ROW_PAD - fontSize - li * lineH;
         page.drawText(txt, { x, y: ly, size: fontSize, font, color: rgb(0.1, 0.1, 0.1) });
       }
     }
+    // Keep the light rule under the header band and under total rows.
     if (ri === 1 || isTotalRow) {
       page.drawLine({ start: { x: LP.mL, y: y - rowH + 1 }, end: { x: colX[nCols], y: y - rowH + 1 }, thickness: 0.4, color: rgb(0.55, 0.55, 0.55) });
     }
@@ -208,7 +322,8 @@ async function worksheetToPdfBytes(ws, opts = {}) {
 // found, falls back to case-insensitive match, else the first sheet.
 // Returns { bytes, sheetUsed, availableSheets }.
 async function xlsxSheetToPdf(xlsxBuffer, sheetName, opts = {}) {
-  const wb = XLSX.read(xlsxBuffer, { type: 'buffer', cellDates: true, cellNF: true, cellText: true });
+  // cellStyles: true so we can read bold/alignment and !cols widths faithfully.
+  const wb = XLSX.read(xlsxBuffer, { type: 'buffer', cellDates: true, cellNF: true, cellText: true, cellStyles: true });
   let name = sheetName;
   if (!name || !wb.Sheets[name]) {
     const found = wb.SheetNames.find(n => n.toLowerCase() === String(sheetName || '').toLowerCase());
