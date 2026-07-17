@@ -29,6 +29,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+const { xlsxSheetToPdf, looksLikeXlsx } = require('./xlsxToPdf');
 
 // ── numeric helpers ────────────────────────────────────────────────────────
 const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
@@ -726,11 +727,15 @@ async function renderCoverPdf(meta) {
 // args: {
 //   statements,                 // result of buildStatements
 //   execSummaryBytes (optional) // uploaded exec-summary PDF
-//   reqReportBytes (optional)   // uploaded requisition-report PDF
+//   reqReportBytes (optional)   // uploaded requisition report — PDF or .xlsx
+//   reqReportName (optional)    // original filename, used to detect .xlsx
+//   reqSheetName (optional)     // worksheet to extract when .xlsx (default
+//                               //   "Budget to Actual", case-insensitive; falls
+//                               //   back to first sheet if not present)
 // }
 // Returns { bytes, info: { pages, reqRemoved, reqKept, cashFlowTies, ... } }.
 // ═══════════════════════════════════════════════════════════════════════════
-async function generatePackage({ statements, execSummaryBytes, reqReportBytes }) {
+async function generatePackage({ statements, execSummaryBytes, reqReportBytes, reqReportName, reqSheetName }) {
   const merged = await PDFDocument.create();
   const info = { sections: [], warnings: [] };
 
@@ -753,16 +758,40 @@ async function generatePackage({ statements, execSummaryBytes, reqReportBytes })
   else info.warnings.push('No executive summary uploaded.');
   // 3. GL statements
   await appendPdf(await renderStatementsPdf(statements), 'Financial Statements');
-  // 4. Requisition report (uploaded, invoice-log pages stripped)
+  // 4. Requisition report (uploaded). Accepts a PDF or an .xlsx workbook. When a
+  //    workbook is uploaded, extract the requested sheet (default "Budget to
+  //    Actual") and render it to a PDF page first — the rendered PDF carries a
+  //    real text layer, so invoice-log stripping runs on it identically.
   if (reqReportBytes) {
-    const stripped = await stripInvoiceLogPages(reqReportBytes);
-    info.reqRemoved = stripped.removed;
-    info.reqKept = stripped.kept;
-    info.reqTotal = stripped.total;
-    if (!stripped.textDetected) info.warnings.push(stripped.parseFailed
-      ? 'Requisition PDF could not be parsed for invoice-log detection; all pages were kept.'
-      : 'Requisition PDF had no extractable text; invoice-log pages could not be detected and were left in.');
-    await appendPdf(stripped.bytes, 'Requisition Report');
+    let reqPdfBytes = reqReportBytes;
+    if (looksLikeXlsx(reqReportBytes, reqReportName)) {
+      try {
+        const wantSheet = reqSheetName || 'Budget to Actual';
+        const conv = await xlsxSheetToPdf(reqReportBytes, wantSheet, {
+          title: (statements.meta.entityName || 'Requisition') + ' \u2014 ' + wantSheet,
+        });
+        reqPdfBytes = Buffer.from(conv.bytes);
+        info.reqConvertedFromXlsx = true;
+        info.reqSheetUsed = conv.sheetUsed;
+        info.reqAvailableSheets = conv.availableSheets;
+        if (conv.sheetUsed.toLowerCase() !== wantSheet.toLowerCase()) {
+          info.warnings.push('Requisition workbook had no "' + wantSheet + '" sheet; used "' + conv.sheetUsed + '" instead.');
+        }
+      } catch (e) {
+        info.warnings.push('Could not convert requisition workbook to PDF: ' + e.message);
+        reqPdfBytes = null;
+      }
+    }
+    if (reqPdfBytes) {
+      const stripped = await stripInvoiceLogPages(reqPdfBytes);
+      info.reqRemoved = stripped.removed;
+      info.reqKept = stripped.kept;
+      info.reqTotal = stripped.total;
+      if (!stripped.textDetected) info.warnings.push(stripped.parseFailed
+        ? 'Requisition PDF could not be parsed for invoice-log detection; all pages were kept.'
+        : 'Requisition PDF had no extractable text; invoice-log pages could not be detected and were left in.');
+      await appendPdf(stripped.bytes, 'Requisition Report');
+    }
   } else {
     info.warnings.push('No requisition report uploaded.');
   }

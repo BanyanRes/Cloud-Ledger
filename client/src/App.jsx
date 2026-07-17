@@ -3191,8 +3191,8 @@ function FinancialStatements({entityId,entityName,canEdit=true}){
           {execFile&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{execFile.name}</span>}
         </div>
         <div>
-          <label style={S.label}>Requisition report (Invoice Log pages removed automatically)</label>
-          <input type="file" accept=".pdf" disabled={!canEdit} onChange={e=>setReqFile(e.target.files[0]||null)} style={{fontSize:13}}/>
+          <label style={S.label}>Requisition report (PDF or Excel &mdash; Invoice Log pages removed automatically)</label>
+          <input type="file" accept=".pdf,.xlsx,.xls" disabled={!canEdit} onChange={e=>setReqFile(e.target.files[0]||null)} style={{fontSize:13}}/>
           {reqFile&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{reqFile.name}</span>}
         </div>
       </div>
@@ -3207,7 +3207,7 @@ function FinancialStatements({entityId,entityName,canEdit=true}){
       <div style={{fontSize:13,color:T.text}}>
         {(result.sections||[]).map((s,i)=><span key={i} style={{marginRight:14}}>{s.label}: <b>{s.pages}</b>p</span>)}
       </div>
-      {result.reqTotal!=null&&<div style={{marginTop:8,fontSize:12,color:T.textMuted}}>Requisition report: kept {result.reqKept} of {result.reqTotal} pages{(result.reqRemoved&&result.reqRemoved.length)?(' (removed '+result.reqRemoved.length+' invoice-log page'+(result.reqRemoved.length>1?'s':'')+')'):''}.</div>}
+      {result.reqTotal!=null&&<div style={{marginTop:8,fontSize:12,color:T.textMuted}}>Requisition report{result.reqConvertedFromXlsx?(' (converted from Excel'+(result.reqSheetUsed?', sheet "'+result.reqSheetUsed+'"':'')+')'):''}: kept {result.reqKept} of {result.reqTotal} pages{(result.reqRemoved&&result.reqRemoved.length)?(' (removed '+result.reqRemoved.length+' invoice-log page'+(result.reqRemoved.length>1?'s':'')+')'):''}.</div>}
       {(result.warnings||[]).length>0&&<div style={{marginTop:8,fontSize:12,color:T.orange}}>{result.warnings.map((w,i)=><div key={i}>⚠ {w}</div>)}</div>}
       <div style={{marginTop:8,fontSize:12,color:T.textMuted}}>The PDF has downloaded. Review before distributing.</div>
     </div>}

@@ -6515,9 +6515,12 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
 
       const files = req.files || {};
       const execSummaryBytes = files.execSummary && files.execSummary[0] ? files.execSummary[0].buffer : null;
-      const reqReportBytes = files.reqReport && files.reqReport[0] ? files.reqReport[0].buffer : null;
+      const reqReportFile = files.reqReport && files.reqReport[0] ? files.reqReport[0] : null;
+      const reqReportBytes = reqReportFile ? reqReportFile.buffer : null;
+      const reqReportName = reqReportFile ? reqReportFile.originalname : null;
+      const reqSheetName = req.body.req_sheet || undefined; // optional override; default "Budget to Actual"
 
-      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, reqReportBytes });
+      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, reqReportBytes, reqReportName, reqSheetName });
 
       const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
       const safeName = entityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
@@ -6527,6 +6530,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       res.setHeader('X-Financials-Summary', JSON.stringify({
         pages: info.pages, sections: info.sections, warnings: info.warnings,
         reqRemoved: info.reqRemoved || [], reqKept: info.reqKept, reqTotal: info.reqTotal,
+        reqConvertedFromXlsx: info.reqConvertedFromXlsx || false, reqSheetUsed: info.reqSheetUsed,
         balanceSheetTies: info.balanceSheetTies, cashFlowTies: info.cashFlowTies, cashFlowDiff: info.cashFlowDiff,
         checks: statements.checks,
       }).replace(/[\r\n]/g, ' '));
