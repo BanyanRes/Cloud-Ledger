@@ -878,7 +878,13 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       y -= 13;
     },
     // A data row: label (optionally indented) + numeric cells (strings already formatted).
-    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapAfter = 0, dollarPrefix = false } = {}) {
+    //   valueInset — right-inset (pt) so a right-aligned value doesn't jam the
+    //                column's right edge (used on the wide equity columns).
+    //   colRules   — when set with ruleAbove/ruleBelow/doubleBelow, draw the
+    //                subtotal/total rules PER COLUMN (each spanning that column's
+    //                "$"-to-value box with a gutter) instead of one continuous
+    //                line across all columns.
+    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapAfter = 0, dollarPrefix = false, valueInset = 0, colRules = false } = {}) {
       ensure(13);
       const font = boldRow ? bold : reg;
       // Per-numeric-column width: distance from the previous column's right edge
@@ -886,24 +892,37 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       const colWidth = (i) => (i === 0 ? 78 : Math.max(40, cols[i] - cols[i - 1]));
       const ruleLeft = cols[0] - colWidth(0) + 2;
       const ruleRight = cols[cols.length - 1];
-      if (ruleAbove) { page.drawLine({ start: { x: ruleLeft, y: y + 9 }, end: { x: ruleRight, y: y + 9 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) }); }
+      // Per-column rule segments: one short line under each column's value box,
+      // leaving a gutter between adjacent columns so the rules read as one-per-
+      // column rather than a single line drawn straight across ("일직선").
+      const GUTTER = 12;
+      const drawRule = (yy) => {
+        if (colRules) {
+          cols.forEach((cx, i) => {
+            const w = colWidth(i);
+            const x0 = cx - w + 2 + GUTTER / 2;
+            const x1 = cx;
+            page.drawLine({ start: { x: x0, y: yy }, end: { x: x1, y: yy }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
+          });
+        } else {
+          page.drawLine({ start: { x: ruleLeft, y: yy }, end: { x: ruleRight, y: yy }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
+        }
+      };
+      if (ruleAbove) drawRule(y + 9);
       page.drawText(String(label), { x: PAGE.mL + indent, y, size: FS.row, font });
       cells.forEach((c, i) => {
         if (c == null || c === '') return;
         const s = String(c);
         const w = font.widthOfTextAtSize(s, FS.row);
-        page.drawText(s, { x: cols[i] - w, y, size: FS.row, font });
+        page.drawText(s, { x: cols[i] - w - valueInset, y, size: FS.row, font });
         if (dollarPrefix) {
           // "$" anchored at the left of this column's cell box.
           const dx = cols[i] - colWidth(i) + 2;
           page.drawText('$', { x: dx, y, size: FS.row, font });
         }
       });
-      if (ruleBelow) { page.drawLine({ start: { x: ruleLeft, y: y - 3 }, end: { x: ruleRight, y: y - 3 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) }); }
-      if (doubleBelow) {
-        page.drawLine({ start: { x: ruleLeft, y: y - 3 }, end: { x: ruleRight, y: y - 3 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
-        page.drawLine({ start: { x: ruleLeft, y: y - 5 }, end: { x: ruleRight, y: y - 5 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
-      }
+      if (ruleBelow) drawRule(y - 3);
+      if (doubleBelow) { drawRule(y - 3); drawRule(y - 5); }
       y -= 12 + gapAfter;
     },
   };
@@ -1081,22 +1100,26 @@ async function renderStatementsPdf(s, outOffsets) {
     };
     const begDate = '1/1/' + String(m.asOf).slice(0, 4);
     const endDate = shortMD(m.longDate);
-    // Right-edges evenly spaced across the right ~60% of the landscape width,
-    // leaving the left ~250pt for the member-name labels. Each column is ~88pt,
-    // enough for a "$" prefix plus a large right-aligned value on one row.
-    const c1 = LRIGHT - 350, c2 = LRIGHT - 262, c3 = LRIGHT - 174, c4 = LRIGHT - 86, c5 = LRIGHT;
+    // Right-edges with a wider ~104pt pitch so a "$" prefix and a large right-
+    // aligned value never crowd and there is a visible gap between columns.
+    // Leaves the left ~270pt for the member-name labels.
+    const PITCH = 104;
+    const c5 = LRIGHT, c4 = c5 - PITCH, c3 = c4 - PITCH, c2 = c3 - PITCH, c1 = c2 - PITCH;
     const eCols = [c1, c2, c3, c4, c5];
     L.setCols(eCols);
+    // Date on the TOP line of each dated header, with "Balances at" / "Equity"
+    // beneath it, so the header underline sits at the BOTTOM of the block.
     L.colHeaders([
-      'Equity\nBalances at\n' + begDate,
+      begDate + '\nBalances at\nEquity',
       'Contributions',
       'Distributions',
       'Net Income\n(Loss)',
-      'Equity\nBalances at\n' + endDate,
+      endDate + '\nBalances at\nEquity',
     ], { bottomAlign: true, underline: true, colBox: true });
-    // Money cell with a "$" prefix at the column's left and the value right-aligned.
+    // Money cell with a "$" prefix at the column's left and the value right-
+    // aligned with a small inset so it doesn't jam against the column edge.
     const dollarRow = (label, vals, o = {}) => {
-      L.row(label, vals.map(v => acct(v)), Object.assign({ indent: 10, dollarPrefix: true }, o));
+      L.row(label, vals.map(v => acct(v)), Object.assign({ indent: 10, dollarPrefix: true, valueInset: 4 }, o));
     };
     L.row('Member', [], { indent: 6, boldRow: true });
     for (const r of s.equity.rows) {
@@ -1104,7 +1127,7 @@ async function renderStatementsPdf(s, outOffsets) {
     }
     const t = s.equity.totals;
     dollarRow('Total', [t.beginning, t.contributions, t.distributions, t.netIncome, t.ending],
-      { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+      { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, colRules: true });
   }
 
   return await pdf.save();
