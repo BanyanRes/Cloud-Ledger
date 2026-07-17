@@ -280,6 +280,106 @@ const BS_SUB_ORDER = {
   'Long Term Liabilities': ['Loans'],
 };
 
+// ── P&L operating-expense classification ────────────────────────────────────
+// Per the CLR operating-expense restructure (Will Myers / Jimmy Yun, Jun 2026),
+// the old broad P&L sections (G&A, Payroll, Utilities & Facilities, Taxes &
+// Insurance) are replaced by 11 finer categories. NO GL accounts change — this
+// is purely a re-grouping of how expense sub-lines roll up into subtotals, so
+// the operating-expense grand total (and therefore net income) is unaffected.
+//
+// Management Fees is intentionally kept as its own unchanged category. Car Hire
+// and other cost-of-revenue lines are handled separately as COGS and are not
+// part of this map.
+//
+// PL_EXPENSE_MAP is an explicit code → category assignment built from the SRN
+// chart; PL_EXPENSE_CATEGORY_ORDER fixes the presentation order. Any expense
+// account not in the map falls through to a name heuristic so other CLR
+// entities' charts still classify sensibly rather than dropping a line.
+const PL_EXPENSE_MAP = {
+  // Professional Services
+  '63000': 'Professional Services',   // Accounting
+  '63025': 'Professional Services',   // Professional Fees
+  // Technology & Software
+  '67300': 'Technology & Software',   // Telephone & Internet
+  // Administrative & Other
+  '60200': 'Administrative & Other',  // Payroll Processing Fee (bank/processing)
+  '60210': 'Administrative & Other',  // Travel
+  '60500': 'Administrative & Other',  // Meals
+  '67100': 'Administrative & Other',  // Dues & Subscriptions
+  '67150': 'Administrative & Other',  // Miscellaneous
+  '67200': 'Administrative & Other',  // Office Expense
+  '67400': 'Administrative & Other',  // Advertising & Marketing
+  // Personnel / Payroll
+  '60000': 'Personnel / Payroll',     // Salaries & Wages
+  '60002': 'Personnel / Payroll',     // Payroll Taxes
+  '60005': 'Personnel / Payroll',     // Health Insurance
+  '60012': 'Personnel / Payroll',     // RRB Taxes - Employer Portion
+  '63042': 'Personnel / Payroll',     // Offsite Staff
+  // Track & Infrastructure
+  '61050': 'Track & Infrastructure',  // Site/Yard Maintenance
+  // Equipment & Rolling Stock
+  '61000': 'Equipment & Rolling Stock', // Locomotive Rent
+  '61005': 'Equipment & Rolling Stock', // Vehicle Rent
+  '61053': 'Equipment & Rolling Stock', // Equipment Supplies
+  '61054': 'Equipment & Rolling Stock', // Locomotive Repair
+  // Fuel & Utilities
+  '61150': 'Fuel & Utilities',        // Utilities
+  '61152': 'Fuel & Utilities',        // Water
+  '61164': 'Fuel & Utilities',        // Fuel
+  // Contracted Services
+  '61056': 'Contracted Services',     // Landscape Maintenance
+  '61064': 'Contracted Services',     // Pest Control Services
+  // Insurance
+  '65000': 'Insurance',               // Insurance - Liability
+  '68055': 'Insurance',               // Property Insurance
+  // Taxes & Assessments
+  '68000': 'Taxes & Assessments',     // Tax & License
+  '68050': 'Taxes & Assessments',     // Property Tax
+  '68060': 'Taxes & Assessments',     // State and Local Taxes
+  // Regulatory & Compliance — new category; no SRN accounts yet
+  // Management Fees (unchanged)
+  '63041': 'Management Fees',         // CLRO Management Fees
+};
+
+// Presentation order for operating-expense categories (Management Fees last,
+// kept separate and unchanged per the email).
+const PL_EXPENSE_CATEGORY_ORDER = [
+  'Professional Services',
+  'Technology & Software',
+  'Administrative & Other',
+  'Personnel / Payroll',
+  'Track & Infrastructure',
+  'Equipment & Rolling Stock',
+  'Fuel & Utilities',
+  'Contracted Services',
+  'Insurance',
+  'Taxes & Assessments',
+  'Regulatory & Compliance',
+  'Management Fees',
+];
+
+// Classify an expense account into one of the 11 categories. Explicit map wins;
+// otherwise a name heuristic keeps unmapped accounts (other CLR entities) from
+// being dropped. Falls back to 'Administrative & Other' as a catch-all.
+function plExpenseCategory(row) {
+  const explicit = PL_EXPENSE_MAP[String(row.code)];
+  if (explicit) return explicit;
+  const name = (row.name || '').toLowerCase();
+  if (/management fee/.test(name)) return 'Management Fees';
+  if (/wage|salary|salaries|payroll|benefit|health insurance|rrb|offsite staff|overtime/.test(name)) return 'Personnel / Payroll';
+  if (/accounting|legal|professional fee|engineering|consulting|environmental consult/.test(name)) return 'Professional Services';
+  if (/software|subscription|telecom|telephone|internet/.test(name)) return 'Technology & Software';
+  if (/fra|regulatory|compliance/.test(name)) return 'Regulatory & Compliance';
+  if (/diesel|fuel|electric|water|utilit/.test(name)) return 'Fuel & Utilities';
+  if (/locomotive|truck|vehicle|equipment|rolling stock/.test(name)) return 'Equipment & Rolling Stock';
+  if (/track|crossing|site\/yard|yard maintenance|infrastructure/.test(name)) return 'Track & Infrastructure';
+  if (/landscap|pest|contracted|janitor/.test(name)) return 'Contracted Services';
+  if (/insurance/.test(name)) return 'Insurance';
+  if (/property tax|state and local tax|tax & license|tax and license|assessment|other tax/.test(name)) return 'Taxes & Assessments';
+  return 'Administrative & Other';
+}
+
+
 // ═══════════════════════════════════════════════════════════════════════════
 // buildStatements — the numeric core. Pure given getBalances; no I/O.
 //
@@ -458,6 +558,36 @@ async function buildStatements(getBalances, opts) {
   const totOpex = { cur: sumCol(opex, 'cur'), pri: sumCol(opex, 'pri'), ytd: sumCol(opex, 'ytd') };
   const netIncome = { cur: r2(grossProfit.cur - totOpex.cur), pri: r2(grossProfit.pri - totOpex.pri), ytd: r2(grossProfit.ytd - totOpex.ytd) };
 
+  // Group operating expenses into the 11 presentation categories (per the CLR
+  // operating-expense restructure). Category subtotals sum to totOpex exactly —
+  // this is purely a re-grouping, so net income is unaffected. Only categories
+  // that actually have lines are emitted, in the fixed presentation order.
+  const opexByCat = new Map();
+  for (const l of opex) {
+    const cat = plExpenseCategory(l);
+    if (!opexByCat.has(cat)) opexByCat.set(cat, []);
+    opexByCat.get(cat).push(l);
+  }
+  const opexGroups = [];
+  const pushGroup = (cat, lines) => {
+    lines.sort((a, b) => String(a.code).localeCompare(String(b.code)));
+    opexGroups.push({
+      title: cat,
+      lines,
+      subtotal: { cur: sumCol(lines, 'cur'), pri: sumCol(lines, 'pri'), ytd: sumCol(lines, 'ytd') },
+    });
+  };
+  for (const cat of PL_EXPENSE_CATEGORY_ORDER) {
+    const lines = opexByCat.get(cat);
+    if (lines && lines.length) pushGroup(cat, lines);
+    opexByCat.delete(cat);
+  }
+  // Safety net: any category the heuristic produced but that isn't in the fixed
+  // order (shouldn't happen) is still emitted so no expense line is ever dropped.
+  for (const [cat, lines] of opexByCat) {
+    if (lines && lines.length) pushGroup(cat, lines);
+  }
+
   // ── Statement of Cash Flows (indirect, YTD) ────────────────────────────────
   // Beginning balances = as of (year start − 1 day). Deltas over the YTD window.
   const bsOpen = await getBalances({ as_of: priorMonthEnd(ys), close_pl_before: ys });
@@ -576,7 +706,7 @@ async function buildStatements(getBalances, opts) {
             priorLongDate: longDate(priorBsDate), monthsEnded: monthsEndedLabel(asOf),
             period: (opts.period || 'monthly').toLowerCase(), periodLabel: period.periodLabel, colLabel: period.colLabel },
     balanceSheet: { assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
-    operations: { revenue, cogs, opex, totRev, totCogs, grossProfit, totOpex, netIncome },
+    operations: { revenue, cogs, opex, opexGroups, totRev, totCogs, grossProfit, totOpex, netIncome },
     cashFlow,
     equity: { rows: equityStmt, totals: equityTotals },
     checks: {
@@ -758,7 +888,22 @@ async function renderStatementsPdf(s) {
       L.row('Gross Profit', [money(s.operations.grossProfit.cur), money(s.operations.grossProfit.pri), money(s.operations.grossProfit.ytd)], { indent: 6, boldRow: true, gapAfter: 6 });
     }
     L.sectionTitle('Operating Expenses');
-    s.operations.opex.forEach(r => line(r));
+    // Grouped into the 11 presentation categories, each with its own subtotal.
+    // Category subtotals sum to Total Operating Expenses exactly (pure re-group).
+    // Fall back to a flat list if grouping produced nothing (defensive).
+    const groups = s.operations.opexGroups && s.operations.opexGroups.length
+      ? s.operations.opexGroups : null;
+    if (groups) {
+      for (const g of groups) {
+        L.row(g.title, [], { indent: 12, boldRow: true });
+        g.lines.forEach(r => L.row(r.name, [money(r.cur), money(r.pri), money(r.ytd)], { indent: 26 }));
+        if (g.lines.length > 1) {
+          L.row('Total ' + g.title, [money(g.subtotal.cur), money(g.subtotal.pri), money(g.subtotal.ytd)], { indent: 20, ruleAbove: true });
+        }
+      }
+    } else {
+      s.operations.opex.forEach(r => line(r));
+    }
     L.row('Total Operating Expenses', [money(s.operations.totOpex.cur), money(s.operations.totOpex.pri), money(s.operations.totOpex.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
   }
