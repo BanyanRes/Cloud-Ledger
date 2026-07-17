@@ -801,6 +801,16 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     get page() { return page; },
     space(n) { y -= n; },
     ensure,
+    // Keep-together: if the next `space` points of content won't fit on the
+    // current page, break to a new page BEFORE rendering it — so a grouped block
+    // (e.g. an operating-expense category with its header, lines and subtotal)
+    // never splits across a page boundary. If the block is taller than a full
+    // usable page it can't be kept whole, so we let it flow normally rather than
+    // emitting an endless run of blank pages.
+    keepTogether(space) {
+      const usable = (PH - PAGE.mT) - (PAGE.mB + 8);
+      if (space <= usable) ensure(space);
+    },
     // Column layout: array of right-edge x positions for numeric columns.
     setCols(rightEdges) { cols.length = 0; rightEdges.forEach(e => cols.push(e)); },
     // Column headers (right-aligned above each numeric column). Only the header
@@ -958,9 +968,16 @@ async function renderStatementsPdf(s, outOffsets) {
       ? s.operations.opexGroups : null;
     if (groups) {
       for (const g of groups) {
+        // Keep each category together: reserve the height of its header row +
+        // all line rows + (if shown) the subtotal row, so a group like
+        // "Contracted Services" never splits with its subtotal on the next page.
+        const nLines = g.lines.length;
+        const hasSubtotal = nLines > 1;
+        const groupH = 12 /* header */ + nLines * 12 + (hasSubtotal ? 12 : 0) + 4 /* subtotal rule buffer */;
+        L.keepTogether(groupH);
         L.row(g.title, [], { indent: 12, boldRow: true });
         g.lines.forEach(r => L.row(r.name, [money(r.cur), money(r.pri), money(r.ytd)], { indent: 26 }));
-        if (g.lines.length > 1) {
+        if (hasSubtotal) {
           L.row('Total ' + g.title, [money(g.subtotal.cur), money(g.subtotal.pri), money(g.subtotal.ytd)], { indent: 20, ruleAbove: true });
         }
       }
