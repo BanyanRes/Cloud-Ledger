@@ -743,16 +743,30 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
   const dateLine = opts.dateLine || null; // repeated heading date-line (every page)
   let page, y;
   const cols = []; // right edges for numeric columns, set per statement
+  // Saved column-header spec so the header row repeats atop every continuation
+  // page (so a reader always knows what each column is). Set by colHeaders();
+  // replayed by newPage(). `_replaying` guards against re-entrancy since
+  // colHeaders() calls ensure() which could otherwise trigger another newPage().
+  let _hdrSpec = null;      // { labels, hopts }
+  let _replaying = false;
 
   function newPage() {
     page = pdf.addPage([PW, PH]);
     y = PH - PAGE.mT;
     drawHeader();
     drawFooter();
-    // On every page: draw the repeated date-line heading + a blank space between
-    // the heading and the first row (or the column headers).
+    // On every page: draw the repeated date-line heading + a wider blank space
+    // (~2 lines) between the heading and the column headers / first row so the
+    // top of the statement doesn't look cramped.
     if (dateLine) { textC(dateLine, FS.sub, reg, PH - PAGE.mT - 2); y -= 14; }
-    y -= 8;
+    y -= 20;
+    // Repeat the column headers on continuation pages (not the very first page,
+    // where the statement body calls colHeaders() itself in the right spot).
+    if (_hdrSpec && !_replaying) {
+      _replaying = true;
+      layout.colHeaders(_hdrSpec.labels, _hdrSpec.hopts);
+      _replaying = false;
+    }
   }
   function textC(str, size, font, yy) {
     const w = font.widthOfTextAtSize(str, size);
@@ -828,6 +842,9 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     //                 a gutter) instead of only the text width, so the rules read
     //                 as one-per-column with a narrow gap between them.
     colHeaders(labels, hopts = {}) {
+      // Remember the spec so newPage() can repeat this header on continuation
+      // pages. Only record on the FIRST (body-driven) call, not during replay.
+      if (!_replaying) _hdrSpec = { labels, hopts };
       const nLines = Math.max(1, ...labels.map(l => String(l).split('\n').length));
       // Reserve height for all header lines (bottom-aligned labels can be taller
       // than one line) plus the underline + trailing gap.
@@ -942,8 +959,12 @@ async function renderStatementsPdf(s, outOffsets) {
   const m = s.meta;
   const money = v => acct(v, { dash: true });
 
-  // Numeric column right-edges. Two-column statements (BS) use 2; Operations uses 3.
+  // Numeric column right-edges. Balance Sheet now has 3 columns (current, prior,
+  // and a Change column at the far right); Operations uses 3.
   const RIGHT = PAGE.w - PAGE.mR;
+  // Balance Sheet: current & prior dates plus a "Change" column on the far right.
+  // Pack three columns into the same right band the two-column layout used.
+  const bsCols = [RIGHT - 190, RIGHT - 95, RIGHT];
   const twoCols = [RIGHT - 95, RIGHT];
   const threeCols = [RIGHT - 200, RIGHT - 100, RIGHT];
 
@@ -954,9 +975,15 @@ async function renderStatementsPdf(s, outOffsets) {
     const L = makeLayout(pdf, fonts, m, 'Balance Sheets', { dateLine: m.longDate + ' and ' + m.priorLongDate });
     track('Balance Sheets');
     L.start();
-    L.setCols(twoCols);
-    L.colHeaders([m.longDate, m.priorLongDate]);
+    L.setCols(bsCols);
+    // Three columns now: current date, prior date, and a "Change" column showing
+    // the month-over-month movement (current − prior). Headers underlined.
+    L.colHeaders([m.longDate, m.priorLongDate, 'Change'], { underline: true });
     L.sectionTitle('ASSETS');
+    // A BS money triple: current, prior, and the change (cur − pri). Change is
+    // computed here so every line — accounts, subtotals, section totals, and the
+    // grand totals — carries a consistent month-over-month delta column.
+    const bsCells = (cur, pri) => [money(cur), money(pri), money(r2(cur - pri))];
     // Two-level: section header → subsection header → accounts → subsection
     // subtotal, then a bold section total. Subsection headers/subtotals appear
     // only when a section has multiple subsections or a contra subsection;
@@ -968,27 +995,27 @@ async function renderStatementsPdf(s, outOffsets) {
       for (const su of sec.subs) {
         if (showSubHeaders) L.row(su.title, [], { indent: 16 });
         const rowIndent = showSubHeaders ? 26 : 16;
-        for (const r of su.rows) L.row(r.name, [money(r.cur), money(r.pri)], { indent: rowIndent });
+        for (const r of su.rows) L.row(r.name, bsCells(r.cur, r.pri), { indent: rowIndent });
         if (showSubHeaders && su.rows.length > 1) {
           // GL balances are already signed; a contra subtotal (accumulated
           // amortization) is naturally negative and prints in parentheses.
-          L.row('Total ' + su.title, [money(su.subtotal.cur), money(su.subtotal.pri)], { indent: 20, ruleAbove: true });
+          L.row('Total ' + su.title, bsCells(su.subtotal.cur, su.subtotal.pri), { indent: 20, ruleAbove: true });
         }
       }
-      L.row(sectionTotalLabel, [money(sec.total.cur), money(sec.total.pri)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      L.row(sectionTotalLabel, bsCells(sec.total.cur, sec.total.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     };
     for (const sec of s.balanceSheet.assetSections) renderBsSection(sec, 'Total ' + sec.title);
-    L.row('Total Assets', [money(s.balanceSheet.totalAssets.cur), money(s.balanceSheet.totalAssets.pri)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, gapAfter: 8 });
+    L.row('Total Assets', bsCells(s.balanceSheet.totalAssets.cur, s.balanceSheet.totalAssets.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, gapAfter: 8 });
 
     L.sectionTitle('LIABILITIES AND MEMBERS\u2019 EQUITY');
     for (const sec of s.balanceSheet.liabSections) renderBsSection(sec, 'Total ' + sec.title);
-    L.row('Total Liabilities', [money(s.balanceSheet.totalLiab.cur), money(s.balanceSheet.totalLiab.pri)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    L.row('Total Liabilities', bsCells(s.balanceSheet.totalLiab.cur, s.balanceSheet.totalLiab.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     L.row('Members\u2019 Equity', [], { indent: 6, boldRow: true });
-    for (const r of s.balanceSheet.equityRows) L.row(r.name, [money(r.cur), money(r.pri)], { indent: 16 });
-    for (const r of (s.balanceSheet.retainedRows || [])) L.row(r.name, [money(r.cur), money(r.pri)], { indent: 16 });
-    L.row('Net Income (Loss)', [money(s.balanceSheet.niLine.cur), money(s.balanceSheet.niLine.pri)], { indent: 16 });
-    L.row('Total Members\u2019 Equity', [money(s.balanceSheet.totalEquity.cur), money(s.balanceSheet.totalEquity.pri)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
-    L.row('Total Liabilities and Members\u2019 Equity', [money(s.balanceSheet.totalLiabEquity.cur), money(s.balanceSheet.totalLiabEquity.pri)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+    for (const r of s.balanceSheet.equityRows) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
+    for (const r of (s.balanceSheet.retainedRows || [])) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
+    L.row('Net Income (Loss)', bsCells(s.balanceSheet.niLine.cur, s.balanceSheet.niLine.pri), { indent: 16 });
+    L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    L.row('Total Liabilities and Members\u2019 Equity', bsCells(s.balanceSheet.totalLiabEquity.cur, s.balanceSheet.totalLiabEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
   }
 
   // ── 2. Statements of Operations ─────────────────────────────────────────────
@@ -998,8 +1025,8 @@ async function renderStatementsPdf(s, outOffsets) {
     L.start();
     L.setCols(threeCols);
     // Current-month column shows the current period-end date; prior-month column
-    // shows the prior period-end date (per round-2 feedback).
-    L.colHeaders([m.longDate, m.priorLongDate, 'Year to Date']);
+    // shows the prior period-end date (per round-2 feedback). Headers underlined.
+    L.colHeaders([m.longDate, m.priorLongDate, 'Year to Date'], { underline: true });
     const line = (r, o = {}) => L.row(r.name, [money(r.cur), money(r.pri), money(r.ytd)], { indent: 16, ...o });
 
     L.sectionTitle('Revenue');
@@ -1045,9 +1072,10 @@ async function renderStatementsPdf(s, outOffsets) {
     track('Statement of Cash Flows');
     L.start();
     L.setCols([RIGHT]);
-    // No "Year to Date" column heading (single YTD column, per round-2 feedback);
-    // add a little space where the header row would have been.
-    L.space(6);
+    // Single YTD column. Give it an underlined "Year to Date" heading so the
+    // reader knows what the column is (and, via the repeat mechanism, it shows
+    // again atop any continuation page).
+    L.colHeaders(['Year to Date'], { underline: true });
     const cf = s.cashFlow;
     L.sectionTitle('Cash Flows from Operating Activities');
     L.row('Net Income (Loss)', [money(cf.netIncome)], { indent: 16 });
