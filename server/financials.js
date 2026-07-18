@@ -1110,9 +1110,9 @@ async function renderStatementsPdf(s, outOffsets) {
 
   // ── 4. Statement of Changes in Members' Equity ──────────────────────────────
   {
-    // Landscape page mirroring the CPA reference: five columns, each money value
-    // prefixed with "$", a Distributions column shown even when all zero, and a
-    // Net Income (Loss) column wide enough to keep the value on one row.
+    // Landscape page mirroring the CPA reference: five columns, a Distributions
+    // column shown even when all zero, and a Net Income (Loss) column wide enough
+    // to keep the value on one row. Values are shown without a "$" prefix.
     const L = makeLayout(pdf, fonts, m, 'Statement of Changes in Members\u2019 Equity',
       { landscape: true, dateLine: m.monthsEnded });
     const LRIGHT = PAGE.h - PAGE.mR; // landscape printable right edge (PAGE.h is the long side)
@@ -1152,10 +1152,10 @@ async function renderStatementsPdf(s, outOffsets) {
       'Net Income\n(Loss)',
       'Balances at\nEquity\n' + endDate,
     ], { bottomAlign: true, underline: true, colBox: true });
-    // Money cell with a "$" prefix at the column's left and the value right-
-    // aligned with a small inset so it doesn't jam against the column edge.
+    // Money cell: value right-aligned to the column with a small inset so it
+    // doesn't jam against the column edge. No "$" prefix (per request).
     const dollarRow = (label, vals, o = {}) => {
-      L.row(label, vals.map(v => acct(v)), Object.assign({ indent: 10, dollarPrefix: true, valueInset: 4 }, o));
+      L.row(label, vals.map(v => acct(v)), Object.assign({ indent: 10, dollarPrefix: false, valueInset: 4 }, o));
     };
     L.row('Member', [], { indent: 6, boldRow: true });
     for (const r of s.equity.rows) {
