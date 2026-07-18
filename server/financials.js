@@ -972,8 +972,9 @@ async function renderStatementsPdf(s, outOffsets) {
   const threeCols = [RIGHT - 200, RIGHT - 100, RIGHT];
   // Operations: four columns — current month, prior month, a Change column
   // (current − prior) sitting between the prior-month and Year-to-Date columns,
-  // and Year to Date on the far right.
-  const opsCols = [RIGHT - 288, RIGHT - 192, RIGHT - 96, RIGHT];
+  // and Year to Date on the far right. Numeric columns are kept narrow (76pt
+  // pitch) so the first (account-name) column is wide enough to show full names.
+  const opsCols = [RIGHT - 228, RIGHT - 152, RIGHT - 76, RIGHT];
 
   // ── 1. Balance Sheet ───────────────────────────────────────────────────────
   {
