@@ -1522,12 +1522,12 @@ function glTypeFromCode(codeStr) {
   if (n <= 29999) return 'Liability';
   if (n <= 39999) return 'Equity';
   if (n <= 49999) return 'Revenue';
-  // Everything from 5xxxx through 9xxxx is an expense account (5=COGS/opex,
-  // 6/7/8/9=other expense). The old fallback returned Revenue for codes above
-  // 69999, which misclassified 5-digit expense codes like 82000 Amortization
-  // Expense as Revenue.
-  if (n <= 99999) return 'Expense';
-  return 'Expense';
+  if (n <= 69999) return 'Expense';
+  // 7xxxx-9xxxx (5-digit) is ambiguous in these charts: some are other-income
+  // accounts (70000 Interest Income), others are other-expense (82000
+  // Amortization Expense). Code alone can't disambiguate, so return null here
+  // and let the caller fall back to the account name.
+  return null;
 }
 
 // Split a fused "code + name" cell (e.g. "1000 · Cash", "1000 - Cash", "1000: Cash",
@@ -1901,10 +1901,14 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
       const typeFromName = (nm) => {
         const s = String(nm || '').toLowerCase();
         if (/retained earnings|equity|capital|contribution|distribution|member|partner|accumulated/.test(s)) return 'Equity';
-        if (/payable|liabilit|accrued|due to|note payable|loan/.test(s)) return 'Liability';
+        if (/payable|liabilit|accrued|due to|note payable|loan payable/.test(s)) return 'Liability';
         if (/receivable|due from|cash|bank|prepaid|investment|asset/.test(s)) return 'Asset';
-        if (/income|revenue|gain/.test(s)) return 'Revenue';
-        if (/expense|cost|fee|loss/.test(s)) return 'Expense';
+        // Check expense keywords BEFORE income so names like 'Interest Expense'
+        // or 'Loan Fee Expense' resolve to Expense even though the 7xxxx code is
+        // ambiguous. 'Refund' stays income.
+        if (/expense|amortization|depreciation|donation/.test(s)) return 'Expense';
+        if (/income|revenue|gain|refund|dividend/.test(s)) return 'Revenue';
+        if (/cost|fee|loss/.test(s)) return 'Expense';
         return 'Equity';
       };
       for (const [code, nm] of acctNames) {
