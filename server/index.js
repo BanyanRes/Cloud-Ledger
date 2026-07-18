@@ -1522,8 +1522,12 @@ function glTypeFromCode(codeStr) {
   if (n <= 29999) return 'Liability';
   if (n <= 39999) return 'Equity';
   if (n <= 49999) return 'Revenue';
-  if (n <= 69999) return 'Expense';
-  return 'Revenue';
+  // Everything from 5xxxx through 9xxxx is an expense account (5=COGS/opex,
+  // 6/7/8/9=other expense). The old fallback returned Revenue for codes above
+  // 69999, which misclassified 5-digit expense codes like 82000 Amortization
+  // Expense as Revenue.
+  if (n <= 99999) return 'Expense';
+  return 'Expense';
 }
 
 // Split a fused "code + name" cell (e.g. "1000 · Cash", "1000 - Cash", "1000: Cash",
