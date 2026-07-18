@@ -1129,21 +1129,28 @@ async function renderStatementsPdf(s, outOffsets) {
     };
     const begDate = '1/1/' + String(m.asOf).slice(0, 4);
     const endDate = shortMD(m.longDate);
-    // Right-edges with a wider ~104pt pitch so a "$" prefix and a large right-
-    // aligned value never crowd and there is a visible gap between columns.
-    // Leaves the left ~270pt for the member-name labels.
-    const PITCH = 104;
-    const c5 = LRIGHT, c4 = c5 - PITCH, c3 = c4 - PITCH, c2 = c3 - PITCH, c1 = c2 - PITCH;
+    // Right-edges anchored at the printable right edge and marched LEFT by a
+    // fixed pitch. The first numeric column (c1) is placed far enough right that
+    // its "$" prefix cell box (c1 - colWidth(0) + 2) clears the longest member
+    // label — the previous layout put c1 too far left, letting long labels
+    // ("Contributed Capital - County Line Rail Fund, LLP", right edge ≈ 254pt)
+    // overrun into the first column. c1 = 356 puts the "$" box left at ~280pt
+    // (a ~26pt gap after the longest label); pitch (~95pt) still leaves each
+    // column ample room for a "$" prefix and a large right-aligned value.
+    const c1 = 356;
+    const PITCH = (LRIGHT - c1) / 4;
+    const c2 = c1 + PITCH, c3 = c2 + PITCH, c4 = c3 + PITCH, c5 = LRIGHT;
     const eCols = [c1, c2, c3, c4, c5];
     L.setCols(eCols);
-    // Date on the TOP line of each dated header, with "Balances at" / "Equity"
-    // beneath it, so the header underline sits at the BOTTOM of the block.
+    // "Balances at" / "Equity" on the TOP two lines and the DATE on the BOTTOM
+    // line, so the date reads directly above the header underline (matches the
+    // CPA reference, which places the date at the bottom of the header block).
     L.colHeaders([
-      begDate + '\nBalances at\nEquity',
+      'Balances at\nEquity\n' + begDate,
       'Contributions',
       'Distributions',
       'Net Income\n(Loss)',
-      endDate + '\nBalances at\nEquity',
+      'Balances at\nEquity\n' + endDate,
     ], { bottomAlign: true, underline: true, colBox: true });
     // Money cell with a "$" prefix at the column's left and the value right-
     // aligned with a small inset so it doesn't jam against the column edge.
