@@ -700,7 +700,7 @@ export default function App(){
         {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} canEdit={canEdit} reqState={reqState} setReqState={setReqState}/>}
         {page==='wp_mgmtfee'&&activeEntity&&isCLRF&&<MgmtFeeWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityName={entityName}/>}
+        {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
       </>})()}</div></div>
     {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
@@ -3113,14 +3113,101 @@ function MgmtFeeWorkpaper({entityId,entityName,canEdit=true}){
   </div>);
 }
 
-// ═══ Trailing 12 Months — placeholder (report not yet implemented) ═══
-function TrailingTwelveMonths({entityName}){
+// ═══ Trailing 12 Months — P&L with 12 monthly columns + a Total column ═══
+function TrailingTwelveMonths({entityId,entityName}){
+  const[asOf,setAsOf]=useState(today());
+  const[data,setData]=useState(null);
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const fmt=n=>{const v=Number(n)||0;const t=Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});return v<0?'('+t+')':(v===0?'-':t);};
+  useEffect(()=>{let cancelled=false;setData(null);setErr('');
+    if(!entityId||!/^\d{4}-\d{2}-\d{2}$/.test(asOf))return;
+    setBusy(true);
+    api.getTtmPL(entityId,asOf)
+      .then(d=>{if(!cancelled)setData(d);})
+      .catch(e=>{if(!cancelled)setErr(e.message);})
+      .finally(()=>{if(!cancelled)setBusy(false);});
+    return()=>{cancelled=true;};
+  },[entityId,asOf]);
+  const months=data?data.meta.months:[];
+  const nCols=months.length; // 12
+  // Build the ordered display rows for both the on-screen table and the export.
+  const buildRows=()=>{
+    if(!data)return[];
+    const rows=[];
+    const line=(label,vals,total,opt={})=>rows.push({label,vals,total,...opt});
+    // Revenue
+    line('Revenue',null,null,{header:true});
+    data.revenue.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+    line('Total Revenue',data.totRev.vals,data.totRev.total,{bold:true,rule:true});
+    // Cost of Revenue (only if present)
+    if(data.hasCogs){
+      line('Cost of Revenue',null,null,{header:true});
+      data.cogs.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+      line('Total Cost of Revenue',data.totCogs.vals,data.totCogs.total,{bold:true,rule:true});
+      line('Gross Profit',data.grossProfit.vals,data.grossProfit.total,{bold:true,rule:true});
+    }
+    // Operating Expenses, grouped
+    line('Operating Expenses',null,null,{header:true});
+    data.opexGroups.forEach(g=>{
+      if(data.opexGroups.length>1){
+        line(g.title,null,null,{indent:1,sub:true});
+        g.lines.forEach(l=>line(l.name,l.vals,l.total,{indent:2}));
+        line('Total '+g.title,g.subtotal.vals,g.subtotal.total,{indent:1,rule:true});
+      }else{
+        g.lines.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+      }
+    });
+    line('Total Operating Expenses',data.totOpex.vals,data.totOpex.total,{bold:true,rule:true});
+    // Net Income
+    line('Net Income (Loss)',data.netIncome.vals,data.netIncome.total,{bold:true,rule:true,dbl:true});
+    return rows;
+  };
+  const rows=buildRows();
+  const doExport=()=>{
+    if(!data)return;
+    const head=['Account',...months.map(m=>m.label),data.meta.totalLabel||'Total'];
+    const aoa=[[entityName||('Entity '+entityId)],[data.meta.title],[data.meta.periodLabel],[],head];
+    rows.forEach(r=>{
+      if(r.header){aoa.push([r.label,...new Array(nCols+1).fill('')]);return;}
+      const pad=(r.indent?'  '.repeat(r.indent):'')+r.label;
+      const cells=(r.vals||new Array(nCols).fill('')).map(v=>r.vals?Number(v):'');
+      aoa.push([pad,...cells,r.total==null?'':Number(r.total)]);
+    });
+    exportToExcel(aoa,(entityName||'Entity_'+entityId).replace(/[^a-zA-Z0-9]+/g,'_')+'_Trailing_12_Months.xlsx');
+  };
   return(<div>
-    <div style={S.h1}>Trailing 12 Months</div>
-    <div style={{color:T.textMuted,marginTop:12,fontSize:13,maxWidth:640}}>
-      A trailing-twelve-month report for {entityName||'this entity'} is coming soon.
-      This section is a placeholder — the report has not been built yet.
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+      <div><div style={S.h1}>Trailing 12 Months</div><div style={S.sub}>P&amp;L activity by month for the trailing twelve months &middot; {entityName||'this entity'}</div></div>
+      <div style={{display:'flex',gap:8,alignItems:'flex-end'}}>
+        <div><label style={S.label}>As of date</label><input type='date' value={asOf} onChange={e=>setAsOf(e.target.value)} style={{...S.input,width:160}}/></div>
+        {data&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}
+      </div>
     </div>
+    {err&&<div style={S.err}>{err}</div>}
+    {busy&&!data&&<div style={{color:T.textMuted,fontSize:12,padding:12}}>Computing trailing 12 months…</div>}
+    {data&&<div style={{...S.card,padding:0,overflowX:'auto'}}>
+      <table style={{borderCollapse:'collapse',width:'100%',fontSize:12,whiteSpace:'nowrap'}}>
+        <thead>
+          <tr>
+            <th style={{position:'sticky',left:0,background:T.cardBg||T.bg,textAlign:'left',padding:'8px 12px',borderBottom:'2px solid '+T.border,color:T.textDim,fontSize:11}}>{data.meta.periodLabel}</th>
+            {months.map((m,i)=><th key={i} style={{textAlign:'right',padding:'8px 10px',borderBottom:'2px solid '+T.border,color:T.textDim,fontSize:11}}>{m.label}</th>)}
+            <th style={{textAlign:'right',padding:'8px 12px',borderBottom:'2px solid '+T.border,color:T.textBright,fontSize:11,fontWeight:700,borderLeft:'2px solid '+T.border}}>{data.meta.totalLabel||'Total'}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r,ri)=>(
+            <tr key={ri} style={{background:r.header?(T.hover||'transparent'):'transparent'}}>
+              <td style={{position:'sticky',left:0,background:T.cardBg||T.bg,padding:'4px 12px',paddingLeft:(12+(r.indent||0)*16)+'px',fontWeight:(r.bold||r.header||r.sub)?600:400,color:r.header?T.textBright:T.text,borderTop:r.rule?'1px solid '+T.border:'none'}}>{r.label}</td>
+              {(r.vals||new Array(nCols).fill(null)).map((v,ci)=>(
+                <td key={ci} style={{textAlign:'right',padding:'4px 10px',fontWeight:r.bold?600:400,color:T.text,borderTop:r.rule?'1px solid '+T.border:'none',borderBottom:r.dbl?'3px double '+T.border:'none'}}>{r.vals?fmt(v):''}</td>
+              ))}
+              <td style={{textAlign:'right',padding:'4px 12px',fontWeight:(r.bold||r.header)?700:600,color:T.textBright,borderLeft:'2px solid '+T.border,borderTop:r.rule?'1px solid '+T.border:'none',borderBottom:r.dbl?'3px double '+T.border:'none'}}>{r.total==null?'':fmt(r.total)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>}
   </div>);
 }
 

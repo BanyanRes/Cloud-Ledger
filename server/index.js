@@ -6507,6 +6507,22 @@ app.post('/api/workpapers/financial-statements/:entity_id/preview', auth, requir
   }
 });
 
+// Trailing 12 Months P&L — 12 monthly columns (oldest→newest) + a Total column.
+// Returns the full matrix as JSON; the client renders it and exports to Excel.
+app.get('/api/entities/:eid/ttm-pl', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), async (req, res) => {
+  try {
+    const eid = req.params.eid;
+    const asOf = (req.query && req.query.as_of);
+    if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
+    const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
+    const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
+    const out = await financials.buildTtmPL(getBalances, { asOf, entityName: ent ? ent.name : ('Entity ' + eid) });
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: 'TTM P&L error: ' + e.message });
+  }
+});
+
 app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   finStmtFields(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message });

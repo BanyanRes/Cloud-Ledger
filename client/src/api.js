@@ -111,6 +111,7 @@ export const api = {
     if (opts.class_id) p.push('class_id=' + opts.class_id);
     return request('/entities/' + eid + '/balances' + (p.length ? '?' + p.join('&') : ''));
   },
+  getTtmPL: (eid, asOf) => request('/entities/' + eid + '/ttm-pl?as_of=' + asOf),
   getGLDetail: (eid, opts = {}) => {
     const p = [];
     if (opts.from) p.push('from=' + opts.from);

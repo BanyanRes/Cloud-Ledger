@@ -1418,8 +1418,105 @@ async function generatePackage({ statements, execSummaryBytes, reqReportBytes, r
   return { bytes, info };
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// buildTtmPL — Trailing-12-Months P&L matrix.
+//
+// Produces a P&L (Statements-of-Operations grouping) with 12 monthly columns
+// (oldest → newest, ending at asOf) plus a Total column that sums the 12 months.
+// Pure given getBalances({from,to}); no I/O.
+//   opts: { asOf, entityName }
+// ═══════════════════════════════════════════════════════════════════════════
+async function buildTtmPL(getBalances, opts) {
+  const asOf = opts.asOf;
+  const months = [];
+  for (let i = 11; i >= 0; i--) {
+    const end = addMonthsEnd(asOf, -i);
+    months.push({ from: monthStart(end), to: end, label: monthLabel(end), end });
+  }
+  const monthRows = await Promise.all(months.map(mo => getBalances({ from: mo.from, to: mo.to })));
+
+  const maps = monthRows.map(rows => {
+    const m = new Map();
+    for (const r of rows) if (r.type === 'Revenue' || r.type === 'Expense') m.set(String(r.code), r);
+    return m;
+  });
+  const refByCode = new Map();
+  for (let i = maps.length - 1; i >= 0; i--) {
+    for (const [code, r] of maps[i]) if (!refByCode.has(code)) refByCode.set(code, r);
+  }
+  const allCodes = Array.from(refByCode.keys())
+    .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true }));
+
+  function lineFor(code) {
+    const ref = refByCode.get(code);
+    const vals = maps.map(m => { const r = m.get(code); return r ? r2(bal(r)) : 0; });
+    const total = r2(vals.reduce((s, v) => s + v, 0));
+    if (vals.every(isZero) && isZero(total)) return null;
+    return { code, name: ref.name, type: ref.type, subtype: ref.subtype, vals, total };
+  }
+  const allLines = allCodes.map(lineFor).filter(Boolean);
+
+  const revenue = allLines.filter(l => l.type === 'Revenue');
+  const cogs = allLines.filter(l => l.type === 'Expense' && /cogs|cost of goods|cost of revenue|car hire/i.test((l.subtype || '') + ' ' + (l.name || '')));
+  const cogsCodes = new Set(cogs.map(l => l.code));
+  const opex = allLines.filter(l => l.type === 'Expense' && !cogsCodes.has(l.code));
+
+  const sumLines = lines => {
+    const vals = new Array(12).fill(0);
+    let total = 0;
+    for (const l of lines) { for (let i = 0; i < 12; i++) vals[i] += l.vals[i]; total += l.total; }
+    return { vals: vals.map(r2), total: r2(total) };
+  };
+  const totRev = sumLines(revenue);
+  const totCogs = sumLines(cogs);
+  const grossProfit = { vals: totRev.vals.map((v, i) => r2(v - totCogs.vals[i])), total: r2(totRev.total - totCogs.total) };
+  const totOpex = sumLines(opex);
+  const netIncome = { vals: grossProfit.vals.map((v, i) => r2(v - totOpex.vals[i])), total: r2(grossProfit.total - totOpex.total) };
+
+  const opexByCat = new Map();
+  for (const l of opex) {
+    const cat = plExpenseCategory(l);
+    if (!opexByCat.has(cat)) opexByCat.set(cat, []);
+    opexByCat.get(cat).push(l);
+  }
+  const opexGroups = [];
+  const pushGroup = (cat, lines) => {
+    lines.sort((a, b) => String(a.code).localeCompare(String(b.code), undefined, { numeric: true }));
+    opexGroups.push({ title: cat, lines, subtotal: sumLines(lines) });
+  };
+  for (const cat of PL_EXPENSE_CATEGORY_ORDER) {
+    const lines = opexByCat.get(cat);
+    if (lines && lines.length) pushGroup(cat, lines);
+    opexByCat.delete(cat);
+  }
+  for (const [cat, lines] of opexByCat) if (lines && lines.length) pushGroup(cat, lines);
+
+  return {
+    meta: {
+      entityName: opts.entityName || '',
+      asOf,
+      title: 'Trailing 12 Months',
+      periodLabel: 'For the Trailing Twelve Months Ended ' + longDate(asOf),
+      months: months.map(m => ({ from: m.from, to: m.to, label: m.label })),
+      totalLabel: 'Total',
+    },
+    revenue, totRev,
+    cogs, totCogs, grossProfit, hasCogs: cogs.length > 0,
+    opex, opexGroups, totOpex,
+    netIncome,
+  };
+}
+
+// Short month-column label, e.g. '2026-04-30' → 'Apr 2026'.
+function monthLabel(dateStr) {
+  const d = new Date(dateStr + 'T00:00:00Z');
+  const ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return ABBR[d.getUTCMonth()] + ' ' + d.getUTCFullYear();
+}
+
 module.exports = {
   buildStatements,
+  buildTtmPL,
   generatePackage,
   renderStatementsPdf,
   stripInvoiceLogPages,
