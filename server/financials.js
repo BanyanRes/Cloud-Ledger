@@ -1154,11 +1154,11 @@ async function renderStatementsPdf(s, outOffsets) {
     // line, so the date reads directly above the header underline (matches the
     // CPA reference, which places the date at the bottom of the header block).
     L.colHeaders([
-      'Balances at\nEquity\n' + begDate,
+      'Equity Balances at\n' + begDate,
       'Contributions',
       'Distributions',
       'Net Income\n(Loss)',
-      'Balances at\nEquity\n' + endDate,
+      'Equity Balances at\n' + endDate,
     ], { bottomAlign: true, underline: true, colBox: true });
     // Money cell: value right-aligned to the column with a small inset so it
     // doesn't jam against the column edge. No "$" prefix (per request).
