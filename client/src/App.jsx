@@ -3164,17 +3164,16 @@ function TrailingTwelveMonths({entityId,entityName}){
     return rows;
   };
   const rows=buildRows();
-  const doExport=()=>{
+  // Download the styled workbook from the server (ExcelJS): comma-formatted
+  // amounts, underlined month header, and underlined subtotal/grand-total rows.
+  const doExport=async()=>{
     if(!data)return;
-    const head=['Account',...months.map(m=>m.label),data.meta.totalLabel||'Total'];
-    const aoa=[[entityName||('Entity '+entityId)],[data.meta.title],[data.meta.periodLabel],[],head];
-    rows.forEach(r=>{
-      if(r.header){aoa.push([r.label,...new Array(nCols+1).fill('')]);return;}
-      const pad=(r.indent?'  '.repeat(r.indent):'')+r.label;
-      const cells=(r.vals||new Array(nCols).fill('')).map(v=>r.vals?Number(v):'');
-      aoa.push([pad,...cells,r.total==null?'':Number(r.total)]);
-    });
-    exportToExcel(aoa,(entityName||'Entity_'+entityId).replace(/[^a-zA-Z0-9]+/g,'_')+'_Trailing_12_Months.xlsx');
+    setErr('');
+    try{
+      const out=await api.getTtmPLXlsx(entityId,asOf);
+      if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
+    }catch(e){setErr(e.message);}
   };
   return(<div>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>

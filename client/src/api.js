@@ -112,6 +112,18 @@ export const api = {
     return request('/entities/' + eid + '/balances' + (p.length ? '?' + p.join('&') : ''));
   },
   getTtmPL: (eid, asOf) => request('/entities/' + eid + '/ttm-pl?as_of=' + asOf),
+  getTtmPLXlsx: async (eid, asOf) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/entities/' + eid + '/ttm-pl.xlsx?as_of=' + asOf, { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) { let data = {}; try { data = await res.json(); } catch {} throw new Error(data.error || 'Export failed'); }
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const filename = m ? m[1] : 'Trailing_12_Months.xlsx';
+    const blob = await res.blob();
+    return { blob, filename };
+  },
   getGLDetail: (eid, opts = {}) => {
     const p = [];
     if (opts.from) p.push('from=' + opts.from);

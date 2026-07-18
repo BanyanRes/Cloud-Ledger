@@ -6523,6 +6523,112 @@ app.get('/api/entities/:eid/ttm-pl', auth, requireEntityAccess(), requireRole('A
   }
 });
 
+// Trailing 12 Months P&L — styled Excel export (12 monthly columns + Total).
+// Amounts are comma-styled; the month-header row and every subtotal/grand-total
+// row are underlined (bottom border). Built with ExcelJS server-side because the
+// client SheetJS community build cannot write cell borders/styles.
+app.get('/api/entities/:eid/ttm-pl.xlsx', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), async (req, res) => {
+  try {
+    const eid = req.params.eid;
+    const asOf = (req.query && req.query.as_of);
+    if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
+    const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
+    const entityName = ent ? ent.name : ('Entity ' + eid);
+    const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
+    const d = await financials.buildTtmPL(getBalances, { asOf, entityName });
+
+    const nCols = d.meta.months.length; // 12
+    const NUMFMT = '#,##0.00;(#,##0.00)';
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Trailing 12 Months');
+    const totalCol = 2 + nCols; // col A = account, B..(1+n) = months, last = Total
+
+    // Title block.
+    ws.getCell(1, 1).value = entityName;
+    ws.getCell(1, 1).font = { bold: true, size: 13 };
+    ws.getCell(2, 1).value = d.meta.title;
+    ws.getCell(2, 1).font = { bold: true, size: 11 };
+    ws.getCell(3, 1).value = d.meta.periodLabel;
+    ws.getCell(3, 1).font = { italic: true, size: 10 };
+
+    // Header row (row 5): Account, month labels, Total — all underlined.
+    const headerRowIdx = 5;
+    const hdr = ['', ...d.meta.months.map(m => m.label), d.meta.totalLabel || 'Total'];
+    for (let c = 1; c <= totalCol; c++) {
+      const cell = ws.getCell(headerRowIdx, c);
+      cell.value = hdr[c - 1];
+      cell.font = { bold: true, size: 10 };
+      cell.alignment = { horizontal: c === 1 ? 'left' : 'right' };
+      cell.border = { bottom: { style: 'thin' } };
+    }
+
+    let r = headerRowIdx + 1;
+    // Emit one worksheet row from a display line. underline: 'single'|'double'|none.
+    const emit = (label, vals, total, opt = {}) => {
+      const rowIdx = r++;
+      const nameCell = ws.getCell(rowIdx, 1);
+      const indent = opt.indent || 0;
+      nameCell.value = label;
+      nameCell.font = { bold: !!(opt.bold || opt.header || opt.sub), size: 10 };
+      nameCell.alignment = { indent };
+      if (opt.header) return rowIdx; // header/label row: no numbers
+      for (let i = 0; i < nCols; i++) {
+        const cell = ws.getCell(rowIdx, 2 + i);
+        cell.value = (vals && vals[i] != null) ? Number(vals[i]) : null;
+        cell.numFmt = NUMFMT;
+        cell.font = { bold: !!opt.bold, size: 10 };
+      }
+      const tcell = ws.getCell(rowIdx, totalCol);
+      tcell.value = total == null ? null : Number(total);
+      tcell.numFmt = NUMFMT;
+      tcell.font = { bold: true, size: 10 };
+      if (opt.underline) {
+        const style = opt.underline === 'double' ? 'double' : 'thin';
+        for (let c = 2; c <= totalCol; c++) ws.getCell(rowIdx, c).border = { bottom: { style } };
+      }
+      return rowIdx;
+    };
+
+    // Revenue
+    emit('Revenue', null, null, { header: true });
+    d.revenue.forEach(l => emit(l.name, l.vals, l.total, { indent: 1 }));
+    emit('Total Revenue', d.totRev.vals, d.totRev.total, { bold: true, underline: 'single' });
+    // Cost of Revenue (only if present)
+    if (d.hasCogs) {
+      emit('Cost of Revenue', null, null, { header: true });
+      d.cogs.forEach(l => emit(l.name, l.vals, l.total, { indent: 1 }));
+      emit('Total Cost of Revenue', d.totCogs.vals, d.totCogs.total, { bold: true, underline: 'single' });
+      emit('Gross Profit', d.grossProfit.vals, d.grossProfit.total, { bold: true, underline: 'single' });
+    }
+    // Operating Expenses, grouped
+    emit('Operating Expenses', null, null, { header: true });
+    d.opexGroups.forEach(g => {
+      if (d.opexGroups.length > 1) {
+        emit(g.title, null, null, { indent: 1, sub: true });
+        g.lines.forEach(l => emit(l.name, l.vals, l.total, { indent: 2 }));
+        emit('Total ' + g.title, g.subtotal.vals, g.subtotal.total, { indent: 1, underline: 'single' });
+      } else {
+        g.lines.forEach(l => emit(l.name, l.vals, l.total, { indent: 1 }));
+      }
+    });
+    emit('Total Operating Expenses', d.totOpex.vals, d.totOpex.total, { bold: true, underline: 'single' });
+    // Net Income (grand total) — double underline.
+    emit('Net Income (Loss)', d.netIncome.vals, d.netIncome.total, { bold: true, underline: 'double' });
+
+    // Column widths: account column wide, numeric columns comfortable.
+    ws.getColumn(1).width = 34;
+    for (let c = 2; c <= totalCol; c++) ws.getColumn(c).width = 14;
+
+    const buf = await wb.xlsx.writeBuffer();
+    const fname = (entityName.replace(/[^a-zA-Z0-9]+/g, '_')) + '_Trailing_12_Months_' + asOf + '.xlsx';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
+    res.send(Buffer.from(buf));
+  } catch (e) {
+    res.status(500).json({ error: 'TTM export error: ' + e.message });
+  }
+});
+
 app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   finStmtFields(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message });
