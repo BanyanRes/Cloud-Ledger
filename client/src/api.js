@@ -112,9 +112,25 @@ export const api = {
     return request('/entities/' + eid + '/balances' + (p.length ? '?' + p.join('&') : ''));
   },
   getTtmPL: (eid, asOf) => request('/entities/' + eid + '/ttm-pl?as_of=' + asOf),
-  getTtmPLXlsx: async (eid, asOf) => {
+  analyzeTtmPL: async (eid, asOf) => {
     const token = getToken();
-    const res = await fetch(API_BASE + '/entities/' + eid + '/ttm-pl.xlsx?as_of=' + asOf, { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    const res = await fetch(API_BASE + '/entities/' + eid + '/ttm-pl/analyze', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: JSON.stringify({ as_of: asOf }),
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Analysis failed');
+    return data;
+  },
+  getTtmPLXlsx: async (eid, asOf, analysis) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/entities/' + eid + '/ttm-pl.xlsx', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: JSON.stringify({ as_of: asOf, analysis: analysis || null }),
+    });
     if (res.status === 401) { clearToken(); window.location.reload(); return null; }
     const ctype = res.headers.get('content-type') || '';
     if (!res.ok || ctype.includes('application/json')) { let data = {}; try { data = await res.json(); } catch {} throw new Error(data.error || 'Export failed'); }

@@ -3119,8 +3119,11 @@ function TrailingTwelveMonths({entityId,entityName}){
   const[data,setData]=useState(null);
   const[busy,setBusy]=useState(false);
   const[err,setErr]=useState('');
+  const[analysis,setAnalysis]=useState(null);
+  const[analyzing,setAnalyzing]=useState(false);
+  const[analysisErr,setAnalysisErr]=useState('');
   const fmt=n=>{const v=Number(n)||0;const t=Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});return v<0?'('+t+')':(v===0?'-':t);};
-  useEffect(()=>{let cancelled=false;setData(null);setErr('');
+  useEffect(()=>{let cancelled=false;setData(null);setErr('');setAnalysis(null);setAnalysisErr('');
     if(!entityId||!/^\d{4}-\d{2}-\d{2}$/.test(asOf))return;
     setBusy(true);
     api.getTtmPL(entityId,asOf)
@@ -3163,6 +3166,11 @@ function TrailingTwelveMonths({entityId,entityName}){
     line('Net Income (Loss)',data.netIncome.vals,data.netIncome.total,{bold:true,rule:true,dbl:true});
     return rows;
   };
+  const runAnalysis=async()=>{
+    if(!data)return;setAnalyzing(true);setAnalysisErr('');
+    try{const a=await api.analyzeTtmPL(entityId,asOf);if(a)setAnalysis(a);}
+    catch(e){setAnalysisErr(e.message);}finally{setAnalyzing(false);}
+  };
   const rows=buildRows();
   // Download the styled workbook from the server (ExcelJS): comma-formatted
   // amounts, underlined month header, and underlined subtotal/grand-total rows.
@@ -3170,7 +3178,7 @@ function TrailingTwelveMonths({entityId,entityName}){
     if(!data)return;
     setErr('');
     try{
-      const out=await api.getTtmPLXlsx(entityId,asOf);
+      const out=await api.getTtmPLXlsx(entityId,asOf,analysis);
       if(!out)return;
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
     }catch(e){setErr(e.message);}
@@ -3207,28 +3215,23 @@ function TrailingTwelveMonths({entityId,entityName}){
         </tbody>
       </table>
     </div>}
-    {data&&data.analysis&&(()=>{
-      const a=data.analysis;
-      const sevColor=sev=>sev==='high'?T.red:(T.orange||'#d08a2a');
-      if(!a.hasFindings)return(<div style={{...S.card,marginTop:16,borderColor:(T.green||'#2a9d5a')+'55'}}>
-        <div style={{...S.h2,marginBottom:4,color:T.green||'#2a9d5a'}}>Items Needing Attention</div>
-        <div style={{fontSize:13,color:T.textMuted}}>No unfavorable trends stood out this period. Nothing exceeded the review threshold ({Math.round(a.thresholds.pct*100)}% swing and ${a.thresholds.dollar.toLocaleString()} vs. the trailing average in {a.lastMonthLabel}).</div>
-      </div>);
-      return(<div style={{...S.card,marginTop:16,borderColor:(T.orange||'#d08a2a')+'55'}}>
-        <div style={{...S.h2,marginBottom:4}}>Items Needing Attention</div>
-        <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Unfavorable movements in {a.lastMonthLabel} vs. the trailing average — expenses running above, or revenue running below, their prior-month norm (flagged at ≥{Math.round(a.thresholds.pct*100)}% and ≥${a.thresholds.dollar.toLocaleString()}).</div>
-        {a.items.length>0&&<div style={{marginBottom:a.netIncome.length?14:0}}>
-          {a.items.map((it,i)=>(<div key={i} style={{display:'flex',gap:10,alignItems:'flex-start',padding:'7px 0',borderTop:i?'1px solid '+T.border:'none'}}>
-            <span style={{flexShrink:0,marginTop:1,fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.04em',color:sevColor(it.severity),border:'1px solid '+sevColor(it.severity)+'66',borderRadius:4,padding:'2px 6px'}}>{it.kind==='expense_up'?'Expense ↑':it.kind==='revenue_down'?'Revenue ↓':it.severity}</span>
-            <div style={{fontSize:13,color:T.text}}><span style={{fontWeight:600,color:T.textBright}}>{it.name}</span> — {it.detail}</div>
-          </div>))}
-        </div>}
-        {a.netIncome.length>0&&<div style={{borderTop:a.items.length?'2px solid '+T.border:'none',paddingTop:a.items.length?12:0}}>
-          <div style={{fontSize:11,fontWeight:700,color:T.textDim,textTransform:'uppercase',letterSpacing:'.04em',marginBottom:6}}>Net Income</div>
-          {a.netIncome.map((it,i)=>(<div key={i} style={{display:'flex',gap:10,alignItems:'flex-start',padding:'5px 0'}}>
+    {data&&(()=>{
+      const sevColor=sev=>sev==='high'?T.red:sev==='low'?(T.textDim||'#888'):(T.orange||'#d08a2a');
+      return(<div style={{...S.card,marginTop:16}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+          <div><div style={S.h2}>Items Needing Attention</div><div style={{fontSize:12,color:T.textMuted,marginTop:2}}>AI review of the trailing-twelve-month trends — unfavorable movements a reviewer should look at.</div></div>
+          <button style={{...S.btnP,opacity:analyzing?0.6:1}} disabled={analyzing} onClick={runAnalysis}>{analyzing?'Analyzing…':analysis?'Re-analyze with Claude':'Analyze with Claude'}</button>
+        </div>
+        {analysisErr&&<div style={{...S.err,marginTop:12}}>{analysisErr}</div>}
+        {!analysis&&!analyzing&&!analysisErr&&<div style={{fontSize:13,color:T.textMuted,marginTop:12}}>Click “Analyze with Claude” to generate a written review of items needing attention. It reads the 12-month P&amp;L and flags unfavorable trends.</div>}
+        {analyzing&&<div style={{fontSize:13,color:T.textMuted,marginTop:12}}>Claude is reviewing the trailing twelve months…</div>}
+        {analysis&&<div style={{marginTop:12}}>
+          {analysis.summary&&<div style={{fontSize:13,color:T.text,marginBottom:analysis.findings.length?14:0,lineHeight:1.5}}>{analysis.summary}</div>}
+          {analysis.findings.length>0?analysis.findings.map((it,i)=>(<div key={i} style={{display:'flex',gap:10,alignItems:'flex-start',padding:'8px 0',borderTop:i?'1px solid '+T.border:'1px solid '+T.border}}>
             <span style={{flexShrink:0,marginTop:1,fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.04em',color:sevColor(it.severity),border:'1px solid '+sevColor(it.severity)+'66',borderRadius:4,padding:'2px 6px'}}>{it.severity}</span>
-            <div style={{fontSize:13,color:T.text}}>{it.detail}</div>
-          </div>))}
+            <div style={{fontSize:13,color:T.text}}>{it.title&&<span style={{fontWeight:600,color:T.textBright}}>{it.title}</span>}{it.title&&it.detail?' — ':''}{it.detail}</div>
+          </div>)):<div style={{fontSize:13,color:T.green||'#2a9d5a',marginTop:4}}>Nothing flagged for this period.</div>}
+          <div style={{fontSize:11,color:T.textDim,marginTop:12,fontStyle:'italic'}}>Generated by Claude · review before relying on it.</div>
         </div>}
       </div>);
     })()}

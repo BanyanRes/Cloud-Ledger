@@ -1491,8 +1491,6 @@ async function buildTtmPL(getBalances, opts) {
   }
   for (const [cat, lines] of opexByCat) if (lines && lines.length) pushGroup(cat, lines);
 
-  const analysis = buildTtmAnalysis({ months, revenue, opex, opexGroups, netIncome });
-
   return {
     meta: {
       entityName: opts.entityName || '',
@@ -1506,7 +1504,6 @@ async function buildTtmPL(getBalances, opts) {
     cogs, totCogs, grossProfit, hasCogs: cogs.length > 0,
     opex, opexGroups, totOpex,
     netIncome,
-    analysis,
   };
 }
 
