@@ -970,6 +970,10 @@ async function renderStatementsPdf(s, outOffsets) {
   const bsCols = [RIGHT - 190, RIGHT - 95, RIGHT];
   const twoCols = [RIGHT - 95, RIGHT];
   const threeCols = [RIGHT - 200, RIGHT - 100, RIGHT];
+  // Operations: four columns — current month, prior month, a Change column
+  // (current − prior) sitting between the prior-month and Year-to-Date columns,
+  // and Year to Date on the far right.
+  const opsCols = [RIGHT - 288, RIGHT - 192, RIGHT - 96, RIGHT];
 
   // ── 1. Balance Sheet ───────────────────────────────────────────────────────
   {
@@ -1026,20 +1030,23 @@ async function renderStatementsPdf(s, outOffsets) {
     const L = makeLayout(pdf, fonts, m, 'Statements of Operations', { dateLine: 'For the Months Ended ' + m.longDate + ' and ' + m.priorLongDate });
     track('Statements of Operations');
     L.start();
-    L.setCols(threeCols);
+    L.setCols(opsCols);
     // Current-month column shows the current period-end date; prior-month column
-    // shows the prior period-end date (per round-2 feedback). Headers underlined.
-    L.colHeaders([m.longDate, m.priorLongDate, 'Year to Date'], { underline: true });
-    const line = (r, o = {}) => L.row(r.name, [money(r.cur), money(r.pri), money(r.ytd)], { indent: 16, ...o });
+    // shows the prior period-end date (per round-2 feedback). A Change column
+    // (current − prior) sits between the prior-month and Year-to-Date columns.
+    // Headers underlined.
+    L.colHeaders([m.longDate, m.priorLongDate, 'Change', 'Year to Date'], { underline: true });
+    const chg = (cur, pri) => money(r2(cur - pri));
+    const line = (r, o = {}) => L.row(r.name, [money(r.cur), money(r.pri), chg(r.cur, r.pri), money(r.ytd)], { indent: 16, ...o });
 
     L.sectionTitle('Revenue');
     s.operations.revenue.forEach(r => line(r));
-    L.row('Total Revenue', [money(s.operations.totRev.cur), money(s.operations.totRev.pri), money(s.operations.totRev.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    L.row('Total Revenue', [money(s.operations.totRev.cur), money(s.operations.totRev.pri), chg(s.operations.totRev.cur, s.operations.totRev.pri), money(s.operations.totRev.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     if (s.operations.cogs.length) {
       L.sectionTitle('Cost of Revenue');
       s.operations.cogs.forEach(r => line(r));
-      L.row('Total Cost of Revenue', [money(s.operations.totCogs.cur), money(s.operations.totCogs.pri), money(s.operations.totCogs.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 4 });
-      L.row('Gross Profit', [money(s.operations.grossProfit.cur), money(s.operations.grossProfit.pri), money(s.operations.grossProfit.ytd)], { indent: 6, boldRow: true, gapAfter: 6 });
+      L.row('Total Cost of Revenue', [money(s.operations.totCogs.cur), money(s.operations.totCogs.pri), chg(s.operations.totCogs.cur, s.operations.totCogs.pri), money(s.operations.totCogs.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 4 });
+      L.row('Gross Profit', [money(s.operations.grossProfit.cur), money(s.operations.grossProfit.pri), chg(s.operations.grossProfit.cur, s.operations.grossProfit.pri), money(s.operations.grossProfit.ytd)], { indent: 6, boldRow: true, gapAfter: 6 });
     }
     L.sectionTitle('Operating Expenses');
     // Grouped into the 11 presentation categories, each with its own subtotal.
@@ -1057,16 +1064,16 @@ async function renderStatementsPdf(s, outOffsets) {
         const groupH = 12 /* header */ + nLines * 12 + (hasSubtotal ? 12 : 0) + 4 /* subtotal rule buffer */;
         L.keepTogether(groupH);
         L.row(g.title, [], { indent: 12, boldRow: true });
-        g.lines.forEach(r => L.row(r.name, [money(r.cur), money(r.pri), money(r.ytd)], { indent: 26 }));
+        g.lines.forEach(r => L.row(r.name, [money(r.cur), money(r.pri), chg(r.cur, r.pri), money(r.ytd)], { indent: 26 }));
         if (hasSubtotal) {
-          L.row('Total ' + g.title, [money(g.subtotal.cur), money(g.subtotal.pri), money(g.subtotal.ytd)], { indent: 20, ruleAbove: true });
+          L.row('Total ' + g.title, [money(g.subtotal.cur), money(g.subtotal.pri), chg(g.subtotal.cur, g.subtotal.pri), money(g.subtotal.ytd)], { indent: 20, ruleAbove: true });
         }
       }
     } else {
       s.operations.opex.forEach(r => line(r));
     }
-    L.row('Total Operating Expenses', [money(s.operations.totOpex.cur), money(s.operations.totOpex.pri), money(s.operations.totOpex.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
-    L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+    L.row('Total Operating Expenses', [money(s.operations.totOpex.cur), money(s.operations.totOpex.pri), chg(s.operations.totOpex.cur, s.operations.totOpex.pri), money(s.operations.totOpex.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
   }
 
   // ── 3. Statement of Cash Flows ──────────────────────────────────────────────
