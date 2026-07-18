@@ -1075,10 +1075,8 @@ async function renderStatementsPdf(s, outOffsets) {
     track('Statement of Cash Flows');
     L.start();
     L.setCols([RIGHT]);
-    // Single YTD column. Give it an underlined "Year to Date" heading so the
-    // reader knows what the column is (and, via the repeat mechanism, it shows
-    // again atop any continuation page).
-    L.colHeaders(['Year to Date'], { underline: true });
+    // No column heading: the single YTD column is self-evident from the
+    // statement title, so no "Year to Date" label is drawn above it.
     const cf = s.cashFlow;
     L.sectionTitle('Cash Flows from Operating Activities');
     L.row('Net Income (Loss)', [money(cf.netIncome)], { indent: 16 });
