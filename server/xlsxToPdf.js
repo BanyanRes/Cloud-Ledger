@@ -4,10 +4,14 @@
 // pdf-lib. It prints the sheet's own values as-is — native column widths
 // (!cols), merged cells (!merges), each cell's own bold and horizontal
 // alignment, and the workbook's number formats (SheetJS `w` = formatted text) —
-// and fits the whole sheet onto ONE landscape page. It deliberately does NOT
-// invent any formatting: no rules/underlines are drawn and bold is never
-// inferred from a row's position or label (that inference previously added
-// spurious underlines to the requisition report's reconciliation block).
+// and fits the whole sheet onto ONE landscape page.
+//
+// It reproduces the sheet's OWN cell borders (read from the OOXML, since the
+// community SheetJS build doesn't surface them) so the main table reads as a
+// table and the reconciliation block's underlines appear exactly where the
+// workbook drew bottom borders. It still infers NO formatting from row position
+// or labels — bold, fills, and border edges all come straight from the file, so
+// nothing spurious is added.
 //
 // Used by the Financial Statements engine so an uploaded .xlsx requisition
 // report's "Budget to Actual" sheet can be merged into the package faithfully
@@ -18,6 +22,7 @@
 const XLSX = require('xlsx');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const { readSheetFills } = require('./xlsxFills');
+const { readSheetBorders } = require('./xlsxBorders');
 
 // Landscape Letter.
 const LP = { w: 792, h: 612, mL: 30, mR: 30, mT: 40, mB: 34 };
@@ -53,19 +58,21 @@ function isNumericDisplay(s) {
 // style hints (bold, horizontal alignment). Blank leading/trailing rows/cols
 // are trimmed; the same trim offset is applied to widths and merges so
 // everything stays aligned.
-//   returns { rows, nCols, colWidths, merges, styles, fills }
+//   returns { rows, nCols, colWidths, merges, styles, fills, borders }
 //     rows[r][c]     = display string
 //     colWidths[c]   = points (or null → auto)
 //     merges         = [{ r, c, rs, cs }] (top-left row/col + row/col span),
 //                      already shifted into the trimmed coordinate space
 //     styles[r][c]   = { bold, align } | undefined
 //     fills[r][c]    = "RRGGBB" | undefined  (solid cell background, if any)
-// `absFills` (optional) is a Map "r,c"→"RRGGBB" in ABSOLUTE sheet coordinates
-// (from xlsxFills.readSheetFills); it is shifted into the trimmed space so the
-// renderer can paint each cell's background before drawing text.
-function sheetToGrid(ws, absFills) {
+//     borders[r][c]  = { top, bottom, left, right } | undefined (drawn edges)
+// `absFills`/`absBorders` (optional) are Maps in ABSOLUTE sheet coordinates
+// (from xlsxFills.readSheetFills / xlsxBorders.readSheetBorders); each is
+// shifted into the trimmed space so the renderer can paint backgrounds and draw
+// border edges per cell.
+function sheetToGrid(ws, absFills, absBorders) {
   const ref = ws['!ref'];
-  if (!ref) return { rows: [], nCols: 0, colWidths: [], merges: [], styles: [], fills: [] };
+  if (!ref) return { rows: [], nCols: 0, colWidths: [], merges: [], styles: [], fills: [], borders: [] };
   const range = XLSX.utils.decode_range(ref);
   const grid = [];
   const styles = [];
@@ -168,7 +175,24 @@ function sheetToGrid(ws, absFills) {
     }
   }
 
-  return { rows: trimmed, nCols: outNCols, colWidths, merges, styles: trimmedStyles, fills };
+  // Cell borders → trimmed coordinate space, exactly like fills. absBorders keys
+  // are ABSOLUTE sheet coords "r,c" → { top, bottom, left, right } (from
+  // xlsxBorders.readSheetBorders). Each entry lands at grid row (R - range.s.r)
+  // and col (C - range.s.c - firstCol), so the drawn edges line up with the
+  // same cells the values do.
+  const borders = trimmed.map(row => new Array(row.length));
+  if (absBorders && absBorders.size) {
+    for (const [key, edges] of absBorders) {
+      const [ar, ac] = key.split(',').map(Number);
+      const gr = ar - range.s.r;
+      const gc = ac - range.s.c - firstCol;
+      if (gr < 0 || gr >= borders.length) continue;
+      if (gc < 0 || gc >= outNCols) continue;
+      borders[gr][gc] = edges;
+    }
+  }
+
+  return { rows: trimmed, nCols: outNCols, colWidths, merges, styles: trimmedStyles, fills, borders };
 }
 
 // Resolve natural column widths in points: use the sheet's native width where
@@ -240,8 +264,11 @@ function wrapText(str, font, fontSize, maxWidth) {
 //              false (default) the sheet is fit onto a single page.
 //   fills    — optional Map "r,c"→"RRGGBB" (absolute sheet coords) of solid cell
 //              backgrounds to reproduce (from xlsxFills.readSheetFills).
+//   borders  — optional Map "r,c"→{top,bottom,left,right} (absolute sheet coords)
+//              of drawn cell-border edges to reproduce (from
+//              xlsxBorders.readSheetBorders).
 async function worksheetToPdfBytes(ws, opts = {}) {
-  const { rows, nCols, colWidths, merges, styles, fills } = sheetToGrid(ws, opts.fills);
+  const { rows, nCols, colWidths, merges, styles, fills, borders } = sheetToGrid(ws, opts.fills, opts.borders);
   const pdf = await PDFDocument.create();
   const reg = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -373,7 +400,32 @@ async function worksheetToPdfBytes(ws, opts = {}) {
         page.drawRectangle({ x: colX[c], y: y - rowH, width: cw, height: rowH, color: col });
       }
     }
-    // Pass 2: text on top of any fills.
+    // Pass 2: draw cell BORDER edges from the workbook (behind text, above
+    // fills). Each present edge is a thin gray hairline spanning the cell's
+    // merged width; a merged region draws its edges once across the full span.
+    // These come straight from the sheet's own borders — the main table's
+    // gridlines and the reconciliation block's underlines both appear exactly
+    // where Excel drew them, with nothing inferred from row position.
+    if (borders && borders.length) {
+      const EDGE = rgb(0.55, 0.55, 0.55);
+      const EW = Math.max(0.3, 0.5 * scale);
+      const yTop = y;
+      const yBot = y - rowH;
+      for (let c = 0; c < nCols; c++) {
+        if (covered.has(ri + ',' + c)) continue;
+        const b = borders[ri] && borders[ri][c];
+        if (!b) continue;
+        const { w: cw } = mergedWidth(ri, c);
+        if (cw <= 0) continue;
+        const xL = colX[c];
+        const xR = colX[c] + cw;
+        if (b.top) page.drawLine({ start: { x: xL, y: yTop }, end: { x: xR, y: yTop }, thickness: EW, color: EDGE });
+        if (b.bottom) page.drawLine({ start: { x: xL, y: yBot }, end: { x: xR, y: yBot }, thickness: EW, color: EDGE });
+        if (b.left) page.drawLine({ start: { x: xL, y: yBot }, end: { x: xL, y: yTop }, thickness: EW, color: EDGE });
+        if (b.right) page.drawLine({ start: { x: xR, y: yBot }, end: { x: xR, y: yTop }, thickness: EW, color: EDGE });
+      }
+    }
+    // Pass 3: text on top of any fills and borders.
     for (let c = 0; c < nCols; c++) {
       const cell = cells[c];
       if (!cell) continue; // covered by a merge anchor
@@ -392,11 +444,11 @@ async function worksheetToPdfBytes(ws, opts = {}) {
         page.drawText(txt, { x, y: ly, size: fontSize, font, color: rgb(0.1, 0.1, 0.1) });
       }
     }
-    // No invented rules/underlines. We print only the sheet's own values and
-    // its own cell fills; the requisition report already carries whatever
-    // underlines belong in it as part of its cell content, so drawing extra
-    // ones (under "total" rows or the header band) is exactly the artifact
-    // we're removing.
+    // We draw ONLY the sheet's own values, fills, and borders — never rules or
+    // underlines inferred from a row's position or label. The requisition
+    // report's table gridlines and its reconciliation underlines are the
+    // workbook's own cell borders (reproduced above), so nothing here is
+    // invented.
     y -= rowH;
   }
   return await pdf.save({ useObjectStreams: false });
@@ -419,9 +471,14 @@ async function xlsxSheetToPdf(xlsxBuffer, sheetName, opts = {}) {
   // band, subtotal rows, and Date cell. Degrades to no fills on any parse error.
   let fills;
   try { fills = await readSheetFills(xlsxBuffer, name); } catch { fills = undefined; }
+  // Read cell borders the same way, so the rendered page reproduces the report's
+  // own table gridlines and the reconciliation block's underlines. Degrades to
+  // no borders on any parse error.
+  let borders;
+  try { borders = await readSheetBorders(xlsxBuffer, name); } catch { borders = undefined; }
   // Pass through only an explicitly-provided title; the requisition sheet carries
   // its own header block, so we don't inject the sheet name as a caption.
-  const bytes = await worksheetToPdfBytes(ws, { title: opts.title, fills });
+  const bytes = await worksheetToPdfBytes(ws, { title: opts.title, fills, borders });
   return { bytes, sheetUsed: name, availableSheets: wb.SheetNames };
 }
 
