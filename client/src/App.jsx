@@ -652,7 +652,7 @@ export default function App(){
     {id:'d1',divider:1,label:'TRANSACTIONS'},{id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
     {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},...(dimsEnabled?[{id:'dimensions',label:'Dimensions',icon:'🏷️',section:'coa'}]:[]),{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
     {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
-    {id:'d3',divider:1,label:'REPORTS'},{id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
+    {id:'d3',divider:1,label:'REPORTS'},{id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},{id:'ttm',label:'Trailing 12 Months',icon:'📈',section:'reports'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
     {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),{id:'apaging',label:'AP Aging',icon:'⏳',section:'reports'},{id:'commitments',label:'Commitments',icon:'🤝',section:'reports'},{id:'memorized',label:'Memorized Reports',icon:'★',section:'reports'},
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
     ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
@@ -700,6 +700,7 @@ export default function App(){
         {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} canEdit={canEdit} reqState={reqState} setReqState={setReqState}/>}
         {page==='wp_mgmtfee'&&activeEntity&&isCLRF&&<MgmtFeeWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityName={entityName}/>}
       </>})()}</div></div>
     {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
@@ -3109,6 +3110,17 @@ function MgmtFeeWorkpaper({entityId,entityName,canEdit=true}){
         <div style={{marginTop:8,fontSize:12,color:T.textMuted}}>The .xlsx has downloaded. Review the calc tab before sending.</div>
       </div>}
     </>}
+  </div>);
+}
+
+// ═══ Trailing 12 Months — placeholder (report not yet implemented) ═══
+function TrailingTwelveMonths({entityName}){
+  return(<div>
+    <div style={S.h1}>Trailing 12 Months</div>
+    <div style={{color:T.textMuted,marginTop:12,fontSize:13,maxWidth:640}}>
+      A trailing-twelve-month report for {entityName||'this entity'} is coming soon.
+      This section is a placeholder — the report has not been built yet.
+    </div>
   </div>);
 }
 
