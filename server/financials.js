@@ -1491,6 +1491,8 @@ async function buildTtmPL(getBalances, opts) {
   }
   for (const [cat, lines] of opexByCat) if (lines && lines.length) pushGroup(cat, lines);
 
+  const analysis = buildTtmAnalysis({ months, revenue, opex, opexGroups, netIncome });
+
   return {
     meta: {
       entityName: opts.entityName || '',
@@ -1504,8 +1506,123 @@ async function buildTtmPL(getBalances, opts) {
     cogs, totCogs, grossProfit, hasCogs: cogs.length > 0,
     opex, opexGroups, totOpex,
     netIncome,
+    analysis,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// buildTtmAnalysis — surfaces line items that need attention from the 12-month
+// series. Focus is on UNFAVORABLE movements in the most recent month vs. the
+// average of the prior active months:
+//   • Expense up  = latest month materially above its trailing average (spending
+//                   is rising) → unfavorable.
+//   • Revenue down= latest month materially below its trailing average (revenue
+//                   is falling) → unfavorable.
+// Plus overall Net Income context: any loss months, and whether the latest month
+// deteriorated vs. its trailing average. Thresholds keep noise down: a movement
+// must clear both a percentage swing and a dollar floor to be flagged.
+// ─────────────────────────────────────────────────────────────────────────────
+function buildTtmAnalysis(ctx) {
+  const { months, revenue, opex, opexGroups, netIncome } = ctx;
+  const n = 12;
+  const lastIdx = n - 1;
+  const lastLabel = months[lastIdx] ? months[lastIdx].label : '';
+  const PCT_THRESHOLD = 0.25;   // ≥25% swing vs. trailing average
+  const DOLLAR_FLOOR = 500;     // and ≥ $500 movement, to ignore trivial lines
+
+  // Trailing average of the prior months (indices 0..lastIdx-1), counting only
+  // months where the line was active (non-zero), so a line that only recently
+  // started isn't compared against a diluted average full of zeros.
+  const trailingAvg = vals => {
+    const prior = vals.slice(0, lastIdx).filter(v => Math.abs(v) >= 0.005);
+    if (!prior.length) return null;
+    return prior.reduce((s, v) => s + v, 0) / prior.length;
+  };
+
+  const items = [];
+
+  // Expense lines (individual accounts) — flag latest month running hot.
+  for (const l of opex) {
+    const last = l.vals[lastIdx];
+    const avg = trailingAvg(l.vals);
+    if (avg == null || avg <= 0) continue;
+    const delta = r2(last - avg);
+    if (delta >= DOLLAR_FLOOR && (delta / avg) >= PCT_THRESHOLD) {
+      items.push({
+        severity: (delta / avg) >= 0.75 ? 'high' : 'medium',
+        kind: 'expense_up',
+        name: l.name,
+        code: l.code,
+        detail: lastLabel + ' expense of ' + fmtAbs(last) + ' is ' + pctStr(delta / avg)
+          + ' above the trailing average of ' + fmtAbs(avg) + ' (up ' + fmtAbs(delta) + ').',
+        last: r2(last), avg: r2(avg), delta,
+      });
+    }
+  }
+
+  // Revenue lines — flag latest month running cold (revenue falling).
+  for (const l of revenue) {
+    const last = l.vals[lastIdx];
+    const avg = trailingAvg(l.vals);
+    if (avg == null || avg <= 0) continue;
+    const delta = r2(avg - last); // positive = shortfall
+    if (delta >= DOLLAR_FLOOR && (delta / avg) >= PCT_THRESHOLD) {
+      items.push({
+        severity: (delta / avg) >= 0.75 ? 'high' : 'medium',
+        kind: 'revenue_down',
+        name: l.name,
+        code: l.code,
+        detail: lastLabel + ' revenue of ' + fmtAbs(last) + ' is ' + pctStr(delta / avg)
+          + ' below the trailing average of ' + fmtAbs(avg) + ' (down ' + fmtAbs(delta) + ').',
+        last: r2(last), avg: r2(avg), delta,
+      });
+    }
+  }
+
+  // Sort most material first (largest dollar movement), high severity first.
+  const sevRank = { high: 0, medium: 1 };
+  items.sort((a, b) => (sevRank[a.severity] - sevRank[b.severity]) || (Math.abs(b.delta) - Math.abs(a.delta)));
+
+  // Net income context.
+  const niContext = [];
+  const lossMonths = [];
+  for (let i = 0; i < n; i++) {
+    if (netIncome.vals[i] < -0.005) lossMonths.push(months[i] ? months[i].label : ('M' + (i + 1)));
+  }
+  if (lossMonths.length) {
+    niContext.push({
+      severity: lossMonths.length >= 3 ? 'high' : 'medium',
+      kind: 'net_loss_months',
+      detail: 'Net loss in ' + lossMonths.length + ' of ' + n + ' months: ' + lossMonths.join(', ') + '.',
+    });
+  }
+  const niAvg = trailingAvg(netIncome.vals);
+  const niLast = netIncome.vals[lastIdx];
+  if (niAvg != null) {
+    const niDelta = r2(niLast - niAvg);
+    if (niDelta <= -DOLLAR_FLOOR && Math.abs(niAvg) >= 0.005 && (Math.abs(niDelta) / Math.abs(niAvg)) >= PCT_THRESHOLD) {
+      niContext.push({
+        severity: 'medium',
+        kind: 'net_income_down',
+        detail: lastLabel + ' net income of ' + fmtSigned(niLast) + ' is ' + fmtAbs(Math.abs(niDelta))
+          + ' below the trailing average of ' + fmtSigned(niAvg) + '.',
+      });
+    }
+  }
+
+  return {
+    lastMonthLabel: lastLabel,
+    thresholds: { pct: PCT_THRESHOLD, dollar: DOLLAR_FLOOR },
+    items,          // unfavorable line-level movements
+    netIncome: niContext,
+    hasFindings: items.length > 0 || niContext.length > 0,
+  };
+}
+
+// Format helpers for analysis narrative (magnitude with commas, and % / signed).
+function fmtAbs(n) { return Math.abs(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function fmtSigned(n) { const v = Number(n) || 0; const t = fmtAbs(v); return v < 0 ? '(' + t + ')' : t; }
+function pctStr(frac) { return Math.round((Number(frac) || 0) * 100) + '%'; }
 
 // Short month-column label, e.g. '2026-04-30' → 'Apr 2026'.
 function monthLabel(dateStr) {

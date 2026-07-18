@@ -6614,6 +6614,45 @@ app.get('/api/entities/:eid/ttm-pl.xlsx', auth, requireEntityAccess(), requireRo
     emit('Total Operating Expenses', d.totOpex.vals, d.totOpex.total, { bold: true, underline: 'single' });
     // Net Income (grand total) — double underline.
     emit('Net Income (Loss)', d.netIncome.vals, d.netIncome.total, { bold: true, underline: 'double' });
+    // -- Analysis: Items Needing Attention (below Net Income) ------------------
+    const a = d.analysis;
+    if (a) {
+      const GE = String.fromCharCode(8805);   // >=
+      const DASH = String.fromCharCode(8212);  // em dash
+      r += 1; // blank spacer row
+      const titleRow = r++;
+      const tCell = ws.getCell(titleRow, 1);
+      tCell.value = 'Items Needing Attention';
+      tCell.font = { bold: true, size: 11 };
+      tCell.border = { bottom: { style: 'thin' } };
+      const subRow = r++;
+      const sCell = ws.getCell(subRow, 1);
+      sCell.value = a.hasFindings
+        ? ('Unfavorable movements in ' + a.lastMonthLabel + ' vs. the trailing average (flagged at ' + GE + Math.round(a.thresholds.pct * 100) + '% and ' + GE + '$' + a.thresholds.dollar.toLocaleString() + ').')
+        : ('No unfavorable trends exceeded the review threshold in ' + a.lastMonthLabel + '.');
+      sCell.font = { italic: true, size: 9, color: { argb: 'FF666666' } };
+      const writeFinding = (text) => {
+        const rowIdx = r++;
+        const c = ws.getCell(rowIdx, 1);
+        c.value = text;
+        c.font = { size: 10 };
+        c.alignment = { indent: 1 };
+      };
+      if (a.items && a.items.length) {
+        for (const it of a.items) {
+          const tag = it.kind === 'expense_up' ? 'EXPENSE UP' : it.kind === 'revenue_down' ? 'REVENUE DOWN' : it.severity.toUpperCase();
+          writeFinding('[' + tag + '] ' + it.name + ' ' + DASH + ' ' + it.detail);
+        }
+      }
+      if (a.netIncome && a.netIncome.length) {
+        const niHdr = ws.getCell(r++, 1);
+        niHdr.value = 'Net Income';
+        niHdr.font = { bold: true, size: 10 };
+        for (const it of a.netIncome) writeFinding('[' + it.severity.toUpperCase() + '] ' + it.detail);
+      }
+      if (!a.hasFindings) writeFinding('Nothing flagged this period.');
+    }
+
 
     // Column widths: account column wide, numeric columns comfortable.
     ws.getColumn(1).width = 34;

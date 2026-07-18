@@ -3207,6 +3207,31 @@ function TrailingTwelveMonths({entityId,entityName}){
         </tbody>
       </table>
     </div>}
+    {data&&data.analysis&&(()=>{
+      const a=data.analysis;
+      const sevColor=sev=>sev==='high'?T.red:(T.orange||'#d08a2a');
+      if(!a.hasFindings)return(<div style={{...S.card,marginTop:16,borderColor:(T.green||'#2a9d5a')+'55'}}>
+        <div style={{...S.h2,marginBottom:4,color:T.green||'#2a9d5a'}}>Items Needing Attention</div>
+        <div style={{fontSize:13,color:T.textMuted}}>No unfavorable trends stood out this period. Nothing exceeded the review threshold ({Math.round(a.thresholds.pct*100)}% swing and ${a.thresholds.dollar.toLocaleString()} vs. the trailing average in {a.lastMonthLabel}).</div>
+      </div>);
+      return(<div style={{...S.card,marginTop:16,borderColor:(T.orange||'#d08a2a')+'55'}}>
+        <div style={{...S.h2,marginBottom:4}}>Items Needing Attention</div>
+        <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Unfavorable movements in {a.lastMonthLabel} vs. the trailing average — expenses running above, or revenue running below, their prior-month norm (flagged at ≥{Math.round(a.thresholds.pct*100)}% and ≥${a.thresholds.dollar.toLocaleString()}).</div>
+        {a.items.length>0&&<div style={{marginBottom:a.netIncome.length?14:0}}>
+          {a.items.map((it,i)=>(<div key={i} style={{display:'flex',gap:10,alignItems:'flex-start',padding:'7px 0',borderTop:i?'1px solid '+T.border:'none'}}>
+            <span style={{flexShrink:0,marginTop:1,fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.04em',color:sevColor(it.severity),border:'1px solid '+sevColor(it.severity)+'66',borderRadius:4,padding:'2px 6px'}}>{it.kind==='expense_up'?'Expense ↑':it.kind==='revenue_down'?'Revenue ↓':it.severity}</span>
+            <div style={{fontSize:13,color:T.text}}><span style={{fontWeight:600,color:T.textBright}}>{it.name}</span> — {it.detail}</div>
+          </div>))}
+        </div>}
+        {a.netIncome.length>0&&<div style={{borderTop:a.items.length?'2px solid '+T.border:'none',paddingTop:a.items.length?12:0}}>
+          <div style={{fontSize:11,fontWeight:700,color:T.textDim,textTransform:'uppercase',letterSpacing:'.04em',marginBottom:6}}>Net Income</div>
+          {a.netIncome.map((it,i)=>(<div key={i} style={{display:'flex',gap:10,alignItems:'flex-start',padding:'5px 0'}}>
+            <span style={{flexShrink:0,marginTop:1,fontSize:10,fontWeight:700,textTransform:'uppercase',letterSpacing:'.04em',color:sevColor(it.severity),border:'1px solid '+sevColor(it.severity)+'66',borderRadius:4,padding:'2px 6px'}}>{it.severity}</span>
+            <div style={{fontSize:13,color:T.text}}>{it.detail}</div>
+          </div>))}
+        </div>}
+      </div>);
+    })()}
   </div>);
 }
 
