@@ -779,8 +779,8 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     if (layout._subline) textC(layout._subline, FS.sub, reg, PH - PAGE.mT - 2);
   }
   function drawFooter() {
-    // Centered footer on every page: "<entity>, <date>   See Executive Summary".
-    const label = meta.entityName + ', ' + meta.longDate + '   See Executive Summary';
+    // Centered footer on every page: "<entity>, <date>  |  See Executive Summary".
+    const label = meta.entityName + ', ' + meta.longDate + '  |  See Executive Summary';
     const w = reg.widthOfTextAtSize(label, FS.foot);
     page.drawText(label, { x: (PW - w) / 2, y: PAGE.mB - 12, size: FS.foot, font: reg, color: rgb(0.4, 0.4, 0.4) });
   }
