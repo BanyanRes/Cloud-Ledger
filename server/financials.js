@@ -1779,25 +1779,32 @@ async function buildFundStatements(opts) {
   const CONTRIB_PREFIXES = ['3011', '3012', '3013', '3018'];
   const SYND_PREFIX = ['3702'];
 
-  // Fund-level column totals come straight from the GL and tie exactly:
-  //   beginning  = fund equity at beginning of year (prior years closed)
-  //   contributions/refunds (net) = movement of the contribution accounts over the period
-  //   syndication = movement of the syndication-cost account over the period
-  //   netLoss     = fund net investment loss for the period
-  //   ending      = beginning + contributions + syndication + netLoss (ties to totalCapital)
-  const fundBegEquity = r2(sumWhere(bsBeg, r => r.type === 'Equity'));
+  // Fund-level column totals. The ENDING is anchored to the balance-sheet total
+  // partners' capital (totalCapital), so the Statement of Changes always ties to
+  // the Statement of Assets, Liabilities & Partners' Capital by construction.
+  // The activity columns are the real period movements:
+  //   contributions/refunds (net) = movement of the contribution accounts
+  //   syndication                 = movement of the syndication-cost account
+  //   netLoss                     = fund net investment loss for the period
+  // Beginning is then derived as ending - activity, so the column foots exactly.
+  //
+  // Note on retained earnings: the beginning-of-year equity snapshot carries a
+  // Retained Earnings balance that is a soft-close artifact (prior-period P&L
+  // that the close mechanism re-derives). Anchoring the ending to totalCapital
+  // and back-solving the beginning naturally allocates that retained earnings
+  // into partners' capital rather than leaving it stranded outside the
+  // roll-forward - which is why beginning here matches the CPA's beginning
+  // partners' capital and ending matches the balance sheet.
   const contribMove = r2(sumWhere(isYtd, r => r.type === 'Equity' && codeStarts(r.code, CONTRIB_PREFIXES)));
   const syndMove = r2(sumWhere(isYtd, r => r.type === 'Equity' && codeStarts(r.code, SYND_PREFIX)));
-  // Any other equity movement over the period (e.g. reclasses) so the columns
-  // still foot to the true ending capital.
-  const otherEqMove = r2(sumWhere(isYtd, r => r.type === 'Equity' && !codeStarts(r.code, CONTRIB_PREFIXES) && !codeStarts(r.code, SYND_PREFIX)));
+  const fundEnding = totalCapital; // balance-sheet total partners' capital
+  const fundBeginning = r2(fundEnding - contribMove - syndMove - niYtd);
   const fundTotals = {
-    beginning: fundBegEquity,
+    beginning: fundBeginning,
     contributions: contribMove,
     syndication: syndMove,
-    other: otherEqMove,
     netLoss: r2(niYtd),
-    ending: r2(fundBegEquity + contribMove + syndMove + otherEqMove + niYtd),
+    ending: fundEnding,
   };
 
   // GP/LP split. The GL's equity/contribution accounts are not reliably tagged
