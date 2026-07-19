@@ -6640,11 +6640,13 @@ app.post('/api/entities/:eid/ttm-pl.xlsx', auth, requireEntityAccess(), requireR
         c.alignment = { indent: 1 };
       };
       if (a.findings && a.findings.length) {
-        for (const it of a.findings) {
-          const sev = (it.severity || 'medium').toUpperCase();
-          const title = it.title ? (it.title + ' ' + DASH + ' ') : '';
-          writeFinding('[' + sev + '] ' + title + (it.detail || ''));
-        }
+        // Numbered by importance (findings arrive already ordered most-important first).
+        a.findings.forEach((it, i) => {
+          const account = it.account || it.title || '';
+          const reason = it.reason || it.detail || '';
+          const sep = account && reason ? (' ' + DASH + ' ') : '';
+          writeFinding((i + 1) + '. ' + account + sep + reason);
+        });
       } else {
         writeFinding('Nothing flagged this period.');
       }
@@ -6720,10 +6722,12 @@ app.post('/api/entities/:eid/ttm-pl/analyze', auth, requireEntityAccess(), requi
       '(e.g. a normally-active account suddenly at zero in the latest month). Ignore trivially small amounts. ' +
       'Do NOT flag favorable movements as problems (e.g. expenses going down or revenue going up are good).\n\n' +
       'Return ONLY a JSON object, no prose, no markdown fences, in exactly this shape:\n' +
-      '{"summary": string, "findings": [{"severity": "high"|"medium"|"low", "title": string, "detail": string}]}\n' +
+      '{"summary": string, "findings": [{"account": string, "reason": string}]}\n' +
       '- summary: 1-2 sentence plain-English overview of the entity\'s trailing-12 performance and the main concern.\n' +
-      '- findings: the items needing attention, most important first, each with a short title (the account or theme) ' +
-      'and a one-sentence detail citing the specific numbers/months. Aim for the 3-8 most material items; return an empty array if nothing warrants attention.\n\n' +
+      '- findings: the items needing attention, ORDERED BY IMPORTANCE (most important/material first). ' +
+      'Each finding has "account" (the account or line-item name exactly as shown) and "reason" (one concise ' +
+      'sentence saying why it needs attention, citing the specific numbers/months). ' +
+      'Aim for the 3-8 most material items; return an empty array if nothing warrants attention.\n\n' +
       'THE REPORT:\n' + matrixText;
 
     const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
@@ -6759,11 +6763,12 @@ app.post('/api/entities/:eid/ttm-pl/analyze', auth, requireEntityAccess(), requi
       if (end === -1) throw firstErr;
       parsed = JSON.parse(clean.slice(start, end + 1));
     }
-    const findings = Array.isArray(parsed.findings) ? parsed.findings.map(f => ({
-      severity: ['high', 'medium', 'low'].includes((f.severity || '').toLowerCase()) ? f.severity.toLowerCase() : 'medium',
-      title: String(f.title || '').slice(0, 200),
-      detail: String(f.detail || '').slice(0, 500),
-    })) : [];
+    const findings = Array.isArray(parsed.findings) ? parsed.findings.map(f => {
+      const account = String(f.account || f.title || '').slice(0, 200);
+      const reason = String(f.reason || f.detail || '').slice(0, 500);
+      // title/detail retained for the Excel export and older clients.
+      return { account, reason, title: account, detail: reason };
+    }) : [];
     res.json({
       generatedBy: 'claude-haiku-4-5-20251001',
       lastMonthLabel: monthLabels[monthLabels.length - 1] || '',
