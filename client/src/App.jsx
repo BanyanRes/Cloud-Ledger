@@ -652,7 +652,7 @@ export default function App(){
     {id:'d1',divider:1,label:'TRANSACTIONS'},{id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
     {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},...(dimsEnabled?[{id:'dimensions',label:'Dimensions',icon:'🏷️',section:'coa'}]:[]),{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
     {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
-    {id:'d3',divider:1,label:'REPORTS'},{id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},{id:'ttm',label:'Trailing 12 Months',icon:'📈',section:'reports'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
+    {id:'d3',divider:1,label:'REPORTS'},{id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},{id:'ttm',label:'Trailing 12 Months',icon:'📈',section:'reports'},{id:'fundrep',label:'Fund Reporting',icon:'🏦',section:'reports'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
     {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),{id:'apaging',label:'AP Aging',icon:'⏳',section:'reports'},{id:'commitments',label:'Commitments',icon:'🤝',section:'reports'},{id:'memorized',label:'Memorized Reports',icon:'★',section:'reports'},
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
     ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
@@ -701,6 +701,7 @@ export default function App(){
         {page==='wp_mgmtfee'&&activeEntity&&isCLRF&&<MgmtFeeWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
+        {page==='fundrep'&&activeEntity&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
       </>})()}</div></div>
     {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
@@ -3110,6 +3111,139 @@ function MgmtFeeWorkpaper({entityId,entityName,canEdit=true}){
         <div style={{marginTop:8,fontSize:12,color:T.textMuted}}>The .xlsx has downloaded. Review the calc tab before sending.</div>
       </div>}
     </>}
+  </div>);
+}
+
+// ═══ Fund Reporting — CLRF-style LP fund statement package (config + generate) ═══
+function FundReporting({entityId,entityName}){
+  const[asOf,setAsOf]=useState(today());
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const[invs,setInvs]=useState(null);
+  const[classes,setClasses]=useState(null);
+  const[savingId,setSavingId]=useState(null);
+  const[classFilter,setClassFilter]=useState('');
+  const blank={parent_name:'',name:'',acquisition_date:'',cost:'',fair_value:'',sort_order:''};
+  const[draft,setDraft]=useState(blank);
+
+  const load=()=>{
+    setErr('');
+    api.getFundInvestments(entityId).then(setInvs).catch(e=>setErr(e.message));
+    api.getClasses(entityId).then(setClasses).catch(e=>setErr(e.message));
+  };
+  useEffect(()=>{setInvs(null);setClasses(null);load();},[entityId]);
+
+  const addInv=async()=>{
+    if(!draft.name.trim()){setErr('Investment name is required');return;}
+    setBusy(true);setErr('');
+    try{await api.createFundInvestment(entityId,{...draft,cost:Number(draft.cost)||0,fair_value:Number(draft.fair_value)||0,sort_order:Number(draft.sort_order)||0});setDraft(blank);load();}
+    catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+  const saveInv=async(row)=>{
+    setSavingId(row.id);setErr('');
+    try{await api.updateFundInvestment(entityId,row.id,{parent_name:row.parent_name,name:row.name,acquisition_date:row.acquisition_date,cost:Number(row.cost)||0,fair_value:Number(row.fair_value)||0,sort_order:Number(row.sort_order)||0});}
+    catch(e){setErr(e.message);}finally{setSavingId(null);}
+  };
+  const delInv=async(id)=>{setErr('');try{await api.deleteFundInvestment(entityId,id);load();}catch(e){setErr(e.message);}};
+  const setInvField=(id,f,v)=>setInvs(list=>list.map(r=>r.id===id?{...r,[f]:v}:r));
+
+  const toggleGP=async(cls)=>{
+    const next=(cls.partner_type==='GP')?'LP':'GP';
+    setClasses(list=>list.map(c=>c.id===cls.id?{...c,partner_type:next}:c));
+    try{await api.setClassPartnerType(entityId,cls.id,next);}catch(e){setErr(e.message);load();}
+  };
+
+  const genPdf=async()=>{
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(asOf)){setErr('Pick a valid as-of date');return;}
+    setBusy(true);setErr('');
+    try{const out=await api.getFundStatementsPdf(entityId,asOf);if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);}
+    catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+
+  const gpList=(classes||[]).filter(c=>c.partner_type==='GP');
+  const shownClasses=(classes||[]).filter(c=>!classFilter||c.name.toLowerCase().includes(classFilter.toLowerCase()));
+  const th={textAlign:'left',padding:'6px 8px',borderBottom:'2px solid '+T.border,color:T.textDim,fontSize:11,fontWeight:700};
+  const td={padding:'4px 8px',borderBottom:'1px solid '+T.border,fontSize:12};
+  const cellInput={width:'100%',background:'transparent',border:'1px solid '+T.border,borderRadius:4,padding:'3px 6px',color:T.text,fontSize:12};
+
+  return(<div>
+    <div style={{marginBottom:8}}>
+      <div style={S.h1}>Fund Reporting</div>
+      <div style={S.sub}>Limited-partnership fund statement package (Assets/Liabilities/Partners' Capital, Schedule of Investments, Operations, Changes in Partners' Capital, Cash Flows) · {entityName}</div>
+    </div>
+    {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
+
+    {/* Generate */}
+    <div style={{...S.card,marginBottom:16}}>
+      <div style={S.h2}>Generate statement package</div>
+      <div style={{display:'flex',gap:10,alignItems:'flex-end',marginTop:10,flexWrap:'wrap'}}>
+        <div><label style={S.label}>As of date</label><input type='date' value={asOf} onChange={e=>setAsOf(e.target.value)} style={{...S.input,width:170}}/></div>
+        <button style={{...S.btnP,opacity:busy?0.6:1}} disabled={busy} onClick={genPdf}>{busy?'Generating…':'Generate PDF'}</button>
+      </div>
+      <div style={{fontSize:12,color:T.textMuted,marginTop:8}}>Amounts come from the general ledger. The Schedule of Investments and the GP/LP capital split use the settings below.</div>
+    </div>
+
+    {/* Schedule of Investments editor */}
+    <div style={{...S.card,marginBottom:16}}>
+      <div style={S.h2}>Schedule of Investments</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>Per-underlying look-through detail (not in the GL). Group underlyings under a holding company via “Parent”. Percentages of partners' capital are computed at generation.</div>
+      {invs===null?<div style={{color:T.textMuted,fontSize:12}}>Loading…</div>:
+      <div style={{overflowX:'auto'}}>
+        <table style={{borderCollapse:'collapse',width:'100%',minWidth:720}}>
+          <thead><tr>
+            <th style={th}>Parent (holding co.)</th><th style={th}>Investment</th><th style={th}>Acq. date</th>
+            <th style={{...th,textAlign:'right'}}>Cost</th><th style={{...th,textAlign:'right'}}>Fair value</th>
+            <th style={{...th,textAlign:'right'}}>Order</th><th style={th}></th>
+          </tr></thead>
+          <tbody>
+            {invs.map(r=>(<tr key={r.id}>
+              <td style={td}><input style={cellInput} value={r.parent_name||''} onChange={e=>setInvField(r.id,'parent_name',e.target.value)}/></td>
+              <td style={td}><input style={cellInput} value={r.name||''} onChange={e=>setInvField(r.id,'name',e.target.value)}/></td>
+              <td style={td}><input style={{...cellInput,width:90}} value={r.acquisition_date||''} placeholder='m/d/yyyy' onChange={e=>setInvField(r.id,'acquisition_date',e.target.value)}/></td>
+              <td style={{...td,textAlign:'right'}}><input style={{...cellInput,textAlign:'right'}} value={r.cost} onChange={e=>setInvField(r.id,'cost',e.target.value)}/></td>
+              <td style={{...td,textAlign:'right'}}><input style={{...cellInput,textAlign:'right'}} value={r.fair_value} onChange={e=>setInvField(r.id,'fair_value',e.target.value)}/></td>
+              <td style={{...td,textAlign:'right',width:60}}><input style={{...cellInput,textAlign:'right'}} value={r.sort_order} onChange={e=>setInvField(r.id,'sort_order',e.target.value)}/></td>
+              <td style={{...td,whiteSpace:'nowrap'}}>
+                <button style={{...S.btnGhost,color:T.green,fontSize:11,marginRight:6,opacity:savingId===r.id?0.6:1}} disabled={savingId===r.id} onClick={()=>saveInv(r)}>{savingId===r.id?'…':'Save'}</button>
+                <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={()=>delInv(r.id)}>Delete</button>
+              </td>
+            </tr>))}
+            {/* add-new row */}
+            <tr>
+              <td style={td}><input style={cellInput} value={draft.parent_name} placeholder='CLRFI Midco I, LLC' onChange={e=>setDraft({...draft,parent_name:e.target.value})}/></td>
+              <td style={td}><input style={cellInput} value={draft.name} placeholder='New investment' onChange={e=>setDraft({...draft,name:e.target.value})}/></td>
+              <td style={td}><input style={{...cellInput,width:90}} value={draft.acquisition_date} placeholder='m/d/yyyy' onChange={e=>setDraft({...draft,acquisition_date:e.target.value})}/></td>
+              <td style={{...td,textAlign:'right'}}><input style={{...cellInput,textAlign:'right'}} value={draft.cost} placeholder='0' onChange={e=>setDraft({...draft,cost:e.target.value})}/></td>
+              <td style={{...td,textAlign:'right'}}><input style={{...cellInput,textAlign:'right'}} value={draft.fair_value} placeholder='0' onChange={e=>setDraft({...draft,fair_value:e.target.value})}/></td>
+              <td style={{...td,textAlign:'right',width:60}}><input style={{...cellInput,textAlign:'right'}} value={draft.sort_order} placeholder='0' onChange={e=>setDraft({...draft,sort_order:e.target.value})}/></td>
+              <td style={td}><button style={{...S.btnP,padding:'4px 10px',opacity:busy?0.6:1}} disabled={busy} onClick={addInv}>Add</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>}
+    </div>
+
+    {/* GP/LP tagging */}
+    <div style={{...S.card}}>
+      <div style={S.h2}>General Partner designation</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>Tag the investor classes that are General Partners. Everything else is treated as a Limited Partner for the GP/LP capital split. Currently {gpList.length} class{gpList.length===1?'':'es'} tagged GP.</div>
+      <input style={{...S.input,maxWidth:320,marginBottom:10}} placeholder='Filter classes…' value={classFilter} onChange={e=>setClassFilter(e.target.value)}/>
+      {classes===null?<div style={{color:T.textMuted,fontSize:12}}>Loading…</div>:
+      <div style={{maxHeight:340,overflowY:'auto',border:'1px solid '+T.border,borderRadius:6}}>
+        <table style={{borderCollapse:'collapse',width:'100%'}}>
+          <thead><tr><th style={th}>Investor class</th><th style={{...th,width:120,textAlign:'center'}}>Type</th></tr></thead>
+          <tbody>
+            {shownClasses.map(c=>(<tr key={c.id}>
+              <td style={td}>{c.name}</td>
+              <td style={{...td,textAlign:'center'}}>
+                <button onClick={()=>toggleGP(c)} style={{cursor:'pointer',fontSize:11,fontWeight:700,padding:'3px 10px',borderRadius:12,border:'1px solid '+(c.partner_type==='GP'?(T.green||'#2a9d5a'):T.border),background:c.partner_type==='GP'?(T.green||'#2a9d5a')+'22':'transparent',color:c.partner_type==='GP'?(T.green||'#2a9d5a'):T.textDim}}>{c.partner_type==='GP'?'General Partner':'Limited Partner'}</button>
+              </td>
+            </tr>))}
+          </tbody>
+        </table>
+      </div>}
+    </div>
   </div>);
 }
 

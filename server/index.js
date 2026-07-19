@@ -6903,6 +6903,38 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
   });
 });
 
+// Fund financial-statement package (CLRF-style limited-partnership fund). Builds
+// the five-statement PDF from the GL plus the fund_investments config and the
+// GP/LP partner_type tags on investor classes. Admin/Accountant.
+app.get('/api/entities/:eid/fund-statements.pdf', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), async (req, res) => {
+  try {
+    const eid = req.params.eid;
+    const asOf = (req.query && req.query.as_of);
+    if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
+    const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
+    const entityName = ent ? ent.name : ('Entity ' + eid);
+
+    const investments = db.prepare(`SELECT id, parent_name, name, acquisition_date, cost, fair_value, sort_order
+      FROM fund_investments WHERE entity_id = ? ORDER BY sort_order, id`).all(eid);
+    const partnerClasses = db.prepare(`SELECT id, name, partner_type FROM dim_classes WHERE entity_id = ?`).all(eid);
+
+    const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
+    const model = await financials.buildFundStatements({ asOf, entityName, getBalances, investments, partnerClasses });
+    const bytes = await financials.renderFundStatementsPdf(model, []);
+
+    const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
+    const safeName = entityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const fname = safeName + '_Fund_Financial_Statements_' + mm + '_' + yyyy + '.pdf';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
+    res.setHeader('X-Fund-Tie', JSON.stringify(model._tie).replace(/[\r\n]/g, ' '));
+    res.send(Buffer.from(bytes));
+  } catch (e) {
+    res.status(500).json({ error: 'Fund statements error: ' + e.message });
+  }
+});
+
+
 if (process.env.NODE_ENV === 'production') app.get('*', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');

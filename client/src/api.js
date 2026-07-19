@@ -111,6 +111,24 @@ export const api = {
     if (opts.class_id) p.push('class_id=' + opts.class_id);
     return request('/entities/' + eid + '/balances' + (p.length ? '?' + p.join('&') : ''));
   },
+  // Fund reporting (CLRF-style LP package)
+  getFundInvestments: (eid) => request('/entities/' + eid + '/fund-investments'),
+  createFundInvestment: (eid, data) => request('/entities/' + eid + '/fund-investments', { method: 'POST', body: data }),
+  updateFundInvestment: (eid, id, data) => request('/entities/' + eid + '/fund-investments/' + id, { method: 'PATCH', body: data }),
+  deleteFundInvestment: (eid, id) => request('/entities/' + eid + '/fund-investments/' + id, { method: 'DELETE' }),
+  setClassPartnerType: (eid, id, partner_type) => request('/entities/' + eid + '/classes/' + id, { method: 'PATCH', body: { partner_type } }),
+  getFundStatementsPdf: async (eid, asOf) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/entities/' + eid + '/fund-statements.pdf?as_of=' + asOf, { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) { let d = {}; try { d = await res.json(); } catch {} throw new Error(d.error || 'Generate failed'); }
+    const cd = res.headers.get('content-disposition') || '';
+    const mm = cd.match(/filename="?([^"]+)"?/);
+    const filename = mm ? mm[1] : 'Fund_Financial_Statements.pdf';
+    const blob = await res.blob();
+    return { blob, filename };
+  },
   getTtmPL: (eid, asOf) => request('/entities/' + eid + '/ttm-pl?as_of=' + asOf),
   analyzeTtmPL: async (eid, asOf) => {
     const token = getToken();
