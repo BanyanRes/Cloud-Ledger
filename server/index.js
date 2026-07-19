@@ -6917,9 +6917,10 @@ app.get('/api/entities/:eid/fund-statements.pdf', auth, requireEntityAccess(), r
     const investments = db.prepare(`SELECT id, parent_name, name, acquisition_date, cost, fair_value, sort_order
       FROM fund_investments WHERE entity_id = ? ORDER BY sort_order, id`).all(eid);
     const partnerClasses = db.prepare(`SELECT id, name, partner_type FROM dim_classes WHERE entity_id = ?`).all(eid);
+    const commitments = db.prepare(`SELECT class_id, commitment_amount FROM investor_commitments WHERE entity_id = ?`).all(eid);
 
     const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
-    const model = await financials.buildFundStatements({ asOf, entityName, getBalances, investments, partnerClasses });
+    const model = await financials.buildFundStatements({ asOf, entityName, getBalances, investments, partnerClasses, commitments });
     const bytes = await financials.renderFundStatementsPdf(model, []);
 
     const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);

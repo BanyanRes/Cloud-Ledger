@@ -1779,55 +1779,98 @@ async function buildFundStatements(opts) {
   const CONTRIB_PREFIXES = ['3011', '3012', '3013', '3018'];
   const SYND_PREFIX = ['3702'];
 
-  async function classActivity(classId) {
-    const [beg, end, pl] = await Promise.all([
-      getBalances({ as_of: priorBsDate, close_pl_before: yearStart(priorBsDate), class_id: classId }),
-      getBalances({ as_of: asOf, close_pl_before: ys, class_id: classId }),
-      getBalances({ from: ys, to: asOf, class_id: classId }),
-    ]);
-    const eqBeg = sumWhere(beg, r => r.type === 'Equity');
-    const eqEnd = sumWhere(end, r => r.type === 'Equity');
-    const contribEnd = sumWhere(end, r => r.type === 'Equity' && codeStarts(r.code, CONTRIB_PREFIXES));
-    const contribBeg = sumWhere(beg, r => r.type === 'Equity' && codeStarts(r.code, CONTRIB_PREFIXES));
-    const syndEnd = sumWhere(end, r => r.type === 'Equity' && codeStarts(r.code, SYND_PREFIX));
-    const syndBeg = sumWhere(beg, r => r.type === 'Equity' && codeStarts(r.code, SYND_PREFIX));
-    const netLoss = netIncomeOf(pl);
-    return {
-      beginning: r2(eqBeg),
-      contributions: r2(contribEnd - contribBeg),
-      syndication: r2(syndEnd - syndBeg),
-      netLoss: r2(netLoss),
-      ending: r2(eqEnd + netLoss),
-    };
-  }
-
-  // Aggregate per-class activity into GP and LP groups.
-  const groups = { GP: { beginning: 0, contributions: 0, syndication: 0, netLoss: 0, ending: 0 },
-                   LP: { beginning: 0, contributions: 0, syndication: 0, netLoss: 0, ending: 0 } };
-  let anyClassData = false;
-  for (const c of partnerClasses) {
-    const a = await classActivity(c.id);
-    if (isZero(a.beginning) && isZero(a.contributions) && isZero(a.syndication) && isZero(a.netLoss) && isZero(a.ending)) continue;
-    anyClassData = true;
-    const g = gpClassIds.has(c.id) ? groups.GP : groups.LP;
-    g.beginning = r2(g.beginning + a.beginning);
-    g.contributions = r2(g.contributions + a.contributions);
-    g.syndication = r2(g.syndication + a.syndication);
-    g.netLoss = r2(g.netLoss + a.netLoss);
-    g.ending = r2(g.ending + a.ending);
-  }
-  const capTotals = {
-    beginning: r2(groups.GP.beginning + groups.LP.beginning),
-    contributions: r2(groups.GP.contributions + groups.LP.contributions),
-    syndication: r2(groups.GP.syndication + groups.LP.syndication),
-    netLoss: r2(groups.GP.netLoss + groups.LP.netLoss),
-    ending: r2(groups.GP.ending + groups.LP.ending),
+  // Fund-level column totals come straight from the GL and tie exactly:
+  //   beginning  = fund equity at beginning of year (prior years closed)
+  //   contributions/refunds (net) = movement of the contribution accounts over the period
+  //   syndication = movement of the syndication-cost account over the period
+  //   netLoss     = fund net investment loss for the period
+  //   ending      = beginning + contributions + syndication + netLoss (ties to totalCapital)
+  const fundBegEquity = r2(sumWhere(bsBeg, r => r.type === 'Equity'));
+  const contribMove = r2(sumWhere(isYtd, r => r.type === 'Equity' && codeStarts(r.code, CONTRIB_PREFIXES)));
+  const syndMove = r2(sumWhere(isYtd, r => r.type === 'Equity' && codeStarts(r.code, SYND_PREFIX)));
+  // Any other equity movement over the period (e.g. reclasses) so the columns
+  // still foot to the true ending capital.
+  const otherEqMove = r2(sumWhere(isYtd, r => r.type === 'Equity' && !codeStarts(r.code, CONTRIB_PREFIXES) && !codeStarts(r.code, SYND_PREFIX)));
+  const fundTotals = {
+    beginning: fundBegEquity,
+    contributions: contribMove,
+    syndication: syndMove,
+    other: otherEqMove,
+    netLoss: r2(niYtd),
+    ending: r2(fundBegEquity + contribMove + syndMove + otherEqMove + niYtd),
   };
 
-  // GP/LP ending split for the balance-sheet capital section. If per-class data
-  // is present, use it; otherwise put everything in LP (single-column fallback).
-  const capGP = anyClassData ? groups.GP.ending : 0;
-  const capLP = anyClassData ? groups.LP.ending : totalCapital;
+  // GP/LP split. The GL's equity/contribution accounts are not reliably tagged
+  // by investor class at a point in time (a per-class as-of snapshot returns the
+  // whole fund), but PERIOD MOVEMENTS are class-tagged. So we split the activity
+  // columns (contributions, syndication, net loss) by summing period movements
+  // for GP-tagged classes, and split the beginning balance by each group's share
+  // of total capital commitments when available; otherwise beginning is all-LP.
+  // Ending = beginning + activity per group, and GP+LP always re-foot to the
+  // fund totals exactly (LP is computed as fund − GP).
+  async function classPeriodMove(classId) {
+    const pl = await getBalances({ from: ys, to: asOf, class_id: classId });
+    const contrib = r2(sumWhere(pl, r => r.type === 'Equity' && codeStarts(r.code, CONTRIB_PREFIXES)));
+    const synd = r2(sumWhere(pl, r => r.type === 'Equity' && codeStarts(r.code, SYND_PREFIX)));
+    const other = r2(sumWhere(pl, r => r.type === 'Equity' && !codeStarts(r.code, CONTRIB_PREFIXES) && !codeStarts(r.code, SYND_PREFIX)));
+    const netLoss = netIncomeOf(pl);
+    return { contrib, synd, other, netLoss };
+  }
+
+  // GP activity from period movements of GP-tagged classes.
+  const gpAgg = { contributions: 0, syndication: 0, other: 0, netLoss: 0 };
+  let anyClassData = false;
+  for (const c of partnerClasses) {
+    if (!gpClassIds.has(c.id)) continue;
+    const m = await classPeriodMove(c.id);
+    if (!isZero(m.contrib) || !isZero(m.synd) || !isZero(m.other) || !isZero(m.netLoss)) anyClassData = true;
+    gpAgg.contributions = r2(gpAgg.contributions + m.contrib);
+    gpAgg.syndication = r2(gpAgg.syndication + m.synd);
+    gpAgg.other = r2(gpAgg.other + m.other);
+    gpAgg.netLoss = r2(gpAgg.netLoss + m.netLoss);
+  }
+
+  // Beginning-capital GP share: use GP classes' commitment share of total
+  // commitments if commitments are loaded; else 0 (all LP). This is the only
+  // beginning-balance signal available since per-class snapshots aren't reliable.
+  let gpBegShare = 0;
+  const commitments = opts.commitments || [];
+  if (commitments.length && gpClassIds.size) {
+    const totalCommit = commitments.reduce((s, x) => s + (Number(x.commitment_amount) || 0), 0);
+    const gpCommit = commitments.filter(x => gpClassIds.has(x.class_id)).reduce((s, x) => s + (Number(x.commitment_amount) || 0), 0);
+    if (totalCommit > 0) gpBegShare = gpCommit / totalCommit;
+  }
+  const gpBeginning = r2(fundTotals.beginning * gpBegShare);
+
+  const groups = {
+    GP: {
+      beginning: gpBeginning,
+      contributions: gpAgg.contributions,
+      syndication: gpAgg.syndication,
+      netLoss: gpAgg.netLoss,
+      ending: r2(gpBeginning + gpAgg.contributions + gpAgg.syndication + gpAgg.other + gpAgg.netLoss),
+    },
+    LP: {},
+  };
+  // LP = fund − GP for every column, so the two columns always re-foot exactly.
+  groups.LP = {
+    beginning: r2(fundTotals.beginning - groups.GP.beginning),
+    contributions: r2(fundTotals.contributions - groups.GP.contributions),
+    syndication: r2(fundTotals.syndication - groups.GP.syndication),
+    netLoss: r2(fundTotals.netLoss - groups.GP.netLoss),
+    ending: r2(fundTotals.ending - groups.GP.ending),
+  };
+  const capTotals = {
+    beginning: fundTotals.beginning,
+    contributions: fundTotals.contributions,
+    syndication: fundTotals.syndication,
+    netLoss: fundTotals.netLoss,
+    ending: fundTotals.ending,
+  };
+
+  // GP/LP ending split for the balance-sheet capital section.
+  const capGP = groups.GP.ending;
+  const capLP = groups.LP.ending;
 
   // ── 2. Schedule of Investments (from config) ────────────────────────────────
   // Group underlyings by parent_name (holding company); a blank parent means the
