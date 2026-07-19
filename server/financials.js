@@ -1856,13 +1856,27 @@ async function buildFundStatements(opts) {
     if (!isZero(eqMove) || !isZero(niMove)) anyClassData = true;
   }
 
+  // Net loss is allocated to the partners by ownership %, measured as each
+  // group's share of total capital commitments. When commitments are loaded,
+  // GP net loss = fund net loss x (GP commitments / total commitments). When
+  // commitments are not loaded, fall back to the class-tagged P&L (usually zero
+  // for GP since expenses aren't class-tagged), so the statement still foots.
+  const commitments = opts.commitments || [];
+  const totalCommit = commitments.reduce((sum, x) => sum + (Number(x.commitment_amount) || 0), 0);
+  const gpCommit = commitments
+    .filter(x => gpClassIds.has(x.class_id))
+    .reduce((sum, x) => sum + (Number(x.commitment_amount) || 0), 0);
+  const haveCommitments = totalCommit > 0;
+  const gpCommitShare = haveCommitments ? (gpCommit / totalCommit) : 0;
+  const gpNetLoss = haveCommitments ? r2(fundTotals.netLoss * gpCommitShare) : gpAgg.netLoss;
+
   const groups = {
     GP: {
       beginning: gpBeginning,
       contributions: gpAgg.contributions,
       syndication: gpAgg.syndication,
-      netLoss: gpAgg.netLoss,
-      ending: r2(gpBeginning + gpAgg.contributions + gpAgg.syndication + gpAgg.other + gpAgg.netLoss),
+      netLoss: gpNetLoss,
+      ending: r2(gpBeginning + gpAgg.contributions + gpAgg.syndication + gpAgg.other + gpNetLoss),
     },
     LP: {},
   };
