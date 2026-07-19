@@ -1935,9 +1935,15 @@ async function buildFundStatements(opts) {
     wcLiab = r2(wcLiab + d); // liability increase provides cash
   }
   // Equity contributions/refunds/syndication over the period = financing.
-  const eqCur = sumWhere(bsCur, r => r.type === 'Equity');
-  const eqBegAll = sumWhere(bsBeg, r => r.type === 'Equity');
-  const financingEquity = r2(eqCur - eqBegAll);
+  // Financing = movement of real capital-flow equity accounts only
+  // (contributions + syndication). The accumulated / retained-earnings accounts
+  // (390xxx) move because of the prior-year soft close, not because of cash, so
+  // they are excluded — otherwise they double-count the net loss and the cash
+  // flow won't reconcile.
+  const isCapitalFlowEquity = code => codeStarts(code, CONTRIB_PREFIXES) || codeStarts(code, SYND_PREFIX);
+  const eqFlowCur = sumWhere(bsCur, r => r.type === 'Equity' && isCapitalFlowEquity(r.code));
+  const eqFlowBeg = sumWhere(bsBeg, r => r.type === 'Equity' && isCapitalFlowEquity(r.code));
+  const financingEquity = r2(eqFlowCur - eqFlowBeg);
 
   const netOperating = r2(niYtd + wcAssets + wcLiab);
   const netInvesting = r2(-investChange); // investment asset increase = cash outflow
