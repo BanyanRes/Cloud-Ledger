@@ -1628,9 +1628,467 @@ function monthLabel(dateStr) {
   return ABBR[d.getUTCMonth()] + ' ' + d.getUTCFullYear();
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// buildFundStatements — CLRF-style limited-partnership fund statement package.
+//
+// Produces the numeric model for five statements:
+//   1. Statement of Assets, Liabilities, and Partners' Capital
+//   2. Schedule of Investments (from the fund_investments config table)
+//   3. Statement of Operations (investment-company format)
+//   4. Statement of Changes in Partners' Capital (GP / LP columns)
+//   5. Statement of Cash Flows (indirect)
+//
+// Pure given the injected data accessors; no direct DB/PDF I/O. opts:
+//   { asOf, entityName,
+//     getBalances(o),          // -> computeBalances(eid, o)
+//     investments: [ { parent_name, name, acquisition_date, cost, fair_value, sort_order } ],
+//     partnerClasses: [ { id, name, partner_type } ]  // GP/LP tag per class
+//   }
+//
+// Fund-specific GL mapping (CLRF entity 40), verified against the Q1-2026 CPA
+// statements:
+//   Portfolio investments at fair value = 1201xx + 1202xx + 1218xx (unrealized)
+//   Operations expense buckets: Management fees = 5101xx; Professional fees =
+//     52xxxx; Broken deal costs = 5302xx; Other expenses = everything else in
+//     Expense that isn't one of the above and isn't the 6101xx unrealized G/L
+//     contra (which belongs to the investment fair-value mark, not operations).
+// ═══════════════════════════════════════════════════════════════════════════
+async function buildFundStatements(opts) {
+  const asOf = opts.asOf;
+  const ys = yearStart(asOf);
+  const getBalances = opts.getBalances;
+  const investments = (opts.investments || []).slice().sort((a, b) => (a.sort_order - b.sort_order) || (a.id - b.id));
+  const partnerClasses = opts.partnerClasses || [];
+  const gpClassIds = new Set(partnerClasses.filter(c => String(c.partner_type).toUpperCase() === 'GP').map(c => c.id));
+
+  const priorBsDate = priorMonthEnd(ys); // beginning-of-year balance sheet date
+
+  // Snapshots. Current + beginning-of-period balance sheets (prior years closed
+  // into RE so RE holds the opening balance); YTD P&L drives Operations + CF.
+  const [bsCur, bsBeg, isYtd] = await Promise.all([
+    getBalances({ as_of: asOf, close_pl_before: ys }),
+    getBalances({ as_of: priorBsDate, close_pl_before: yearStart(priorBsDate) }),
+    getBalances({ from: ys, to: asOf }),
+  ]);
+
+  const byCode = rows => { const m = new Map(); for (const r of rows) m.set(String(r.code), r); return m; };
+  const curMap = byCode(bsCur), begMap = byCode(bsBeg);
+
+  // ── helpers ────────────────────────────────────────────────────────────────
+  const codeStarts = (code, prefixes) => prefixes.some(p => String(code).startsWith(p));
+  const sumWhere = (rows, pred) => r2(rows.filter(pred).reduce((s, r) => s + bal(r), 0));
+
+  const niYtd = netIncomeOf(isYtd); // net investment loss for the period
+
+  // ── 1. Statement of Assets, Liabilities & Partners' Capital ─────────────────
+  // Investment accounts collapse into a single "Portfolio investments, at fair
+  // value" line (cost + capitalized + unrealized), with the cost basis shown
+  // parenthetically. Everything else lists individually by account.
+  const INVEST_PREFIXES = ['1201', '1202', '1218'];
+  const isInvest = code => codeStarts(code, INVEST_PREFIXES);
+  const investCostCode = code => codeStarts(code, ['1201', '1202']); // cost (excl. unrealized mark)
+
+  function assetRows(map) {
+    const rows = [];
+    let investFV = 0, investCost = 0;
+    for (const r of map.values()) {
+      if (r.type !== 'Asset') continue;
+      if (isInvest(r.code)) { investFV += bal(r); if (investCostCode(r.code)) investCost += bal(r); continue; }
+      if (isZero(bal(r))) continue;
+      rows.push({ code: String(r.code), name: r.name, amount: r2(bal(r)) });
+    }
+    rows.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+    return { rows, investFV: r2(investFV), investCost: r2(investCost) };
+  }
+  const curAssets = assetRows(curMap);
+
+  // Assets are presented investments-first, then the rest in code order.
+  const assetLines = [];
+  if (!isZero(curAssets.investFV) || !isZero(curAssets.investCost)) {
+    assetLines.push({ name: 'Portfolio investments, at fair value (cost ' + acct(curAssets.investCost, { dash: false }) + ')', amount: curAssets.investFV, invest: true });
+  }
+  for (const r of curAssets.rows) assetLines.push({ name: r.name, amount: r.amount });
+  const totalAssets = r2(assetLines.reduce((s, l) => s + l.amount, 0));
+
+  // Liabilities: list each non-zero liability account by name, code order.
+  const liabLines = [];
+  for (const r of curMap.values()) {
+    if (r.type !== 'Liability' || isZero(bal(r))) continue;
+    liabLines.push({ code: String(r.code), name: r.name, amount: r2(bal(r)) });
+  }
+  liabLines.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+  const totalLiab = r2(liabLines.reduce((s, l) => s + l.amount, 0));
+
+  // Partners' capital total = all Equity accounts + current-period net income
+  // (which is still open on the income accounts in the close_pl_before snapshot).
+  const totalCapital = r2(sumWhere(bsCur, r => r.type === 'Equity') + niYtd);
+
+  // GP vs LP split of the ending capital, from per-class capital roll-forward
+  // (computed below). Falls back to 0/total if no classes are tagged.
+  // (populated after the changes-in-capital section.)
+
+  // ── 3. Statement of Operations (investment-company format) ──────────────────
+  const invIncome = sumWhere(isYtd, r => r.type === 'Revenue');
+  const expRows = isYtd.filter(r => r.type === 'Expense');
+  const isMgmtFee = code => codeStarts(code, ['5101']);
+  const isProfFee = code => codeStarts(code, ['52']);
+  const isBrokenDeal = code => codeStarts(code, ['5302']);
+  const isUnrealizedContra = code => codeStarts(code, ['6101']); // fair-value mark, not an operating expense
+  const mgmtFees = sumWhere(expRows, r => isMgmtFee(r.code));
+  const profFees = sumWhere(expRows, r => isProfFee(r.code));
+  const brokenDeal = sumWhere(expRows, r => isBrokenDeal(r.code));
+  const otherExp = sumWhere(expRows, r => !isMgmtFee(r.code) && !isProfFee(r.code) && !isBrokenDeal(r.code) && !isUnrealizedContra(r.code));
+  const totalExpenses = r2(mgmtFees + profFees + brokenDeal + otherExp);
+  const netInvestmentLoss = r2(invIncome - totalExpenses);
+  // Net change in unrealized appreciation flows to operations only if the fund
+  // presents it there; CLRF Q1 shows net investment loss = decrease in capital
+  // from operations, so we mirror that (unrealized handled within investments).
+  const netOpsResult = netInvestmentLoss;
+
+  const operations = {
+    investmentIncome: [
+      // No itemized investment income in the CLRF format when zero; the total line carries it.
+    ],
+    totalInvestmentIncome: r2(invIncome),
+    expenses: [
+      { name: 'Management fees', amount: mgmtFees },
+      { name: 'Professional fees', amount: profFees },
+      { name: 'Broken deal costs', amount: brokenDeal },
+      { name: 'Other expenses', amount: otherExp },
+    ].filter(e => !isZero(e.amount)),
+    totalExpenses,
+    netInvestmentLoss,
+    netResult: netOpsResult,
+  };
+
+  // ── 4. Statement of Changes in Partners' Capital (GP / LP) ──────────────────
+  // Per-class capital activity for the period, grouped GP vs LP. Each class's
+  // beginning capital = equity accounts at beginning-of-year (prior closed);
+  // period activity = equity-account movements over the period, split into the
+  // standard fund columns by account meaning; net loss = the class's share of
+  // net investment loss (its P&L movement over the period).
+  //
+  // Column mapping by equity account meaning (CLRF):
+  //   Contributions       = 3011xx/3012xx/3013xx/3018xx positive movements
+  //   Capital call refunds = negative movements of the contribution accounts
+  //   Syndication costs   = 3702xx movement
+  //   Net loss (ops)      = class P&L over the period (Revenue - Expense)
+  // Because a single account (contributions) holds both calls and refunds net,
+  // we present the net movement in the Contributions column and rely on the GL
+  // sign; the fund-level totals still tie to the GL exactly.
+  const CONTRIB_PREFIXES = ['3011', '3012', '3013', '3018'];
+  const SYND_PREFIX = ['3702'];
+
+  async function classActivity(classId) {
+    const [beg, end, pl] = await Promise.all([
+      getBalances({ as_of: priorBsDate, close_pl_before: yearStart(priorBsDate), class_id: classId }),
+      getBalances({ as_of: asOf, close_pl_before: ys, class_id: classId }),
+      getBalances({ from: ys, to: asOf, class_id: classId }),
+    ]);
+    const eqBeg = sumWhere(beg, r => r.type === 'Equity');
+    const eqEnd = sumWhere(end, r => r.type === 'Equity');
+    const contribEnd = sumWhere(end, r => r.type === 'Equity' && codeStarts(r.code, CONTRIB_PREFIXES));
+    const contribBeg = sumWhere(beg, r => r.type === 'Equity' && codeStarts(r.code, CONTRIB_PREFIXES));
+    const syndEnd = sumWhere(end, r => r.type === 'Equity' && codeStarts(r.code, SYND_PREFIX));
+    const syndBeg = sumWhere(beg, r => r.type === 'Equity' && codeStarts(r.code, SYND_PREFIX));
+    const netLoss = netIncomeOf(pl);
+    return {
+      beginning: r2(eqBeg),
+      contributions: r2(contribEnd - contribBeg),
+      syndication: r2(syndEnd - syndBeg),
+      netLoss: r2(netLoss),
+      ending: r2(eqEnd + netLoss),
+    };
+  }
+
+  // Aggregate per-class activity into GP and LP groups.
+  const groups = { GP: { beginning: 0, contributions: 0, syndication: 0, netLoss: 0, ending: 0 },
+                   LP: { beginning: 0, contributions: 0, syndication: 0, netLoss: 0, ending: 0 } };
+  let anyClassData = false;
+  for (const c of partnerClasses) {
+    const a = await classActivity(c.id);
+    if (isZero(a.beginning) && isZero(a.contributions) && isZero(a.syndication) && isZero(a.netLoss) && isZero(a.ending)) continue;
+    anyClassData = true;
+    const g = gpClassIds.has(c.id) ? groups.GP : groups.LP;
+    g.beginning = r2(g.beginning + a.beginning);
+    g.contributions = r2(g.contributions + a.contributions);
+    g.syndication = r2(g.syndication + a.syndication);
+    g.netLoss = r2(g.netLoss + a.netLoss);
+    g.ending = r2(g.ending + a.ending);
+  }
+  const capTotals = {
+    beginning: r2(groups.GP.beginning + groups.LP.beginning),
+    contributions: r2(groups.GP.contributions + groups.LP.contributions),
+    syndication: r2(groups.GP.syndication + groups.LP.syndication),
+    netLoss: r2(groups.GP.netLoss + groups.LP.netLoss),
+    ending: r2(groups.GP.ending + groups.LP.ending),
+  };
+
+  // GP/LP ending split for the balance-sheet capital section. If per-class data
+  // is present, use it; otherwise put everything in LP (single-column fallback).
+  const capGP = anyClassData ? groups.GP.ending : 0;
+  const capLP = anyClassData ? groups.LP.ending : totalCapital;
+
+  // ── 2. Schedule of Investments (from config) ────────────────────────────────
+  // Group underlyings by parent_name (holding company); a blank parent means the
+  // investment stands alone. Percentages are of total partners' capital.
+  const invByParent = new Map();
+  for (const inv of investments) {
+    const key = inv.parent_name || '';
+    if (!invByParent.has(key)) invByParent.set(key, []);
+    invByParent.get(key).push(inv);
+  }
+  const scheduleGroups = [];
+  let schedTotCost = 0, schedTotFV = 0;
+  for (const [parent, list] of invByParent) {
+    const rows = list.map(inv => ({
+      name: inv.name,
+      acquisition_date: inv.acquisition_date || '',
+      cost: r2(inv.cost),
+      fair_value: r2(inv.fair_value),
+      pctCapital: totalCapital ? r2((inv.fair_value / totalCapital) * 100) : 0,
+    }));
+    const subCost = r2(rows.reduce((s, r) => s + r.cost, 0));
+    const subFV = r2(rows.reduce((s, r) => s + r.fair_value, 0));
+    schedTotCost = r2(schedTotCost + subCost);
+    schedTotFV = r2(schedTotFV + subFV);
+    scheduleGroups.push({
+      parent, rows,
+      subtotal: { cost: subCost, fair_value: subFV, pctCapital: totalCapital ? r2((subFV / totalCapital) * 100) : 0 },
+    });
+  }
+  const schedule = {
+    groups: scheduleGroups,
+    total: { cost: schedTotCost, fair_value: schedTotFV, pctCapital: totalCapital ? r2((schedTotFV / totalCapital) * 100) : 0 },
+    hasData: investments.length > 0,
+  };
+
+  // ── 5. Statement of Cash Flows (indirect) ───────────────────────────────────
+  // Beginning balances at year start − 1 day; deltas over the YTD window. Cash
+  // is every asset account whose name/code reads as cash & equivalents.
+  const isCashCode = code => codeStarts(code, ['1002', '1005', '1072']);
+  const cashCur = sumWhere(bsCur, r => r.type === 'Asset' && isCashCode(r.code));
+  const cashBeg = sumWhere(bsBeg, r => r.type === 'Asset' && isCashCode(r.code));
+
+  // Working-capital deltas: change in each non-cash, non-investment asset and
+  // each liability over the period. Sign for cash-flow: asset increase uses
+  // cash (negative), liability increase provides cash (positive).
+  const deltaAsset = code => r2((curMap.get(code) ? bal(curMap.get(code)) : 0) - (begMap.get(code) ? bal(begMap.get(code)) : 0));
+  const allAssetCodes = new Set([...curMap.keys(), ...begMap.keys()].filter(c => {
+    const ref = curMap.get(c) || begMap.get(c); return ref && ref.type === 'Asset';
+  }));
+  const allLiabCodes = new Set([...curMap.keys(), ...begMap.keys()].filter(c => {
+    const ref = curMap.get(c) || begMap.get(c); return ref && ref.type === 'Liability';
+  }));
+
+  let wcAssets = 0, wcLiab = 0, investChange = 0;
+  for (const c of allAssetCodes) {
+    if (isCashCode(c)) continue;
+    if (isInvest(c)) { investChange = r2(investChange + deltaAsset(c)); continue; }
+    wcAssets = r2(wcAssets - deltaAsset(c)); // asset increase reduces cash
+  }
+  for (const c of allLiabCodes) {
+    const d = r2((curMap.get(c) ? bal(curMap.get(c)) : 0) - (begMap.get(c) ? bal(begMap.get(c)) : 0));
+    wcLiab = r2(wcLiab + d); // liability increase provides cash
+  }
+  // Equity contributions/refunds/syndication over the period = financing.
+  const eqCur = sumWhere(bsCur, r => r.type === 'Equity');
+  const eqBegAll = sumWhere(bsBeg, r => r.type === 'Equity');
+  const financingEquity = r2(eqCur - eqBegAll);
+
+  const netOperating = r2(niYtd + wcAssets + wcLiab);
+  const netInvesting = r2(-investChange); // investment asset increase = cash outflow
+  const netFinancing = r2(financingEquity);
+  const netChange = r2(netOperating + netInvesting + netFinancing);
+  const cashTieOut = r2(cashCur - (cashBeg + netChange));
+
+  const cashFlow = {
+    netLoss: niYtd,
+    changeWCAssets: wcAssets,
+    changeWCLiab: wcLiab,
+    netOperating,
+    investChange: r2(-investChange),
+    netInvesting,
+    financingEquity,
+    netFinancing,
+    netChange,
+    cashBeg: r2(cashBeg),
+    cashEnd: r2(cashCur),
+    tieOut: cashTieOut,
+  };
+
+  return {
+    meta: {
+      entityName: opts.entityName || '',
+      asOf,
+      longDate: longDate(asOf),
+      periodLabel: 'For the Quarter Ended ' + longDate(asOf),
+      title: 'Financial Statements',
+    },
+    assetsLiabCapital: {
+      assetLines, totalAssets,
+      liabLines, totalLiab,
+      capGP: r2(capGP), capLP: r2(capLP), totalCapital,
+      totalLiabCapital: r2(totalLiab + totalCapital),
+    },
+    schedule,
+    operations,
+    changesInCapital: { groups, totals: capTotals, hasClassData: anyClassData },
+    cashFlow,
+    _tie: { totalAssets, totalLiabPlusCapital: r2(totalLiab + totalCapital), niYtd },
+  };
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// renderFundStatementsPdf — render the CLRF fund package to PDF bytes, using the
+// same makeLayout primitives as the corporate package so the styling matches.
+// Statements (each its own page sequence): Assets/Liabilities/Partners' Capital,
+// Schedule of Investments, Statement of Operations, Statement of Changes in
+// Partners' Capital (landscape), Statement of Cash Flows.
+// If outOffsets is passed it is filled with { label, page } for the TOC.
+// ═══════════════════════════════════════════════════════════════════════════
+async function renderFundStatementsPdf(s, outOffsets) {
+  const track = (label) => { if (outOffsets) outOffsets.push({ label, page: pdf.getPageCount() }); };
+  const pdf = await PDFDocument.create();
+  const reg = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const fonts = { reg, bold };
+  const m = s.meta;
+  const money = v => acct(v, { dash: true });
+  const RIGHT = PAGE.w - PAGE.mR;
+  const oneCol = [RIGHT];
+
+  // ── 1. Statement of Assets, Liabilities, and Partners' Capital ──────────────
+  {
+    const L = makeLayout(pdf, fonts, m, 'Statement of Assets, Liabilities, and Partners\u2019 Capital', { dateLine: m.longDate });
+    track('Statement of Assets, Liabilities, and Partners\u2019 Capital');
+    L.start();
+    L.setCols(oneCol);
+    const a = s.assetsLiabCapital;
+    L.sectionTitle('Assets');
+    a.assetLines.forEach((l, i) => L.row(l.name, [money(l.amount)], { indent: 16, dollarPrefix: i === 0 }));
+    L.row('Total assets', [money(a.totalAssets)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, gapAfter: 10 });
+
+    L.sectionTitle('Liabilities and partners\u2019 capital');
+    L.row('Liabilities:', [], { indent: 10, boldRow: true });
+    a.liabLines.forEach((l, i) => L.row(l.name, [money(l.amount)], { indent: 20, dollarPrefix: i === 0 }));
+    L.row('Total liabilities', [money(a.totalLiab)], { indent: 10, boldRow: true, ruleAbove: true, gapAfter: 8 });
+
+    L.row('Partners\u2019 capital:', [], { indent: 10, boldRow: true });
+    if (!isZero(a.capGP) || a.capGP !== a.totalCapital) L.row('General partners', [money(a.capGP)], { indent: 20 });
+    L.row('Limited partners', [money(a.capLP)], { indent: 20 });
+    L.row('Total partners\u2019 capital', [money(a.totalCapital)], { indent: 10, boldRow: true, ruleAbove: true, gapAfter: 8 });
+    L.row('Total liabilities and partners\u2019 capital', [money(a.totalLiabCapital)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+  }
+
+  // ── 2. Schedule of Investments ──────────────────────────────────────────────
+  {
+    const L = makeLayout(pdf, fonts, m, 'Schedule of Investments', { dateLine: m.longDate });
+    track('Schedule of Investments');
+    L.start();
+    // Columns: Acquisition date | Cost | Fair Value | % of Capital
+    const sCols = [RIGHT - 300, RIGHT - 180, RIGHT - 60, RIGHT];
+    L.setCols(sCols);
+    L.colHeaders(['Date of\nAcquisition', 'Cost', 'Fair Value', '% of\nCapital'], { bottomAlign: true, underline: true, colBox: true });
+    const sch = s.schedule;
+    if (!sch.hasData) {
+      L.row('No investment detail configured. Add underlyings in Fund Reporting settings.', [], { indent: 10 });
+    } else {
+      const pct = v => (Number(v) || 0).toFixed(2);
+      for (const g of sch.groups) {
+        if (g.parent) L.row(g.parent, [], { indent: 6, boldRow: true });
+        const rowIndent = g.parent ? 16 : 10;
+        for (const r of g.rows) {
+          L.row(r.name, [r.acquisition_date, money(r.cost), money(r.fair_value), pct(r.pctCapital)], { indent: rowIndent });
+        }
+        if (g.parent && g.rows.length > 1) {
+          L.row('Total ' + g.parent, ['', money(g.subtotal.cost), money(g.subtotal.fair_value), pct(g.subtotal.pctCapital)], { indent: 10, boldRow: true, ruleAbove: true });
+        }
+      }
+      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pct(sch.total.pctCapital) + ' %'], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+    }
+  }
+
+  // ── 3. Statement of Operations ──────────────────────────────────────────────
+  {
+    const L = makeLayout(pdf, fonts, m, 'Statement of Operations', { dateLine: m.periodLabel || ('For the Period Ended ' + m.longDate) });
+    track('Statement of Operations');
+    L.start();
+    L.setCols(oneCol);
+    const o = s.operations;
+    L.sectionTitle('Investment income:');
+    o.investmentIncome.forEach(r => L.row(r.name, [money(r.amount)], { indent: 16 }));
+    L.row('Total investment income', [money(o.totalInvestmentIncome)], { indent: 16, boldRow: true, dollarPrefix: true, gapAfter: 6 });
+    L.sectionTitle('Expenses:');
+    o.expenses.forEach(r => L.row(r.name, [money(r.amount)], { indent: 16 }));
+    L.row('Total expenses', [money(o.totalExpenses)], { indent: 16, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    L.row('Net investment loss', [money(o.netInvestmentLoss)], { indent: 6, boldRow: true, ruleAbove: true });
+    L.row('Net decrease in partners\u2019 capital resulting from operations', [money(o.netResult)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+  }
+
+  // ── 4. Statement of Changes in Partners' Capital (landscape, GP/LP/Total) ────
+  {
+    const L = makeLayout(pdf, fonts, m, 'Statement of Changes in Partners\u2019 Capital', { landscape: true, dateLine: m.periodLabel || ('For the Period Ended ' + m.longDate) });
+    const LRIGHT = PAGE.h - PAGE.mR;
+    track('Statement of Changes in Partners\u2019 Capital');
+    L.start();
+    const c1 = 300;
+    const PITCH = (LRIGHT - c1) / 2;
+    const cols = [c1, c1 + PITCH, LRIGHT];
+    L.setCols(cols);
+    L.colHeaders(['General Partners', 'Limited Partners', 'Total'], { bottomAlign: true, underline: true, colBox: true });
+    const cc = s.changesInCapital;
+    const g = cc.groups, t = cc.totals;
+    const rowvals = (key) => [acct(g.GP[key]), acct(g.LP[key]), acct(t[key])];
+    L.row('Balance, beginning of period', rowvals('beginning'), { indent: 10, valueInset: 4 });
+    L.row('Capital contributions (refunds), net', rowvals('contributions'), { indent: 10, valueInset: 4 });
+    if (!isZero(t.syndication)) L.row('Syndication costs', rowvals('syndication'), { indent: 10, valueInset: 4 });
+    L.row('Net decrease resulting from operations', rowvals('netLoss'), { indent: 10, valueInset: 4 });
+    L.row('Balance, end of period', rowvals('ending'), { indent: 10, boldRow: true, ruleAbove: true, doubleBelow: true, valueInset: 4 });
+    if (!cc.hasClassData) {
+      L.space(8);
+      L.row('Note: GP/LP split requires investor classes tagged in Fund Reporting settings; shown as Limited Partners until tagged.', [], { indent: 10 });
+    }
+  }
+
+  // ── 5. Statement of Cash Flows ──────────────────────────────────────────────
+  {
+    const L = makeLayout(pdf, fonts, m, 'Statement of Cash Flows', { dateLine: m.periodLabel || ('For the Period Ended ' + m.longDate) });
+    track('Statement of Cash Flows');
+    L.start();
+    L.setCols(oneCol);
+    const cf = s.cashFlow;
+    L.sectionTitle('Operating activities:');
+    L.row('Net decrease in partners\u2019 capital resulting from operations', [money(cf.netLoss)], { indent: 16, dollarPrefix: true });
+    L.row('Adjustments to reconcile to net cash used in operating activities:', [], { indent: 16 });
+    if (!isZero(cf.investChange)) L.row('Purchases of investments, net of returns of capital', [money(cf.investChange)], { indent: 28 });
+    if (!isZero(cf.changeWCAssets)) L.row('Changes in operating assets', [money(cf.changeWCAssets)], { indent: 28 });
+    if (!isZero(cf.changeWCLiab)) L.row('Changes in operating liabilities', [money(cf.changeWCLiab)], { indent: 28 });
+    L.row('Net cash used in operating activities', [money(r2(cf.netOperating + cf.investChange))], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
+
+    L.sectionTitle('Financing activities:');
+    if (!isZero(cf.financingEquity)) L.row('Capital contributions, net of refunds and syndication costs', [money(cf.financingEquity)], { indent: 28 });
+    L.row('Net cash provided by financing activities', [money(cf.netFinancing)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
+
+    L.row('Net change in cash and cash equivalents', [money(cf.netChange)], { indent: 6, boldRow: true, ruleAbove: true });
+    L.row('Cash and cash equivalents, beginning of period', [money(cf.cashBeg)], { indent: 6 });
+    L.row('Cash and cash equivalents, end of period', [money(cf.cashEnd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+    if (!isZero(cf.tieOut)) {
+      L.space(6);
+      L.row('Note: reconciled change differs from cash movement by ' + money(cf.tieOut) + '.', [], { indent: 6 });
+    }
+  }
+
+  return await pdf.save();
+}
+
+
 module.exports = {
   buildStatements,
   buildTtmPL,
+  buildFundStatements,
+  renderFundStatementsPdf,
   generatePackage,
   renderStatementsPdf,
   stripInvoiceLogPages,
