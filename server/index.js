@@ -533,6 +533,38 @@ const dcCols = db.prepare("PRAGMA table_info(dim_classes)").all().map(c => c.nam
 if (!dcCols.includes('code')) { db.exec("ALTER TABLE dim_classes ADD COLUMN code TEXT"); console.log('[db migrate] dim_classes.code added'); }
 const dlCols = db.prepare("PRAGMA table_info(dim_locations)").all().map(c => c.name);
 if (!dlCols.includes('code')) { db.exec("ALTER TABLE dim_locations ADD COLUMN code TEXT"); console.log('[db migrate] dim_locations.code added'); }
+// ── Fund reporting (CLRF, entity 40) ────────────────────────────────────────
+// GP vs LP designation on investor classes. Defaults to 'LP'; specific classes
+// are tagged 'GP' via the Fund Reporting admin UI. Drives the GP/LP columns of
+// the Statement of Assets/Liabilities/Partners' Capital and the Statement of
+// Changes in Partners' Capital.
+if (!dcCols.includes('partner_type')) {
+  db.exec("ALTER TABLE dim_classes ADD COLUMN partner_type TEXT NOT NULL DEFAULT 'LP'");
+  console.log('[db migrate] dim_classes.partner_type added');
+}
+// Schedule of Investments look-through detail that is NOT derivable from the
+// fund's trial balance (per-underlying acquisition date, proportional cost and
+// fair value, and the holding-company grouping). One row per underlying
+// investment; edited in the Fund Reporting admin UI. sort_order controls
+// display order; parent_name groups underlyings beneath a holding company
+// (e.g. "CLRFI Midco I, LLC").
+db.exec(`
+  CREATE TABLE IF NOT EXISTS fund_investments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    parent_name TEXT DEFAULT '',
+    name TEXT NOT NULL,
+    acquisition_date TEXT,
+    cost REAL NOT NULL DEFAULT 0,
+    fair_value REAL NOT NULL DEFAULT 0,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    notes TEXT,
+    created_at TEXT,
+    updated_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_fundinv_entity ON fund_investments(entity_id);
+`);
+console.log('[db migrate] fund_investments ensured');
 // turnkey_project_map redesigned: no longer stores per-project account codes
 // (single COA on the company entity now). We add cl_entity_id linking to the
 // COMPANY entity (same for all projects). Keep existing rows on upgrade.
@@ -2018,7 +2050,7 @@ app.get('/api/entities/:eid/accounts', auth, requireEntityAccess(), (req, res) =
 // === Analytical dimensions (class = investor, location = deal/asset) ===
 // List dimension values with how many lines reference each.
 app.get('/api/entities/:eid/classes', auth, requireEntityAccess(), (req, res) =>
-  res.json(db.prepare(`SELECT c.id, c.name, c.code, c.kind, COUNT(jl.id) AS line_count
+  res.json(db.prepare(`SELECT c.id, c.name, c.code, c.kind, c.partner_type, COUNT(jl.id) AS line_count
     FROM dim_classes c LEFT JOIN journal_lines jl ON jl.class_id = c.id
     WHERE c.entity_id = ? GROUP BY c.id ORDER BY c.name`).all(req.params.eid)));
 
@@ -2070,8 +2102,10 @@ app.patch('/api/entities/:eid/classes/:id', auth, requireEntityAccess(), require
   const name = req.body.name !== undefined ? (req.body.name || '').trim() : row.name; if (!name) return res.status(400).json({ error: 'Name required' });
   const code = req.body.code !== undefined ? ((req.body.code || '').trim() || null) : row.code;
   const kind = req.body.kind !== undefined ? (req.body.kind || 'investor') : row.kind;
-  try { db.prepare('UPDATE dim_classes SET name = ?, code = ?, kind = ? WHERE id = ? AND entity_id = ?').run(name, code, kind, req.params.id, req.params.eid);
-    res.json({ id: Number(req.params.id), name, code, kind }); }
+  let partner_type = row.partner_type || 'LP';
+  if (req.body.partner_type !== undefined) partner_type = (String(req.body.partner_type).toUpperCase() === 'GP') ? 'GP' : 'LP';
+  try { db.prepare('UPDATE dim_classes SET name = ?, code = ?, kind = ?, partner_type = ? WHERE id = ? AND entity_id = ?').run(name, code, kind, partner_type, req.params.id, req.params.eid);
+    res.json({ id: Number(req.params.id), name, code, kind, partner_type }); }
   catch(e) { if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'A class with that name already exists' }); throw e; }
 });
 app.delete('/api/entities/:eid/classes/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
@@ -2136,6 +2170,52 @@ app.patch('/api/entities/:eid/commitments/:id', auth, requireEntityAccess(), req
 });
 app.delete('/api/entities/:eid/commitments/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   db.prepare('DELETE FROM investor_commitments WHERE id = ? AND entity_id = ?').run(req.params.id, req.params.eid);
+  res.json({ success: true });
+});
+
+// ── Fund investments (Schedule of Investments look-through for CLRF-style fund
+//    packages). Informational; never posts to the GL. One row per underlying,
+//    grouped under an optional parent_name (holding company). ──
+app.get('/api/entities/:eid/fund-investments', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const rows = db.prepare(`SELECT id, parent_name, name, acquisition_date, cost, fair_value, sort_order, notes
+    FROM fund_investments WHERE entity_id = ? ORDER BY sort_order, id`).all(req.params.eid);
+  res.json(rows);
+});
+app.post('/api/entities/:eid/fund-investments', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  const now = new Date().toISOString();
+  const r = db.prepare(`INSERT INTO fund_investments (entity_id, parent_name, name, acquisition_date, cost, fair_value, sort_order, notes, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    req.params.eid,
+    (req.body.parent_name || '').trim(),
+    name,
+    (req.body.acquisition_date || '').trim() || null,
+    Number(req.body.cost) || 0,
+    Number(req.body.fair_value) || 0,
+    Number(req.body.sort_order) || 0,
+    (req.body.notes || '').trim() || null,
+    now, now);
+  res.json({ id: r.lastInsertRowid });
+});
+app.patch('/api/entities/:eid/fund-investments/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const row = db.prepare('SELECT * FROM fund_investments WHERE id = ? AND entity_id = ?').get(req.params.id, req.params.eid);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  const b = req.body;
+  const name = b.name !== undefined ? (b.name || '').trim() : row.name;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  const parent_name = b.parent_name !== undefined ? (b.parent_name || '').trim() : row.parent_name;
+  const acquisition_date = b.acquisition_date !== undefined ? ((b.acquisition_date || '').trim() || null) : row.acquisition_date;
+  const cost = b.cost !== undefined ? (Number(b.cost) || 0) : row.cost;
+  const fair_value = b.fair_value !== undefined ? (Number(b.fair_value) || 0) : row.fair_value;
+  const sort_order = b.sort_order !== undefined ? (Number(b.sort_order) || 0) : row.sort_order;
+  const notes = b.notes !== undefined ? ((b.notes || '').trim() || null) : row.notes;
+  db.prepare(`UPDATE fund_investments SET parent_name=?, name=?, acquisition_date=?, cost=?, fair_value=?, sort_order=?, notes=?, updated_at=?
+    WHERE id=? AND entity_id=?`).run(parent_name, name, acquisition_date, cost, fair_value, sort_order, notes, new Date().toISOString(), req.params.id, req.params.eid);
+  res.json({ id: Number(req.params.id), parent_name, name, acquisition_date, cost, fair_value, sort_order, notes });
+});
+app.delete('/api/entities/:eid/fund-investments/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  db.prepare('DELETE FROM fund_investments WHERE id = ? AND entity_id = ?').run(req.params.id, req.params.eid);
   res.json({ success: true });
 });
 
