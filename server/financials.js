@@ -1830,17 +1830,24 @@ async function buildFundStatements(opts) {
     gpAgg.netLoss = r2(gpAgg.netLoss + m.netLoss);
   }
 
-  // Beginning-capital GP share: use GP classes' commitment share of total
-  // commitments if commitments are loaded; else 0 (all LP). This is the only
-  // beginning-balance signal available since per-class snapshots aren't reliable.
-  let gpBegShare = 0;
-  const commitments = opts.commitments || [];
-  if (commitments.length && gpClassIds.size) {
-    const totalCommit = commitments.reduce((s, x) => s + (Number(x.commitment_amount) || 0), 0);
-    const gpCommit = commitments.filter(x => gpClassIds.has(x.class_id)).reduce((s, x) => s + (Number(x.commitment_amount) || 0), 0);
-    if (totalCommit > 0) gpBegShare = gpCommit / totalCommit;
+  // GP beginning capital: reconstruct each GP class's opening balance from the
+  // CUMULATIVE class-tagged movement from fund inception through the prior
+  // year-end. The point-in-time per-class snapshot returns the whole fund, but
+  // period movements ARE class-tagged, so the inception-to-open cumulative sum
+  // (equity contributions/syndication + net income) recovers each class's true
+  // opening capital. inceptionDate is well before any activity so the window
+  // captures everything up to the opening date.
+  const inceptionDate = '2000-01-01';
+  const gpOpenEnd = priorMonthEnd(ys); // day before the year start
+  let gpBeginning = 0;
+  for (const c of partnerClasses) {
+    if (!gpClassIds.has(c.id)) continue;
+    const mv = await getBalances({ from: inceptionDate, to: gpOpenEnd, class_id: c.id });
+    const eqMove = sumWhere(mv, r => r.type === 'Equity');
+    const niMove = netIncomeOf(mv);
+    gpBeginning = r2(gpBeginning + eqMove + niMove);
+    if (!isZero(eqMove) || !isZero(niMove)) anyClassData = true;
   }
-  const gpBeginning = r2(fundTotals.beginning * gpBegShare);
 
   const groups = {
     GP: {
