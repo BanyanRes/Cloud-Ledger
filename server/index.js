@@ -2173,6 +2173,78 @@ app.delete('/api/entities/:eid/commitments/:id', auth, requireEntityAccess(), re
   res.json({ success: true });
 });
 
+// ── Upsert a single investor class's commitment amount by class id (find-or-
+//    create). Used by the Fund Reporting "Odyssey commitment" box, which updates
+//    a GP commitment that changes monthly. ──
+app.put('/api/entities/:eid/commitments/by-class/:classId', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const eid = req.params.eid;
+  const classId = parseInt(req.params.classId);
+  if (!classId) return res.status(400).json({ error: 'classId is required' });
+  const cls = db.prepare('SELECT id, name FROM dim_classes WHERE id = ? AND entity_id = ?').get(classId, eid);
+  if (!cls) return res.status(404).json({ error: 'Investor class not found in this entity' });
+  const commitment = Number(req.body.commitment_amount || 0);
+  const now = new Date().toISOString();
+  const existing = db.prepare('SELECT id FROM investor_commitments WHERE entity_id = ? AND class_id = ?').get(eid, classId);
+  if (existing) {
+    db.prepare('UPDATE investor_commitments SET commitment_amount = ?, updated_at = ? WHERE id = ?').run(commitment, now, existing.id);
+    return res.json({ id: existing.id, class_id: classId, commitment_amount: commitment, updated: true });
+  }
+  const r = db.prepare(`INSERT INTO investor_commitments (entity_id, class_id, commitment_amount, called_amount, commit_date, notes, created_at, updated_at)
+    VALUES (?, ?, ?, 0, NULL, NULL, ?, ?)`).run(eid, classId, commitment, now, now);
+  res.json({ id: r.lastInsertRowid, class_id: classId, commitment_amount: commitment, created: true });
+});
+
+// ── Fund GP/LP allocation preview. Returns the commitment-based ownership split
+//    and the resulting net-loss allocation for a given as-of date, so the Fund
+//    Reporting UI can show the GP % and GP/LP net-loss split without generating
+//    the full PDF. ──
+app.get('/api/entities/:eid/fund-allocation', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  try {
+    const eid = req.params.eid;
+    const asOf = (req.query && req.query.as_of);
+    // GP classes and their commitments.
+    const classes = db.prepare('SELECT id, name, partner_type FROM dim_classes WHERE entity_id = ?').all(eid);
+    const gpIds = new Set(classes.filter(c => String(c.partner_type).toUpperCase() === 'GP').map(c => c.id));
+    const commits = db.prepare('SELECT class_id, commitment_amount FROM investor_commitments WHERE entity_id = ?').all(eid);
+    const totalCommit = commits.reduce((s, x) => s + (Number(x.commitment_amount) || 0), 0);
+    const gpCommit = commits.filter(x => gpIds.has(x.class_id)).reduce((s, x) => s + (Number(x.commitment_amount) || 0), 0);
+    const gpShare = totalCommit > 0 ? gpCommit / totalCommit : 0;
+
+    // Per-GP-class commitment detail for display.
+    const nameById = new Map(classes.map(c => [c.id, c.name]));
+    const gpDetail = commits
+      .filter(x => gpIds.has(x.class_id))
+      .map(x => ({ class_id: x.class_id, name: nameById.get(x.class_id) || ('Class ' + x.class_id), commitment_amount: Number(x.commitment_amount) || 0 }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    // Net loss for the period (only if a valid as-of is supplied).
+    let niYtd = null, gpNetLoss = null, lpNetLoss = null;
+    if (asOf && /^\d{4}-\d{2}-\d{2}$/.test(asOf)) {
+      const ys = asOf.slice(0, 4) + '-01-01';
+      const isYtd = computeBalances(eid, { from: ys, to: asOf });
+      let ni = 0;
+      for (const r of isYtd) { if (r.type === 'Revenue') ni += (r.balance || 0); else if (r.type === 'Expense') ni -= (r.balance || 0); }
+      niYtd = Math.round(ni * 100) / 100;
+      gpNetLoss = totalCommit > 0 ? Math.round(niYtd * gpShare * 100) / 100 : 0;
+      lpNetLoss = Math.round((niYtd - gpNetLoss) * 100) / 100;
+    }
+
+    res.json({
+      totalCommitment: Math.round(totalCommit * 100) / 100,
+      gpCommitment: Math.round(gpCommit * 100) / 100,
+      gpSharePct: Math.round(gpShare * 1000000) / 10000, // percent, 4 dp
+      gpDetail,
+      hasCommitments: totalCommit > 0,
+      asOf: asOf || null,
+      netLossYtd: niYtd,
+      gpNetLoss,
+      lpNetLoss,
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'Allocation error: ' + e.message });
+  }
+});
+
 // ── Fund investments (Schedule of Investments look-through for CLRF-style fund
 //    packages). Informational; never posts to the GL. One row per underlying,
 //    grouped under an optional parent_name (holding company). ──

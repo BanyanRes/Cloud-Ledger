@@ -117,6 +117,8 @@ export const api = {
   updateFundInvestment: (eid, id, data) => request('/entities/' + eid + '/fund-investments/' + id, { method: 'PATCH', body: data }),
   deleteFundInvestment: (eid, id) => request('/entities/' + eid + '/fund-investments/' + id, { method: 'DELETE' }),
   setClassPartnerType: (eid, id, partner_type) => request('/entities/' + eid + '/classes/' + id, { method: 'PATCH', body: { partner_type } }),
+  setClassCommitment: (eid, classId, commitment_amount) => request('/entities/' + eid + '/commitments/by-class/' + classId, { method: 'PUT', body: { commitment_amount } }),
+  getFundAllocation: (eid, asOf) => request('/entities/' + eid + '/fund-allocation' + (asOf ? ('?as_of=' + asOf) : '')),
   getFundStatementsPdf: async (eid, asOf) => {
     const token = getToken();
     const res = await fetch(API_BASE + '/entities/' + eid + '/fund-statements.pdf?as_of=' + asOf, { headers: token ? { Authorization: 'Bearer ' + token } : {} });

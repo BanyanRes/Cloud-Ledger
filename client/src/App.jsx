@@ -3125,6 +3125,9 @@ function FundReporting({entityId,entityName}){
   const[classFilter,setClassFilter]=useState('');
   const blank={parent_name:'',name:'',acquisition_date:'',cost:'',fair_value:'',sort_order:''};
   const[draft,setDraft]=useState(blank);
+  const[odysseyAmt,setOdysseyAmt]=useState('');
+  const[savingOdyssey,setSavingOdyssey]=useState(false);
+  const[alloc,setAlloc]=useState(null);
 
   const load=()=>{
     setErr('');
@@ -3132,6 +3135,19 @@ function FundReporting({entityId,entityName}){
     api.getClasses(entityId).then(setClasses).catch(e=>setErr(e.message));
   };
   useEffect(()=>{setInvs(null);setClasses(null);load();},[entityId]);
+
+  const odysseyClass=(classes||[]).find(c=>/odyssey/i.test(c.name||''));
+  const loadAlloc=()=>{api.getFundAllocation(entityId,asOf).then(a=>{setAlloc(a);}).catch(e=>setErr(e.message));};
+  useEffect(()=>{if(classes!==null)loadAlloc();},[classes,asOf,entityId]);
+  useEffect(()=>{
+    if(odysseyClass&&alloc&&alloc.gpDetail){const row=alloc.gpDetail.find(g=>g.class_id===odysseyClass.id);if(row&&odysseyAmt==='')setOdysseyAmt(String(row.commitment_amount||''));}
+  },[alloc,odysseyClass]);
+  const saveOdyssey=async()=>{
+    if(!odysseyClass){setErr('No investor class named "Odyssey" is tagged. Tag it as GP below first.');return;}
+    setSavingOdyssey(true);setErr('');
+    try{await api.setClassCommitment(entityId,odysseyClass.id,Number(odysseyAmt)||0);loadAlloc();}
+    catch(e){setErr(e.message);}finally{setSavingOdyssey(false);}
+  };
 
   const addInv=async()=>{
     if(!draft.name.trim()){setErr('Investment name is required');return;}
@@ -3182,6 +3198,38 @@ function FundReporting({entityId,entityName}){
         <button style={{...S.btnP,opacity:busy?0.6:1}} disabled={busy} onClick={genPdf}>{busy?'Generating…':'Generate PDF'}</button>
       </div>
       <div style={{fontSize:12,color:T.textMuted,marginTop:8}}>Amounts come from the general ledger. The Schedule of Investments and the GP/LP capital split use the settings below.</div>
+    </div>
+
+    {/* Odyssey commitment + GP/LP allocation */}
+    <div style={{...S.card,marginBottom:16}}>
+      <div style={S.h2}>Odyssey commitment &amp; net-loss allocation</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>Odyssey's commitment changes monthly. Enter the current amount; the GP ownership % and the GP/LP net-loss split update from it (GP net loss = fund net loss × GP commitment ÷ total commitment).</div>
+      <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div>
+          <label style={S.label}>Odyssey Holdings commitment ($)</label>
+          <input type='number' value={odysseyAmt} onChange={e=>setOdysseyAmt(e.target.value)} placeholder='e.g. 369577' style={{...S.input,width:200}}/>
+        </div>
+        <button style={{...S.btnP,opacity:savingOdyssey?0.6:1}} disabled={savingOdyssey} onClick={saveOdyssey}>{savingOdyssey?'Saving…':'Save Odyssey commitment'}</button>
+        {!odysseyClass&&<div style={{fontSize:12,color:T.orange||'#d08a2a',alignSelf:'center'}}>Tag an “Odyssey” class as GP below to enable this.</div>}
+      </div>
+      {alloc&&<div style={{marginTop:14,display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:12}}>
+        {(()=>{const money=n=>n==null?'—':(n<0?'('+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})+')':n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}));
+          const stat=(label,val,sub)=>(<div style={{border:'1px solid '+T.border,borderRadius:8,padding:'10px 12px'}}>
+            <div style={{fontSize:11,color:T.textDim,textTransform:'uppercase',letterSpacing:'.04em'}}>{label}</div>
+            <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginTop:3}}>{val}</div>
+            {sub&&<div style={{fontSize:11,color:T.textMuted,marginTop:2}}>{sub}</div>}
+          </div>);
+          return(<>
+            {stat('GP ownership %', alloc.hasCommitments?alloc.gpSharePct.toFixed(4)+'%':'—', 'GP '+money(alloc.gpCommitment)+' / total '+money(alloc.totalCommitment))}
+            {stat('Fund net loss (YTD)', money(alloc.netLossYtd), alloc.asOf?('as of '+alloc.asOf):'set as-of date above')}
+            {stat('GP net loss', money(alloc.gpNetLoss), 'allocated by ownership %')}
+            {stat('LP net loss', money(alloc.lpNetLoss), 'remainder')}
+          </>);})()}
+      </div>}
+      {alloc&&alloc.gpDetail&&alloc.gpDetail.length>0&&<div style={{marginTop:12,fontSize:12,color:T.textMuted}}>
+        GP commitments: {alloc.gpDetail.map(g=>g.name+' '+(g.commitment_amount||0).toLocaleString('en-US')).join(' · ')}
+      </div>}
+      {alloc&&!alloc.hasCommitments&&<div style={{marginTop:12,fontSize:12,color:T.orange||'#d08a2a'}}>No commitments loaded yet, so net loss falls entirely to LP. Once commitments are loaded, the split activates automatically.</div>}
     </div>
 
     {/* Schedule of Investments editor */}
