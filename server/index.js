@@ -533,6 +533,8 @@ const dcCols = db.prepare("PRAGMA table_info(dim_classes)").all().map(c => c.nam
 if (!dcCols.includes('code')) { db.exec("ALTER TABLE dim_classes ADD COLUMN code TEXT"); console.log('[db migrate] dim_classes.code added'); }
 const dlCols = db.prepare("PRAGMA table_info(dim_locations)").all().map(c => c.name);
 if (!dlCols.includes('code')) { db.exec("ALTER TABLE dim_locations ADD COLUMN code TEXT"); console.log('[db migrate] dim_locations.code added'); }
+const bslCols = db.prepare("PRAGMA table_info(billcom_sync_log)").all().map(c => c.name);
+if (!bslCols.includes('invoice_number')) { db.exec("ALTER TABLE billcom_sync_log ADD COLUMN invoice_number TEXT"); console.log('[db migrate] billcom_sync_log.invoice_number added'); }
 // ── Fund reporting (CLRF, entity 40) ────────────────────────────────────────
 // GP vs LP designation on investor classes. Defaults to 'LP'; specific classes
 // are tagged 'GP' via the Fund Reporting admin UI. Drives the GP/LP columns of
@@ -4374,7 +4376,7 @@ app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id
   const entityId = parseInt(req.params.entity_id);
   const limit = Math.min(parseInt(req.query.limit) || 50, 500);
   const rows = db.prepare(
-    'SELECT id, sync_type, billcom_id, cl_entry_id, status, message, created_at FROM billcom_sync_log WHERE entity_id = ? ORDER BY id DESC LIMIT ?'
+    'SELECT id, sync_type, billcom_id, cl_entry_id, status, message, created_at, invoice_number FROM billcom_sync_log WHERE entity_id = ? ORDER BY id DESC LIMIT ?'
   ).all(entityId, limit);
   res.json({ logs: rows });
 });
@@ -4412,7 +4414,7 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
     "SELECT 1 FROM billcom_sync_log WHERE entity_id = ? AND sync_type = ? AND billcom_id = ? AND status = 'success' LIMIT 1"
   );
   const logSync = db.prepare(
-    'INSERT INTO billcom_sync_log (entity_id, sync_type, billcom_id, cl_entry_id, status, message, created_at) VALUES (?,?,?,?,?,?,?)'
+    'INSERT INTO billcom_sync_log (entity_id, sync_type, billcom_id, cl_entry_id, status, message, created_at, invoice_number) VALUES (?,?,?,?,?,?,?,?)'
   );
 
   const isDisbursed = (pay) => {
@@ -4513,7 +4515,7 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
         try {
           const je = db.transaction(() => {
             const created = insertJE(processDate, memo, lines);
-            logSync.run(entityId, 'payment', dedupId, created.id, 'success', 'relieved bill ' + billId + ' (JE #' + created.num + ')', now);
+            logSync.run(entityId, 'payment', dedupId, created.id, 'success', 'relieved bill ' + billId + ' (JE #' + created.num + ')', now, null);
             return created;
           })();
           result.leg1.relieved++; result.leg1.amount += amount;
@@ -4521,7 +4523,7 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
           transferByDate.set(processDate, (transferByDate.get(processDate) || 0) + amount);
         } catch (e) {
           result.leg1.errors++;
-          logSync.run(entityId, 'payment', dedupId, null, 'error', e.message, now);
+          logSync.run(entityId, 'payment', dedupId, null, 'error', e.message, now, null);
           result.leg1.details.push({ id: dedupId, status: 'error', reason: e.message });
         }
       }
@@ -4548,14 +4550,14 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
       try {
         const je = db.transaction(() => {
           const created = insertJE(pd, memo, lines);
-          logSync.run(entityId, 'funds_transfer', dedupId, created.id, 'success', 'funds transfer ' + pd + ' $' + delta.toFixed(2) + ' (JE #' + created.num + ')', now);
+          logSync.run(entityId, 'funds_transfer', dedupId, created.id, 'success', 'funds transfer ' + pd + ' $' + delta.toFixed(2) + ' (JE #' + created.num + ')', now, null);
           return created;
         })();
         result.leg2.transfers++; result.leg2.amount += delta;
         result.leg2.details.push({ date: pd, status: 'created', cl_entry_id: je.id, amount: delta });
       } catch (e) {
         result.leg2.errors++;
-        logSync.run(entityId, 'funds_transfer', dedupId, null, 'error', e.message, now);
+        logSync.run(entityId, 'funds_transfer', dedupId, null, 'error', e.message, now, null);
         result.leg2.details.push({ date: pd, status: 'error', reason: e.message });
       }
     }
@@ -4683,7 +4685,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   const actor = req.user.name || req.user.email || 'system';
 
   const logSync = db.prepare(
-    'INSERT INTO billcom_sync_log (entity_id, sync_type, billcom_id, cl_entry_id, status, message, created_at) VALUES (?,?,?,?,?,?,?)'
+    'INSERT INTO billcom_sync_log (entity_id, sync_type, billcom_id, cl_entry_id, status, message, created_at, invoice_number) VALUES (?,?,?,?,?,?,?,?)'
   );
   const alreadySynced = db.prepare(
     "SELECT 1 FROM billcom_sync_log WHERE entity_id = ? AND sync_type = ? AND billcom_id = ? AND status = 'success' LIMIT 1"
@@ -4743,7 +4745,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       detail = await billcomGetById({ ...listArgs, resourcePath: '/bills', id: billId });
     } catch (e) {
       result.bills.errors++;
-      logSync.run(entityId, 'bill', billId, null, 'error', 'detail fetch failed: ' + e.message, now);
+      logSync.run(entityId, 'bill', billId, null, 'error', 'detail fetch failed: ' + e.message, now, null);
       result.bills.details.push({ id: billId, status: 'error', reason: 'detail fetch failed: ' + e.message });
       continue;
     }
@@ -4753,7 +4755,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
 
     if (!invoiceDate || !Array.isArray(lineItems) || lineItems.length === 0) {
       result.bills.errors++;
-      logSync.run(entityId, 'bill', billId, null, 'error', 'missing invoiceDate or lineItems', now);
+      logSync.run(entityId, 'bill', billId, null, 'error', 'missing invoiceDate or lineItems', now, billNumber);
       result.bills.details.push({ id: billId, status: 'error', reason: 'missing invoiceDate or lineItems' });
       continue;
     }
@@ -4793,7 +4795,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     if (billMissing.length > 0) {
       result.bills.errors++;
       const missingNames = billMissing.map(m => m.name).join(', ');
-      logSync.run(entityId, 'bill', billId, null, 'error', 'missing GL mapping(s) for: ' + missingNames, now);
+      logSync.run(entityId, 'bill', billId, null, 'error', 'missing GL mapping(s) for: ' + missingNames, now, billNumber);
       result.bills.details.push({ id: billId, status: 'error', reason: 'missing mappings: ' + missingNames });
       for (const mm of billMissing) {
         const existing = missingMap.get(mm.id);
@@ -4805,7 +4807,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
 
     if (totalDr <= 0) {
       result.bills.errors++;
-      logSync.run(entityId, 'bill', billId, null, 'error', 'bill total is zero', now);
+      logSync.run(entityId, 'bill', billId, null, 'error', 'bill total is zero', now, billNumber);
       result.bills.details.push({ id: billId, status: 'error', reason: 'zero total' });
       continue;
     }
@@ -4823,14 +4825,14 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
           db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, class_id, location_id) VALUES (?,?,?,?,?,?)')
             .run(r.lastInsertRowid, l.account_code, l.debit, l.credit, l.class_id || null, l.location_id || null);
         }
-        logSync.run(entityId, 'bill', billId, r.lastInsertRowid, 'success', 'created JE #' + num, now);
+        logSync.run(entityId, 'bill', billId, r.lastInsertRowid, 'success', 'created JE #' + num, now, billNumber);
         return r.lastInsertRowid;
       })();
       result.bills.synced++;
       result.bills.details.push({ id: billId, status: 'success', cl_entry_id: insertedId });
     } catch (e) {
       result.bills.errors++;
-      logSync.run(entityId, 'bill', billId, null, 'error', 'JE insert failed: ' + e.message, now);
+      logSync.run(entityId, 'bill', billId, null, 'error', 'JE insert failed: ' + e.message, now, billNumber);
       result.bills.details.push({ id: billId, status: 'error', reason: e.message });
     }
   }
@@ -4876,7 +4878,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       if (!(row.entry_date && String(row.entry_date) >= windowFrom && String(row.entry_date) < windowTo)) continue;
       // only delete if the CL entry actually exists (it may have been removed manually)
       if (!entryStillExists.get(row.cl_entry_id, entityId)) {
-        logSync.run(entityId, 'bill_deleted', bid, row.cl_entry_id, 'success', 'bill absent in Bill.com; CL entry already gone', now);
+        logSync.run(entityId, 'bill_deleted', bid, row.cl_entry_id, 'success', 'bill absent in Bill.com; CL entry already gone', now, null);
         continue;
       }
       try {
@@ -4885,12 +4887,12 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
         const info = delEntry.run(row.cl_entry_id, entityId);
         if (info.changes > 0) {
           result.bills.deleted++;
-          logSync.run(entityId, 'bill_deleted', bid, row.cl_entry_id, 'success', 'bill deleted in Bill.com; removed CL entry ' + row.cl_entry_id, now);
+          logSync.run(entityId, 'bill_deleted', bid, row.cl_entry_id, 'success', 'bill deleted in Bill.com; removed CL entry ' + row.cl_entry_id, now, null);
           result.bills.deleted_details.push({ id: bid, cl_entry_id: row.cl_entry_id, status: 'deleted' });
         }
       } catch (e) {
         result.bills.errors++;
-        logSync.run(entityId, 'bill_deleted', bid, row.cl_entry_id, 'error', 'delete failed: ' + e.message, now);
+        logSync.run(entityId, 'bill_deleted', bid, row.cl_entry_id, 'error', 'delete failed: ' + e.message, now, null);
         result.bills.deleted_details.push({ id: bid, cl_entry_id: row.cl_entry_id, status: 'error', reason: e.message });
       }
     }
