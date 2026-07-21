@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const morgan = require('morgan');
 const multer = require('multer');
 const XLSX = require('xlsx');
@@ -24,7 +25,11 @@ const JSZip = require('jszip');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'change-this-secret';
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET || JWT_SECRET.length < 32) {
+  console.error('FATAL: JWT_SECRET is missing or too short (must be set to a random string of at least 32 characters). Refusing to start.');
+  process.exit(1);
+}
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'cloudledger.db');
 const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
 const RESET_FROM_EMAIL = process.env.RESET_FROM_EMAIL || 'CloudLedger <onboarding@resend.dev>';
@@ -1005,6 +1010,19 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
 app.use(morgan('short'));
 app.use(express.json({ limit: '10mb' }));
+
+// Rate limiter for authentication endpoints. Login and password-reset are the
+// prime targets for credential-stuffing and brute-force attempts, so cap each
+// client IP to a small number of attempts per window. Successful requests do not
+// count against the limit, so legitimate users are never locked out by normal use.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10,                  // 10 attempts per IP per window
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: { error: 'Too many attempts. Please wait a few minutes and try again.' },
+});
 if (process.env.NODE_ENV === 'production') app.use(express.static(path.join(__dirname, '..', 'client', 'dist'), {
   setHeaders: (res, filePath) => {
     // Never cache index.html — forces browsers to always re-fetch it (and pick up new asset URLs)
@@ -1072,19 +1090,28 @@ function requireDevelopmentEntity(paramName) {
 }
 
 // ═══ Auth ═══
-app.post('/api/auth/login', (req, res) => {
+// Login returns a single generic message for both "no such account" and "wrong
+// password" so the endpoint can't be used to enumerate which emails have accounts
+// (a login form that says "no account found" confirms every email you try).
+// The rate limiter caps brute-force attempts per IP.
+app.post('/api/auth/login', authLimiter, (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email?.toLowerCase());
-  if (!user) return res.status(401).json({ error: 'No account found with email: ' + email.toLowerCase() });
-  if (!bcrypt.compareSync(password, user.password_hash)) return res.status(401).json({ error: 'Incorrect password for ' + email.toLowerCase() });
+  if (!user || !bcrypt.compareSync(password, user.password_hash)) {
+    return res.status(401).json({ error: 'Invalid email or password' });
+  }
   const token = jwt.sign({ id: user.id, name: user.name, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
   res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
 });
-app.post('/api/auth/signup', (req, res) => {
+// Account creation is Admin-only. This endpoint previously had no auth guard and
+// accepted a caller-chosen `role`, which let anyone reach the API mint themselves
+// an Admin account. It now requires a valid Admin JWT (same path as /api/users
+// POST) so roles can never be self-assigned.
+app.post('/api/auth/signup', auth, requireRole('Admin'), (req, res) => {
   const { name, email, password, role } = req.body;
   if (!name || !email || !password) return res.status(400).json({ error: 'All fields required' });
-  if (password.length < 3) return res.status(400).json({ error: 'Password too short' });
+  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
   if (db.prepare('SELECT id FROM users WHERE email = ?').get(email.toLowerCase())) return res.status(400).json({ error: 'Email exists' });
   const r = db.prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)').run(name, email.toLowerCase(), bcrypt.hashSync(password, 10), ['Admin','Accountant','Viewer'].includes(role)?role:'Viewer');
   res.json({ id: r.lastInsertRowid });
