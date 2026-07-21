@@ -1609,7 +1609,12 @@ function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSum
   </div>);}
 
 // ═══ Edit JE Modal ═══
-function EditJEModal({entityId,dimsEnabled,entry,accounts:initAccounts,onClose,onSaved}){
+function EditJEModal({entityId,dimsEnabled=true,entry,accounts:initAccounts,onClose,onSaved}){
+  // dimsEnabled defaults to true: report drilldowns (AccountDrillDownModal, ApAgingReport,
+  // FundReporting) open this modal without the prop and only ever do so for real
+  // accounting/fund entities, so the full Location/Class/Project dimension list must show —
+  // matching the New JE modal. Callers that manage shell entities (JournalList, GeneralLedger)
+  // still pass the explicit value, so shell entities correctly get dimsEnabled=false there.
   const[accounts,setAccounts]=useState(initAccounts||[]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[saving,setSaving]=useState(false);
   const[projects,setProjects]=useState([]);const[dimProjects,setDimProjects]=useState([]);
   useEffect(()=>{api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>setDimProjects([]));},[entityId]);
