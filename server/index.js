@@ -24,6 +24,13 @@ const ExcelJS = require('exceljs');
 const JSZip = require('jszip');
 
 const app = express();
+// Railway terminates TLS at a single edge proxy and forwards X-Forwarded-For.
+// Trust exactly one proxy hop so req.ip resolves to the real client address
+// (not the proxy's), which is what express-rate-limit keys the auth limiter on.
+// Without this, rate-limit v7 sees an untrusted XFF and can't distinguish
+// clients, so the login limiter never triggers. Trusting 1 hop (not `true`)
+// prevents clients from spoofing X-Forwarded-For to evade the limit.
+app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET || JWT_SECRET.length < 32) {
