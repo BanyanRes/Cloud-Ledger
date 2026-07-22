@@ -114,6 +114,17 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (group_id, entity_id)
   );
+  -- Per-user entity EXCLUSIONS (negative overrides). A user keeps their group
+  -- membership but specific entities are subtracted from their effective access.
+  -- Evaluated as: effective = (individual grants UNION group grants) MINUS
+  -- exclusions. Only meaningful for a scoped user; an all-access user (no grants,
+  -- no groups) is unaffected by exclusions (see listAccessibleEntityIds).
+  CREATE TABLE IF NOT EXISTS user_entity_exclusions (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    created_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, entity_id)
+  );
   INSERT OR IGNORE INTO user_groups (name) VALUES ('CLA');
   INSERT OR IGNORE INTO user_groups (name) VALUES ('Weaver');
   CREATE TABLE IF NOT EXISTS accounts (
@@ -1069,6 +1080,11 @@ function listAccessibleEntityIds(userId, userRole) {
     ? db.prepare('SELECT DISTINCT entity_id FROM user_group_entity_access WHERE group_id IN (' + groups.map(() => '?').join(',') + ')').all(...groups.map(g => g.group_id))
     : [];
   const set = new Set([...direct.map(r => r.entity_id), ...groupEnt.map(r => r.entity_id)]);
+  // Subtract per-user exclusions (negative overrides). Only applied to a scoped
+  // user, which we already are here (direct.length || groups.length > 0), so an
+  // all-access user is never accidentally narrowed by a stray exclusion row.
+  const excl = db.prepare('SELECT entity_id FROM user_entity_exclusions WHERE user_id = ?').all(userId);
+  for (const r of excl) set.delete(r.entity_id);
   return [...set];
 }
 function requireEntityAccess(paramName) {
@@ -1235,13 +1251,14 @@ app.get('/api/users/:id/entity-access', auth, requireRole('Admin'), (req, res) =
     entity_ids: db.prepare('SELECT entity_id FROM user_group_entity_access WHERE group_id = ? ORDER BY entity_id').all(g.id).map(r => r.entity_id),
   }));
   const groupEntityIds = [...new Set(groupsDetail.flatMap(g => g.entity_ids))];
+  const exclusions = db.prepare('SELECT entity_id FROM user_entity_exclusions WHERE user_id = ? ORDER BY entity_id').all(uid).map(r => r.entity_id);
   const user = db.prepare('SELECT role FROM users WHERE id = ?').get(uid);
-  // effective === null means "all entities"; otherwise the union of individual + group.
+  // effective === null means "all entities"; otherwise (union of individual + group) minus exclusions.
   let effective;
   if (user && user.role === 'Admin') effective = null;
   else if (rows.length === 0 && groups.length === 0) effective = null;
-  else effective = [...new Set([...rows.map(r => r.entity_id), ...groupEntityIds])];
-  res.json({ user_id: uid, entity_ids: rows.map(r => r.entity_id), groups: groupsDetail, group_entity_ids: groupEntityIds, effective });
+  else effective = [...new Set([...rows.map(r => r.entity_id), ...groupEntityIds])].filter(id => !exclusions.includes(id));
+  res.json({ user_id: uid, entity_ids: rows.map(r => r.entity_id), groups: groupsDetail, group_entity_ids: groupEntityIds, exclusions, effective });
 });
 app.put('/api/users/:id/entity-access', auth, requireRole('Admin'), (req, res) => {
   const userId = parseInt(req.params.id);
@@ -1249,13 +1266,17 @@ app.put('/api/users/:id/entity-access', auth, requireRole('Admin'), (req, res) =
   if (!targetUser) return res.status(404).json({ error: 'User not found' });
   if (targetUser.role === 'Admin') return res.status(400).json({ error: 'Admins always have all-entity access; cannot restrict' });
   const ids = Array.isArray(req.body.entity_ids) ? req.body.entity_ids.map(n => parseInt(n)).filter(n => Number.isInteger(n)) : [];
+  const exclusions = Array.isArray(req.body.exclusions) ? req.body.exclusions.map(n => parseInt(n)).filter(n => Number.isInteger(n)) : [];
   const tx = db.transaction(() => {
     db.prepare('DELETE FROM user_entity_access WHERE user_id = ?').run(userId);
     const ins = db.prepare('INSERT INTO user_entity_access (user_id, entity_id) VALUES (?, ?)');
     for (const eid of ids) ins.run(userId, eid);
+    db.prepare('DELETE FROM user_entity_exclusions WHERE user_id = ?').run(userId);
+    const insX = db.prepare('INSERT OR IGNORE INTO user_entity_exclusions (user_id, entity_id) VALUES (?, ?)');
+    for (const eid of exclusions) insX.run(userId, eid);
   });
   tx();
-  res.json({ user_id: userId, entity_ids: ids });
+  res.json({ user_id: userId, entity_ids: ids, exclusions });
 });
 
 

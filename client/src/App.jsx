@@ -4199,21 +4199,26 @@ function UserManagement({currentUser}){
   const[accessSaving,setAccessSaving]=useState(false);
   const[accessErr,setAccessErr]=useState('');
   const[accessGroups,setAccessGroups]=useState([]); // groups the user belongs to (with entity_ids)
-  const[accessEffective,setAccessEffective]=useState(null); // null=all, else union of individual+group
+  const[accessEffective,setAccessEffective]=useState(null); // null=all, else union of individual+group minus exclusions
+  const[accessExclusions,setAccessExclusions]=useState([]); // per-user entity ids to subtract (negative overrides)
   const openAccess=async(u)=>{
-    setAccessUser(u);setAccessErr('');setAccessSaving(false);setAccessGroups([]);setAccessEffective(null);
+    setAccessUser(u);setAccessErr('');setAccessSaving(false);setAccessGroups([]);setAccessEffective(null);setAccessExclusions([]);
     try{
       const[ents,acc]=await Promise.all([api.getEntities(),api.getUserEntityAccess(u.id)]);
       setAccessAllEntities(ents);
       setAccessEntities(acc.entity_ids||[]);
       setAccessGroups(acc.groups||[]);
+      setAccessExclusions(acc.exclusions||[]);
       setAccessEffective(acc.effective===undefined?null:acc.effective);
     }catch(e){setAccessErr(e.message);}
   };
   const toggleAccessEntity=(id)=>setAccessEntities(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);
+  // Toggle an entity granted via group membership: unchecking adds it to the
+  // per-user exclusion list (subtracted from effective access); rechecking removes it.
+  const toggleAccessExclusion=(id)=>setAccessExclusions(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);
   const saveAccess=async()=>{
     setAccessSaving(true);setAccessErr('');
-    try{await api.setUserEntityAccess(accessUser.id,accessEntities);setAccessUser(null);}
+    try{await api.setUserEntityAccess(accessUser.id,accessEntities,accessExclusions);setAccessUser(null);}
     catch(e){setAccessErr(e.message);}
     setAccessSaving(false);
   };
@@ -4290,13 +4295,19 @@ function UserManagement({currentUser}){
         {accessAllEntities.map(e=>{
           const viaGroups=accessGroups.filter(g=>g.entity_ids.includes(e.id)).map(g=>g.name);
           const inGroup=viaGroups.length>0;
-          const checked=inGroup||accessEntities.includes(e.id);
+          const excluded=accessExclusions.includes(e.id);
+          // A group-granted entity is checked unless it's been explicitly excluded.
+          // Unchecking a group entity toggles the exclusion; an individual grant
+          // toggles the normal grant. Excluding only applies to group entities.
+          const checked=!excluded&&(inGroup||accessEntities.includes(e.id));
+          const onToggle=()=>{ if(inGroup) toggleAccessExclusion(e.id); else toggleAccessEntity(e.id); };
           return (
-          <label key={e.id} title={inGroup?'Granted via '+viaGroups.join(', ')+' — manage in User Groups':''} style={{display:'flex',alignItems:'center',padding:'8px 12px',borderBottom:'1px solid '+T.border,cursor:inGroup?'default':'pointer',gap:10}}>
-            <input type="checkbox" checked={checked} disabled={inGroup} onChange={()=>{if(!inGroup)toggleAccessEntity(e.id);}}/>
-            <span style={{color:T.textBright,fontSize:13}}>{e.name}</span>
+          <label key={e.id} title={inGroup?(excluded?'Excluded for this user (overrides '+viaGroups.join(', ')+')':'Granted via '+viaGroups.join(', ')+' — uncheck to exclude for this user only'):''} style={{display:'flex',alignItems:'center',padding:'8px 12px',borderBottom:'1px solid '+T.border,cursor:'pointer',gap:10}}>
+            <input type="checkbox" checked={checked} onChange={onToggle}/>
+            <span style={{color:excluded?T.textMuted:T.textBright,fontSize:13,textDecoration:excluded?'line-through':'none'}}>{e.name}</span>
             {e.code&&<span style={{color:T.textMuted,fontSize:11,fontFamily:'monospace'}}>{e.code}</span>}
-            {inGroup&&<span style={{marginLeft:'auto',fontSize:10,color:T.accent,background:T.accent+'18',padding:'2px 6px',borderRadius:4,whiteSpace:'nowrap'}}>via {viaGroups.join(', ')}</span>}
+            {inGroup&&!excluded&&<span style={{marginLeft:'auto',fontSize:10,color:T.accent,background:T.accent+'18',padding:'2px 6px',borderRadius:4,whiteSpace:'nowrap'}}>via {viaGroups.join(', ')}</span>}
+            {inGroup&&excluded&&<span style={{marginLeft:'auto',fontSize:10,color:T.danger||'#c0392b',background:(T.danger||'#c0392b')+'18',padding:'2px 6px',borderRadius:4,whiteSpace:'nowrap'}}>excluded</span>}
           </label>
           );
         })}

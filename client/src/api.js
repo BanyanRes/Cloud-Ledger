@@ -33,7 +33,7 @@ export const api = {
   deleteUser: (id) => request('/users/' + id, { method: 'DELETE' }),
   updateUser: (id, data) => request('/users/' + id, { method: 'PUT', body: data }),
   getUserEntityAccess: (id) => request('/users/' + id + '/entity-access'),
-  setUserEntityAccess: (id, entity_ids) => request('/users/' + id + '/entity-access', { method: 'PUT', body: { entity_ids } }),
+  setUserEntityAccess: (id, entity_ids, exclusions) => request('/users/' + id + '/entity-access', { method: 'PUT', body: { entity_ids, exclusions } }),
 
   // User groups (bundle users + grant entity access to all at once, e.g. CLA)
   getGroups: () => request('/groups'),
