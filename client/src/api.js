@@ -273,6 +273,7 @@ export const api = {
   getBillcomMappings: (entityId) => request('/billcom/mappings/' + entityId),
   saveBillcomMappings: (entityId, mappings) => request('/billcom/mappings/' + entityId, { method: 'PUT', body: { mappings } }),
   syncBillcom: (entityId) => request('/billcom/sync/' + entityId, { method: 'POST' }),
+  unsyncBillcom: (entityId, dryRun) => request('/billcom/unsync/' + entityId, { method: 'POST', body: { dry_run: !!dryRun } }),
   pushBillcomCoa: (entityId, body) => request('/billcom/push-coa/' + entityId, { method: 'POST', body }),
   getBillcomSyncLog: (entityId, limit) => request('/billcom/sync-log/' + entityId + (limit ? '?limit=' + limit : '')),
   getApAging: (entityId, asOf) => request('/billcom/ap-aging/' + entityId + (asOf ? '?as_of=' + asOf : '')),

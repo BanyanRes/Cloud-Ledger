@@ -4436,8 +4436,40 @@ app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id
   res.json({ logs: rows });
 });
 
-// ───────────────────────────────────────────────────────────────────────────
-// Shared two-leg payment reconcile core. Given an already-fetched payments list,
+// Un-sync: remove every CloudLedger journal entry that a Bill.com sync created
+// for this entity, and clear the entity's sync log so a subsequent (corrected)
+// sync re-pulls from scratch. Scoped STRICTLY to entries recorded in
+// billcom_sync_log with a cl_entry_id — GL-import entries and manual JEs are
+// never touched because they have no sync-log row. Use case: a sync ran with
+// the wrong cutoff and duplicated invoices already present from a GL import.
+app.post('/api/billcom/unsync/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const dryRun = !!(req.body && req.body.dry_run);
+  // Every JE this entity's sync created, via the authoritative link column.
+  const linked = db.prepare(
+    "SELECT DISTINCT cl_entry_id FROM billcom_sync_log WHERE entity_id = ? AND cl_entry_id IS NOT NULL"
+  ).all(entityId).map(r => r.cl_entry_id);
+  // Only those that still exist as JEs on THIS entity (defensive: never delete
+  // an id that isn't actually this entity's journal entry).
+  const existing = linked.filter(id => db.prepare('SELECT 1 FROM journal_entries WHERE id = ? AND entity_id = ?').get(id, entityId));
+  if (dryRun) {
+    return res.json({ dry_run: true, entity_id: entityId, would_delete_entries: existing.length, sync_log_rows: db.prepare('SELECT COUNT(*) c FROM billcom_sync_log WHERE entity_id = ?').get(entityId).c });
+  }
+  let deleted = 0;
+  const tx = db.transaction(() => {
+    for (const id of existing) {
+      const atts = db.prepare('SELECT filename FROM journal_attachments WHERE entry_id = ?').all(id);
+      atts.forEach(a => { try { fs.unlinkSync(path.join(UPLOAD_DIR, a.filename)); } catch {} });
+      db.prepare('DELETE FROM journal_entries WHERE id = ? AND entity_id = ?').run(id, entityId);
+      deleted++;
+    }
+    // Clear the sync log so dedup doesn't block a corrected re-sync.
+    db.prepare('DELETE FROM billcom_sync_log WHERE entity_id = ?').run(entityId);
+  });
+  tx();
+  res.json({ success: true, entity_id: entityId, deleted_entries: deleted, sync_log_cleared: true });
+});
+
 // posts the QBO-style clearing-account flow and returns a structured result.
 // Used by BOTH the Sync endpoint (payment phase) and the payment-reconcile
 // endpoint, so the accounting is identical and dedup can never double-post:

@@ -974,6 +974,8 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
   const[defaultApAcct,setDefaultApAcct]=useState('');
   const[defaultCashAcct,setDefaultCashAcct]=useState('');
   const[defaultClearingAcct,setDefaultClearingAcct]=useState('');
+  const[syncCutoffDate,setSyncCutoffDate]=useState(''); // only sync invoices dated on/after this
+  const[unsyncing,setUnsyncing]=useState(false);
 
   // Phase 2: account mapping state
   const[tab,setTab]=useState('config'); // 'config' | 'mapping' | 'sync'
@@ -1074,6 +1076,22 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
     setSyncing(false);
   };
 
+  const runUnsync=async()=>{
+    if(!selectedEntity)return;
+    let count=0;
+    try{ const dry=await api.unsyncBillcom(selectedEntity,true); count=dry.would_delete_entries||0; }
+    catch(e){ setSyncErr('Un-sync check failed: '+e.message); return; }
+    if(count===0){ setSyncMsg('Nothing to un-sync — no Bill.com-created journal entries on this entity.'); return; }
+    if(!window.confirm('Un-sync will DELETE '+count+' journal entr'+(count===1?'y':'ies')+' that Bill.com syncs created on this entity, and clear the sync log so a corrected sync can re-pull. It does NOT touch imported-GL or manual entries. Continue?')) return;
+    setUnsyncing(true);setSyncMsg('');setSyncErr('');setSyncResult(null);
+    try{
+      const r=await api.unsyncBillcom(selectedEntity,false);
+      setSyncMsg('Un-synced. Removed '+(r.deleted_entries||0)+' Bill.com journal entr'+((r.deleted_entries===1)?'y':'ies')+' and cleared the sync log. Set a cutoff date if needed, then Sync Now to re-pull correctly.');
+      loadSyncLogs();
+    }catch(e){setSyncErr('Un-sync failed: '+e.message);}
+    setUnsyncing(false);
+  };
+
   const load=useCallback(async()=>{
     if(!selectedEntity)return;
     setLoading(true);setMsg('');setErr('');
@@ -1087,9 +1105,10 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
         setDefaultApAcct(r.default_ap_account||'');
         setDefaultCashAcct(r.default_cash_account||'');
         setDefaultClearingAcct(r.default_clearing_account||'');
+        setSyncCutoffDate(r.sync_cutoff_date||'');
         setPassword('');setDevKey('');
       }else{
-        setEnv('sandbox');setUsername('');setOrgId('');setDefaultApAcct('');setDefaultCashAcct('');setDefaultClearingAcct('');
+        setEnv('sandbox');setUsername('');setOrgId('');setDefaultApAcct('');setDefaultCashAcct('');setDefaultClearingAcct('');setSyncCutoffDate('');
         setPassword('');setDevKey('');
       }
     }catch(e){setErr(e.message);}
@@ -1109,7 +1128,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
     if(!selectedEntity){setErr('Select an entity first');return;}
     setSaving(true);setMsg('');setErr('');
     try{
-      const body={environment:env,username,org_id:orgId,default_ap_account:defaultApAcct||null,default_cash_account:defaultCashAcct||null,default_clearing_account:defaultClearingAcct||null};
+      const body={environment:env,username,org_id:orgId,default_ap_account:defaultApAcct||null,default_cash_account:defaultCashAcct||null,default_clearing_account:defaultClearingAcct||null,sync_cutoff_date:syncCutoffDate||null};
       if(password)body.password=password;
       if(devKey)body.dev_key=devKey;
       await api.saveBillcomConfig(selectedEntity,body);
@@ -1214,6 +1233,11 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
             <label style={S.label}>Default Clearing Account (Money Out Clearing)</label>
             <input type="text" value={defaultClearingAcct} onChange={e=>setDefaultClearingAcct(e.target.value)} style={S.input} placeholder="e.g. 10072" autoComplete="new-password"/>
           </div>
+          <div>
+            <label style={S.label}>Sync Cutoff Date</label>
+            <input type="date" value={syncCutoffDate} onChange={e=>setSyncCutoffDate(e.target.value)} style={S.input}/>
+            <div style={{fontSize:11,color:T.textMuted,marginTop:4}}>Only Bill.com invoices dated <b>on or after</b> this date are synced. Set this to the day <b>after</b> your imported GL detail ends (e.g. GL through 4/30 → set 5/1) so already-imported invoices aren't duplicated. Leave blank to sync everything.</div>
+          </div>
         </div>
 
         <div style={{display:'flex',gap:10,marginTop:20,alignItems:'center'}}>
@@ -1292,7 +1316,8 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
           </div>
           <div style={{display:'flex',gap:8}}>
             <button style={S.btnS} onClick={loadSyncLogs} disabled={syncLogsLoading||syncing}>{syncLogsLoading?'Loading...':'Refresh Log'}</button>
-            <button style={S.btnP} onClick={runSync} disabled={syncing}>{syncing?'Syncing...':'Sync Now'}</button>
+            <button style={{...S.btnS,color:'#b91c1c',borderColor:'#fca5a5'}} onClick={runUnsync} disabled={syncing||unsyncing}>{unsyncing?'Un-syncing...':'Un-sync'}</button>
+            <button style={S.btnP} onClick={runSync} disabled={syncing||unsyncing}>{syncing?'Syncing...':'Sync Now'}</button>
           </div>
         </div>
 
