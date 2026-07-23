@@ -1066,13 +1066,33 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
   const runSync=async()=>{
     if(!selectedEntity)return;
     setSyncing(true);setSyncMsg('');setSyncErr('');setSyncResult(null);
+    // The server processes a bounded batch per call (~25 bills) and sets
+    // bills.budget_reached=true when more remain. Auto-continue: keep calling
+    // until it's caught up, so one click drains the whole backlog. Hard cap on
+    // iterations guarantees this can never loop forever.
+    const MAX_ROUNDS=40;
+    let round=0, last=null;
+    // synced + errors are cumulative (real new work each batch); skipped is NOT
+    // summed because each batch re-scans and re-skips the same pre-cutoff /
+    // already-synced bills, so we report the final batch's skipped count only.
+    const tot={bs:0,be:0,ps:0,pe:0};
     try{
-      const r=await api.syncBillcom(selectedEntity);
-      setSyncResult(r);
-      const b=r.bills||{},py=r.payments||{};
-      setSyncMsg('Done. Bills: '+(b.synced||0)+' synced, '+(b.skipped||0)+' skipped, '+(b.errors||0)+' errors. Payments: '+(py.synced||0)+' synced, '+(py.skipped||0)+' skipped, '+(py.errors||0)+' errors.');
+      while(round<MAX_ROUNDS){
+        round++;
+        setSyncMsg('Syncing batch '+round+'\u2026'+(round>1?' ('+tot.bs+' bills, '+tot.ps+' payments posted so far)':''));
+        const r=await api.syncBillcom(selectedEntity);
+        last=r;
+        const b=r.bills||{},py=r.payments||{};
+        tot.bs+=(b.synced||0);tot.be+=(b.errors||0);
+        tot.ps+=(py.synced||0);tot.pe+=(py.errors||0);
+        if(!(b.budget_reached)) break; // caught up
+      }
+      setSyncResult(last);
+      const lb=(last&&last.bills)||{},lp=(last&&last.payments)||{};
+      const capNote=(round>=MAX_ROUNDS)?' (stopped at batch limit \u2014 click Sync Now again to continue)':'';
+      setSyncMsg('Done in '+round+' batch'+(round===1?'':'es')+'. Bills: '+tot.bs+' posted, '+tot.be+' errors, '+(lb.skipped||0)+' skipped. Payments: '+tot.ps+' posted, '+tot.pe+' errors, '+(lp.skipped||0)+' skipped.'+capNote);
       loadSyncLogs();
-    }catch(e){setSyncErr('Sync failed: '+e.message);}
+    }catch(e){setSyncErr('Sync failed after '+round+' batch'+(round===1?'':'es')+': '+e.message+(tot.bs?(' ('+tot.bs+' bills already posted before the error)'):''));}
     setSyncing(false);
   };
 
