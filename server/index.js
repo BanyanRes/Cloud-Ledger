@@ -3246,12 +3246,41 @@ app.post('/api/entities/:eid/bank-transactions/post', auth, requireEntityAccess(
     .all(req.params.eid, ...transaction_ids);
   if (txns.length === 0) return res.status(400).json({ error: 'No coded transactions to post' });
 
+  // Guard: never post unless EVERY selected transaction has a valid bank account.
+  // A missing/blank/unknown bank_account_code would post the offset line but leave
+  // the bank side on a null account, creating an unbalanced entry. Block the whole
+  // batch (all-or-nothing) so no imbalance is ever written, and report which
+  // transactions need a bank account chosen first.
+  const validBankCodes = new Set(db.prepare('SELECT code FROM accounts WHERE entity_id=?').all(req.params.eid).map(a => String(a.code)));
+  const badBank = txns.filter(t => !t.bank_account_code || !validBankCodes.has(String(t.bank_account_code)));
+  if (badBank.length > 0) {
+    return res.status(400).json({
+      error: 'Cannot post: ' + badBank.length + ' transaction' + (badBank.length === 1 ? '' : 's') + ' ' + (badBank.length === 1 ? 'has' : 'have') + ' no valid bank account selected. Select a bank account for these before posting.',
+      transactions_missing_bank_account: badBank.map(t => ({ id: t.id, date: t.date, description: t.description, amount: t.amount, bank_account_code: t.bank_account_code || null })),
+    });
+  }
+  // Guard: every posting transaction must also have a coded offset (single
+  // account or splits), otherwise the offset side would be null.
+  const badOffset = txns.filter(t => {
+    const hasSplits = db.prepare('SELECT COUNT(*) c FROM bank_transaction_splits WHERE txn_id=?').get(t.id).c > 0;
+    return !hasSplits && !t.account_code;
+  });
+  if (badOffset.length > 0) {
+    return res.status(400).json({
+      error: 'Cannot post: ' + badOffset.length + ' transaction' + (badOffset.length === 1 ? '' : 's') + ' ' + (badOffset.length === 1 ? 'has' : 'have') + ' no account coded. Code the offsetting account before posting.',
+      transactions_missing_account: badOffset.map(t => ({ id: t.id, date: t.date, description: t.description, amount: t.amount })),
+    });
+  }
+
   const results = [];
   db.transaction(() => {
     for (const t of txns) {
       const splits = db.prepare('SELECT * FROM bank_transaction_splits WHERE txn_id=? ORDER BY id').all(t.id);
       const hasSplits = splits.length > 0;
-      // If no splits and no single account code, skip (shouldn't happen for 'coded' status, but defend anyway)
+      // Defense in depth: the batch-level guards above already rejected these,
+      // but re-check per transaction so a malformed row can never post a
+      // half-sided (unbalanced) entry.
+      if (!t.bank_account_code) continue;
       if (!hasSplits && !t.account_code) continue;
 
       const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id=?').get(req.params.eid).m||0)+1;
