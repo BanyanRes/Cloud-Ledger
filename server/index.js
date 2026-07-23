@@ -4686,6 +4686,17 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   }
   const listArgs = { sessionId: session.sessionId, devKey: billcomDecrypt(cfg.dev_key_enc), baseUrl: cfg.api_base_url };
 
+  // Bill.com account-id -> account-name lookup, for auto-mapping by name.
+  // Bill.com bill line items DON'T carry the account name (only the id), so to
+  // match a line's account against a GL account by name we must resolve the id
+  // to its name via the chart-of-accounts list. Best-effort: if this fetch
+  // fails, auto-mapping simply won't find names and the sync behaves as before.
+  const bcNameById = new Map();
+  try {
+    const bcAll = await billcomListAccounts(listArgs);
+    for (const a of bcAll) { if (a && a.id != null) bcNameById.set(String(a.id), a.name || ''); }
+  } catch (e) { console.log('[billcom sync] account-name lookup failed: ' + e.message); }
+
   // Bounded sync: process at most maxBills per invocation so the request always
   // returns well under Railway's gateway ceiling. Dedup via billcom_sync_log makes
   // repeated runs safe + incremental — re-run until processed === 0. Caller may
@@ -4851,7 +4862,9 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
         continue;
       }
       let mapping = mapById.get(acctId);
-      const bcName = pick(li, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || pick(cls, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || '';
+      // Prefer the name from the Bill.com chart-of-accounts lookup (keyed by id);
+      // line items usually omit the name. Fall back to any name on the line.
+      const bcName = bcNameById.get(acctId) || pick(li, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || pick(cls, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || '';
       if (!mapping) {
         // Level-2 auto-map: if the Bill.com account name matches exactly one GL
         // account on this entity, use it and remember the mapping. Ambiguous or
