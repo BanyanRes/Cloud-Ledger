@@ -4654,6 +4654,23 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
 
   const mapRows = db.prepare('SELECT billcom_account_id, billcom_account_name, cl_account_code FROM billcom_account_map WHERE entity_id = ?').all(entityId);
   const mapById = new Map(mapRows.map(r => [String(r.billcom_account_id), r]));
+  // Auto-map support: index this entity's GL accounts by normalized name so a
+  // Bill.com line whose account name EXACTLY and UNAMBIGUOUSLY matches one GL
+  // account can be mapped automatically (no manual mapping step). Names are
+  // normalized (lowercase, strip non-alphanumerics) so "Telephone & Internet"
+  // matches "Telephone and Internet". A name shared by 2+ GL accounts is left
+  // ambiguous and NOT auto-mapped — it falls through to the error path so the
+  // accountant decides. Newly auto-mapped ids are persisted so the sync only
+  // resolves each once and the mapping shows up in the Account Mapping tab.
+  const glNorm = (s) => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const glByName = new Map(); // normName -> cl_account_code, or the string '(AMBIGUOUS)'
+  for (const a of db.prepare('SELECT code, name FROM accounts WHERE entity_id = ?').all(entityId)) {
+    const key = glNorm(a.name);
+    if (!key) continue;
+    if (glByName.has(key)) glByName.set(key, '(AMBIGUOUS)');
+    else glByName.set(key, a.code);
+  }
+  const insAutoMap = db.prepare('INSERT OR IGNORE INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)');
   // Dimension maps: only mapped Bill.com class/job ids carry a CL class/location
   // onto the synced line; unmapped ids (incl. workflow-status classes) -> null.
   const classMap = new Map(db.prepare('SELECT billcom_class_id, cl_class_id FROM billcom_class_map WHERE entity_id = ?').all(entityId).map(r => [String(r.billcom_class_id), r.cl_class_id]));
@@ -4833,10 +4850,24 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
         billMissing.push({ id: '(none)', name: '(no chartOfAccount on line)' });
         continue;
       }
-      const mapping = mapById.get(acctId);
+      let mapping = mapById.get(acctId);
+      const bcName = pick(li, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || pick(cls, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || '';
       if (!mapping) {
-        const name = pick(li, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || pick(cls, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || acctId;
-        billMissing.push({ id: acctId, name });
+        // Level-2 auto-map: if the Bill.com account name matches exactly one GL
+        // account on this entity, use it and remember the mapping. Ambiguous or
+        // no match -> fall through to the missing-mapping error below.
+        const glCode = bcName ? glByName.get(glNorm(bcName)) : undefined;
+        if (glCode && glCode !== '(AMBIGUOUS)') {
+          try { insAutoMap.run(entityId, acctId, bcName, glCode, new Date().toISOString()); } catch (e) {}
+          mapping = { cl_account_code: glCode, billcom_account_name: bcName, _auto: true };
+          mapById.set(acctId, mapping);
+        }
+      }
+      if (!mapping) {
+        const name = bcName || acctId;
+        const norm = bcName ? glNorm(bcName) : '';
+        const ambiguous = norm ? (glByName.get(norm) === '(AMBIGUOUS)') : false;
+        billMissing.push({ id: acctId, name, ambiguous });
         continue;
       }
       debitLines.push({
@@ -4854,8 +4885,29 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       result.bills.details.push({ id: billId, status: 'error', reason: 'missing mappings: ' + missingNames });
       for (const mm of billMissing) {
         const existing = missingMap.get(mm.id);
-        if (existing) existing.affected_bills++;
-        else missingMap.set(mm.id, { billcom_account_id: mm.id, name: mm.name, affected_bills: 1 });
+        if (existing) { existing.affected_bills++; continue; }
+        // Enrich each unmapped account for the accountant-facing UI: the real
+        // Bill.com account name, whether the name was ambiguous (matched 2+ GL
+        // accounts), and the GL account list so the UI can offer a dropdown
+        // pre-selected on a close name match. This turns the cryptic id error
+        // into an actionable "map this name to this GL account" prompt.
+        const norm = mm.name ? glNorm(mm.name) : '';
+        let suggestion = null;
+        if (norm && !mm.ambiguous) {
+          const code = glByName.get(norm);
+          if (code && code !== '(AMBIGUOUS)') {
+            const acc = db.prepare('SELECT code, name FROM accounts WHERE entity_id = ? AND code = ?').get(entityId, code);
+            if (acc) suggestion = { cl_account_code: acc.code, cl_account_name: acc.name };
+          }
+        }
+        missingMap.set(mm.id, {
+          billcom_account_id: mm.id,
+          billcom_account_name: mm.name,
+          name: mm.name,
+          ambiguous: !!mm.ambiguous,
+          suggested_gl: suggestion,
+          affected_bills: 1,
+        });
       }
       continue;
     }

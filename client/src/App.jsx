@@ -1299,13 +1299,35 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
         {syncErr&&<div style={{padding:10,marginBottom:12,background:'#fef2f2',border:'1px solid #fecaca',borderRadius:T.radiusSm,color:T.red,fontSize:12}}>{syncErr}</div>}
         {syncMsg&&<div style={{padding:10,marginBottom:12,background:'#f0fdf4',border:'1px solid #86efac',borderRadius:T.radiusSm,color:'#15803d',fontSize:12}}>{syncMsg}</div>}
 
-        {syncResult&&syncResult.missing_mappings&&syncResult.missing_mappings.length>0&&<div style={{padding:12,marginBottom:14,background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:T.radiusSm}}>
-          <div style={{fontSize:13,fontWeight:600,color:'#92400e',marginBottom:6}}>Missing GL Mappings ({syncResult.missing_mappings.length})</div>
-          <div style={{fontSize:12,color:'#92400e',marginBottom:8}}>These Bill.com accounts appeared in bills but aren't mapped to a CloudLedger GL account. Map them in the Account Mapping tab, then sync again.</div>
-          <ul style={{margin:0,paddingLeft:20,fontSize:12,color:'#78350f'}}>
-            {syncResult.missing_mappings.map(m=><li key={m.billcom_account_id}>{m.name} ({m.affected_bills} bill{m.affected_bills===1?'':'s'})</li>)}
-          </ul>
-        </div>}
+        {syncResult&&syncResult.missing_mappings&&syncResult.missing_mappings.length>0&&(()=>{
+          const mm=syncResult.missing_mappings;
+          const suggested=mm.filter(m=>m.suggested_gl);
+          const ambiguous=mm.filter(m=>m.ambiguous);
+          const nomatch=mm.filter(m=>!m.suggested_gl&&!m.ambiguous);
+          return <div style={{padding:12,marginBottom:14,background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:T.radiusSm}}>
+          <div style={{fontSize:13,fontWeight:600,color:'#92400e',marginBottom:6}}>Missing GL Mappings ({mm.length})</div>
+          <div style={{fontSize:12,color:'#92400e',marginBottom:10}}>These Bill.com accounts appeared in bills but aren't mapped to a CloudLedger GL account yet. Here's exactly what each one needs:</div>
+          {suggested.length>0&&<div style={{marginBottom:10}}>
+            <div style={{fontSize:12,fontWeight:600,color:'#15803d',marginBottom:4}}>✓ Ready to map — the Bill.com name matches a GL account exactly:</div>
+            <ul style={{margin:0,paddingLeft:20,fontSize:12,color:'#166534'}}>
+              {suggested.map(m=><li key={m.billcom_account_id} style={{marginBottom:2}}><b>{m.billcom_account_name||m.name}</b> → <b>{m.suggested_gl.cl_account_code} {m.suggested_gl.cl_account_name}</b> <span style={{color:'#4d7c0f'}}>({m.affected_bills} bill{m.affected_bills===1?'':'s'})</span></li>)}
+            </ul>
+            <div style={{fontSize:11,color:'#166534',marginTop:4,fontStyle:'italic'}}>These will be mapped and posted automatically on the next sync — just click Sync Now again.</div>
+          </div>}
+          {ambiguous.length>0&&<div style={{marginBottom:10}}>
+            <div style={{fontSize:12,fontWeight:600,color:'#b45309',marginBottom:4}}>⚠ Needs your decision — the name matches more than one GL account:</div>
+            <ul style={{margin:0,paddingLeft:20,fontSize:12,color:'#78350f'}}>
+              {ambiguous.map(m=><li key={m.billcom_account_id} style={{marginBottom:2}}><b>{m.billcom_account_name||m.name}</b> <span style={{color:'#a16207'}}>({m.affected_bills} bill{m.affected_bills===1?'':'s'})</span> — pick the correct GL account in the Account Mapping tab.</li>)}
+            </ul>
+          </div>}
+          {nomatch.length>0&&<div style={{marginBottom:10}}>
+            <div style={{fontSize:12,fontWeight:600,color:'#b91c1c',marginBottom:4}}>✕ No matching GL account — these need a mapping chosen manually:</div>
+            <ul style={{margin:0,paddingLeft:20,fontSize:12,color:'#78350f'}}>
+              {nomatch.map(m=><li key={m.billcom_account_id} style={{marginBottom:2}}><b>{m.billcom_account_name||m.name}</b> <span style={{color:'#a16207'}}>({m.affected_bills} bill{m.affected_bills===1?'':'s'})</span> — no GL account has this name; map it in the Account Mapping tab.</li>)}
+            </ul>
+          </div>}
+          <button style={{...S.btnS,marginTop:4}} onClick={()=>{setTab('mapping');if(cfg&&cfg.configured)loadMapping();}}>Open Account Mapping tab</button>
+        </div>;})()}
 
         {syncResult&&syncResult.payments&&syncResult.payments.skip_reason&&<div style={{padding:12,marginBottom:14,background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:T.radiusSm}}>
           <div style={{fontSize:13,fontWeight:600,color:'#92400e',marginBottom:6}}>Payments not synced</div>
