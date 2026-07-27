@@ -2716,12 +2716,43 @@ app.get('/api/entities/:eid/gl-detail', auth, requireEntityAccess(), (req, res) 
     WHERE je.entity_id = ?${where}
     ORDER BY jl.account_code, je.date, je.entry_num, jl.id
   `).all(...params);
-  // Running balance per account (natural side: Asset/Expense are debit-positive).
+  // Opening balances: when a 'from' date is given, each account's running
+  // balance must START at its cumulative balance as of the day BEFORE 'from'
+  // (all prior activity), not at 0 — otherwise a mid-life date-range GL detail
+  // for a balance-sheet account (e.g. cash 1/1/25–12/31/25) wrongly opens at 0
+  // instead of the 12/31/24 ending balance. Same dimension filters apply so the
+  // opening ties to the windowed activity. With no 'from' (inception-to-date),
+  // opening is 0, which is already correct.
+  const opening = new Map();
+  if (from) {
+    const oParams = [req.params.eid];
+    let oWhere = ' AND je.date < ?'; oParams.push(from);
+    if (location_id) { oWhere += ' AND jl.location_id = ?'; oParams.push(location_id); }
+    if (class_id) { oWhere += ' AND jl.class_id = ?'; oParams.push(class_id); }
+    if (project_id) { oWhere += ' AND jl.project_id = ?'; oParams.push(project_id); }
+    if (account_code) { oWhere += ' AND jl.account_code = ?'; oParams.push(account_code); }
+    const oRows = db.prepare(`
+      SELECT jl.account_code, a.type AS account_type,
+             SUM(jl.debit) AS td, SUM(jl.credit) AS tc
+      FROM journal_lines jl
+      JOIN journal_entries je ON je.id = jl.entry_id
+      LEFT JOIN accounts a ON a.entity_id = je.entity_id AND a.code = jl.account_code
+      WHERE je.entity_id = ?${oWhere}
+      GROUP BY jl.account_code
+    `).all(...oParams);
+    for (const r of oRows) {
+      const isDr = r.account_type === 'Asset' || r.account_type === 'Expense';
+      const bal = isDr ? ((r.td || 0) - (r.tc || 0)) : ((r.tc || 0) - (r.td || 0));
+      opening.set(r.account_code, +bal.toFixed(2));
+    }
+  }
+  // Running balance per account (natural side: Asset/Expense are debit-positive),
+  // seeded with the opening balance so date-range reports carry forward.
   const run = new Map();
   const out = rows.map(r => {
     const isDr = r.account_type === 'Asset' || r.account_type === 'Expense';
     const delta = isDr ? (r.debit - r.credit) : (r.credit - r.debit);
-    const bal = (run.get(r.account_code) || 0) + delta;
+    const bal = (run.has(r.account_code) ? run.get(r.account_code) : (opening.get(r.account_code) || 0)) + delta;
     run.set(r.account_code, bal);
     return {
       line_id: r.line_id, entry_id: r.entry_id, entry_num: r.entry_num, date: r.date, memo: r.memo,
@@ -2733,7 +2764,7 @@ app.get('/api/entities/:eid/gl-detail', auth, requireEntityAccess(), (req, res) 
   });
   const totalDr = +out.reduce((s, r) => s + r.debit, 0).toFixed(2);
   const totalCr = +out.reduce((s, r) => s + r.credit, 0).toFixed(2);
-  res.json({ lines: out, count: out.length, total_debit: totalDr, total_credit: totalCr });
+  res.json({ lines: out, count: out.length, total_debit: totalDr, total_credit: totalCr, opening_balances: Object.fromEntries(opening) });
 });
 
 app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
