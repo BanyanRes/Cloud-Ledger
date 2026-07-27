@@ -14,7 +14,11 @@ const fmtAmt = (raw) => {
 };
 const parseAmt = v => { const n = parseFloat(String(v).replace(/,/g, '')); return isNaN(n) ? 0 : n; };
 const blurAmt = v => { const t = String(v).trim(); return (t && t !== '.') ? parseAmt(t).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : t; };
-const today = () => new Date().toISOString().slice(0, 10);
+// Local calendar date as YYYY-MM-DD. Uses local date parts (NOT toISOString(),
+// which converts to UTC and can roll a user in a far-from-UTC timezone — e.g.
+// UTC+8 Philippines — onto the previous/next calendar day, causing reports run
+// with the same "as of" default to differ from a US user's).
+const today = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
 // Quick date-range presets (previous complete calendar period) for report filters.
 const presetRange = (kind) => {
   const iso = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -2057,7 +2061,7 @@ function ChartOfAccounts({entityId,entityName,canEdit}){const[accounts,setAccoun
   const[editing,setEditing]=useState(null);const[editForm,setEditForm]=useState({});const[editErr,setEditErr]=useState('');
   const[balByCode,setBalByCode]=useState({});const[drillAcct,setDrillAcct]=useState(null);
   const asOf=today();
-  const yearAgo=(()=>{const d=new Date();d.setFullYear(d.getFullYear()-1);return d.toISOString().slice(0,10);})();
+  const yearAgo=(()=>{const d=new Date();d.setFullYear(d.getFullYear()-1);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');})();
   const load=useCallback(async()=>{
     const[accts,bals]=await Promise.all([api.getAccounts(entityId),api.getBalances(entityId,{as_of:asOf}).catch(()=>[])]);
     setAccounts(accts);const m={};(bals||[]).forEach(b=>{m[b.code]=b.balance;});setBalByCode(m);
