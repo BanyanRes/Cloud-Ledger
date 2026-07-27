@@ -2447,7 +2447,13 @@ function WipSchedule({entityName,asOf,setAsOf}){
 // ══ Financial-report options (Liting #2): date presets, period columns, prior-period comparative ══
 const RPT_DATE_FILTERS=[['all','All'],['month','Last Month'],['quarter','Last Quarter'],['year','Last Year']];
 const RPT_COL_MODES=[['total','Total Only'],['monthly','Monthly'],['quarterly','Quarterly'],['yearly','Yearly']];
-const _ymd=d=>new Date(d).toISOString().slice(0,10);
+// Format a Date as YYYY-MM-DD from LOCAL parts. Must NOT use toISOString(),
+// which converts to UTC: _mkDate parses at local midnight, so a user in a
+// positive-UTC-offset zone (e.g. UTC+8 Philippines) would have local midnight
+// fall on the PREVIOUS calendar day in UTC, shifting the report's as-of/period
+// boundaries back a day and producing a Trial Balance that drops that day's
+// activity vs a US user. Local getters round-trip _mkDate correctly.
+const _ymd=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 const _mkDate=s=>new Date((/^\d{4}-\d{2}-\d{2}$/.test(s)?s:today())+'T00:00:00');
 // Overall [from,to] window for a date preset, anchored at `anchor` (YYYY-MM-DD).
 function rptWindow(filter,anchor){
@@ -2525,7 +2531,7 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   const dimmed=!!(locId||classId||projId); // any dimension selected → activity view
   const scopeLabel=[locName,className,projName].filter(Boolean).join(' · ');
   // 12-month window ending at asOf. If asOf is 2026-04-10, window is 2025-04-11 → 2026-04-10.
-  const drillFrom=useMemo(()=>{const d=new Date(validAsOf+'T00:00:00');d.setFullYear(d.getFullYear()-1);d.setDate(d.getDate()+1);return d.toISOString().slice(0,10);},[validAsOf]);
+  const drillFrom=useMemo(()=>{const d=new Date(validAsOf+'T00:00:00');d.setFullYear(d.getFullYear()-1);d.setDate(d.getDate()+1);return _ymd(d);},[validAsOf]);
   // Whole-entity TB uses the soft-close (close_pl_before) path. A dimension-scoped TB
   // (location and/or class/investor) is activity-based: it sums only lines carrying
   // the selected tag(s), so there is no period-close/RE roll — pass the dimension
@@ -2548,7 +2554,7 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   const nCols=cols.length;const curI=nCols-1;const priI=prior?0:-1;
   const totDr=ci=>rows.reduce((s,r)=>s+drcr(r.code,ci).dr,0);const totCr=ci=>rows.reduce((s,r)=>s+drcr(r.code,ci).cr,0);
   const pctTxt=p=>p==null?'—':(p>=0?'+':'')+p.toFixed(1)+'%';
-  const oneYrBefore=d=>{const x=new Date(d+'T00:00:00');x.setFullYear(x.getFullYear()-1);x.setDate(x.getDate()+1);return x.toISOString().slice(0,10);};
+  const oneYrBefore=d=>{const x=new Date(d+'T00:00:00');x.setFullYear(x.getFullYear()-1);x.setDate(x.getDate()+1);return _ymd(x);};
   const colHead=(c,i)=>prior&&i===0?'Prev':(c.label==='Total'?'':c.label);
   const fnameTag=[locName,className,projName].filter(Boolean).map(s=>s.replace(/[^A-Za-z0-9]+/g,'_')).join('_');
   const doExport=()=>{const lbl=scopeLabel?(' — '+scopeLabel):'';const hdr=['Code','Account','Type'];cols.forEach((c,i)=>{const h=colHead(c,i);hdr.push((h?h+' ':'')+'Debit',(h?h+' ':'')+'Credit');});const d=[[entityName||'Trial Balance'],['Trial Balance'+lbl],['As of '+anchor],[],hdr];
@@ -2615,7 +2621,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
   const[viewEntry,setViewEntry]=useState(null);
   // Beginning balance is the account balance as of the day before 'from', fetched
   // directly so the window can be any custom range (not just trailing-12mo).
-  const prevDay=(d)=>{const x=new Date(d+'T00:00:00');x.setDate(x.getDate()-1);return x.toISOString().slice(0,10);};
+  const prevDay=(d)=>{const x=new Date(d+'T00:00:00');x.setDate(x.getDate()-1);return _ymd(x);};
   useEffect(()=>{
     if(!/^\d{4}-\d{2}-\d{2}$/.test(from)||!/^\d{4}-\d{2}-\d{2}$/.test(to))return;
     (async()=>{
@@ -2716,7 +2722,7 @@ function BalanceSheet({entityId,entityName,asOf,setAsOf,canEdit=true}){
   const pctTxt=p=>p==null?'—':(p>=0?'+':'')+p.toFixed(1)+'%';
   const chgCells=(getter)=>{if(!prior)return null;const c=getter(curI),p=getter(priI);return[<td key="d" style={S.tdR}>{fmt(c-p)}</td>,<td key="p" style={{...S.tdR,color:(c-p)>=0?T.green:T.red}}>{pctTxt(rptPct(c,p))}</td>];};
   const nColSpan=1+nCols+(prior?2:0);
-  const oneYrBefore=d=>{const x=new Date(d+'T00:00:00');x.setFullYear(x.getFullYear()-1);x.setDate(x.getDate()+1);return x.toISOString().slice(0,10);};
+  const oneYrBefore=d=>{const x=new Date(d+'T00:00:00');x.setFullYear(x.getFullYear()-1);x.setDate(x.getDate()+1);return _ymd(x);};
   const Sec=({title,items,totalGetter,extraNiRow})=>(<><tr><td style={S.sectionHeader} colSpan={nColSpan}>{title}</td></tr>
     {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,from:oneYrBefore(c.to),to:c.to})}>{fmt(val(a.code,i))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
     {extraNiRow&&<tr><td style={{...S.indentTd,fontStyle:'italic',color:T.textMuted}}>Net Income (current period)</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,fontStyle:'italic'}}>{fmt(niCol(i))}</td>)}{chgCells(niCol)}</tr>}
@@ -2803,7 +2809,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
   const[colMode,setColMode]=useState('total');const[compare,setCompare]=useState(false);const[priorRows,setPriorRows]=useState([]);
   const[rows,setRows]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
   const[begRows,setBegRows]=useState([]); // beginning balances for selected balance-sheet accounts
-  const prevDay=(d)=>{const x=new Date(d+'T00:00:00');x.setDate(x.getDate()-1);return x.toISOString().slice(0,10);};
+  const prevDay=(d)=>{const x=new Date(d+'T00:00:00');x.setDate(x.getDate()-1);return _ymd(x);};
   const isBS=(t)=>t==='Asset'||t==='Liability'||t==='Equity';
   useEffect(()=>{api.getAccounts(entityId).then(setAccounts).catch(()=>setAccounts([]));},[entityId]);
   useEffect(()=>{if(pendingConfig){if(pendingConfig.sel)setSel(pendingConfig.sel);setFrom(pendingConfig.from||'');setTo(pendingConfig.to||'');if(pendingConfig.groupBy)setGroupBy(pendingConfig.groupBy);clearPending&&clearPending();}},[]);
