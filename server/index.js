@@ -2514,6 +2514,19 @@ app.delete('/api/entities/:eid/ar/customers/:id', auth, requireEntityAccess(), r
   res.json({ success: true });
 });
 
+// AR invoicing engine: per-entity settings, recurring templates, invoices with
+// accrual JEs, invoice PDF, review-then-send email, cash receipts, A/R aging.
+require('./ar').registerArRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  verifyToken: (t) => jwt.verify(t, JWT_SECRET),
+  getResendKey: () => RESEND_API_KEY,
+  getFromEmail: () => (process.env.AR_FROM_EMAIL || RESET_FROM_EMAIL),
+});
+
 // Dimension balance report: net (debit-credit) per dimension value, optionally
 // restricted to a set of account codes and/or as-of date. Used for
 // "capitalized deal cost by location" (accounts=investment accts, dim=location)

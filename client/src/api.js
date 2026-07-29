@@ -198,6 +198,33 @@ export const api = {
   createArCustomer: (eid, data) => request('/entities/' + eid + '/ar/customers', { method: 'POST', body: data }),
   updateArCustomer: (eid, id, data) => request('/entities/' + eid + '/ar/customers/' + id, { method: 'PATCH', body: data }),
   deleteArCustomer: (eid, id) => request('/entities/' + eid + '/ar/customers/' + id, { method: 'DELETE' }),
+  // ── Accounts Receivable: settings, recurring templates, invoices, receipts, aging ──
+  getArSettings: (eid) => request('/entities/' + eid + '/ar/settings'),
+  saveArSettings: (eid, data) => request('/entities/' + eid + '/ar/settings', { method: 'PUT', body: data }),
+  getArTemplates: (eid) => request('/entities/' + eid + '/ar/templates'),
+  createArTemplate: (eid, data) => request('/entities/' + eid + '/ar/templates', { method: 'POST', body: data }),
+  updateArTemplate: (eid, id, data) => request('/entities/' + eid + '/ar/templates/' + id, { method: 'PATCH', body: data }),
+  deleteArTemplate: (eid, id) => request('/entities/' + eid + '/ar/templates/' + id, { method: 'DELETE' }),
+  generateArInvoice: (eid, id, invoice_date) => request('/entities/' + eid + '/ar/templates/' + id + '/generate', { method: 'POST', body: { invoice_date } }),
+  getArInvoices: (eid, opts = {}) => {
+    const p = [];
+    if (opts.status) p.push('status=' + encodeURIComponent(opts.status));
+    if (opts.from) p.push('from=' + opts.from);
+    if (opts.to) p.push('to=' + opts.to);
+    return request('/entities/' + eid + '/ar/invoices' + (p.length ? '?' + p.join('&') : ''));
+  },
+  getArInvoice: (eid, id) => request('/entities/' + eid + '/ar/invoices/' + id),
+  createArInvoice: (eid, data) => request('/entities/' + eid + '/ar/invoices', { method: 'POST', body: data }),
+  updateArInvoice: (eid, id, data) => request('/entities/' + eid + '/ar/invoices/' + id, { method: 'PATCH', body: data }),
+  deleteArInvoice: (eid, id) => request('/entities/' + eid + '/ar/invoices/' + id, { method: 'DELETE' }),
+  voidArInvoice: (eid, id, date) => request('/entities/' + eid + '/ar/invoices/' + id + '/void', { method: 'POST', body: { date } }),
+  sendArInvoice: (eid, id, body = {}) => request('/entities/' + eid + '/ar/invoices/' + id + '/send', { method: 'POST', body }),
+  markArInvoiceSent: (eid, id) => request('/entities/' + eid + '/ar/invoices/' + id + '/mark-sent', { method: 'POST', body: {} }),
+  saveArInvoicePdf: (eid, id) => request('/entities/' + eid + '/ar/invoices/' + id + '/save-pdf', { method: 'POST', body: {} }),
+  arInvoicePdfUrl: (eid, id) => API_BASE + '/entities/' + eid + '/ar/invoices/' + id + '/pdf?token=' + encodeURIComponent(getToken() || ''),
+  addArReceipt: (eid, id, data) => request('/entities/' + eid + '/ar/invoices/' + id + '/receipts', { method: 'POST', body: data }),
+  deleteArReceipt: (eid, id, rid) => request('/entities/' + eid + '/ar/invoices/' + id + '/receipts/' + rid, { method: 'DELETE' }),
+  getArAging: (eid, asOf) => request('/entities/' + eid + '/ar/aging' + (asOf ? '?as_of=' + asOf : '')),
   getDimensionBalances: (eid, opts = {}) => {
     const p = [];
     if (opts.dim) p.push('dim=' + opts.dim);

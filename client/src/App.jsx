@@ -660,7 +660,7 @@ export default function App(){
     {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),{id:'apaging',label:'AP Aging',icon:'⏳',section:'reports'},{id:'commitments',label:'Commitments',icon:'🤝',section:'reports'},{id:'memorized',label:'Memorized Reports',icon:'★',section:'reports'},
     ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
     ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
-    ...(arEnabled?[{id:'d3c',divider:1,label:'RECEIVABLES'},{id:'ar_customers',label:'Customers',icon:'👥',section:'coa'}]:[]),
+    ...(arEnabled?[{id:'d3c',divider:1,label:'RECEIVABLES'},{id:'ar_customers',label:'Customers',icon:'👥',section:'coa'},{id:'ar_invoices',label:'Invoices',icon:'🧾',section:'coa'},{id:'ar_recurring',label:'Recurring',icon:'🔁',section:'coa'},{id:'ar_aging',label:'A/R Aging',icon:'⏱️',section:'reports'}]:[]),
     ...(isCLRF?[{id:'dwp',divider:1,label:'WORKPAPERS'},{id:'wp_mgmtfee',label:'Management Fee',icon:'📄',section:'workpapers'}]:[]),
     {id:'d4',divider:1,label:'ADMIN'},{id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},{id:'users',label:'Users',icon:NI.users,section:'all'},
     {id:'d5',divider:1,label:'INTEGRATIONS'},{id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
@@ -686,6 +686,9 @@ export default function App(){
         {page==='coa'&&activeEntity&&<ChartOfAccounts entityId={activeEntity} entityName={entityName} canEdit={canEdit}/>}
         {page==='dimensions'&&activeEntity&&dimsEnabled&&<DimensionsManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='ar_customers'&&activeEntity&&arEnabled&&<CustomersManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='ar_invoices'&&activeEntity&&arEnabled&&<ArInvoices entityId={activeEntity} entityName={entityName} canEdit={canEdit} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
+        {page==='ar_recurring'&&activeEntity&&arEnabled&&<ArRecurring entityId={activeEntity} entityName={entityName} canEdit={canEdit} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
+        {page==='ar_aging'&&activeEntity&&arEnabled&&<ArAgingReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
         {page==='banktxn'&&activeEntity&&<BankTransactions entityId={activeEntity} canEdit={canEdit} bankSelAcct={bankSelAcct} setBankSelAcct={setBankSelAcct} bankTxns={bankTxns} setBankTxns={setBankTxns} bankUploading={bankUploading} setBankUploading={setBankUploading} bankStatusFilter={bankStatusFilter} setBankStatusFilter={setBankStatusFilter}/>}
         {page==='bankrec'&&activeEntity&&<BankReconciliation entityId={activeEntity} user={user} canEdit={canEdit}/>}
@@ -2051,7 +2054,375 @@ function CustomersManager({entityId,entityName,canEdit}){
           </tr>)}
       </tbody></table></div>
     {editErr&&<div style={{...S.err,marginTop:8}}>{editErr}</div>}
-    <div style={{marginTop:14,fontSize:12,color:T.textMuted}}>Next: recurring invoice templates and one-click send are coming in the next update. For now this is where you manage who you bill.</div>
+    <div style={{marginTop:14,fontSize:12,color:T.textMuted}}>Customers defined here feed Invoices and Recurring under RECEIVABLES. The email on a customer is where its invoices get sent.</div>
+  </div>);
+}
+
+// ═══ Accounts Receivable: settings, invoices, recurring templates, aging ═══
+// Invoices post an accrual JE on creation (Dr A/R, Cr Revenue). Sending emails
+// the PDF and files a copy under Workpapers > Invoices/<year>. Receipts post
+// Dr Bank / Cr A/R, so the aging always ties back to the GL A/R account.
+
+const AR_ST={draft:'#94a3b8',sent:'#2563eb',paid:'#16a34a',void:'#ef4444'};
+function ArBadge({inv}){
+  const st=inv.status||'draft';
+  const late=st!=='paid'&&st!=='void'&&inv.due_date&&inv.due_date<today()&&(inv.open_amount==null||inv.open_amount>0.005);
+  const label=st==='void'?'Void':st==='paid'?'Paid':late?'Overdue':st==='sent'?'Sent':'Draft';
+  const color=late?T.orange:(AR_ST[st]||T.textMuted);
+  return <span style={{fontSize:11,fontWeight:600,color,border:'1px solid '+color+'55',borderRadius:10,padding:'2px 8px',whiteSpace:'nowrap'}}>{label}</span>;
+}
+
+// Shared line-item editor for both one-off invoices and recurring templates.
+function ArLines({lines,setLines,revAccts,classes,locations,dimsEnabled}){
+  const upd=(i,k,v)=>setLines(ls=>ls.map((l,ix)=>ix===i?{...l,[k]:v}:l));
+  const add=()=>setLines(ls=>[...ls,{description:'',qty:1,rate:'',revenue_account_code:ls.length?ls[ls.length-1].revenue_account_code:'',class_id:'',location_id:''}]);
+  const rm=i=>setLines(ls=>ls.length<=1?ls:ls.filter((_,ix)=>ix!==i));
+  const total=lines.reduce((s,l)=>s+(Number(l.qty)||0)*(Number(l.rate)||0),0);
+  return(<div>
+    <div style={{overflowX:'auto'}}><table style={S.table}><thead><tr>
+      <th style={S.th}>Description</th><th style={{...S.th,width:190}}>Revenue account</th>
+      {dimsEnabled&&<th style={{...S.th,width:130}}>Location</th>}
+      {dimsEnabled&&<th style={{...S.th,width:130}}>{classTerm()}</th>}
+      <th style={{...S.thR,width:70}}>Qty</th><th style={{...S.thR,width:110}}>Rate</th><th style={{...S.thR,width:110}}>Amount</th><th style={{...S.th,width:28}}></th></tr></thead>
+      <tbody>{lines.map((l,i)=><tr key={i}>
+        <td style={{padding:'4px 6px'}}><input style={{...S.inputSm,width:'100%'}} value={l.description} onChange={e=>upd(i,'description',e.target.value)} placeholder="e.g. Land lease — May 2026"/></td>
+        <td style={{padding:'4px 6px'}}><select style={{...S.select,padding:'6px 8px',fontSize:12}} value={l.revenue_account_code} onChange={e=>upd(i,'revenue_account_code',e.target.value)}>
+          <option value="">— select —</option>{revAccts.map(a=><option key={a.code} value={a.code}>{a.code} {a.name}</option>)}</select></td>
+        {dimsEnabled&&<td style={{padding:'4px 6px'}}><select style={{...S.select,padding:'6px 8px',fontSize:12}} value={l.location_id||''} onChange={e=>upd(i,'location_id',e.target.value)}>
+          <option value="">—</option>{locations.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</select></td>}
+        {dimsEnabled&&<td style={{padding:'4px 6px'}}><select style={{...S.select,padding:'6px 8px',fontSize:12}} value={l.class_id||''} onChange={e=>upd(i,'class_id',e.target.value)}>
+          <option value="">—</option>{classes.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</select></td>}
+        <td style={{padding:'4px 6px'}}><input style={{...S.inputSm,width:'100%',textAlign:'right'}} value={l.qty} onChange={e=>upd(i,'qty',e.target.value)}/></td>
+        <td style={{padding:'4px 6px'}}><input style={{...S.inputSm,width:'100%',textAlign:'right'}} value={l.rate} onChange={e=>upd(i,'rate',e.target.value)} placeholder="0.00"/></td>
+        <td style={{...S.td,textAlign:'right',color:T.textBright}}>{fmt((Number(l.qty)||0)*(Number(l.rate)||0))}</td>
+        <td style={S.td}>{lines.length>1&&<button style={{...S.btnGhost,color:T.red,fontSize:11,padding:'2px 4px'}} onClick={()=>rm(i)}>x</button>}</td></tr>)}
+      </tbody></table></div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:8}}>
+      <button style={{...S.btnGhost,color:T.accent,fontSize:12}} onClick={add}>+ Add line</button>
+      <div style={{fontSize:14,fontWeight:700,color:T.textBright}}>Total {fmt(total)}</div></div>
+  </div>);
+}
+
+// Per-entity invoice presentation + numbering settings.
+function ArSettingsPanel({entityId,accounts,onClose,onSaved}){
+  const[f,setF]=useState(null);const[err,setErr]=useState('');const[saving,setSaving]=useState(false);
+  useEffect(()=>{(async()=>{try{const s=await api.getArSettings(entityId);setF({bill_from:s.bill_from||'',remit_to:s.remit_to||'',footer_note:s.footer_note||'',reply_to:s.reply_to||'',invoice_prefix:s.invoice_prefix||'',default_ar_account:s.default_ar_account||'',resolved:s.resolved_ar_account,email_configured:s.email_configured});}catch(e){setErr(e.message);}})();},[entityId]);
+  const save=async()=>{setSaving(true);setErr('');try{await api.saveArSettings(entityId,{bill_from:f.bill_from,remit_to:f.remit_to,footer_note:f.footer_note,reply_to:f.reply_to,invoice_prefix:f.invoice_prefix,default_ar_account:f.default_ar_account});onSaved&&onSaved();onClose();}catch(e){setErr(e.message);}finally{setSaving(false);}};
+  if(!f)return <div style={{...S.card,color:T.textMuted}}>Loading settings…</div>;
+  const arAccts=accounts.filter(a=>a.type==='Asset');
+  return(<div style={{...S.card,borderColor:T.accent+'40',marginBottom:16}}>
+    <div style={{fontSize:14,fontWeight:600,color:T.textBright,marginBottom:12}}>Invoice Settings</div>
+    <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+      <div style={{flex:'1 1 260px'}}><label style={S.label}>Bill-from block (top-left of the invoice)</label>
+        <textarea style={{...S.input,minHeight:70,resize:'vertical'}} value={f.bill_from} onChange={e=>setF(v=>({...v,bill_from:e.target.value}))} placeholder={'Legal entity name, LLC\n123 Main St\nCity, TX 77000'}/></div>
+      <div style={{flex:'1 1 260px'}}><label style={S.label}>Remit-to block (invoice footer)</label>
+        <textarea style={{...S.input,minHeight:70,resize:'vertical'}} value={f.remit_to} onChange={e=>setF(v=>({...v,remit_to:e.target.value}))} placeholder={'Wire: Bank name\nRouting / Account'}/></div>
+    </div>
+    <div style={{display:'flex',gap:14,flexWrap:'wrap',marginTop:10}}>
+      <div style={{flex:'0 0 150px'}}><label style={S.label}>Invoice prefix</label><input style={S.input} value={f.invoice_prefix} onChange={e=>setF(v=>({...v,invoice_prefix:e.target.value}))} placeholder="INV"/></div>
+      <div style={{flex:'1 1 220px'}}><label style={S.label}>A/R account</label>
+        <select style={S.select} value={f.default_ar_account} onChange={e=>setF(v=>({...v,default_ar_account:e.target.value}))}>
+          <option value="">Auto-detect ({f.resolved||'none found'})</option>{arAccts.map(a=><option key={a.code} value={a.code}>{a.code} {a.name}</option>)}</select></div>
+      <div style={{flex:'1 1 220px'}}><label style={S.label}>Reply-to email</label><input style={S.input} type="email" value={f.reply_to} onChange={e=>setF(v=>({...v,reply_to:e.target.value}))} placeholder="ar@banyanres.com"/></div>
+    </div>
+    <div style={{marginTop:10}}><label style={S.label}>Footer note (payment terms, late fees)</label>
+      <input style={S.input} value={f.footer_note} onChange={e=>setF(v=>({...v,footer_note:e.target.value}))} placeholder="Payment due within 30 days of invoice date."/></div>
+    {!f.email_configured&&<div style={{marginTop:10,fontSize:12,color:T.orange}}>Email sending is not configured on the server (RESEND_API_KEY). You can still generate and download invoice PDFs; the Send button will report the error until the key is set.</div>}
+    {err&&<div style={{...S.err,marginTop:8}}>{err}</div>}
+    <div style={{display:'flex',gap:10,marginTop:14}}><button style={S.btnP} onClick={save} disabled={saving}>{saving?'Saving…':'Save Settings'}</button><button style={S.btnS} onClick={onClose}>Cancel</button></div>
+  </div>);
+}
+
+function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
+  const[customers,setCustomers]=useState([]);const[accounts,setAccounts]=useState([]);
+  const[classes,setClasses]=useState([]);const[locations,setLocations]=useState([]);
+  const[invoices,setInvoices]=useState([]);const[loading,setLoading]=useState(true);
+  const[statusF,setStatusF]=useState('');const[err,setErr]=useState('');
+  const[showNew,setShowNew]=useState(false);const[showSettings,setShowSettings]=useState(false);
+  const[detail,setDetail]=useState(null);const[busy,setBusy]=useState('');
+  const blankLine={description:'',qty:1,rate:'',revenue_account_code:'',class_id:'',location_id:''};
+  const[form,setForm]=useState({customer_id:'',invoice_date:today(),due_date:'',memo:''});
+  const[lines,setLines]=useState([{...blankLine}]);
+  const revAccts=accounts.filter(a=>a.type==='Revenue');
+  const bankAccts=accounts.filter(a=>a.bank_acct);
+  const loadRefs=useCallback(async()=>{
+    const[c,a,cl,lo]=await Promise.all([api.getArCustomers(entityId),api.getAccounts(entityId),
+      api.getClasses(entityId).catch(()=>[]),api.getLocations(entityId).catch(()=>[])]);
+    setCustomers((c||[]).filter(x=>x.active));setAccounts(a||[]);setClasses(cl||[]);setLocations(lo||[]);
+  },[entityId]);
+  const load=useCallback(async()=>{setLoading(true);setErr('');
+    try{setInvoices(await api.getArInvoices(entityId,statusF?{status:statusF}:{})||[]);}
+    catch(e){setErr(e.message);}finally{setLoading(false);}},[entityId,statusF]);
+  useEffect(()=>{loadRefs();},[loadRefs]);
+  useEffect(()=>{load();},[load]);
+  const resetForm=()=>{setForm({customer_id:'',invoice_date:today(),due_date:'',memo:''});setLines([{...blankLine}]);};
+  const create=async()=>{
+    setErr('');
+    if(!form.customer_id){setErr('Pick a customer');return;}
+    setBusy('create');
+    try{
+      const inv=await api.createArInvoice(entityId,{customer_id:+form.customer_id,invoice_date:form.invoice_date,
+        due_date:form.due_date||undefined,memo:form.memo,
+        lines:lines.map(l=>({description:l.description,qty:Number(l.qty),rate:Number(l.rate),
+          revenue_account_code:l.revenue_account_code,class_id:l.class_id?+l.class_id:null,location_id:l.location_id?+l.location_id:null}))});
+      resetForm();setShowNew(false);await load();setDetail(inv);
+    }catch(e){setErr(e.message);}finally{setBusy('');}
+  };
+  const open=async(inv)=>{try{setDetail(await api.getArInvoice(entityId,inv.id));}catch(e){alert(e.message);}};
+  const act=async(fn,label)=>{setBusy(label);try{const r=await fn();await load();if(detail)setDetail(await api.getArInvoice(entityId,detail.id));return r;}catch(e){alert(e.message);}finally{setBusy('');}};
+  const totals=invoices.reduce((s,i)=>{if(i.status!=='void'){s.billed+=Number(i.total)||0;s.open+=Number(i.open_amount)||0;}return s;},{billed:0,open:0});
+  return(<div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16}}>
+      <div><div style={S.h1}>Invoices</div><div style={S.sub}>{entityName} — each invoice posts Dr A/R / Cr Revenue when created, then you review and send.</div></div>
+      <div style={{display:'flex',gap:8}}>
+        {canEdit&&<button style={S.btnS} onClick={()=>setShowSettings(s=>!s)}>Settings</button>}
+        {canEdit&&<button style={S.btnP} onClick={()=>{setShowNew(n=>!n);setErr('');}}>{showNew?'Cancel':'+ New Invoice'}</button>}</div></div>
+    {showSettings&&<ArSettingsPanel entityId={entityId} accounts={accounts} onClose={()=>setShowSettings(false)} onSaved={load}/>}
+    {showNew&&<div style={{...S.card,borderColor:T.green+'40',marginBottom:16}}>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+        <div style={{flex:'1 1 240px'}}><label style={S.label}>Customer</label>
+          <select style={S.select} value={form.customer_id} onChange={e=>setForm(f=>({...f,customer_id:e.target.value}))}>
+            <option value="">— select —</option>{customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+        <div style={{flex:'0 0 160px'}}><label style={S.label}>Invoice date</label><input style={S.input} type="date" value={form.invoice_date} onChange={e=>setForm(f=>({...f,invoice_date:e.target.value}))}/></div>
+        <div style={{flex:'0 0 160px'}}><label style={S.label}>Due date (blank = terms)</label><input style={S.input} type="date" value={form.due_date} onChange={e=>setForm(f=>({...f,due_date:e.target.value}))}/></div>
+        <div style={{flex:'1 1 240px'}}><label style={S.label}>Memo / "Re:" line</label><input style={S.input} value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))} placeholder="April 2026 services"/></div>
+      </div>
+      <div style={{marginTop:14}}><ArLines lines={lines} setLines={setLines} revAccts={revAccts} classes={classes} locations={locations} dimsEnabled={dimsEnabled}/></div>
+      {err&&<div style={{...S.err,marginTop:10}}>{err}</div>}
+      {revAccts.length===0&&<div style={{marginTop:10,fontSize:12,color:T.orange}}>This entity has no Revenue accounts yet — add one in the Chart of Accounts first.</div>}
+      <div style={{display:'flex',justifyContent:'flex-end',marginTop:12}}><button style={S.btnP} onClick={create} disabled={busy==='create'}>{busy==='create'?'Posting…':'Create Invoice (posts JE)'}</button></div>
+    </div>}
+    <div style={{...S.card,display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap',marginBottom:0}}>
+      <div style={{flex:'0 0 170px'}}><label style={S.label}>Status</label>
+        <select style={S.select} value={statusF} onChange={e=>setStatusF(e.target.value)}>
+          <option value="">All</option><option value="draft">Draft</option><option value="sent">Sent</option><option value="paid">Paid</option><option value="void">Void</option></select></div>
+      <div style={{fontSize:12,color:T.textMuted}}>Billed (ex-void) <span style={{color:T.textBright,fontWeight:600}}>{fmt(totals.billed)}</span>
+        <span style={{margin:'0 10px'}}>·</span>Open <span style={{color:T.textBright,fontWeight:600}}>{fmt(totals.open)}</span></div>
+    </div>
+    {err&&!showNew&&<div style={S.err}>{err}</div>}
+    <div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+      <th style={S.th}>Invoice #</th><th style={S.th}>Date</th><th style={S.th}>Customer</th><th style={S.th}>Memo</th>
+      <th style={S.th}>Due</th><th style={{...S.th,width:100}}>Status</th><th style={S.thR}>Total</th><th style={S.thR}>Open</th></tr></thead>
+      <tbody>
+        {loading&&<tr><td colSpan={8} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>Loading…</td></tr>}
+        {!loading&&invoices.length===0&&<tr><td colSpan={8} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>No invoices yet.</td></tr>}
+        {!loading&&invoices.map(i=><tr key={i.id} style={{cursor:'pointer',...(i.status==='void'?{opacity:0.55}:{})}} onClick={()=>open(i)}>
+          <td style={{...S.td,color:T.textBright,fontWeight:600}}>{i.invoice_num}</td>
+          <td style={S.td}>{i.invoice_date}</td><td style={S.td}>{i.customer_name}</td>
+          <td style={{...S.td,color:T.textMuted}}>{i.memo||''}</td><td style={S.td}>{i.due_date||''}</td>
+          <td style={S.td}><ArBadge inv={i}/></td>
+          <td style={{...S.td,textAlign:'right'}}>{fmt(i.total)}</td>
+          <td style={{...S.td,textAlign:'right',color:i.open_amount>0.005?T.textBright:T.textMuted}}>{fmt(i.open_amount)}</td></tr>)}
+      </tbody></table></div>
+    {detail&&<ArInvoiceDetail entityId={entityId} invoice={detail} bankAccts={bankAccts} canEdit={canEdit} busy={busy} act={act}
+      onClose={()=>setDetail(null)} onChanged={load}/>}
+  </div>);
+}
+
+function ArInvoiceDetail({entityId,invoice,bankAccts,canEdit,busy,act,onClose}){
+  const inv=invoice;
+  const[sendTo,setSendTo]=useState(inv.customer_email||'');
+  const[pay,setPay]=useState({date:today(),amount:'',bank_account_code:bankAccts[0]?bankAccts[0].code:'',memo:''});
+  useEffect(()=>{setSendTo(inv.customer_email||'');setPay(p=>({...p,amount:'',date:today()}));},[inv.id]);
+  const isDraft=inv.status==='draft';const isVoid=inv.status==='void';
+  return(<div style={{position:'fixed',inset:0,background:'rgba(15,23,42,0.55)',display:'flex',justifyContent:'center',alignItems:'flex-start',zIndex:60,overflowY:'auto',padding:'40px 16px'}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+    <div style={{background:'#fff',borderRadius:12,maxWidth:820,width:'100%',padding:22,boxShadow:'0 20px 60px rgba(0,0,0,0.3)'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:6}}>
+        <div><div style={{fontSize:18,fontWeight:700,color:T.textBright}}>{inv.invoice_num} <ArBadge inv={inv}/></div>
+          <div style={{fontSize:13,color:T.textMuted,marginTop:4}}>{inv.customer_name}{inv.customer_email?' · '+inv.customer_email:''}</div></div>
+        <button style={S.btnGhost} onClick={onClose}>Close</button></div>
+      <div style={{display:'flex',gap:24,flexWrap:'wrap',fontSize:12,color:T.textMuted,margin:'12px 0 16px'}}>
+        <div>Invoice date<div style={{color:T.textBright,fontSize:13}}>{inv.invoice_date}</div></div>
+        <div>Due date<div style={{color:T.textBright,fontSize:13}}>{inv.due_date||'—'}</div></div>
+        <div>A/R account<div style={{color:T.textBright,fontSize:13}}>{inv.ar_account_code}</div></div>
+        <div>Total<div style={{color:T.textBright,fontSize:13}}>{fmt(inv.total)}</div></div>
+        <div>Paid<div style={{color:T.textBright,fontSize:13}}>{fmt(inv.paid_amount)}</div></div>
+        <div>Open<div style={{color:T.textBright,fontSize:13,fontWeight:700}}>{fmt(inv.open_amount)}</div></div>
+        {inv.sent_at&&<div>Sent<div style={{color:T.textBright,fontSize:13}}>{String(inv.sent_at).slice(0,10)}</div></div>}
+      </div>
+      {inv.memo&&<div style={{fontSize:13,marginBottom:12}}>Re: {inv.memo}</div>}
+      <table style={{...S.table,marginBottom:16}}><thead><tr>
+        <th style={S.th}>Description</th><th style={S.th}>Account</th><th style={S.thR}>Qty</th><th style={S.thR}>Rate</th><th style={S.thR}>Amount</th></tr></thead>
+        <tbody>{(inv.lines||[]).map(l=><tr key={l.id}>
+          <td style={S.td}>{l.description}</td><td style={S.td}>{l.revenue_account_code}</td>
+          <td style={{...S.td,textAlign:'right'}}>{l.qty}</td><td style={{...S.td,textAlign:'right'}}>{fmt(l.rate)}</td>
+          <td style={{...S.td,textAlign:'right'}}>{fmt(l.amount)}</td></tr>)}</tbody></table>
+      {(inv.receipts||[]).length>0&&<div style={{marginBottom:16}}>
+        <div style={{fontSize:12,fontWeight:600,color:T.textMuted,marginBottom:6}}>PAYMENTS RECEIVED</div>
+        <table style={S.table}><tbody>{inv.receipts.map(r=><tr key={r.id}>
+          <td style={S.td}>{r.date}</td><td style={S.td}>{r.bank_account_code}</td><td style={{...S.td,color:T.textMuted}}>{r.memo||''}</td>
+          <td style={{...S.td,textAlign:'right'}}>{fmt(r.amount)}</td>
+          {canEdit&&<td style={{...S.td,width:60}}><button style={{...S.btnGhost,color:T.red,fontSize:11}} disabled={!!busy}
+            onClick={()=>{if(confirm('Delete this payment and its journal entry?'))act(()=>api.deleteArReceipt(entityId,inv.id,r.id),'rmrec');}}>x</button></td>}</tr>)}</tbody></table></div>}
+      <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
+        <button style={S.btnS} onClick={()=>window.open(api.arInvoicePdfUrl(entityId,inv.id),'_blank')}>View PDF</button>
+        {canEdit&&!isVoid&&<button style={S.btnS} disabled={!!busy} onClick={()=>act(()=>api.saveArInvoicePdf(entityId,inv.id),'savepdf')}>{busy==='savepdf'?'Filing…':'File to Workpapers'}</button>}
+        {canEdit&&isDraft&&<button style={S.btnS} disabled={!!busy} onClick={()=>act(()=>api.markArInvoiceSent(entityId,inv.id),'marksent')}>Mark Sent (no email)</button>}
+        {canEdit&&isDraft&&<button style={{...S.btnGhost,color:T.red}} disabled={!!busy}
+          onClick={()=>{if(confirm('Delete draft '+inv.invoice_num+' and its journal entry?'))act(()=>api.deleteArInvoice(entityId,inv.id),'del').then(()=>onClose());}}>Delete Draft</button>}
+        {canEdit&&!isVoid&&<button style={{...S.btnGhost,color:T.orange}} disabled={!!busy}
+          onClick={()=>{if(confirm(isDraft?'Void this draft? Its journal entry will be removed.':'Void '+inv.invoice_num+'? A reversing journal entry will be posted.'))act(()=>api.voidArInvoice(entityId,inv.id),'void');}}>Void</button>}
+      </div>
+      {canEdit&&!isVoid&&<div style={{...S.card,marginBottom:12}}>
+        <div style={{fontSize:13,fontWeight:600,color:T.textBright,marginBottom:8}}>Send to customer</div>
+        <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
+          <div style={{flex:'1 1 260px'}}><label style={S.label}>Recipient email</label><input style={S.input} type="email" value={sendTo} onChange={e=>setSendTo(e.target.value)} placeholder="ar@customer.com"/></div>
+          <button style={S.btnP} disabled={!!busy||!sendTo.trim()} onClick={()=>act(()=>api.sendArInvoice(entityId,inv.id,{to:sendTo.trim()}),'send')}>{busy==='send'?'Sending…':'Email Invoice'}</button></div>
+        <div style={{fontSize:11,color:T.textMuted,marginTop:8}}>Attaches the PDF, files a copy under Workpapers &gt; Invoices/{String(inv.invoice_date).slice(0,4)}, and marks the invoice sent.</div>
+      </div>}
+      {canEdit&&!isVoid&&inv.open_amount>0.005&&<div style={S.card}>
+        <div style={{fontSize:13,fontWeight:600,color:T.textBright,marginBottom:8}}>Record payment</div>
+        <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
+          <div style={{flex:'0 0 150px'}}><label style={S.label}>Date</label><input style={S.input} type="date" value={pay.date} onChange={e=>setPay(p=>({...p,date:e.target.value}))}/></div>
+          <div style={{flex:'0 0 140px'}}><label style={S.label}>Amount</label><input style={{...S.input,textAlign:'right'}} value={pay.amount} onChange={e=>setPay(p=>({...p,amount:e.target.value}))} placeholder={String(inv.open_amount)}/></div>
+          <div style={{flex:'1 1 200px'}}><label style={S.label}>Bank account</label>
+            <select style={S.select} value={pay.bank_account_code} onChange={e=>setPay(p=>({...p,bank_account_code:e.target.value}))}>
+              <option value="">— select —</option>{bankAccts.map(a=><option key={a.code} value={a.code}>{a.code} {a.name}</option>)}</select></div>
+          <div style={{flex:'1 1 180px'}}><label style={S.label}>Memo</label><input style={S.input} value={pay.memo} onChange={e=>setPay(p=>({...p,memo:e.target.value}))} placeholder="Check 10482"/></div>
+          <button style={S.btnP} disabled={!!busy||!pay.bank_account_code} onClick={()=>act(()=>api.addArReceipt(entityId,inv.id,{date:pay.date,amount:pay.amount===''?undefined:Number(pay.amount),bank_account_code:pay.bank_account_code,memo:pay.memo}),'pay')}>{busy==='pay'?'Posting…':'Post Receipt'}</button></div>
+        <div style={{fontSize:11,color:T.textMuted,marginTop:8}}>Blank amount pays the full open balance. Posts Dr {pay.bank_account_code||'bank'} / Cr {inv.ar_account_code}.</div>
+        {bankAccts.length===0&&<div style={{fontSize:12,color:T.orange,marginTop:8}}>No account is flagged as a bank/cash account in this entity's Chart of Accounts.</div>}
+      </div>}
+    </div></div>);
+}
+
+function ArRecurring({entityId,entityName,canEdit,dimsEnabled}){
+  const[templates,setTemplates]=useState([]);const[customers,setCustomers]=useState([]);
+  const[accounts,setAccounts]=useState([]);const[classes,setClasses]=useState([]);const[locations,setLocations]=useState([]);
+  const[loading,setLoading]=useState(true);const[err,setErr]=useState('');const[busy,setBusy]=useState('');
+  const[showNew,setShowNew]=useState(false);const[editId,setEditId]=useState(null);
+  const blankLine={description:'',qty:1,rate:'',revenue_account_code:'',class_id:'',location_id:''};
+  const[form,setForm]=useState({customer_id:'',memo:'',frequency:'monthly',day_of_month:1,next_run:''});
+  const[lines,setLines]=useState([{...blankLine}]);
+  const revAccts=accounts.filter(a=>a.type==='Revenue');
+  const load=useCallback(async()=>{setLoading(true);setErr('');
+    try{const[t,c,a,cl,lo]=await Promise.all([api.getArTemplates(entityId),api.getArCustomers(entityId),api.getAccounts(entityId),
+      api.getClasses(entityId).catch(()=>[]),api.getLocations(entityId).catch(()=>[])]);
+      setTemplates(t||[]);setCustomers((c||[]).filter(x=>x.active));setAccounts(a||[]);setClasses(cl||[]);setLocations(lo||[]);
+    }catch(e){setErr(e.message);}finally{setLoading(false);}},[entityId]);
+  useEffect(()=>{load();},[load]);
+  const reset=()=>{setForm({customer_id:'',memo:'',frequency:'monthly',day_of_month:1,next_run:''});setLines([{...blankLine}]);setEditId(null);setShowNew(false);};
+  const payload=()=>({customer_id:+form.customer_id,memo:form.memo,frequency:form.frequency,day_of_month:+form.day_of_month||1,
+    next_run:form.next_run||undefined,
+    lines:lines.map(l=>({description:l.description,qty:Number(l.qty),rate:Number(l.rate),revenue_account_code:l.revenue_account_code,
+      class_id:l.class_id?+l.class_id:null,location_id:l.location_id?+l.location_id:null}))});
+  const save=async()=>{
+    setErr('');if(!form.customer_id){setErr('Pick a customer');return;}
+    setBusy('save');
+    try{if(editId)await api.updateArTemplate(entityId,editId,payload());else await api.createArTemplate(entityId,payload());reset();await load();}
+    catch(e){setErr(e.message);}finally{setBusy('');}
+  };
+  const startEdit=t=>{setEditId(t.id);setShowNew(true);setErr('');
+    setForm({customer_id:String(t.customer_id),memo:t.memo||'',frequency:t.frequency||'monthly',day_of_month:t.day_of_month||1,next_run:t.next_run||''});
+    setLines((t.lines||[]).map(l=>({description:l.description,qty:l.qty,rate:l.rate,revenue_account_code:l.revenue_account_code,class_id:l.class_id||'',location_id:l.location_id||''})));};
+  const run=async(t)=>{const d=prompt('Invoice date for this run:',t.next_run||today());if(!d)return;
+    setBusy('gen'+t.id);
+    try{const inv=await api.generateArInvoice(entityId,t.id,d);await load();alert('Created '+inv.invoice_num+' for '+fmt(inv.total)+' (draft). Open Invoices to review and send.');}
+    catch(e){alert(e.message);}finally{setBusy('');}};
+  const dueNow=t=>t.active&&t.next_run&&t.next_run<=today();
+  return(<div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16}}>
+      <div><div style={S.h1}>Recurring Invoices</div><div style={S.sub}>{entityName} — templates you run each period. Generating creates a draft invoice and posts its accrual entry.</div></div>
+      {canEdit&&<button style={S.btnP} onClick={()=>{if(showNew)reset();else{setShowNew(true);setErr('');}}}>{showNew?'Cancel':'+ New Template'}</button>}</div>
+    {showNew&&<div style={{...S.card,borderColor:T.green+'40',marginBottom:16}}>
+      <div style={{fontSize:14,fontWeight:600,color:T.textBright,marginBottom:12}}>{editId?'Edit template':'New recurring template'}</div>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+        <div style={{flex:'1 1 220px'}}><label style={S.label}>Customer</label>
+          <select style={S.select} value={form.customer_id} onChange={e=>setForm(f=>({...f,customer_id:e.target.value}))}>
+            <option value="">— select —</option>{customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+        <div style={{flex:'0 0 150px'}}><label style={S.label}>Frequency</label>
+          <select style={S.select} value={form.frequency} onChange={e=>setForm(f=>({...f,frequency:e.target.value}))}>
+            <option value="monthly">Monthly</option><option value="quarterly">Quarterly</option><option value="annual">Annual</option></select></div>
+        <div style={{flex:'0 0 120px'}}><label style={S.label}>Day of month</label><input style={S.input} type="number" min="1" max="28" value={form.day_of_month} onChange={e=>setForm(f=>({...f,day_of_month:e.target.value}))}/></div>
+        <div style={{flex:'0 0 160px'}}><label style={S.label}>Next run</label><input style={S.input} type="date" value={form.next_run} onChange={e=>setForm(f=>({...f,next_run:e.target.value}))}/></div>
+        <div style={{flex:'1 1 220px'}}><label style={S.label}>Memo</label><input style={S.input} value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))} placeholder="Monthly land lease"/></div>
+      </div>
+      <div style={{marginTop:14}}><ArLines lines={lines} setLines={setLines} revAccts={revAccts} classes={classes} locations={locations} dimsEnabled={dimsEnabled}/></div>
+      {err&&<div style={{...S.err,marginTop:10}}>{err}</div>}
+      <div style={{display:'flex',gap:10,justifyContent:'flex-end',marginTop:12}}>
+        <button style={S.btnS} onClick={reset}>Cancel</button>
+        <button style={S.btnP} onClick={save} disabled={busy==='save'}>{busy==='save'?'Saving…':(editId?'Save Template':'Create Template')}</button></div>
+    </div>}
+    {err&&!showNew&&<div style={S.err}>{err}</div>}
+    <div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+      <th style={S.th}>Customer</th><th style={S.th}>Memo</th><th style={S.th}>Frequency</th><th style={S.th}>Next run</th>
+      <th style={S.thR}>Amount</th><th style={{...S.th,width:90}}>Status</th>{canEdit&&<th style={{...S.th,width:210}}>Actions</th>}</tr></thead>
+      <tbody>
+        {loading&&<tr><td colSpan={canEdit?7:6} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>Loading…</td></tr>}
+        {!loading&&templates.length===0&&<tr><td colSpan={canEdit?7:6} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>No recurring templates yet.</td></tr>}
+        {!loading&&templates.map(t=><tr key={t.id} style={t.active?undefined:{opacity:0.55}}>
+          <td style={{...S.td,color:T.textBright}}>{t.customer_name}</td>
+          <td style={{...S.td,color:T.textMuted}}>{t.memo||''}</td>
+          <td style={S.td}>{t.frequency}{t.frequency!=='annual'?' (day '+t.day_of_month+')':''}</td>
+          <td style={S.td}>{t.next_run||'—'}{dueNow(t)&&<span style={{marginLeft:6,fontSize:11,color:T.orange,fontWeight:600}}>due</span>}</td>
+          <td style={{...S.td,textAlign:'right'}}>{fmt(t.amount)}</td>
+          <td style={S.td}><span style={{fontSize:12,color:t.active?T.green:T.textMuted}}>{t.active?'Active':'Paused'}</span></td>
+          {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+            <button style={{...S.btnGhost,color:T.green,fontSize:11}} disabled={!!busy} onClick={()=>run(t)}>{busy==='gen'+t.id?'…':'Generate'}</button>
+            <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>startEdit(t)}>Edit</button>
+            <button style={{...S.btnGhost,fontSize:11}} onClick={async()=>{try{await api.updateArTemplate(entityId,t.id,{active:t.active?0:1});load();}catch(e){alert(e.message);}}}>{t.active?'Pause':'Resume'}</button>
+            <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={async()=>{if(!confirm('Delete this template? Invoices already generated are not affected.'))return;try{await api.deleteArTemplate(entityId,t.id);load();}catch(e){alert(e.message);}}}>x</button>
+          </div></td>}</tr>)}
+      </tbody></table></div>
+  </div>);
+}
+
+function ArAgingReport({entityId,entityName}){
+  const[asOf,setAsOf]=useState(today());
+  const[data,setData]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
+  const[showDetail,setShowDetail]=useState(true);
+  const BK=[['current','Current'],['d1_30','1-30'],['d31_60','31-60'],['d61_90','61-90'],['d90_plus','90+']];
+  const run=async()=>{setLoading(true);setErr('');setData(null);
+    try{setData(await api.getArAging(entityId,asOf));}catch(e){setErr(e.message);}finally{setLoading(false);}};
+  useEffect(()=>{run();},[entityId]);
+  const doExport=()=>{
+    if(!data)return;
+    const head=['Customer','Invoice #','Invoice date','Due date','Days past due','Current','1-30','31-60','61-90','90+','Open'];
+    const d=[[entityName||'A/R Aging'],['A/R Aging — ties to GL '+(data.ar_accounts||[]).join(', ')],['As of '+data.as_of],[],head];
+    data.detail.forEach(r=>d.push([r.customer,r.invoice_num,r.invoice_date,r.due_date,r.days_past_due,
+      r.bucket==='current'?r.open:'',r.bucket==='d1_30'?r.open:'',r.bucket==='d31_60'?r.open:'',r.bucket==='d61_90'?r.open:'',r.bucket==='d90_plus'?r.open:'',r.open]));
+    d.push([]);d.push(['TOTAL','','','','',data.totals.current,data.totals.d1_30,data.totals.d31_60,data.totals.d61_90,data.totals.d90_plus,data.totals.total]);
+    d.push(['GL A/R balance','','','','','','','','','',data.gl_ar_balance]);
+    d.push(['Reconciling difference','','','','','','','','','',data.recon_diff]);
+    exportToExcel(d,'AR_Aging_'+data.as_of+'.xlsx');
+  };
+  return(<div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+      <div><div style={S.h1}>A/R Aging</div><div style={S.sub}>{entityName} — open customer invoices, reconciled to GL {data?(data.ar_accounts||[]).join(', '):'A/R'}</div></div>
+      {data&&data.totals.total!==0&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div>
+    <div style={S.card}><div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
+      <div style={{flex:'0 0 180px'}}><label style={S.label}>As of date</label><input style={{...S.inputSm,width:'100%'}} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
+      <button style={S.btnP} onClick={run} disabled={loading}>{loading?'Building…':'Run Aging'}</button>
+      <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,cursor:'pointer'}}><input type="checkbox" style={S.checkbox} checked={showDetail} onChange={e=>setShowDetail(e.target.checked)}/>Show invoice detail</label>
+    </div>{err&&<div style={S.err}>{err}</div>}</div>
+    {data&&<>
+      <div style={{...S.cardFlush,overflowX:'auto'}}>
+        {data.rows.length===0?<div style={{padding:24,color:T.textMuted}}>No open A/R as of {data.as_of}.</div>:
+        <table style={S.table}><thead><tr><th style={S.th}>Customer</th>{BK.map(b=><th key={b[0]} style={S.thR}>{b[1]}</th>)}<th style={S.thR}>Total</th></tr></thead>
+          <tbody>
+            {data.rows.map(r=><Fragment key={r.customer}>
+              <tr><td style={{...S.td,color:T.textBright,fontWeight:600}}>{r.customer}</td>
+                {BK.map(b=><td key={b[0]} style={{...S.td,textAlign:'right'}}>{r[b[0]]?fmt(r[b[0]]):''}</td>)}
+                <td style={{...S.td,textAlign:'right',fontWeight:600}}>{fmt(r.total)}</td></tr>
+              {showDetail&&data.detail.filter(d=>d.customer===r.customer).map(d=><tr key={d.invoice_id}>
+                <td style={{...S.td,paddingLeft:26,color:T.textMuted,fontSize:12}}>{d.invoice_num} · {d.invoice_date} · due {d.due_date||'—'}{d.days_past_due>0?' · '+d.days_past_due+'d late':''}</td>
+                {BK.map(b=><td key={b[0]} style={{...S.td,textAlign:'right',fontSize:12,color:T.textMuted}}>{d.bucket===b[0]?fmt(d.open):''}</td>)}
+                <td style={{...S.td,textAlign:'right',fontSize:12,color:T.textMuted}}>{fmt(d.open)}</td></tr>)}
+            </Fragment>)}
+            <tr style={{borderTop:'2px solid '+T.border}}><td style={{...S.td,fontWeight:700,color:T.textBright}}>Total</td>
+              {BK.map(b=><td key={b[0]} style={{...S.td,textAlign:'right',fontWeight:700}}>{fmt(data.totals[b[0]])}</td>)}
+              <td style={{...S.td,textAlign:'right',fontWeight:700,color:T.textBright}}>{fmt(data.totals.total)}</td></tr>
+          </tbody></table>}
+      </div>
+      <div style={{...S.card,marginTop:12,fontSize:13}}>
+        <div style={{display:'flex',justifyContent:'space-between',maxWidth:420}}><span style={{color:T.textMuted}}>Aging total</span><span>{fmt(data.totals.total)}</span></div>
+        <div style={{display:'flex',justifyContent:'space-between',maxWidth:420}}><span style={{color:T.textMuted}}>GL A/R balance ({(data.ar_accounts||[]).join(', ')})</span><span>{fmt(data.gl_ar_balance)}</span></div>
+        <div style={{display:'flex',justifyContent:'space-between',maxWidth:420,fontWeight:700,color:Math.abs(data.recon_diff)<0.005?T.green:T.red}}>
+          <span>Reconciling difference</span><span>{fmt(data.recon_diff)}</span></div>
+        {Math.abs(data.recon_diff)>=0.005&&<div style={{fontSize:12,color:T.textMuted,marginTop:8}}>
+          A non-zero difference means the A/R account carries activity that did not come from this module — imported opening balances or manual journal entries against {(data.ar_accounts||[]).join(', ')}. Drill into the account in the General Ledger to identify it.</div>}
+      </div>
+    </>}
   </div>);
 }
 
