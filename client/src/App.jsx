@@ -1121,6 +1121,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
   // Phase 3: sync state
   const[syncing,setSyncing]=useState(false);
   const[syncResult,setSyncResult]=useState(null);
+  const[agingCheck,setAgingCheck]=useState(null);const[agingChecking,setAgingChecking]=useState(false);
   const[syncLogs,setSyncLogs]=useState([]);
   const[syncLogsLoading,setSyncLogsLoading]=useState(false);
   const[syncMsg,setSyncMsg]=useState('');const[syncErr,setSyncErr]=useState('');
@@ -1194,6 +1195,12 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
     setSyncLogsLoading(false);
   },[selectedEntity]);
 
+  const runAgingCheck=async()=>{
+    setAgingChecking(true);setAgingCheck(null);setSyncErr('');
+    try{ const r=await api.checkApAgingOverlap(selectedEntity); setAgingCheck(r); }
+    catch(e){ setSyncErr('A/P aging check failed: '+e.message); }
+    finally{ setAgingChecking(false); }
+  };
   const runSync=async()=>{
     if(!selectedEntity)return;
     setSyncing(true);setSyncMsg('');setSyncErr('');setSyncResult(null);
@@ -1468,12 +1475,26 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
           <div style={{display:'flex',gap:8}}>
             <button style={S.btnS} onClick={loadSyncLogs} disabled={syncLogsLoading||syncing}>{syncLogsLoading?'Loading...':'Refresh Log'}</button>
             <button style={{...S.btnS,color:'#b91c1c',borderColor:'#fca5a5'}} onClick={runUnsync} disabled={syncing||unsyncing}>{unsyncing?'Un-syncing...':'Un-sync'}</button>
+            <button style={S.btnS} onClick={runAgingCheck} disabled={agingChecking||syncing||unsyncing}>{agingChecking?'Checking…':'Check against A/P aging'}</button>
             <button style={S.btnP} onClick={runSync} disabled={syncing||unsyncing}>{syncing?'Syncing...':'Sync Now'}</button>
           </div>
         </div>
 
         {syncErr&&<div style={{padding:10,marginBottom:12,background:'#fef2f2',border:'1px solid #fecaca',borderRadius:T.radiusSm,color:T.red,fontSize:12}}>{syncErr}</div>}
         {syncMsg&&<div style={{padding:10,marginBottom:12,background:'#f0fdf4',border:'1px solid #86efac',borderRadius:T.radiusSm,color:'#15803d',fontSize:12}}>{syncMsg}</div>}
+
+        {agingCheck&&<div style={{padding:12,marginBottom:12,background:(agingCheck.overlap_count>0)?'#fffbeb':'#f0fdf4',border:'1px solid '+((agingCheck.overlap_count>0)?'#fcd34d':'#86efac'),borderRadius:T.radiusSm,fontSize:12}}>
+          {!agingCheck.aging_uploaded?<div style={{color:'#92400e'}}>{agingCheck.message}</div>:<>
+            <div style={{fontWeight:600,color:(agingCheck.overlap_count>0)?'#92400e':'#15803d',marginBottom:4}}>{(agingCheck.overlap_count>0)?(agingCheck.overlap_count+' bill'+(agingCheck.overlap_count===1?'':'s')+' already in the A/P aging — auto-skipped on sync'):('No overlaps — none of the '+agingCheck.checked_bills+' bills to sync are already in the A/P aging')}</div>
+            <div style={{color:T.textMuted,marginBottom:(agingCheck.overlap_count>0)?8:0}}>A/P aging as of {agingCheck.aging_as_of||'(n/a)'} · {agingCheck.aging_lines} lines · cutoff {agingCheck.cutoff_date} · {agingCheck.checked_bills} bills checked</div>
+            {(agingCheck.overlap_count>0)&&<><div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}><thead><tr>
+              <th style={{textAlign:'left',padding:'4px 6px',color:T.textMuted}}>Invoice #</th><th style={{textAlign:'left',padding:'4px 6px',color:T.textMuted}}>Vendor</th><th style={{textAlign:'left',padding:'4px 6px',color:T.textMuted}}>Date</th><th style={{textAlign:'right',padding:'4px 6px',color:T.textMuted}}>Amount</th><th style={{textAlign:'left',padding:'4px 6px',color:T.textMuted}}>Matched on</th>
+            </tr></thead><tbody>{agingCheck.overlaps.map((o,i)=><tr key={i} style={{borderTop:'1px solid '+T.border}}>
+              <td style={{padding:'4px 6px'}}>{o.invoice_number}</td><td style={{padding:'4px 6px'}}>{o.vendor||'—'}</td><td style={{padding:'4px 6px'}}>{o.date||'—'}</td><td style={{padding:'4px 6px',textAlign:'right'}}>{o.amount!=null?fmt(o.amount):'—'}</td><td style={{padding:'4px 6px'}}>{o.matched_on}</td>
+            </tr>)}</tbody></table></div>
+            <button style={{...S.btnS,marginTop:8}} onClick={()=>{const rows=[['Invoice #','Vendor','Date','Amount','Matched on'],...agingCheck.overlaps.map(o=>[o.invoice_number,o.vendor||'',o.date||'',o.amount!=null?o.amount:'',o.matched_on])];exportToExcel(rows,'AP_aging_skipped_'+(agingCheck.aging_as_of||'report')+'.xlsx');}}>Download skipped report</button></>}
+          </>}
+        </div>}
 
         {syncResult&&syncResult.missing_mappings&&syncResult.missing_mappings.length>0&&(()=>{
           const mm=syncResult.missing_mappings;
@@ -3645,6 +3666,7 @@ function ApAgingCutoffModal({entityId,entityName,onClose,onDone}){
         if(rows)break;
       }
       if(!rows)throw new Error('Could not find an A/P aging sheet — need a header row with a Bill date column and an Amount/Balance column.');
+      let fileAsOf=null; for(let i=0;i<headerIdx;i++){ const rr=rows[i]||[]; for(let c=0;c<rr.length;c++){ if(String(rr[c]||'').toLowerCase().indexOf('as of')>=0){ const mm=String(rr[c]).match(/(\d{4}-\d{2}-\d{2})/); if(mm)fileAsOf=mm[1]; else if(c+1<rr.length){ const ff=fmtDate(rr[c+1]); if(ff)fileAsOf=ff; } } } }
       const items=[]; let latest=null; let vend=null;
       for(let i=headerIdx+1;i<rows.length;i++){
         const r=rows[i];
@@ -3657,7 +3679,8 @@ function ApAgingCutoffModal({entityId,entityName,onClose,onDone}){
         if(ci.vendor>=0&&vcell&&(dateCell===null||amt===null)){ vend=vcell; continue; }
         if(dateCell===null||amt===null)continue;
         if(ci.vendor>=0&&vcell)vend=vcell;
-        items.push({vendor:vend||'(no vendor)',bill_date:dateCell,amount:Math.round(amt*100)/100});
+        const docCell=ci.doc>=0?String(r[ci.doc]||'').trim():'';
+        items.push({vendor:vend||'(no vendor)',invoice_number:docCell,bill_date:dateCell,amount:Math.round(amt*100)/100});
         if(!latest||dateCell>latest)latest=dateCell;
       }
       if(!items.length)throw new Error('No bill rows with a date and amount were found below the header row.');
@@ -3667,11 +3690,11 @@ function ApAgingCutoffModal({entityId,entityName,onClose,onDone}){
       const cutoff=addDay(latest);
       let glBalance=null,recon=null;
       try{ const ag=await api.getApAging(entityId,latest); glBalance=ag.gl_balance; recon=Math.round((glBalance-total)*100)/100; }catch(e){}
-      setPreview({count:items.length,total,vendCount,latest,cutoff,glBalance,recon});
+      setPreview({count:items.length,total,vendCount,latest,cutoff,glBalance,recon,items,asOf:fileAsOf});
     }catch(e){ setErr(e.message||String(e)); } finally{ setParsing(false); }
   };
   const doSave=async()=>{ if(!preview)return; setSaving(true);setErr('');
-    try{ await api.setBillcomCutoff(entityId,preview.cutoff); onDone&&onDone(preview.cutoff); }
+    try{ await api.setBillcomCutoff(entityId,preview.cutoff,preview.items,preview.asOf); onDone&&onDone(preview.cutoff); }
     catch(e){ setErr(e.message||String(e)); } finally{ setSaving(false); }
   };
   const tie=preview&&preview.recon!==null?Math.abs(preview.recon)<0.005:null;

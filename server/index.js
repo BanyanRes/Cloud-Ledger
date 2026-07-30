@@ -443,6 +443,12 @@ if (!bcCfgCols.includes('default_cash_account')) db.exec("ALTER TABLE billcom_co
 // to operating cash as a process-date lump sum (mirrors Bill.com Money Out Clearing).
 if (!bcCfgCols.includes('default_clearing_account')) db.exec("ALTER TABLE billcom_config ADD COLUMN default_clearing_account TEXT");
 if (!bcCfgCols.includes('sync_cutoff_date')) db.exec("ALTER TABLE billcom_config ADD COLUMN sync_cutoff_date TEXT");
+// A/P aging dedupe: the parsed lines of the last uploaded A/P aging detail (JSON
+// array of {vendor, invoice_number, bill_date, amount}), used to skip Bill.com
+// bills already booked in the GL. Set from the A/P Aging "Upload aging detail" flow.
+if (!bcCfgCols.includes('ap_aging_lines_json')) db.exec("ALTER TABLE billcom_config ADD COLUMN ap_aging_lines_json TEXT");
+if (!bcCfgCols.includes('ap_aging_as_of')) db.exec("ALTER TABLE billcom_config ADD COLUMN ap_aging_as_of TEXT");
+if (!bcCfgCols.includes('ap_aging_uploaded_at')) db.exec("ALTER TABLE billcom_config ADD COLUMN ap_aging_uploaded_at TEXT");
 
 // Bank-transaction matching: link a bank line to an already-posted JE instead of
 // creating a new one. matched_entry_id holds the JE id; status becomes 'matched'.
@@ -4216,11 +4222,30 @@ app.put('/api/billcom/config/:entity_id/cutoff', auth, requireEntityAccess('enti
   if (cutoff !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(cutoff))) return res.status(400).json({ error: 'sync_cutoff_date must be YYYY-MM-DD or null' });
   const existing = db.prepare('SELECT entity_id FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
   if (!existing) return res.status(400).json({ error: 'Bill.com is not configured for this entity yet. Set up the Bill.com connection first, then upload the A/P aging.' });
+  // Optionally persist the parsed A/P aging lines alongside the cutoff so the
+  // dedupe check can later skip Bill.com bills already booked in the GL. Each
+  // line is normalized to {vendor, invoice_number, bill_date, amount}.
+  let linesJson = null, asOf = null;
+  if (Array.isArray(req.body && req.body.lines)) {
+    const clean = req.body.lines.map(l => ({
+      vendor: (l && l.vendor != null) ? String(l.vendor) : '',
+      invoice_number: (l && (l.invoice_number != null ? l.invoice_number : l.document_no != null ? l.document_no : l.num)) != null ? String(l.invoice_number != null ? l.invoice_number : l.document_no != null ? l.document_no : l.num) : '',
+      bill_date: (l && (l.bill_date != null ? l.bill_date : l.invoice_date != null ? l.invoice_date : l.date)) ? String(l.bill_date != null ? l.bill_date : l.invoice_date != null ? l.invoice_date : l.date).slice(0, 10) : null,
+      amount: (l && l.amount != null && !isNaN(Number(l.amount))) ? Math.round(Number(l.amount) * 100) / 100 : null,
+    })).filter(l => l.amount != null);
+    linesJson = JSON.stringify(clean);
+    asOf = (req.body.as_of && /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.as_of))) ? String(req.body.as_of) : null;
+  }
   const now = new Date().toISOString();
   const updater = req.user.name || req.user.email;
-  db.prepare('UPDATE billcom_config SET sync_cutoff_date=?, updated_by=?, updated_at=? WHERE entity_id=?')
-    .run(cutoff, updater, now, req.params.entity_id);
-  res.json({ success: true, sync_cutoff_date: cutoff });
+  if (linesJson !== null) {
+    db.prepare('UPDATE billcom_config SET sync_cutoff_date=?, ap_aging_lines_json=?, ap_aging_as_of=?, ap_aging_uploaded_at=?, updated_by=?, updated_at=? WHERE entity_id=?')
+      .run(cutoff, linesJson, asOf, now, updater, now, req.params.entity_id);
+  } else {
+    db.prepare('UPDATE billcom_config SET sync_cutoff_date=?, updated_by=?, updated_at=? WHERE entity_id=?')
+      .run(cutoff, updater, now, req.params.entity_id);
+  }
+  res.json({ success: true, sync_cutoff_date: cutoff, aging_lines: linesJson !== null ? JSON.parse(linesJson).length : undefined });
 });
 
 app.delete('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
@@ -4802,6 +4827,81 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
   return result;
 }
 
+// ─── A/P aging dedupe matcher ───
+// Decide whether a Bill.com bill is already booked in the GL by matching it
+// against a line from the last uploaded A/P aging detail. Per spec, amount must
+// always agree; identity is then confirmed by invoice number OR vendor+date.
+// GL-import aging rows carry neither a vendor nor an invoice number (only a JE
+// number + date + amount), so those fall back to date+amount — safe because the
+// sync cutoff already excludes anything dated on/before the aging's latest date,
+// so a bill that reaches this check is dated later and won't spuriously match.
+function billcomNormKey(s) { return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function billcomAmtEq(a, b) { return a != null && b != null && Math.abs(Number(a) - Number(b)) < 0.005; }
+function billcomDateEq(a, b) { return !!a && !!b && String(a).slice(0, 10) === String(b).slice(0, 10); }
+function matchApAgingLine(lines, bill) {
+  if (!Array.isArray(lines) || !lines.length) return null;
+  const bnum = billcomNormKey(bill.number);
+  const bven = billcomNormKey(bill.vendor);
+  const bamt = bill.amount;
+  const bdate = bill.date;
+  for (const ln of lines) {
+    if (!billcomAmtEq(bamt, ln.amount)) continue; // amount is required in every case
+    const lnum = billcomNormKey(ln.invoice_number);
+    const lven = billcomNormKey(ln.vendor);
+    if (bnum && lnum && bnum === lnum) return { matched_on: 'invoice number + amount', line: ln };
+    if (bven && lven && bven === lven && billcomDateEq(bdate, ln.bill_date)) return { matched_on: 'vendor + date + amount', line: ln };
+    if (!lnum && !lven && billcomDateEq(bdate, ln.bill_date)) return { matched_on: 'date + amount', line: ln };
+  }
+  return null;
+}
+
+// Manual dry-run: report Bill.com bills that would sync (dated >= cutoff) but are
+// already present in the last uploaded A/P aging detail. No JEs are created. This
+// is what the "Check against A/P aging" button calls; the same matching runs
+// automatically (and auto-skips) inside the sync itself.
+app.post('/api/billcom/ap-aging-check/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+  let agingLines = [];
+  try { agingLines = cfg.ap_aging_lines_json ? JSON.parse(cfg.ap_aging_lines_json) : []; } catch (e) { agingLines = []; }
+  if (!agingLines.length) return res.json({ ok: true, aging_uploaded: false, aging_as_of: null, aging_lines: 0, checked_bills: 0, overlaps: [], message: 'No A/P aging has been uploaded for this entity yet. Upload one from the A/P Aging report first.' });
+  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
+  const cutoffDate = String((req.body && req.body.cutoff_date) || cfg.sync_cutoff_date || '2026-01-01');
+  let session;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    const devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'Bill.com login failed: ' + e.message }); }
+  const listArgs = { sessionId: session.sessionId, devKey: billcomDecrypt(cfg.dev_key_enc), baseUrl: cfg.api_base_url };
+  const windowFrom = (cutoffDate.slice(0, 7) + '-01');
+  const windowTo = (() => { const d = new Date(); d.setMonth(d.getMonth() + 1); return d.toISOString().slice(0, 10); })();
+  let bills;
+  try { bills = await billcomListBillsWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo }); }
+  catch (e) { return res.status(502).json({ error: 'Failed to fetch bills: ' + e.message }); }
+  const vendorById = new Map();
+  try { const vlist = await billcomListVendors({ ...listArgs, maxItems: 5000 }); for (const v of vlist) { const id = String(pick(v, 'id') || ''); const n = pick(v, 'name', 'vendorName', 'companyName'); if (id && n) vendorById.set(id, n); } } catch (e) {}
+  const vendorOf = (obj) => vendorById.get(String(pick(obj, 'vendorId', 'vendor_id') || (pick(obj, 'vendor') || {}).id || '')) || pick(pick(obj, 'vendor') || {}, 'name', 'vendorName') || '';
+  let checked = 0;
+  const overlaps = [];
+  for (const bill of bills) {
+    const billId = String(pick(bill, 'id') || '');
+    if (!billId) continue;
+    const a = String(pick(bill, 'approvalStatus', 'status') || '').toUpperCase();
+    if (a === 'DENIED') continue;
+    const date = pick(bill, 'invoiceDate', 'invoice_date', 'dueDate') || pick(pick(bill, 'invoice') || {}, 'invoiceDate', 'invoice_date');
+    if (date && String(date) < cutoffDate) continue; // only bills that would actually sync
+    checked++;
+    const number = pick(bill, 'invoiceNumber', 'invoice_number') || pick(pick(bill, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || billId;
+    const amount = Number(pick(bill, 'amount', 'amountDue', 'invoiceAmount') || 0) || null;
+    const hit = matchApAgingLine(agingLines, { number, date, vendor: vendorOf(bill), amount });
+    if (hit) overlaps.push({ id: billId, invoice_number: number, date: date || null, vendor: vendorOf(bill) || '', amount, matched_on: hit.matched_on });
+  }
+  res.json({ ok: true, aging_uploaded: true, aging_as_of: cfg.ap_aging_as_of || null, aging_lines: agingLines.length, cutoff_date: cutoffDate, checked_bills: checked, overlap_count: overlaps.length, overlaps });
+});
+
 app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
@@ -4888,6 +4988,11 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // dated before it would double-count. Skip anything earlier. Configurable via
   // config.sync_cutoff_date or body.cutoff_date; defaults to 2026-01-01.
   const cutoffDate = String((req.body && req.body.cutoff_date) || cfg.sync_cutoff_date || '2026-01-01');
+  // A/P aging dedupe: lines from the last uploaded A/P aging detail. Any bill
+  // matching one of these is already booked in the GL, so it's auto-skipped and
+  // reported. Empty when no aging has been uploaded (feature is a no-op then).
+  let agingLines = [];
+  try { agingLines = cfg.ap_aging_lines_json ? JSON.parse(cfg.ap_aging_lines_json) : []; } catch (e) { agingLines = []; }
 
   let bills, payments;
   // Bill.com v3 /bills and /payments IGNORE offset pagination — nextPage returns
@@ -5027,6 +5132,24 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       result.bills.skipped++;
       result.bills.details.push({ id: billId, status: 'skip', reason: 'before cutoff ' + cutoffDate + ' (date ' + invoiceDate + ')' });
       continue;
+    }
+
+    // A/P aging dedupe: skip bills already present in the uploaded A/P aging
+    // detail (already booked in the GL). Reported in result.bills.aging_overlaps.
+    {
+      const billVendorName = vendorOf(detail) || vendorOf(bill) || '';
+      const billAmount = Number(pick(detail, 'amount', 'amountDue', 'invoiceAmount') || 0) || null;
+      const agingHit = matchApAgingLine(agingLines, { number: billNumber, date: invoiceDate, vendor: billVendorName, amount: billAmount });
+      if (agingHit) {
+        result.bills.skipped++;
+        result.bills.aging_skipped = (result.bills.aging_skipped || 0) + 1;
+        (result.bills.aging_overlaps = result.bills.aging_overlaps || []).push({
+          id: billId, invoice_number: billNumber, date: invoiceDate, vendor: billVendorName,
+          amount: billAmount, matched_on: agingHit.matched_on,
+        });
+        result.bills.details.push({ id: billId, status: 'skip', reason: 'already in A/P aging (' + agingHit.matched_on + ')' });
+        continue;
+      }
     }
 
     const debitLines = [];

@@ -299,7 +299,8 @@ export const api = {
   // Bill.com integration
   getBillcomConfig: (entityId) => request('/billcom/config/' + entityId),
   saveBillcomConfig: (entityId, body) => request('/billcom/config/' + entityId, { method: 'PUT', body }),
-  setBillcomCutoff: (entityId, syncCutoffDate) => request('/billcom/config/' + entityId + '/cutoff', { method: 'PUT', body: { sync_cutoff_date: syncCutoffDate || null } }),
+  setBillcomCutoff: (entityId, syncCutoffDate, lines, asOf) => request('/billcom/config/' + entityId + '/cutoff', { method: 'PUT', body: { sync_cutoff_date: syncCutoffDate || null, ...(lines ? { lines, as_of: asOf || null } : {}) } }),
+  checkApAgingOverlap: (entityId) => request('/billcom/ap-aging-check/' + entityId, { method: 'POST', body: {} }),
   deleteBillcomConfig: (entityId) => request('/billcom/config/' + entityId, { method: 'DELETE' }),
   testBillcomConnection: (entityId) => request('/billcom/config/' + entityId + '/test', { method: 'POST' }),
   getBillcomAccounts: (entityId) => request('/billcom/accounts/' + entityId),
