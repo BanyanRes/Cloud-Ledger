@@ -3610,12 +3610,105 @@ function PivotReport({entityId,entityName,canEdit=true,pendingConfig,clearPendin
 }
 
 // ═══ AP Aging Detail (Q5: open bills from Bill.com, bucketed by days past due) ═══
+// Upload an A/P aging detail (the same GL/prior-system report the GL import came
+// from) to set the Bill.com sync cutoff. The latest bill date on the report is
+// the last invoice already booked in the GL, so we store cutoff = latest + 1 day
+// (the sync engine's cutoff is exclusive: a bill syncs when invoiceDate >= cutoff),
+// making Bill.com skip everything already in the GL and pull only newer bills.
+function ApAgingCutoffModal({entityId,entityName,onClose,onDone}){
+  const [parsing,setParsing]=useState(false);
+  const [preview,setPreview]=useState(null);
+  const [err,setErr]=useState('');
+  const [saving,setSaving]=useState(false);
+  const [fileName,setFileName]=useState('');
+  const [curCutoff,setCurCutoff]=useState(null);
+  useEffect(()=>{ let ok=true; (async()=>{ try{ const c=await api.getBillcomConfig(entityId); if(ok)setCurCutoff((c&&c.sync_cutoff_date)||''); }catch(e){ if(ok)setCurCutoff(''); } })(); return()=>{ok=false;}; },[]);
+  const fmtDate=(v)=>{ if(v===null||v===undefined||v==='')return null; if(v instanceof Date&&!isNaN(v)){return v.getFullYear()+'-'+String(v.getMonth()+1).padStart(2,'0')+'-'+String(v.getDate()).padStart(2,'0');} const s=String(v).trim(); if(!s)return null; if(s.indexOf('/')>=0){const p=s.split(' ')[0].split('/'); if(p.length===3){let y=p[2]; if(y.length===2)y='20'+y; return y+'-'+p[0].padStart(2,'0')+'-'+p[1].padStart(2,'0');}} if(s.length>=10&&s.charAt(4)==='-')return s.slice(0,10); return null; };
+  const num=(v)=>{ if(v===null||v===undefined||v==='')return null; if(typeof v==='number')return v; const n=parseFloat(String(v).split(',').join('').split('$').join('').split('(').join('-').split(')').join('')); return isNaN(n)?null:n; };
+  const addDay=(ymd)=>{ const p=ymd.split('-').map(Number); const dt=new Date(Date.UTC(p[0],p[1]-1,p[2])); dt.setUTCDate(dt.getUTCDate()+1); return dt.toISOString().slice(0,10); };
+  const findIn=(H,names)=>{ for(const nm of names){ for(let i=0;i<H.length;i++){ if(H[i].indexOf(nm)>=0)return i; } } return -1; };
+  const onFile=async(file)=>{
+    setErr('');setPreview(null);setParsing(true);setFileName(file.name);
+    try{
+      const buf=await file.arrayBuffer();
+      const wb=XLSX.read(buf,{type:'array',cellDates:true});
+      let rows=null,headerIdx=-1,ci=null;
+      for(const name of wb.SheetNames){
+        const rws=XLSX.utils.sheet_to_json(wb.Sheets[name],{header:1,defval:''});
+        for(let i=0;i<Math.min(rws.length,25);i++){
+          const H=rws[i].map(c=>String(c).toLowerCase().trim());
+          const bd=findIn(H,['bill date','invoice date','bill dt','document date']);
+          const amt=findIn(H,['open balance','balance','amount','total','current']);
+          const dcol=bd>=0?bd:findIn(H,['date']);
+          if(dcol>=0&&amt>=0){ rows=rws;headerIdx=i; ci={ date:dcol, amt, vendor:findIn(H,['vendor name','vendor','payee','name']), doc:findIn(H,['bill no','bill number','document no','invoice no','ref no','ref','num']) }; break; }
+        }
+        if(rows)break;
+      }
+      if(!rows)throw new Error('Could not find an A/P aging sheet — need a header row with a Bill date column and an Amount/Balance column.');
+      const items=[]; let latest=null; let vend=null;
+      for(let i=headerIdx+1;i<rows.length;i++){
+        const r=rows[i];
+        const vcell=String(ci.vendor>=0?r[ci.vendor]:'').trim();
+        const low=vcell=>vcell.toLowerCase();
+        if(low(vcell).indexOf('grand total')>=0)break;
+        if(low(vcell).indexOf('total for')>=0||low(vcell).indexOf('total ')===0)continue;
+        const dateCell=fmtDate(r[ci.date]);
+        const amt=num(r[ci.amt]);
+        if(ci.vendor>=0&&vcell&&(dateCell===null||amt===null)){ vend=vcell; continue; }
+        if(dateCell===null||amt===null)continue;
+        if(ci.vendor>=0&&vcell)vend=vcell;
+        items.push({vendor:vend||'(no vendor)',bill_date:dateCell,amount:Math.round(amt*100)/100});
+        if(!latest||dateCell>latest)latest=dateCell;
+      }
+      if(!items.length)throw new Error('No bill rows with a date and amount were found below the header row.');
+      if(!latest)throw new Error('Could not read a bill date from any row.');
+      const total=Math.round(items.reduce((s,x)=>s+x.amount,0)*100)/100;
+      const vendCount=new Set(items.map(x=>x.vendor)).size;
+      const cutoff=addDay(latest);
+      let glBalance=null,recon=null;
+      try{ const ag=await api.getApAging(entityId,latest); glBalance=ag.gl_balance; recon=Math.round((glBalance-total)*100)/100; }catch(e){}
+      setPreview({count:items.length,total,vendCount,latest,cutoff,glBalance,recon});
+    }catch(e){ setErr(e.message||String(e)); } finally{ setParsing(false); }
+  };
+  const doSave=async()=>{ if(!preview)return; setSaving(true);setErr('');
+    try{ await api.setBillcomCutoff(entityId,preview.cutoff); onDone&&onDone(preview.cutoff); }
+    catch(e){ setErr(e.message||String(e)); } finally{ setSaving(false); }
+  };
+  const tie=preview&&preview.recon!==null?Math.abs(preview.recon)<0.005:null;
+  return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:640}} onClick={e=>e.stopPropagation()}>
+    <button style={S.modalClose} onClick={onClose}>&times;</button>
+    <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Set Bill.com sync cutoff from A/P aging</div>
+    <div style={{fontSize:12,color:T.textMuted,marginBottom:16}}>Upload the A/P aging detail (.xlsx) for the same period as your GL import. The latest bill date on the report is the last bill already booked in the GL, so Bill.com will sync only bills dated after it — no double-counting. This sets the cutoff on {entityName}'s Bill.com config; it does not import bills.</div>
+    <div style={{...S.card,background:T.bgElevated,padding:16,marginBottom:14,textAlign:'center'}}>
+      <input id="ap-cutoff-file" type="file" accept=".xlsx,.xls" style={{display:'none'}} onChange={e=>{const f=e.target.files[0];if(f)onFile(f); e.target.value='';}}/>
+      <label htmlFor="ap-cutoff-file" style={{...S.btnP,display:'inline-block',cursor:'pointer'}}>{parsing?'Reading file…':'Choose .xlsx file'}</label>
+      {fileName&&<div style={{fontSize:12,color:T.textMuted,marginTop:8}}>{fileName}</div>}
+    </div>
+    {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
+    {preview&&<div style={{...S.card,padding:14,marginBottom:14}}>
+      <div style={{display:'flex',justifyContent:'space-between',fontSize:13,padding:'3px 0'}}><span style={{color:T.textMuted}}>Bills read</span><span style={{fontWeight:600}}>{preview.count} across {preview.vendCount} vendors</span></div>
+      <div style={{display:'flex',justifyContent:'space-between',fontSize:13,padding:'3px 0'}}><span style={{color:T.textMuted}}>Grand total</span><span style={{fontWeight:600}}>{'$'+fmt(preview.total)}</span></div>
+      {preview.glBalance!==null&&<div style={{display:'flex',justifyContent:'space-between',fontSize:13,padding:'3px 0'}}><span style={{color:T.textMuted}}>GL control balance (as of {preview.latest})</span><span>{'$'+fmt(preview.glBalance)}</span></div>}
+      {preview.recon!==null&&<div style={{display:'flex',justifyContent:'space-between',fontSize:13,padding:'3px 0'}}><span style={{color:T.textMuted}}>Difference</span><span style={{fontWeight:700,color:tie?T.green:T.orange}}>{tie?'ties out':'$'+fmt(preview.recon)+' off'}</span></div>}
+      <div style={{display:'flex',justifyContent:'space-between',fontSize:13,padding:'6px 0 3px',marginTop:6,borderTop:'1px solid '+T.border}}><span style={{color:T.textMuted}}>Latest bill date in report</span><span style={{fontWeight:700}}>{preview.latest}</span></div>
+      <div style={{display:'flex',justifyContent:'space-between',fontSize:13,padding:'3px 0'}}><span style={{color:T.textMuted}}>Current cutoff</span><span>{curCutoff?curCutoff:'(none set)'}</span></div>
+      <div style={{display:'flex',justifyContent:'space-between',fontSize:13,padding:'3px 0'}}><span style={{color:T.textMuted}}>New cutoff</span><span style={{fontWeight:700,color:T.accent}}>{preview.cutoff}</span></div>
+      <div style={{fontSize:12,color:T.textMuted,marginTop:8}}>Bill.com will sync bills dated {preview.cutoff} and later. Everything through {preview.latest} is treated as already in the GL.</div>
+    </div>}
+    <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
+      <button style={S.btnS} onClick={onClose} disabled={saving}>Cancel</button>
+      <button style={{...S.btnP,opacity:(!preview||saving)?0.5:1}} onClick={doSave} disabled={!preview||saving}>{saving?'Saving…':(preview?'Set cutoff to '+preview.cutoff:'Set cutoff')}</button>
+    </div>
+  </div></div>);
+}
+
 function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPending}){
   const[asOf,setAsOf]=useState(today());
   useEffect(()=>{if(pendingConfig){if(pendingConfig.asOf)setAsOf(pendingConfig.asOf);clearPending&&clearPending();}},[]);
   const[data,setData]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
   const[viewEntry,setViewEntry]=useState(null);
   const[entryLoading,setEntryLoading]=useState(false);
+  const[showUpload,setShowUpload]=useState(false);
   // GL rows only carry an entry id; fetch the full entry (with lines) before
   // opening the JE modal, which requires entry.lines to render.
   const openEntry=async(id)=>{if(!id)return;setEntryLoading(true);try{const full=await api.getEntry(entityId,id);setViewEntry(full);}catch(e){alert('Could not open entry: '+e.message);}finally{setEntryLoading(false);}};
@@ -3648,7 +3741,7 @@ function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPend
     exportToExcel(d,'AP_Aging_'+data.as_of+'.xlsx');
   };
   const hasAnything=data&&(data.bill_count>0||(data.gl_rows&&data.gl_rows.length>0));
-  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>A/P Aging Detail</div><div style={S.sub}>Built from GL account {data?data.ap_account:'202000'} &middot; ties to the book{data&&data.billcom_error?' · Bill.com enrich error: '+data.billcom_error:''}</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='apaging' currentConfig={{asOf}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);}} canEdit={canEdit}/>{hasAnything&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
+  return(<div>{showUpload&&<ApAgingCutoffModal entityId={entityId} entityName={entityName} onClose={()=>setShowUpload(false)} onDone={()=>{setShowUpload(false);}}/>}<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>A/P Aging Detail</div><div style={S.sub}>Built from GL account {data?data.ap_account:'202000'} &middot; ties to the book{data&&data.billcom_error?' · Bill.com enrich error: '+data.billcom_error:''}</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><button style={S.btnS} onClick={()=>setShowUpload(true)}>Upload aging detail</button><MemorizeBar entityId={entityId} reportType='apaging' currentConfig={{asOf}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);}} canEdit={canEdit}/>{hasAnything&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
     <div style={S.card}>
       <div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
         <div style={{flex:'0 0 180px'}}><label style={S.label}>As of date</label><input style={{...S.inputSm,width:'100%'}} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>

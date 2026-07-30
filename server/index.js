@@ -4203,6 +4203,26 @@ app.put('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id')
   res.json({ success: true });
 });
 
+// Set ONLY the Bill.com sync cutoff date, without touching stored credentials.
+// Driven by the A/P Aging "Upload aging detail" flow: the latest bill date on
+// the uploaded GL/prior-system aging report is the last invoice already booked
+// in the GL, so we skip anything dated on/before it. The sync engine treats the
+// cutoff as EXCLUSIVE (a bill syncs when invoiceDate >= cutoff), so to exclude
+// the last booked bill itself the caller stores latestBillDate + 1 day. Creating
+// a fresh config row here would be missing required credentials, so this only
+// updates an existing config.
+app.put('/api/billcom/config/:entity_id/cutoff', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
+  const cutoff = (req.body && req.body.sync_cutoff_date) || null;
+  if (cutoff !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(cutoff))) return res.status(400).json({ error: 'sync_cutoff_date must be YYYY-MM-DD or null' });
+  const existing = db.prepare('SELECT entity_id FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
+  if (!existing) return res.status(400).json({ error: 'Bill.com is not configured for this entity yet. Set up the Bill.com connection first, then upload the A/P aging.' });
+  const now = new Date().toISOString();
+  const updater = req.user.name || req.user.email;
+  db.prepare('UPDATE billcom_config SET sync_cutoff_date=?, updated_by=?, updated_at=? WHERE entity_id=?')
+    .run(cutoff, updater, now, req.params.entity_id);
+  res.json({ success: true, sync_cutoff_date: cutoff });
+});
+
 app.delete('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
   db.prepare('DELETE FROM billcom_config WHERE entity_id = ?').run(req.params.entity_id);
   res.json({ success: true });
