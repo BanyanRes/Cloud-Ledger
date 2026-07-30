@@ -2495,25 +2495,42 @@ function ArAgingReport({entityId,entityName}){
   const[asOf,setAsOf]=useState(today());
   const[data,setData]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
   const[showDetail,setShowDetail]=useState(true);
+  const[viewEntry,setViewEntry]=useState(null);const[entryLoading,setEntryLoading]=useState(false);
+  // GL rows carry only an entry id; fetch the full entry (with lines) before
+  // opening the JE modal so the user can see/clear the legacy balance.
+  const openEntry=async(id)=>{if(!id)return;setEntryLoading(true);try{setViewEntry(await api.getEntry(entityId,id));}catch(e){alert('Could not open entry: '+e.message);}finally{setEntryLoading(false);}};
   const BK=[['current','Current'],['d1_30','1-30'],['d31_60','31-60'],['d61_90','61-90'],['d90_plus','90+']];
+  const arLabel=(data&&(data.ar_account||(data.ar_accounts||[]).join(', ')))||'12000';
   const run=async()=>{setLoading(true);setErr('');setData(null);
     try{setData(await api.getArAging(entityId,asOf));}catch(e){setErr(e.message);}finally{setLoading(false);}};
   useEffect(()=>{run();},[entityId]);
+  const jeNum=n=>n!=null?'JE-'+String(n).padStart(4,'0'):'';
   const doExport=()=>{
     if(!data)return;
-    const head=['Customer','Invoice #','Invoice date','Due date','Days past due','Current','1-30','31-60','61-90','90+','Open'];
-    const d=[[entityName||'A/R Aging'],['A/R Aging — ties to GL '+(data.ar_accounts||[]).join(', ')],['As of '+data.as_of],[],head];
-    data.detail.forEach(r=>d.push([r.customer,r.invoice_num,r.invoice_date,r.due_date,r.days_past_due,
-      r.bucket==='current'?r.open:'',r.bucket==='d1_30'?r.open:'',r.bucket==='d31_60'?r.open:'',r.bucket==='d61_90'?r.open:'',r.bucket==='d90_plus'?r.open:'',r.open]));
-    d.push([]);d.push(['TOTAL','','','','',data.totals.current,data.totals.d1_30,data.totals.d31_60,data.totals.d61_90,data.totals.d90_plus,data.totals.total]);
-    d.push(['GL A/R balance','','','','','','','','','',data.gl_ar_balance]);
-    d.push(['Reconciling difference','','','','','','','','','',data.recon_diff]);
+    const head=['Customer','Invoice #','Invoice date','Due date','Days past due','Current','1-30','31-60','61-90','90+','GL','Amount'];
+    const d=[[entityName||'A/R Aging Detail'],['A/R Aging Detail — built from GL '+arLabel],['As of '+data.as_of],[],head];
+    data.rows.forEach(r=>{
+      data.detail.filter(x=>x.customer===r.customer).forEach(x=>d.push([r.customer,x.invoice_num,x.invoice_date,x.due_date,x.days_past_due,
+        x.bucket==='current'?x.open:'',x.bucket==='d1_30'?x.open:'',x.bucket==='d31_60'?x.open:'',x.bucket==='d61_90'?x.open:'',x.bucket==='d90_plus'?x.open:'','',x.open]));
+      d.push(['Total '+r.customer,'','','','',r.current,r.d1_30,r.d31_60,r.d61_90,r.d90_plus,'',r.total]);
+    });
+    if((data.gl_rows||[]).length){
+      d.push([]);d.push(['GL ENTRIES (imported / manual — not aged)']);
+      data.gl_rows.forEach(r=>d.push([r.memo||'GL detail import',jeNum(r.entry_num),r.date,'','','','','','','',r.amount,r.amount]));
+      d.push(['Total GL Entries','','','','','','','','','',data.gl_total,data.gl_total]);
+    }
+    const t=data.totals;
+    d.push(['TOTAL','','','','',t.current,t.d1_30,t.d31_60,t.d61_90,t.d90_plus,t.gl,t.total]);
+    d.push(['Reconciliation vs GL '+arLabel+' ('+fmt(data.gl_ar_balance)+')','','','','','','','','','','',data.recon_diff]);
     exportToExcel(d,'AR_Aging_'+data.as_of+'.xlsx');
   };
+  const hasGL=data&&data.gl_rows&&data.gl_rows.length>0;
+  const hasAnything=data&&(data.rows.length>0||hasGL);
+  const ncols=1+BK.length+2;
   return(<div>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
-      <div><div style={S.h1}>A/R Aging</div><div style={S.sub}>{entityName} — open customer invoices, reconciled to GL {data?(data.ar_accounts||[]).join(', '):'A/R'}</div></div>
-      {data&&data.totals.total!==0&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div>
+      <div><div style={S.h1}>A/R Aging</div><div style={S.sub}>{entityName} — CloudLedger invoices are aged; imported/manual A/R on {arLabel} shows in the GL column, un-aged, to be cleared by journal entry.</div></div>
+      {hasAnything&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div>
     <div style={S.card}><div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
       <div style={{flex:'0 0 180px'}}><label style={S.label}>As of date</label><input style={{...S.inputSm,width:'100%'}} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
       <button style={S.btnP} onClick={run} disabled={loading}>{loading?'Building…':'Run Aging'}</button>
@@ -2521,32 +2538,42 @@ function ArAgingReport({entityId,entityName}){
     </div>{err&&<div style={S.err}>{err}</div>}</div>
     {data&&<>
       <div style={{...S.cardFlush,overflowX:'auto'}}>
-        {data.rows.length===0?<div style={{padding:24,color:T.textMuted}}>No open A/R as of {data.as_of}.</div>:
-        <table style={S.table}><thead><tr><th style={S.th}>Customer</th>{BK.map(b=><th key={b[0]} style={S.thR}>{b[1]}</th>)}<th style={S.thR}>Total</th></tr></thead>
+        {!hasAnything?<div style={{padding:24,color:T.textMuted}}>No open A/R as of {data.as_of}.</div>:
+        <table style={S.table}><thead><tr><th style={S.th}>Customer</th>{BK.map(b=><th key={b[0]} style={S.thR}>{b[1]}</th>)}<th style={{...S.thR,color:T.accent}}>GL</th><th style={S.thR}>Total</th></tr></thead>
           <tbody>
             {data.rows.map(r=><Fragment key={r.customer}>
               <tr><td style={{...S.td,color:T.textBright,fontWeight:600}}>{r.customer}</td>
                 {BK.map(b=><td key={b[0]} style={{...S.td,textAlign:'right'}}>{r[b[0]]?fmt(r[b[0]]):''}</td>)}
+                <td style={{...S.td,textAlign:'right'}}></td>
                 <td style={{...S.td,textAlign:'right',fontWeight:600}}>{fmt(r.total)}</td></tr>
               {showDetail&&data.detail.filter(d=>d.customer===r.customer).map(d=><tr key={d.invoice_id}>
                 <td style={{...S.td,paddingLeft:26,color:T.textMuted,fontSize:12}}>{d.invoice_num} · {d.invoice_date} · due {d.due_date||'—'}{d.days_past_due>0?' · '+d.days_past_due+'d late':''}</td>
                 {BK.map(b=><td key={b[0]} style={{...S.td,textAlign:'right',fontSize:12,color:T.textMuted}}>{d.bucket===b[0]?fmt(d.open):''}</td>)}
+                <td style={{...S.td,textAlign:'right'}}></td>
                 <td style={{...S.td,textAlign:'right',fontSize:12,color:T.textMuted}}>{fmt(d.open)}</td></tr>)}
             </Fragment>)}
+            {hasGL&&<Fragment>
+              <tr><td colSpan={ncols} style={{...S.td,fontWeight:700,color:T.accent,background:T.accentDim}}>GL ENTRIES <span style={{fontWeight:400,color:T.textMuted}}>— imported / manual &middot; not aged &middot; clear by journal entry</span></td></tr>
+              {data.gl_rows.map((r,i)=><tr key={'gl'+i} onClick={()=>openEntry(r.entry_id)} style={{cursor:r.entry_id?'pointer':'default',opacity:entryLoading?0.6:1}}>
+                <td style={{...S.td,fontSize:12}}><span style={{color:T.accent}}>{jeNum(r.entry_num)}</span> <span style={{color:T.textMuted}}>· {r.date} · {r.memo}</span></td>
+                {BK.map(b=><td key={b[0]} style={{...S.td,textAlign:'right'}}></td>)}
+                <td style={{...S.td,textAlign:'right',fontWeight:600,color:T.accent}}>{fmt(r.amount)}</td>
+                <td style={{...S.td,textAlign:'right',fontWeight:600}}>{fmt(r.amount)}</td></tr>)}
+              <tr style={{background:T.accentDim}}><td style={{...S.td,fontWeight:600,fontStyle:'italic'}}>Total GL Entries</td>
+                {BK.map(b=><td key={b[0]} style={{...S.td,textAlign:'right'}}></td>)}
+                <td style={{...S.td,textAlign:'right',fontWeight:700,color:T.accent}}>{fmt(data.gl_total)}</td>
+                <td style={{...S.td,textAlign:'right',fontWeight:700,color:T.textBright}}>{fmt(data.gl_total)}</td></tr>
+            </Fragment>}
             <tr style={{borderTop:'2px solid '+T.border}}><td style={{...S.td,fontWeight:700,color:T.textBright}}>Total</td>
               {BK.map(b=><td key={b[0]} style={{...S.td,textAlign:'right',fontWeight:700}}>{fmt(data.totals[b[0]])}</td>)}
+              <td style={{...S.td,textAlign:'right',fontWeight:700,color:T.accent}}>{fmt(data.totals.gl||0)}</td>
               <td style={{...S.td,textAlign:'right',fontWeight:700,color:T.textBright}}>{fmt(data.totals.total)}</td></tr>
+            <tr><td colSpan={ncols} style={{...S.td,textAlign:'right',background:Math.abs(data.recon_diff)<0.005?'#f3faf5':'#fdf2f4',color:Math.abs(data.recon_diff)<0.005?T.green:T.red,fontWeight:600}}>
+              Reconciliation vs GL {arLabel} ({fmt(data.gl_ar_balance)}): {Math.abs(data.recon_diff)<0.005?fmt(0)+' ✓':fmt(data.recon_diff)+' — does not tie'}</td></tr>
           </tbody></table>}
       </div>
-      <div style={{...S.card,marginTop:12,fontSize:13}}>
-        <div style={{display:'flex',justifyContent:'space-between',maxWidth:420}}><span style={{color:T.textMuted}}>Aging total</span><span>{fmt(data.totals.total)}</span></div>
-        <div style={{display:'flex',justifyContent:'space-between',maxWidth:420}}><span style={{color:T.textMuted}}>GL A/R balance ({(data.ar_accounts||[]).join(', ')})</span><span>{fmt(data.gl_ar_balance)}</span></div>
-        <div style={{display:'flex',justifyContent:'space-between',maxWidth:420,fontWeight:700,color:Math.abs(data.recon_diff)<0.005?T.green:T.red}}>
-          <span>Reconciling difference</span><span>{fmt(data.recon_diff)}</span></div>
-        {Math.abs(data.recon_diff)>=0.005&&<div style={{fontSize:12,color:T.textMuted,marginTop:8}}>
-          A non-zero difference means the A/R account carries activity that did not come from this module — imported opening balances or manual journal entries against {(data.ar_accounts||[]).join(', ')}. Drill into the account in the General Ledger to identify it.</div>}
-      </div>
     </>}
+    {viewEntry&&<EditJEModal entityId={entityId} entry={viewEntry} accounts={[]} onClose={()=>setViewEntry(null)} onSaved={()=>{setViewEntry(null);run();}}/>}
   </div>);
 }
 

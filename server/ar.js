@@ -381,6 +381,15 @@ function invoiceEmailHtml({ entityName, invoice, settings }) {
 }
 
 // ─── A/R aging (invoice-driven, reconciled to the GL A/R balance) ───────────
+// Two-source model, mirroring the A/P aging report:
+//   • CloudLedger invoices age normally into current / 1-30 / 31-60 / 61-90 / 90+.
+//   • Everything else on the A/R control account — legacy Intacct imports and any
+//     manual JE — is NOT aged. It is summed into a single "GL" column and listed
+//     as un-aged GL entries, to be cleared by journal entry over time.
+// The split is by source, not by date: a JE is "CloudLedger" only if it is the
+// accrual/void JE of a non-void invoice (or a receipt JE). This survives someone
+// backdating a real invoice and needs no per-entity cutover date. By construction
+// aged buckets + GL column == GL control balance, so recon_diff is ~0.
 function buildAging(db, eid, asOf) {
   const invoices = db.prepare("SELECT * FROM ar_invoices WHERE entity_id = ? AND status != 'void' AND invoice_date <= ? ORDER BY customer_name, invoice_date, invoice_num").all(eid, asOf);
   const recByInv = new Map();
@@ -388,7 +397,7 @@ function buildAging(db, eid, asOf) {
     recByInv.set(r.invoice_id, Number(r.paid || 0));
   }
   const BUCKETS = ['current', 'd1_30', 'd31_60', 'd61_90', 'd90_plus'];
-  const zero = () => ({ current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0, total: 0 });
+  const zero = () => ({ current: 0, d1_30: 0, d31_60: 0, d61_90: 0, d90_plus: 0, gl: 0, total: 0 });
   const byCustomer = new Map();
   const detail = [];
   for (const inv of invoices) {
@@ -417,17 +426,54 @@ function buildAging(db, eid, asOf) {
   const def = defaultArAccount(db, eid);
   if (def) codes.add(def);
   let glBalance = 0;
-  if (codes.size) {
-    const list = Array.from(codes);
-    const ph = list.map(() => '?').join(',');
-    const stmt = db.prepare('SELECT COALESCE(SUM(jl.debit - jl.credit), 0) AS bal FROM journal_lines jl '
+  const codeList = Array.from(codes);
+  if (codeList.length) {
+    const ph = codeList.map(() => '?').join(',');
+    const row = db.prepare('SELECT COALESCE(SUM(jl.debit - jl.credit), 0) AS bal FROM journal_lines jl '
       + 'JOIN journal_entries je ON je.id = jl.entry_id '
-      + 'WHERE je.entity_id = ? AND je.date <= ? AND jl.account_code IN (' + ph + ')');
-    const row = stmt.get(eid, asOf, ...list);
+      + 'WHERE je.entity_id = ? AND je.date <= ? AND jl.account_code IN (' + ph + ')').get(eid, asOf, ...codeList);
     glBalance = r2(row.bal || 0);
   }
+
+  // ── GL column: A/R control activity NOT produced by this module. Every JE id
+  // the AR module owns (invoice accruals, void reversals, receipt JEs) is
+  // excluded; the remaining net movement on the control account(s) is the legacy
+  // / manually-booked balance that we surface un-aged.
+  const glRows = [];
+  let glTotal = 0;
+  if (codeList.length) {
+    // Own only the JEs of NON-void invoices, plus receipt JEs. A void invoice's
+    // accrual and its reversal are deliberately left un-owned so both fall into
+    // the GL column and net to zero there — otherwise the accrual would be hidden
+    // (owned) while its reversal showed, throwing the tie-out off by the invoice.
+    const ownedRows = db.prepare(
+      "SELECT je_id AS id FROM ar_invoices WHERE entity_id = ? AND status != 'void' AND je_id IS NOT NULL "
+      + "UNION SELECT je_id FROM ar_receipts WHERE entity_id = ? AND je_id IS NOT NULL").all(eid, eid);
+    const owned = new Set(ownedRows.map(r => r.id));
+    const ph = codeList.map(() => '?').join(',');
+    // Roll un-aged control activity up to the JE, so each row reads like a GL
+    // line the way the A/P report presents its imported entries.
+    const lines = db.prepare(
+      'SELECT je.id AS entry_id, je.entry_num, je.date, je.memo, '
+      + 'SUM(jl.debit - jl.credit) AS amount '
+      + 'FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id '
+      + 'WHERE je.entity_id = ? AND je.date <= ? AND jl.account_code IN (' + ph + ') '
+      + 'GROUP BY je.id ORDER BY je.date, je.entry_num').all(eid, asOf, ...codeList);
+    for (const l of lines) {
+      if (owned.has(l.entry_id)) continue;
+      const amt = r2(l.amount || 0);
+      if (Math.abs(amt) < 0.005) continue;
+      glRows.push({ entry_id: l.entry_id, entry_num: l.entry_num, date: l.date, memo: l.memo || 'GL detail import', amount: amt });
+      glTotal = r2(glTotal + amt);
+    }
+  }
+  totals.gl = glTotal;
+  totals.total = r2(totals.total + glTotal);
+
   return {
-    as_of: asOf, ar_accounts: Array.from(codes), rows: rows, totals: totals, detail: detail,
+    as_of: asOf, ar_accounts: codeList, ar_account: def || (codeList[0] || null),
+    rows: rows, totals: totals, detail: detail,
+    gl_rows: glRows, gl_total: glTotal,
     gl_ar_balance: glBalance, recon_diff: r2(glBalance - totals.total),
   };
 }
