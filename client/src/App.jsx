@@ -2711,13 +2711,27 @@ function BankMatchModal({txn, entityId, onClose, onMatched}){
 function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClose, onSaved}){
   const target = Math.abs(txn.amount);
   const initialLines = (txn.splits && txn.splits.length > 0)
-    ? txn.splits.map(s => ({ account_code: s.account_code, amount: String(s.amount), memo: s.memo || '', project_id: s.project_id||null, class_id: s.class_id||null, location_id: s.location_id||null }))
+    ? txn.splits.map(s => ({ account_code: s.account_code, amount: String(s.amount), memo: s.memo || '', project_id: s.project_id||null, class_id: s.class_id||null, location_id: s.location_id||null, invoice_id: s.invoice_id||null }))
     : (txn.account_code
         ? [{ account_code: txn.account_code, amount: target.toFixed(2), memo: txn.memo || '', project_id: txn.project_id||null, class_id: txn.class_id||null, location_id: txn.location_id||null }, { account_code: '', amount: '', memo: '' }]
         : [{ account_code: '', amount: '', memo: '' }, { account_code: '', amount: '', memo: '' }]);
   const [lines, setLines] = useState(initialLines);
   const [err, setErr] = useState('');
   const [saving, setSaving] = useState(false);
+  // A/R cash application: a deposit line coded to the A/R control account can be
+  // applied to a specific open invoice, tagging the split with invoice_id so the
+  // aging report clears that document on post (no extra JE).
+  const arCodes = (accounts||[]).filter(a => /accounts?\s*receivable/i.test(a.name||'') && !/other|note|interest/i.test(a.name||'')).map(a => String(a.code));
+  const isDeposit = txn.amount > 0;
+  const [openInvoices, setOpenInvoices] = useState([]);
+  useEffect(() => { if (isDeposit && arCodes.length) api.getArOpenInvoices(entityId).then(d => setOpenInvoices((d && d.invoices) || [])).catch(() => {}); }, [entityId]);
+  const isArLine = l => arCodes.includes(String(l.account_code));
+  const pickInvoice = (i, invId) => setLines(prev => prev.map((l, idx) => {
+    if (idx !== i) return l;
+    if (!invId) return { ...l, invoice_id: null };
+    const inv = openInvoices.find(o => String(o.id) === String(invId));
+    return inv ? { ...l, invoice_id: inv.id, amount: String(inv.open), memo: l.memo || inv.invoice_num } : l;
+  }));
   const [locations, setLocations] = useState([]); const [classes, setClasses] = useState([]); const [dimProjects, setDimProjects] = useState([]);
   useEffect(() => { api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>{}); api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>{}); api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>{}); }, [entityId]);
   const dimOpts = [
@@ -2746,7 +2760,7 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClos
     if (!balanced) { setErr('Splits must total ' + fmt(target) + ' (currently off by ' + fmt(remaining) + ')'); return; }
     setSaving(true);
     try {
-      await api.splitBankTransaction(entityId, txn.id, valid.map(l => ({ account_code: l.account_code, amount: parseAmt(l.amount), memo: l.memo || null, project_id: l.project_id||null, class_id: l.class_id||null, location_id: l.location_id||null })));
+      await api.splitBankTransaction(entityId, txn.id, valid.map(l => ({ account_code: l.account_code, amount: parseAmt(l.amount), memo: l.memo || null, project_id: l.project_id||null, class_id: l.class_id||null, location_id: l.location_id||null, invoice_id: l.invoice_id || null })));
       onSaved();
     } catch (e) { setErr(e.message); } finally { setSaving(false); }
   };
@@ -2774,7 +2788,9 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClos
         <td style={{...S.td,padding:'4px 6px'}}><AccountAutocomplete accounts={accounts} value={l.account_code} exclude={excludeCode} onChange={v => updateLine(i, 'account_code', v)} placeholder="Search GL account..."/></td>
         {showDims&&<td style={{...S.td,padding:'4px 6px'}}><select style={{...S.inputSm,width:'100%'}} value={lineDimValue(l)} onChange={e=>setLineDim(i,e.target.value)}><option value="">No dimension</option>{dimOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</select></td>}
         <td style={{...S.td,padding:'4px 6px'}}><input style={{...S.inputSm,textAlign:'right',fontFamily:'monospace'}} value={l.amount} onChange={e => updateLine(i, 'amount', e.target.value)} placeholder="0.00"/></td>
-        <td style={{...S.td,padding:'4px 6px'}}><input style={S.inputSm} value={l.memo} onChange={e => updateLine(i, 'memo', e.target.value)} placeholder="Memo"/></td>
+        <td style={{...S.td,padding:'4px 6px'}}>{isDeposit && isArLine(l)
+          ? <select style={{...S.inputSm,width:'100%'}} value={l.invoice_id||''} onChange={e => pickInvoice(i, e.target.value)}><option value="">Apply to invoice&hellip; (on account)</option>{openInvoices.slice().sort((a,b)=>(Math.abs(b.open-target)<0.005)-(Math.abs(a.open-target)<0.005)).map(o => <option key={o.id} value={o.id}>{Math.abs(o.open-target)<0.005?'\u2713 ':''}{o.invoice_num} {'\u2014'} {o.customer} {'\u2014'} ${fmt(o.open)} ({o.bucket==='current'?'current':o.days_past_due+'d'})</option>)}</select>
+          : <input style={S.inputSm} value={l.memo} onChange={e => updateLine(i, 'memo', e.target.value)} placeholder="Memo"/>}</td>
         <td style={{...S.td,padding:'4px 6px',textAlign:'center'}}>{lines.length > 1 && <button style={S.btnGhost} onClick={() => removeLine(i)}>x</button>}</td>
       </tr>)}</tbody>
     </table>

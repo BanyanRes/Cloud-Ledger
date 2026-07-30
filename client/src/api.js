@@ -228,6 +228,7 @@ export const api = {
   addArReceipt: (eid, id, data) => request('/entities/' + eid + '/ar/invoices/' + id + '/receipts', { method: 'POST', body: data }),
   deleteArReceipt: (eid, id, rid) => request('/entities/' + eid + '/ar/invoices/' + id + '/receipts/' + rid, { method: 'DELETE' }),
   getArAging: (eid, asOf) => request('/entities/' + eid + '/ar/aging' + (asOf ? '?as_of=' + asOf : '')),
+  getArOpenInvoices: (eid, amount) => request('/entities/' + eid + '/ar/open-invoices' + (amount != null ? '?amount=' + amount : '')),
   getDimensionBalances: (eid, opts = {}) => {
     const p = [];
     if (opts.dim) p.push('dim=' + opts.dim);
