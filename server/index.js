@@ -551,6 +551,13 @@ for (const _tbl of ['bank_transactions', 'bank_transaction_splits']) {
   if (!_cols.includes('location_id')) db.exec(`ALTER TABLE ${_tbl} ADD COLUMN location_id INTEGER`);
 }
 console.log('[db migrate] bank_transactions/splits dimension columns ensured');
+// AR cash application: a split line can carry the ar_invoice it pays, so posting
+// a deposit coded to the A/R control account also records the subledger receipt.
+{
+  const _sc = db.prepare("PRAGMA table_info(bank_transaction_splits)").all().map(c => c.name);
+  if (!_sc.includes('invoice_id')) db.exec('ALTER TABLE bank_transaction_splits ADD COLUMN invoice_id INTEGER');
+  console.log('[db migrate] bank_transaction_splits.invoice_id ensured');
+}
 // Dimension code columns (name was the only label originally; code added for reporting/sorting)
 const dcCols = db.prepare("PRAGMA table_info(dim_classes)").all().map(c => c.name);
 if (!dcCols.includes('code')) { db.exec("ALTER TABLE dim_classes ADD COLUMN code TEXT"); console.log('[db migrate] dim_classes.code added'); }
@@ -3309,8 +3316,8 @@ app.put('/api/entities/:eid/bank-transactions/:id/splits', auth, requireEntityAc
 
   db.transaction(() => {
     db.prepare('DELETE FROM bank_transaction_splits WHERE txn_id=?').run(txn.id);
-    const ins = db.prepare('INSERT INTO bank_transaction_splits (txn_id, account_code, amount, memo, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?)');
-    for (const s of splits) ins.run(txn.id, s.account_code, Number(s.amount), s.memo || null, s.project_id || null, s.class_id || null, s.location_id || null);
+    const ins = db.prepare('INSERT INTO bank_transaction_splits (txn_id, account_code, amount, memo, project_id, class_id, location_id, invoice_id) VALUES (?,?,?,?,?,?,?,?)');
+    for (const s of splits) ins.run(txn.id, s.account_code, Number(s.amount), s.memo || null, s.project_id || null, s.class_id || null, s.location_id || null, s.invoice_id || null);
     // Clear the single-code field + its dimensions (dimensions now live per split) and mark coded
     db.prepare('UPDATE bank_transactions SET account_code=NULL, project_id=NULL, class_id=NULL, location_id=NULL, status=? WHERE id=?').run('coded', txn.id);
   })();
@@ -3319,6 +3326,7 @@ app.put('/api/entities/:eid/bank-transactions/:id/splits', auth, requireEntityAc
 
 app.post('/api/entities/:eid/bank-transactions/post', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { transaction_ids } = req.body;
+  const arMod = require('./ar');
   if (!transaction_ids || transaction_ids.length === 0) return res.status(400).json({ error: 'No transactions' });
 
   const txns = db.prepare(`SELECT * FROM bank_transactions WHERE entity_id=? AND id IN (${transaction_ids.map(()=>'?').join(',')}) AND status='coded'`)
@@ -3385,6 +3393,17 @@ app.post('/api/entities/:eid/bank-transactions/post', auth, requireEntityAccess(
       }
 
       db.prepare('UPDATE bank_transactions SET status=?, je_id=? WHERE id=?').run('posted', jeId, t.id);
+      // Deposit splits coded to an A/R invoice also record a subledger receipt
+      // against that invoice, so the aging report clears the specific document
+      // while the GL keeps one clean deposit JE (Dr bank / Cr A/R control).
+      if (hasSplits && t.amount > 0) {
+        for (const s of splits) {
+          if (!s.invoice_id) continue;
+          arMod.recordArReceipt(db, { entity_id: +req.params.eid, invoice_id: s.invoice_id, date: t.date,
+            amount: s.amount, bank_account_code: t.bank_account_code, memo: s.memo || t.memo || null,
+            je_id: jeId, created_by: req.user.name });
+        }
+      }
       results.push({ txn_id: t.id, je_id: jeId, entry_num: num });
     }
   })();

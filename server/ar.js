@@ -79,6 +79,11 @@ function ensureSchema(db) {
   const cols = db.prepare('PRAGMA table_info(ar_invoices)').all().map(c => c.name);
   if (!cols.includes('void_je_id')) db.exec('ALTER TABLE ar_invoices ADD COLUMN void_je_id INTEGER');
   if (!cols.includes('voided_at')) db.exec('ALTER TABLE ar_invoices ADD COLUMN voided_at TEXT');
+  // origin: 'native' = a CloudLedger invoice with its own accrual JE; 'opening'
+  // = a legacy item imported from the prior system's A/R aging detail, GL-backed
+  // (no accrual JE — the balance already sits on the control account) and aged
+  // by its own invoice/due dates so the legacy A/R reads as a real subledger.
+  if (!cols.includes('origin')) db.exec("ALTER TABLE ar_invoices ADD COLUMN origin TEXT DEFAULT 'native'");
   console.log('[db] AR invoicing schema ready');
 }
 
@@ -441,7 +446,15 @@ function buildAging(db, eid, asOf) {
   // / manually-booked balance that we surface un-aged.
   const glRows = [];
   let glTotal = 0;
-  if (codeList.length) {
+  const bucketsTotal = totals.total;
+  // If a legacy opening subledger has been imported, the control balance is now
+  // itemized into aged buckets, so the GL column becomes the residual not yet on
+  // the subledger. buckets + residual == control balance, so recon ties to 0.
+  const hasOpening = db.prepare("SELECT COUNT(*) AS c FROM ar_invoices WHERE entity_id = ? AND origin = 'opening'").get(eid).c > 0;
+  if (hasOpening) {
+    glTotal = r2(glBalance - bucketsTotal);
+    if (Math.abs(glTotal) >= 0.005) glRows.push({ entry_id: null, entry_num: null, date: asOf, memo: 'Un-itemized GL balance (not yet on the subledger)', amount: glTotal });
+  } else if (codeList.length) {
     // Own only the JEs of NON-void invoices, plus receipt JEs. A void invoice's
     // accrual and its reversal are deliberately left un-owned so both fall into
     // the GL column and net to zero there — otherwise the accrual would be hidden
@@ -468,7 +481,7 @@ function buildAging(db, eid, asOf) {
     }
   }
   totals.gl = glTotal;
-  totals.total = r2(totals.total + glTotal);
+  totals.total = r2(bucketsTotal + glTotal);
 
   return {
     as_of: asOf, ar_accounts: codeList, ar_account: def || (codeList[0] || null),
@@ -476,6 +489,68 @@ function buildAging(db, eid, asOf) {
     gl_rows: glRows, gl_total: glTotal,
     gl_ar_balance: glBalance, recon_diff: r2(glBalance - totals.total),
   };
+}
+
+// ─── legacy opening-balance subledger + external cash application ────────────
+// Import a prior-system A/R aging detail as GL-backed "opening" open items: one
+// ar_invoice per document, aging by its own dates, with NO accrual JE (the
+// balance already sits on the control account from the legacy GL import).
+// Idempotent per entity: existing opening items with no receipts are replaced.
+function importOpeningItems(db, eid, items, opts = {}) {
+  const arCode = defaultArAccount(db, eid) || '12000';
+  const existing = db.prepare("SELECT id FROM ar_invoices WHERE entity_id = ? AND origin = 'opening'").all(eid).map(r => r.id);
+  if (existing.length) {
+    const ph = existing.map(() => '?').join(',');
+    const withRec = db.prepare('SELECT COUNT(*) AS c FROM ar_receipts WHERE invoice_id IN (' + ph + ')').get(...existing).c;
+    if (withRec > 0 && !opts.force) throw new Error('Opening items already have ' + withRec + ' applied receipt(s); pass force:true to replace');
+    db.prepare('DELETE FROM ar_receipts WHERE invoice_id IN (' + ph + ')').run(...existing);
+    db.prepare('DELETE FROM ar_invoice_lines WHERE invoice_id IN (' + ph + ')').run(...existing);
+    const del = db.prepare('DELETE FROM ar_invoices WHERE id = ?');
+    for (const id of existing) del.run(id);
+  }
+  const findCust = db.prepare('SELECT id, name FROM ar_customers WHERE entity_id = ? AND name = ?');
+  const insCust = db.prepare('INSERT INTO ar_customers (entity_id, name) VALUES (?, ?)');
+  const used = new Set(db.prepare('SELECT invoice_num FROM ar_invoices WHERE entity_id = ?').all(eid).map(r => r.invoice_num));
+  const insInv = db.prepare('INSERT INTO ar_invoices (entity_id, customer_id, invoice_num, invoice_date, due_date, customer_name, subtotal, total, ar_account_code, status, sent_at, origin, created_by) '
+    + "VALUES (?,?,?,?,?,?,?,?,?,'sent',?,'opening',?)");
+  let inserted = 0, total = 0; const out = [];
+  db.transaction(() => {
+    for (const it of items) {
+      const name = String(it.customer_name || '').trim() || '(no customer)';
+      let cust = findCust.get(eid, name);
+      if (!cust) { const r = insCust.run(eid, name); cust = { id: r.lastInsertRowid, name }; }
+      let num = String(it.document_no || it.invoice_num || '').trim() || ('OPEN-' + (inserted + 1));
+      if (used.has(num)) { let n = 2; while (used.has(num + '-' + n)) n++; num = num + '-' + n; }
+      used.add(num);
+      const amt = r2(it.amount);
+      const invDate = isDate(it.invoice_date) ? it.invoice_date : (isDate(it.due_date) ? it.due_date : todayStr());
+      const dueDate = isDate(it.due_date) ? it.due_date : invDate;
+      insInv.run(eid, cust.id, num, invDate, dueDate, name, amt, amt, arCode, invDate, opts.who || 'opening-import');
+      inserted++; total = r2(total + amt); out.push({ invoice_num: num, customer: name, amount: amt });
+    }
+  })();
+  return { inserted, total, ar_account: arCode, items: out };
+}
+
+// Apply a cash receipt to an invoice WITHOUT posting a new JE — used when the
+// cash side is already booked elsewhere (e.g. a bank-transaction post whose JE
+// debits the bank and credits the A/R control account). Records the subledger
+// allocation and flips the invoice to paid when fully applied.
+function recordArReceipt(db, o) {
+  const inv = db.prepare('SELECT * FROM ar_invoices WHERE id = ? AND entity_id = ?').get(o.invoice_id, o.entity_id);
+  if (!inv) throw new Error('Invoice ' + o.invoice_id + ' not found for entity ' + o.entity_id);
+  if (inv.status === 'void') throw new Error('Invoice ' + inv.invoice_num + ' is void');
+  const amt = r2(o.amount);
+  if (!(amt > 0.005)) throw new Error('Receipt amount must be positive');
+  const priorPaid = r2(db.prepare('SELECT COALESCE(SUM(amount),0) AS p FROM ar_receipts WHERE invoice_id = ?').get(o.invoice_id).p);
+  if (Number(inv.total || 0) >= 0 && (priorPaid + amt) - r2(inv.total) > 0.005) {
+    throw new Error('Receipt of ' + amt.toFixed(2) + ' exceeds the open balance of ' + r2(Number(inv.total || 0) - priorPaid).toFixed(2) + ' on ' + inv.invoice_num);
+  }
+  db.prepare('INSERT INTO ar_receipts (invoice_id, entity_id, date, amount, bank_account_code, memo, je_id, created_by) VALUES (?,?,?,?,?,?,?,?)')
+    .run(o.invoice_id, o.entity_id, o.date, amt, o.bank_account_code || '', o.memo || null, o.je_id || null, o.created_by || null);
+  const paid = r2(db.prepare('SELECT COALESCE(SUM(amount),0) AS p FROM ar_receipts WHERE invoice_id = ?').get(o.invoice_id).p);
+  if (paid >= r2(inv.total) - 0.005) db.prepare("UPDATE ar_invoices SET status='paid', paid_at=? WHERE id=?").run(o.date, o.invoice_id);
+  return { invoice_num: inv.invoice_num, paid, open: r2(Number(inv.total || 0) - paid) };
 }
 
 // ═══ route registration ════════════════════════════════════════════════════
@@ -820,6 +895,41 @@ function registerArRoutes(app, ctx) {
     res.json({ success: true });
   });
 
+  // ── opening subledger import + AR cash-application picker feed ──
+  app.post('/api/entities/:eid/ar/opening-import', ...writers, (req, res) => {
+    try {
+      const items = Array.isArray(req.body && req.body.items) ? req.body.items : null;
+      if (!items || !items.length) throw new Error('items[] is required');
+      res.json(importOpeningItems(db, req.params.eid, items, { who: who(req), force: !!(req.body && req.body.force) }));
+    } catch (e) { fail(res, e); }
+  });
+
+  app.get('/api/entities/:eid/ar/opening', ...readers, (req, res) => {
+    const r = db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(total),0) AS total FROM ar_invoices WHERE entity_id = ? AND origin = 'opening'").get(req.params.eid);
+    res.json({ count: r.n, total: r2(r.total) });
+  });
+
+  // Open invoices a bank deposit can be applied to; flags exact-amount matches
+  // so the coding screen can auto-suggest a single invoice for the deposit.
+  app.get('/api/entities/:eid/ar/open-invoices', ...readers, (req, res) => {
+    const eid = req.params.eid;
+    const amount = req.query.amount != null && req.query.amount !== '' ? r2(req.query.amount) : null;
+    const invs = db.prepare("SELECT * FROM ar_invoices WHERE entity_id = ? AND status != 'void' ORDER BY customer_name, invoice_date, invoice_num").all(eid);
+    const paidBy = new Map();
+    for (const r of db.prepare('SELECT invoice_id, SUM(amount) AS paid FROM ar_receipts WHERE entity_id = ? GROUP BY invoice_id').all(eid)) paidBy.set(r.invoice_id, Number(r.paid || 0));
+    const today = todayStr(); const open = [];
+    for (const inv of invs) {
+      const openAmt = r2(Number(inv.total || 0) - (paidBy.get(inv.id) || 0));
+      if (Math.abs(openAmt) < 0.005) continue;
+      const past = inv.due_date ? daysBetween(inv.due_date, today) : 0;
+      const bucket = past <= 0 ? 'current' : past <= 30 ? 'd1_30' : past <= 60 ? 'd31_60' : past <= 90 ? 'd61_90' : 'd90_plus';
+      open.push({ id: inv.id, invoice_num: inv.invoice_num, customer: inv.customer_name, invoice_date: inv.invoice_date,
+        due_date: inv.due_date, open: openAmt, bucket, days_past_due: Math.max(past, 0),
+        exact_match: amount != null && Math.abs(openAmt - amount) < 0.005 });
+    }
+    res.json({ amount, invoices: open, exact_matches: amount != null ? open.filter(o => o.exact_match) : [] });
+  });
+
   // ── aging ──
   app.get('/api/entities/:eid/ar/aging', ...readers, (req, res) => {
     const asOf = isDate(req.query.as_of) ? req.query.as_of : todayStr();
@@ -829,6 +939,7 @@ function registerArRoutes(app, ctx) {
 
 module.exports = {
   registerArRoutes, buildInvoicePdf, buildAging, defaultArAccount, ensureSchema,
+  importOpeningItems, recordArReceipt,
   // exported for tests
   createInvoice, nextInvoiceNum, advanceNextRun, postJE, invoiceWithLines,
 };
