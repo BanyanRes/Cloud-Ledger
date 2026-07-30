@@ -509,11 +509,69 @@ function ResetPasswordScreen({token}){
   </div>);
 }
 
+// ═══ Sidebar category flyout ═══
+// Clicking a sidebar category opens this panel to the right of the rail. Items can
+// be dragged into a different order; the new order is handed back to the caller,
+// which persists it per-user on the server. Positioned `fixed` rather than absolute
+// so the sidebar's own overflow can't clip it.
+function NavFlyout({catKey,catLabel,items,pos,page,canReorder,onPick,onClose,onReorder}){
+  const ids=items.map(i=>i.id);
+  const[list,setList]=useState(ids);
+  const[drag,setDrag]=useState(null);
+  const key=ids.join(',');
+  useEffect(()=>{setList(ids);setDrag(null);},[catKey,key]);
+  useEffect(()=>{const h=e=>{if(e.key==='Escape')onClose();};window.addEventListener('keydown',h);return()=>window.removeEventListener('keydown',h);},[onClose]);
+  const byId={};items.forEach(i=>{byId[i.id]=i;});
+  const move=(from,to)=>setList(l=>{const n=l.slice();const[x]=n.splice(from,1);n.splice(to,0,x);return n;});
+  const commit=()=>{setDrag(null);if(list.join(',')!==key)onReorder(list);};
+  const est=list.length*33+(canReorder?70:34);
+  const top=Math.max(12,Math.min(pos.top,Math.max(12,window.innerHeight-est-12)));
+  return(<>
+    <div style={{position:'fixed',inset:0,zIndex:70}} onClick={onClose}/>
+    <div style={{position:'fixed',top,left:pos.left,zIndex:71,width:256,background:T.bgCard,borderRadius:T.radiusSm,border:'1px solid '+T.border,boxShadow:T.shadowLg,padding:'8px 0',maxHeight:'calc(100vh - 24px)',overflowY:'auto'}}>
+      <div style={{padding:'2px 14px 8px',fontSize:9,fontWeight:700,color:T.textDim,textTransform:'uppercase',letterSpacing:'0.12em'}}>{catLabel}</div>
+      {list.map((id,i)=>{
+        const n=byId[id];if(!n)return null;
+        const active=page===id;
+        return(<div key={id} draggable={canReorder}
+          onDragStart={()=>setDrag(i)}
+          onDragEnter={()=>{if(drag!=null&&drag!==i){move(drag,i);setDrag(i);}}}
+          onDragOver={e=>e.preventDefault()}
+          onDragEnd={commit}
+          onDrop={e=>{e.preventDefault();commit();}}
+          onClick={()=>onPick(id)}
+          style={{display:'flex',alignItems:'center',gap:8,padding:'7px 14px',cursor:'pointer',fontSize:13,
+            fontWeight:active?600:400,color:active?T.accent:T.text,
+            background:drag===i?T.bgHover:(active?T.accentDim:'transparent'),
+            borderLeft:'3px solid '+(active?T.accent:'transparent')}}>
+          {canReorder&&<span onClick={e=>e.stopPropagation()} title="Drag to reorder" style={{color:T.textDim,fontSize:12,cursor:'grab',lineHeight:1}}>⠿</span>}
+          <span style={{width:20,textAlign:'center'}}>{n.icon}</span>
+          <span style={{flex:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{n.label}</span>
+        </div>);
+      })}
+      {canReorder&&list.length>1&&<div style={{borderTop:'1px solid '+T.borderLight,marginTop:6,paddingTop:7,display:'flex',justifyContent:'space-between',alignItems:'center',padding:'7px 14px 0'}}>
+        <span style={{fontSize:10,color:T.textDim}}>Drag to reorder</span>
+        <button style={{background:'none',border:'none',color:T.textMuted,fontSize:10,cursor:'pointer',padding:0}} onClick={e=>{e.stopPropagation();onReorder(null);}}>Reset</button></div>}
+    </div></>);
+}
+
 export default function App(){
   const[user,setUser]=useState(null);const[entities,setEntities]=useState([]);const[activeEntity,setActiveEntity]=useState(null);
   // Workpapers modal openable from the header (any page), for the active entity.
   const[wpEntity,setWpEntity]=useState(null);
   const[page,setPage]=useState('dashboard');const[loading,setLoading]=useState(true);
+  // Sidebar: which category flyout is open ({key,top,left}), and the per-user
+  // item order inside each category ({CATEGORY:[pageId,...]}), loaded from and
+  // saved to the server so it follows the user across browsers and machines.
+  const[openCat,setOpenCat]=useState(null);
+  const[navOrder,setNavOrder]=useState({});
+  useEffect(()=>{
+    if(!user)return;let live=true;
+    (async()=>{try{const p=await api.getMyPrefs();
+      if(live&&p&&p.navOrder&&typeof p.navOrder==='object'&&!Array.isArray(p.navOrder))setNavOrder(p.navOrder);
+    }catch(e){console.error('[nav] could not load prefs:',e.message);}})();
+    return()=>{live=false;};
+  },[user]);
   // JE to auto-open after navigating to the Journal page (used by global search).
   const[pendingJEId,setPendingJEId]=useState(null);
   // Account code to pre-filter the CoA page (used by global search).
@@ -651,20 +709,71 @@ export default function App(){
   const isShellEntity = !!(_activeEnt && _activeEnt.entity_type==='shell');
   const dimsEnabled = !!_activeEnt && !isShellEntity;// location/class dimensions available on every entity EXCEPT shell
   const arEnabled = !!_activeEnt && !isShellEntity;// AR / customer invoicing available on every entity EXCEPT shell
-  const navItems=[
-    {id:'dashboard',label:'Dashboard',icon:NI.dashboard,section:'reports'},
-    {id:'d1',divider:1,label:'TRANSACTIONS'},{id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
-    {id:'d2',divider:1,label:'ACCOUNTS'},{id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},...(dimsEnabled?[{id:'dimensions',label:'Dimensions',icon:'🏷️',section:'coa'}]:[]),{id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
-    {id:'d2b',divider:1,label:'BANKING'},{id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},{id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
-    {id:'d3',divider:1,label:'REPORTS'},{id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},{id:'ttm',label:'Trailing 12 Months',icon:'📈',section:'reports'},{id:'fundrep',label:'Fund Reporting',icon:'🏦',section:'reports'},{id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},{id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},{id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
-    {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),{id:'apaging',label:'AP Aging',icon:'⏳',section:'reports'},{id:'commitments',label:'Commitments',icon:'🤝',section:'reports'},{id:'memorized',label:'Memorized Reports',icon:'★',section:'reports'},
-    ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
-    ...(isDevEntity?[{id:'d3b',divider:1,label:'DEVELOPMENT'},{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
-    ...(arEnabled?[{id:'d3c',divider:1,label:'RECEIVABLES'},{id:'ar_customers',label:'Customers',icon:'👥',section:'coa'},{id:'ar_invoices',label:'Invoices',icon:'🧾',section:'coa'},{id:'ar_recurring',label:'Recurring',icon:'🔁',section:'coa'},{id:'ar_aging',label:'A/R Aging',icon:'⏱️',section:'reports'}]:[]),
-    ...(isCLRF?[{id:'dwp',divider:1,label:'WORKPAPERS'},{id:'wp_mgmtfee',label:'Management Fee',icon:'📄',section:'workpapers'}]:[]),
-    {id:'d4',divider:1,label:'ADMIN'},{id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},{id:'users',label:'Users',icon:NI.users,section:'all'},
-    {id:'d5',divider:1,label:'INTEGRATIONS'},{id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
+  // Six top-level categories: Accounting, Banking, A/R, Reports, Workpapers,
+  // Administration. The rail shows only the categories; clicking one opens a
+  // flyout to its right listing that category's pages. Entity-conditional pages
+  // live inside a permanent category so switching entities never reshuffles the
+  // rail, and a category with nothing visible to this user is dropped entirely.
+  const hasWorkpapers = isDevEntity || isCLRF;
+  const navTree=[
+    {key:'ACCOUNTING',label:'Accounting',icon:'📘',items:[
+      {id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
+      {id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},
+      ...(dimsEnabled?[{id:'dimensions',label:'Dimensions',icon:'🏷️',section:'coa'}]:[]),
+    ]},
+    {key:'BANKING',label:'Banking',icon:'🏛️',items:[
+      {id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},
+      {id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
+    ]},
+    ...(arEnabled?[{key:'AR',label:'A/R',icon:'🧾',items:[
+      {id:'ar_customers',label:'Customers',icon:'👥',section:'coa'},
+      {id:'ar_invoices',label:'Invoices',icon:'🧾',section:'coa'},
+      {id:'ar_recurring',label:'Recurring',icon:'🔁',section:'coa'},
+      {id:'ar_aging',label:'A/R Aging',icon:'⏱️',section:'reports'},
+    ]}]:[]),
+    {key:'REPORTS',label:'Reports',icon:'📊',items:[
+      {id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},
+      {id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},
+      {id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
+      {id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},
+      {id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
+      {id:'apaging',label:'A/P Aging',icon:'⏳',section:'reports'},
+      {id:'ttm',label:'Trailing 12 Months',icon:'📈',section:'reports'},
+      {id:'fundrep',label:'Fund Reporting',icon:'🏦',section:'reports'},
+      {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},
+      ...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),
+      {id:'commitments',label:'Commitments',icon:'🤝',section:'reports'},
+      ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
+      {id:'memorized',label:'Memorized Reports',icon:'★',section:'reports'},
+    ]},
+    ...(hasWorkpapers?[{key:'WORKPAPERS',label:'Workpapers',icon:'📄',items:[
+      ...(isDevEntity?[{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
+      ...(isCLRF?[{id:'wp_mgmtfee',label:'Management Fee',icon:'📄',section:'workpapers'}]:[]),
+    ]}]:[]),
+    {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
+      {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
+      {id:'users',label:'Users',icon:NI.users,section:'all'},
+      {id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
+    ]},
   ];
+  // Access filter, then the user's saved order. Items with no saved position sort
+  // to the end in their declared order (Array.sort is stable), so a newly shipped
+  // page appears at the bottom of its category rather than disappearing.
+  const visibleItems=cat=>cat.items.filter(n=>n.section==='all'?user.role==='Admin':canAccess(n.section));
+  const orderedItems=cat=>{
+    const ord=navOrder[cat.key]||[];
+    const rank=id=>{const i=ord.indexOf(id);return i<0?1e6:i;};
+    return visibleItems(cat).slice().sort((a,b)=>rank(a.id)-rank(b.id));
+  };
+  const navCats=navTree.filter(c=>visibleItems(c).length>0);
+  const activeCat=navCats.find(c=>c.items.some(n=>n.id===page));
+  const openCatDef=openCat?navCats.find(c=>c.key===openCat.key):null;
+  const saveNavOrder=async(catKey,ids)=>{
+    const next={...navOrder};
+    if(ids)next[catKey]=ids;else delete next[catKey];
+    setNavOrder(next);
+    try{await api.saveMyPrefs({navOrder:next});}catch(e){console.error('[nav] could not save order:',e.message);}
+  };
 
   return(<div style={S.app}>
     <div style={S.topBar}><div style={{display:'flex',alignItems:'center',gap:16}}>
@@ -677,9 +786,24 @@ export default function App(){
         <button style={S.btnS} onClick={()=>setShowChangePw(true)}>Settings</button>
         <button style={S.btnS} onClick={()=>{api.clearToken();setUser(null);}}>Sign Out</button></div></div>
     <div style={S.body}><div style={S.sidebar(sidebarCol)}>
-      {navItems.map(n=>n.divider?(!sidebarCol?<div key={n.id} style={S.navSection(sidebarCol)}>{n.label}</div>:<div key={n.id} style={{height:8}}/>)
-        :(n.section==='all'?user.role==='Admin':canAccess(n.section))?<div key={n.id} style={S.navItem(page===n.id,sidebarCol)} onClick={()=>setPage(n.id)} title={n.label}>
-          {sidebarCol?<span style={{display:'inline-block',width:18,textAlign:'center',fontSize:15}}>{n.icon}</span>:<span><span style={{display:'inline-block',width:22,textAlign:'center',marginRight:8}}>{n.icon}</span>{n.label}</span>}</div>:null)}</div>
+      <div style={S.navItem(page==='dashboard',sidebarCol)} onClick={()=>{setOpenCat(null);setPage('dashboard');}} title="Dashboard">
+        {sidebarCol?<span style={{display:'inline-block',width:18,textAlign:'center',fontSize:15}}>{NI.dashboard}</span>
+          :<span><span style={{display:'inline-block',width:22,textAlign:'center',marginRight:8}}>{NI.dashboard}</span>Dashboard</span>}</div>
+      <div style={{height:10}}/>
+      {navCats.map(c=>{
+        const isOpen=!!openCat&&openCat.key===c.key;
+        return(<div key={c.key} title={c.label}
+          style={{...S.navItem(isOpen||(activeCat&&activeCat.key===c.key),sidebarCol),display:'flex',alignItems:'center',justifyContent:sidebarCol?'center':'space-between'}}
+          onClick={e=>{const r=e.currentTarget.getBoundingClientRect();setOpenCat(isOpen?null:{key:c.key,top:r.top,left:r.right+6});}}>
+          {sidebarCol?<span style={{fontSize:15}}>{c.icon}</span>:<>
+            <span><span style={{display:'inline-block',width:22,textAlign:'center',marginRight:8}}>{c.icon}</span>{c.label}</span>
+            <span style={{fontSize:9,marginRight:8,opacity:0.75,display:'inline-block',transform:isOpen?'rotate(90deg)':'none',transition:'transform 0.12s'}}>{'\u25B6'}</span></>}
+        </div>);
+      })}</div>
+      {openCat&&openCatDef&&<NavFlyout catKey={openCatDef.key} catLabel={openCatDef.label} items={orderedItems(openCatDef)}
+        pos={openCat} page={page} canReorder={true}
+        onPick={id=>{setPage(id);setOpenCat(null);}} onClose={()=>setOpenCat(null)}
+        onReorder={ids=>saveNavOrder(openCatDef.key,ids)}/>}
       <div style={S.main}>{(()=>{const en=entities.find(e=>e.id===activeEntity);const entityName=en?en.name:'';return<>
         {page==='dashboard'&&<Dashboard entityId={activeEntity} setActiveEntity={setActiveEntity} setPage={setPage} user={user} key={rk}/>}
         {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)} openJEId={pendingJEId} clearOpenJE={()=>setPendingJEId(null)}/>}

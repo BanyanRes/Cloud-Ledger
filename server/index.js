@@ -1153,6 +1153,41 @@ app.put('/api/auth/profile', auth, (req, res) => {
   const updated = db.prepare('SELECT id, name, email, role FROM users WHERE id = ?').get(req.user.id);
   res.json(updated);
 });
+
+// ── Per-user UI preferences ────────────────────────────────────────────────
+// A single JSON blob per user for client-side layout choices that should follow
+// the person across browsers and machines (currently the sidebar's per-category
+// item order). Deliberately schema-less: the client owns the shape, so adding a
+// new preference never needs a migration. PUT does a shallow merge so one client
+// writing navOrder cannot clobber a key it does not know about.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_prefs (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    prefs TEXT NOT NULL DEFAULT '{}',
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
+function readPrefs(userId) {
+  const row = db.prepare('SELECT prefs FROM user_prefs WHERE user_id = ?').get(userId);
+  if (!row) return {};
+  try { const p = JSON.parse(row.prefs); return (p && typeof p === 'object' && !Array.isArray(p)) ? p : {}; }
+  catch { return {}; }
+}
+
+app.get('/api/me/prefs', auth, (req, res) => res.json(readPrefs(req.user.id)));
+
+app.put('/api/me/prefs', auth, (req, res) => {
+  const patch = req.body;
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return res.status(400).json({ error: 'Body must be a JSON object' });
+  const next = Object.assign(readPrefs(req.user.id), patch);
+  const json = JSON.stringify(next);
+  if (json.length > 100000) return res.status(413).json({ error: 'Preferences too large' });
+  db.prepare(`INSERT INTO user_prefs (user_id, prefs, updated_at) VALUES (?, ?, datetime('now'))
+    ON CONFLICT(user_id) DO UPDATE SET prefs = excluded.prefs, updated_at = datetime('now')`)
+    .run(req.user.id, json);
+  res.json(next);
+});
 app.post('/api/auth/change-password', auth, (req, res) => {
   const { current_password, new_password } = req.body;
   if (!new_password || new_password.length < 3) return res.status(400).json({ error: 'Too short' });
