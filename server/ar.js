@@ -84,6 +84,10 @@ function ensureSchema(db) {
   // (no accrual JE — the balance already sits on the control account) and aged
   // by its own invoice/due dates so the legacy A/R reads as a real subledger.
   if (!cols.includes('origin')) db.exec("ALTER TABLE ar_invoices ADD COLUMN origin TEXT DEFAULT 'native'");
+  // aging_date: the date the aging clock runs from. NULL for native invoices
+  // (they age by due date, unchanged). Opening items set it to the legacy GL
+  // posting date so the report matches the prior system's posting-date aging.
+  if (!cols.includes('aging_date')) db.exec('ALTER TABLE ar_invoices ADD COLUMN aging_date TEXT');
   console.log('[db] AR invoicing schema ready');
 }
 
@@ -408,7 +412,8 @@ function buildAging(db, eid, asOf) {
   for (const inv of invoices) {
     const open = r2(Number(inv.total || 0) - (recByInv.get(inv.id) || 0));
     if (Math.abs(open) < 0.005) continue;
-    const past = inv.due_date ? daysBetween(inv.due_date, asOf) : 0;
+    const agingRef = inv.aging_date || inv.due_date;
+    const past = agingRef ? daysBetween(agingRef, asOf) : 0;
     const bucket = past <= 0 ? 'current' : past <= 30 ? 'd1_30' : past <= 60 ? 'd31_60' : past <= 90 ? 'd61_90' : 'd90_plus';
     const key = inv.customer_name || '(no customer)';
     if (!byCustomer.has(key)) byCustomer.set(key, Object.assign({ customer: key }, zero()));
@@ -511,8 +516,8 @@ function importOpeningItems(db, eid, items, opts = {}) {
   const findCust = db.prepare('SELECT id, name FROM ar_customers WHERE entity_id = ? AND name = ?');
   const insCust = db.prepare('INSERT INTO ar_customers (entity_id, name) VALUES (?, ?)');
   const used = new Set(db.prepare('SELECT invoice_num FROM ar_invoices WHERE entity_id = ?').all(eid).map(r => r.invoice_num));
-  const insInv = db.prepare('INSERT INTO ar_invoices (entity_id, customer_id, invoice_num, invoice_date, due_date, customer_name, subtotal, total, ar_account_code, status, sent_at, origin, created_by) '
-    + "VALUES (?,?,?,?,?,?,?,?,?,'sent',?,'opening',?)");
+  const insInv = db.prepare('INSERT INTO ar_invoices (entity_id, customer_id, invoice_num, invoice_date, due_date, aging_date, customer_name, subtotal, total, ar_account_code, status, sent_at, origin, created_by) '
+    + "VALUES (?,?,?,?,?,?,?,?,?,?,'sent',?,'opening',?)");
   let inserted = 0, total = 0; const out = [];
   db.transaction(() => {
     for (const it of items) {
@@ -525,7 +530,8 @@ function importOpeningItems(db, eid, items, opts = {}) {
       const amt = r2(it.amount);
       const invDate = isDate(it.invoice_date) ? it.invoice_date : (isDate(it.due_date) ? it.due_date : todayStr());
       const dueDate = isDate(it.due_date) ? it.due_date : invDate;
-      insInv.run(eid, cust.id, num, invDate, dueDate, name, amt, amt, arCode, invDate, opts.who || 'opening-import');
+      const agingDate = isDate(it.posting_date) ? it.posting_date : invDate;
+      insInv.run(eid, cust.id, num, invDate, dueDate, agingDate, name, amt, amt, arCode, invDate, opts.who || 'opening-import');
       inserted++; total = r2(total + amt); out.push({ invoice_num: num, customer: name, amount: amt });
     }
   })();
@@ -921,7 +927,8 @@ function registerArRoutes(app, ctx) {
     for (const inv of invs) {
       const openAmt = r2(Number(inv.total || 0) - (paidBy.get(inv.id) || 0));
       if (Math.abs(openAmt) < 0.005) continue;
-      const past = inv.due_date ? daysBetween(inv.due_date, today) : 0;
+      const agingRef = inv.aging_date || inv.due_date;
+      const past = agingRef ? daysBetween(agingRef, today) : 0;
       const bucket = past <= 0 ? 'current' : past <= 30 ? 'd1_30' : past <= 60 ? 'd31_60' : past <= 90 ? 'd61_90' : 'd90_plus';
       open.push({ id: inv.id, invoice_num: inv.invoice_num, customer: inv.customer_name, invoice_date: inv.invoice_date,
         due_date: inv.due_date, open: openAmt, bucket, days_past_due: Math.max(past, 0),
