@@ -306,6 +306,7 @@ db.exec(`
     cash_account_code TEXT,
     billcom_clearing_code TEXT,
     ar_owner_code TEXT,
+    retainage_receivable_code TEXT,
     costs_in_excess_code TEXT,
     cip_code TEXT,
     ap_sub_code TEXT,
@@ -610,6 +611,10 @@ const tpmCols = db.prepare("PRAGMA table_info(turnkey_project_map)").all().map(c
 if (!tpmCols.includes('project_code')) {
   db.exec("ALTER TABLE turnkey_project_map ADD COLUMN project_code TEXT");
   console.log('[db migrate] turnkey_project_map.project_code added');
+}
+if (!tpmCols.includes('retainage_receivable_code')) {
+  db.exec("ALTER TABLE turnkey_project_map ADD COLUMN retainage_receivable_code TEXT");
+  console.log('[db migrate] turnkey_project_map.retainage_receivable_code added');
 }
 if (!tpmCols.includes('project_name')) {
   db.exec("ALTER TABLE turnkey_project_map ADD COLUMN project_name TEXT");

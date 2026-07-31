@@ -13,6 +13,7 @@ const POC_ACCOUNTS = [
   { code: '10000', name: 'Cash',                                type: 'Asset' },     // shared w/ default
   { code: '10500', name: 'Bill.com Clearing',                   type: 'Asset' },     // new (avoids 10100)
   { code: '11500', name: 'Accounts Receivable - Owner',         type: 'Asset' },     // new (avoids 11000)
+  { code: '11600', name: 'Retainage Receivable - Owner',        type: 'Asset' },     // new (retainage withheld on owner billings)
   { code: '14500', name: 'Costs in Excess of Billings',         type: 'Asset' },     // new (avoids 12500)
   { code: '15500', name: 'Construction-in-Progress',            type: 'Asset' },     // new (avoids 13000)
   { code: '20500', name: 'Accounts Payable - Subcontractors',   type: 'Liability' }, // new (avoids 20000)
@@ -134,16 +135,16 @@ function linkProject(db, params) {
     db.prepare(
       'INSERT INTO turnkey_project_map (' +
       'turnkey_project_id, cl_entity_id,' +
-      'cash_account_code, billcom_clearing_code, ar_owner_code,' +
+      'cash_account_code, billcom_clearing_code, ar_owner_code, retainage_receivable_code,' +
       'costs_in_excess_code, cip_code, ap_sub_code,' +
       'billings_uncompleted_code, billings_in_excess_code,' +
       'revenue_code, cost_of_construction_code,' +
       'project_code, project_name, contract_amount, total_estimated_costs,' +
       'created_at' +
-      ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(
       turnkey_project_id, cl_entity_id,
-      pick('10000'), pick('10500'), pick('11500'),
+      pick('10000'), pick('10500'), pick('11500'), pick('11600'),
       pick('14500'), pick('15500'), pick('20500'),
       pick('23000'), pick('24000'),
       pick('45000'), pick('55000'),
@@ -227,6 +228,14 @@ function postJE(db, args) {
   return entryId;
 }
 
+// Ensure an account exists on an entity. Used for accounts the sync may post to
+// that weren't part of the original project link (e.g. Retainage Receivable on
+// projects linked before retainage support existed).
+function ensureAccount(db, entityId, code, name, type) {
+  const ex = db.prepare('SELECT 1 FROM accounts WHERE entity_id = ? AND code = ?').get(entityId, code);
+  if (!ex) db.prepare('INSERT INTO accounts (entity_id, code, name, type) VALUES (?, ?, ?, ?)').run(entityId, code, name, type);
+}
+
 // ===== Sync event handlers =====
 
 // Event 1: Sub pay app approved -> Dr. CIP / Cr. AP-Sub
@@ -283,30 +292,63 @@ function syncSubPayAppPaid(db, payload) {
   return { cl_entry_id: entryId, idempotent: false };
 }
 
-// Event 3: Owner pay app issued -> Dr. AR / Cr. Billings on Uncompleted
+// Event 3: Owner pay app issued (with retainage)
+//   Dr. AR - Owner              net collectible now (gross - retainage)
+//   Dr. Retainage Receivable    retainage withheld by owner
+//   Cr. Billings on Uncompleted gross earned this period
+// `date` is the pay-app PERIOD end (e.g. 2026-05-31) so the entry posts in the
+// billing month, not the sync date. Pass replace:true to reverse a prior sync
+// of the same pay app and re-post (used to correct pre-retainage entries).
 function syncOwnerPayAppIssued(db, payload) {
   const map = db.prepare('SELECT * FROM turnkey_project_map WHERE turnkey_project_id = ?').get(payload.turnkey_project_id);
   if (!map) throw new Error('Project ' + payload.turnkey_project_id + ' not linked');
+  if (!payload.date) throw new Error('Pay app period date required (set the pay app period, e.g. 2026-05-31) before syncing');
+
+  // Amounts. `amount` is the gross earned this period (total schedule of values).
+  // Retainage may arrive as an explicit amount or a percentage; AR shows the net.
+  const gross = +Number(payload.amount || 0).toFixed(2);
+  let retainage = 0;
+  if (payload.retainage != null) retainage = Math.abs(+Number(payload.retainage).toFixed(2));
+  else if (payload.retainage_pct != null) { let p = Math.abs(Number(payload.retainage_pct) || 0); if (p > 1) p = p / 100; retainage = +(gross * p).toFixed(2); }
+  if (retainage > gross) throw new Error('Retainage ' + retainage + ' exceeds gross amount ' + gross);
+  const net = +(gross - retainage).toFixed(2);
 
   const existing = findExistingSync(db, { sync_type: 'owner_payapp_issued', turnkey_id: payload.payapp_id });
-  if (existing) return { cl_entry_id: existing.cl_entry_id, idempotent: true };
+  if (existing) {
+    if (!payload.replace) return { cl_entry_id: existing.cl_entry_id, idempotent: true };
+    // Correction path: reverse the prior entry + its sync-log row, then re-post.
+    db.transaction(function () {
+      db.prepare('DELETE FROM journal_lines WHERE entry_id = ?').run(existing.cl_entry_id);
+      db.prepare('DELETE FROM journal_entries WHERE id = ? AND entity_id = ?').run(existing.cl_entry_id, map.cl_entity_id);
+      db.prepare("DELETE FROM turnkey_sync_log WHERE sync_type = 'owner_payapp_issued' AND turnkey_id = ?").run(String(payload.payapp_id));
+    })();
+  }
+
+  // Retainage Receivable: use the mapped code, else the POC default (11600),
+  // ensuring the account exists so reports resolve its name/type correctly.
+  const retCode = map.retainage_receivable_code || '11600';
+  if (retainage > 0) ensureAccount(db, map.cl_entity_id, retCode, 'Retainage Receivable - Owner', 'Asset');
+
+  const lines = [
+    { account_code: map.ar_owner_code, debit: net, credit: 0, description: 'AR - Owner (net of retainage)', project_id: payload.turnkey_project_id },
+  ];
+  if (retainage > 0) lines.push({ account_code: retCode, debit: retainage, credit: 0, description: 'Retainage receivable', project_id: payload.turnkey_project_id });
+  lines.push({ account_code: map.billings_uncompleted_code, debit: 0, credit: gross, description: 'Billings on uncompleted contract', project_id: payload.turnkey_project_id });
 
   const entryId = postJE(db, {
     cl_entity_id: map.cl_entity_id,
     date: payload.date,
-    memo: 'Owner pay app issued',
+    memo: 'Owner pay app issued' + (retainage > 0 ? ' (net of retainage)' : ''),
     reference: 'TKR-OWPA-' + payload.payapp_id,
-    lines: [
-      { account_code: map.ar_owner_code, debit: payload.amount, credit: 0, description: 'AR - Owner', project_id: payload.turnkey_project_id },
-      { account_code: map.billings_uncompleted_code, debit: 0, credit: payload.amount, description: 'Billings on uncompleted contract', project_id: payload.turnkey_project_id },
-    ],
+    lines: lines,
   });
 
   logSync(db, {
     cl_entity_id: map.cl_entity_id, sync_type: 'owner_payapp_issued',
-    turnkey_id: payload.payapp_id, cl_entry_id: entryId, status: 'success', payload: payload,
+    turnkey_id: payload.payapp_id, cl_entry_id: entryId, status: 'success',
+    message: 'gross=' + gross + ' retainage=' + retainage + ' net=' + net, payload: payload,
   });
-  return { cl_entry_id: entryId, idempotent: false };
+  return { cl_entry_id: entryId, idempotent: false, gross: gross, retainage: retainage, net: net };
 }
 
 // Event 4: Owner payment received -> Dr. Cash / Cr. AR
@@ -483,10 +525,11 @@ function computeWipRow(db, map, asOfDate) {
   const pctComplete = estTotalCost > 0 ? Math.min(costsToDate / estTotalCost, 1) : 0;
   const earnedRevenue = Math.round(pctComplete * contract * 100) / 100;
 
-  // Billed to date = sum of credits on Billings on Uncompleted AR cycle = cumulative gross billings
-  // We sum AR debits (every owner pay app issued posted Dr.AR)
+  // Billed to date = cumulative GROSS billings. Since AR now holds only the net
+  // (retainage split into Retainage Receivable), add both AR and retainage debits.
   const arAct = actDr(map.ar_owner_code);
-  const billedToDate = arAct.dr; // every issued owner pay app
+  const retAct = actDr(map.retainage_receivable_code || '11600');
+  const billedToDate = arAct.dr + retAct.dr; // gross = net AR + retainage withheld
 
   const overUnder = Math.round((billedToDate - earnedRevenue) * 100) / 100;
 
