@@ -175,7 +175,7 @@ const S = {
   app: { fontFamily: "'Inter',-apple-system,sans-serif", background: T.bg, color: T.text, minHeight: '100vh', display: 'flex', flexDirection: 'column', fontSize: 13, lineHeight: 1.5 },
   topBar: { background: T.bgCard, borderBottom: '1px solid '+T.border, padding: '0 24px', height: 56, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, zIndex: 10, boxShadow: T.shadow },
   body: { display: 'flex', flex: 1, overflow: 'hidden' },
-  sidebar: col => ({ width: col ? 56 : 224, background: T.sidebarBg, padding: col ? '12px 4px' : '16px 0', flexShrink: 0, overflowY: 'auto', overflowX: 'hidden', transition: 'width 0.2s ease', display: 'flex', flexDirection: 'column' }),
+  sidebar: col => ({ width: col ? 56 : 256, background: T.sidebarBg, padding: col ? '12px 4px' : '16px 0', flexShrink: 0, overflowY: 'auto', overflowX: 'hidden', transition: 'width 0.2s ease', display: 'flex', flexDirection: 'column' }),
   navItem: (a, col) => ({ padding: col ? '10px 0' : '9px 20px', cursor: 'pointer', fontSize: 12.5, fontWeight: a ? 600 : 400, color: a ? T.sidebarActive : T.sidebarText, background: a ? '#ffffff12' : 'transparent', borderRadius: col ? T.radiusXs : '0 6px 6px 0', margin: col ? '2px 6px' : '1px 8px 1px 0', borderLeft: col ? 'none' : (a ? '3px solid '+T.sidebarAccent : '3px solid transparent'), transition: 'all 0.12s', textAlign: col ? 'center' : 'left', whiteSpace: 'nowrap', overflow: 'hidden' }),
   navSection: col => ({ padding: col ? '12px 0 4px' : '18px 20px 6px', fontSize: 9, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.12em', textAlign: col ? 'center' : 'left' }),
   main: { flex: 1, padding: '28px 32px', overflowY: 'auto', background: T.bg },
@@ -799,7 +799,7 @@ export default function App(){
           style={{...S.navItem(isOpen||(activeCat&&activeCat.key===c.key),sidebarCol),display:'flex',alignItems:'center',justifyContent:sidebarCol?'center':'space-between'}}
           onClick={e=>{const r=e.currentTarget.getBoundingClientRect();setOpenCat(isOpen?null:{key:c.key,top:r.top,left:r.right+6});}}>
           {sidebarCol?<span style={{fontSize:15}}>{c.icon}</span>:<>
-            <span style={{flex:1,whiteSpace:'nowrap',paddingRight:12}}><span style={{display:'inline-block',width:22,textAlign:'center',marginRight:8}}>{c.icon}</span>{c.label}</span>
+            <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',paddingRight:25}}><span style={{display:'inline-block',width:22,textAlign:'center',marginRight:8}}>{c.icon}</span>{c.label}</span>
             <span style={{fontSize:9,marginRight:8,opacity:0.75,flexShrink:0,display:'inline-block',transform:isOpen?'rotate(90deg)':'none',transition:'transform 0.12s'}}>{'\u25B6'}</span></>}
         </div>);
       })}</div>
