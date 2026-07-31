@@ -799,7 +799,7 @@ export default function App(){
           style={{...S.navItem(isOpen||(activeCat&&activeCat.key===c.key),sidebarCol),display:'flex',alignItems:'center',justifyContent:sidebarCol?'center':'space-between'}}
           onClick={e=>{const r=e.currentTarget.getBoundingClientRect();setOpenCat(isOpen?null:{key:c.key,top:r.top,left:r.right+6});}}>
           {sidebarCol?<span style={{fontSize:15}}>{c.icon}</span>:<>
-            <span style={{flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',paddingRight:12}}><span style={{display:'inline-block',width:22,textAlign:'center',marginRight:8}}>{c.icon}</span>{c.label}</span>
+            <span style={{flex:1,whiteSpace:'nowrap',paddingRight:12}}><span style={{display:'inline-block',width:22,textAlign:'center',marginRight:8}}>{c.icon}</span>{c.label}</span>
             <span style={{fontSize:9,marginRight:8,opacity:0.75,flexShrink:0,display:'inline-block',transform:isOpen?'rotate(90deg)':'none',transition:'transform 0.12s'}}>{'\u25B6'}</span></>}
         </div>);
       })}</div>
