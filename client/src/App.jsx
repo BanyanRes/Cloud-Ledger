@@ -725,19 +725,22 @@ export default function App(){
       {id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},
       {id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
     ]},
-    ...(arEnabled?[{key:'AR',label:'A/R',icon:'🧾',items:[
+    ...(arEnabled?[{key:'AR',label:'Accounts Receivable',icon:'🧾',items:[
       {id:'ar_customers',label:'Customers',icon:'👥',section:'coa'},
       {id:'ar_invoices',label:'Invoices',icon:'🧾',section:'coa'},
       {id:'ar_recurring',label:'Recurring',icon:'🔁',section:'coa'},
       {id:'ar_aging',label:'A/R Aging',icon:'⏱️',section:'reports'},
     ]}]:[]),
+    {key:'AP',label:'Accounts Payable',icon:'📥',items:[
+      {id:'apaging',label:'A/P Aging',icon:'⏳',section:'reports'},
+      {id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
+    ]},
     {key:'REPORTS',label:'Reports',icon:'📊',items:[
       {id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},
       {id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},
       {id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
       {id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},
       {id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
-      {id:'apaging',label:'A/P Aging',icon:'⏳',section:'reports'},
       {id:'ttm',label:'Trailing 12 Months',icon:'📈',section:'reports'},
       {id:'fundrep',label:'Fund Reporting',icon:'🏦',section:'reports'},
       {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},
@@ -753,7 +756,6 @@ export default function App(){
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
       {id:'users',label:'Users',icon:NI.users,section:'all'},
-      {id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
     ]},
   ];
   // Access filter, then the user's saved order. Items with no saved position sort
