@@ -952,6 +952,55 @@ async function billcomListBillsWindowed({ sessionId, devKey, baseUrl, fromDate, 
   return Array.from(byId.values());
 }
 
+// Fetch bills by updatedTime window instead of dueDate. A bill approved after the
+// sync cutoff must have been updated at/after approval, so this captures late,
+// back-dated invoices a dueDate window (anchored on the cutoff month) would miss.
+// Same month-windowing to dodge v3's broken offset pagination.
+async function billcomListBillsByUpdatedWindowed({ sessionId, devKey, baseUrl, fromDate, toDate }) {
+  const base = (baseUrl || BILLCOM_BASE_URLS.sandbox);
+  const hdr = { sessionId, devKey, Accept: "application/json" };
+  const addMonth = (d) => { const [Y, M] = d.split("-"); let yy = +Y, mm = +M + 1; if (mm > 12) { mm = 1; yy++; } return yy + "-" + String(mm).padStart(2, "0") + "-01"; };
+  const startYM = fromDate.slice(0, 7) + "-01";
+  const endExclusive = addMonth(toDate.slice(0, 7) + "-01");
+  const byId = new Map();
+  let win = startYM;
+  let guard = 0;
+  while (win < endExclusive && guard < 240) {
+    guard++;
+    const winEnd = addMonth(win);
+    const filt = "updatedTime:gte:" + win + ",updatedTime:lt:" + winEnd;
+    const url = base + "/bills?max=100&billApprovals=true&filters=" + encodeURIComponent(filt);
+    let json;
+    try {
+      const resp = await billcomFetch(url, { method: "GET", headers: hdr }, 20000);
+      const text = await resp.text();
+      try { json = JSON.parse(text); } catch { throw new Error("Non-JSON bills window (HTTP " + resp.status + ")"); }
+      if (!resp.ok) { const msg = Array.isArray(json) ? json.map(e => e.message || JSON.stringify(e)).join("; ") : (json.message || ("HTTP " + resp.status)); throw new Error("bills window: " + msg); }
+    } catch (e) { throw new Error("bills updated-window " + win + ": " + e.message); }
+    const results = Array.isArray(json.results) ? json.results : [];
+    for (const b of results) { const id = b && b.id; if (id != null && !byId.has(String(id))) byId.set(String(id), b); }
+    if (results.length >= 100) console.log("[billcom sync] WARNING updated-window " + win + " hit 100-row cap; may be truncated");
+    win = winEnd;
+  }
+  return Array.from(byId.values());
+}
+
+// Approval-complete date of a bill = latest statusChangedTime among approvers that
+// have APPROVED it (requires billApprovals=true on the fetch). Falls back to the
+// bill createdTime when no approver approval timestamp is present, so legacy
+// pre-conversion bills (old createdTime) stay excluded while a newly-entered bill
+// is judged by when it was entered.
+function billApprovalDate(bill) {
+  const aps = Array.isArray(bill && bill.approvers) ? bill.approvers : [];
+  let latest = null;
+  for (const a of aps) {
+    if (String((a && a.status) || "").toUpperCase() !== "APPROVED") continue;
+    const t = a.statusChangedTime || null;
+    if (t && (!latest || String(t) > String(latest))) latest = t;
+  }
+  return latest || (bill && bill.createdTime) || null;
+}
+
 // Bill.com v3 /payments has the SAME broken offset pagination as /bills (nextPage
 // returns the same first 100 rows), so a plain paged fetch silently caps at the
 // first page and never sees newer payments. Mirror the bills approach: walk
@@ -4913,43 +4962,6 @@ app.post('/api/billcom/ap-aging-check/:entity_id', auth, requireEntityAccess('en
   res.json({ ok: true, aging_uploaded: true, aging_as_of: cfg.ap_aging_as_of || null, aging_lines: agingLines.length, cutoff_date: cutoffDate, checked_bills: checked, overlap_count: overlaps.length, overlaps });
 });
 
-// TEMP diagnostic (read-only, no writes): inspect Bill.com v3 approval fields on
-// real bills so we can build approval-date-based sync gating. Remove after use.
-app.get('/api/billcom/approval-probe/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
-  let session;
-  try {
-    const password = billcomDecrypt(cfg.password_enc);
-    const devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
-  const listArgs = { sessionId: session.sessionId, devKey: billcomDecrypt(cfg.dev_key_enc), baseUrl: cfg.api_base_url };
-  const summ = (b) => ({
-    id: b.id,
-    invoiceDate: (b.invoice && b.invoice.invoiceDate) || b.invoiceDate || null,
-    createdTime: b.createdTime || null,
-    updatedTime: b.updatedTime || null,
-    approvalStatus: b.approvalStatus || null,
-    approvers: Array.isArray(b.approvers) ? b.approvers.map(a => ({ userId: a.userId, status: a.status, statusChangedTime: a.statusChangedTime, approverOrder: a.approverOrder })) : (b.approvers === undefined ? 'ABSENT' : b.approvers)
-  });
-  const out = {};
-  try {
-    const withP = await billcomListV3({ ...listArgs, resourcePath: '/bills', extraParams: { billApprovals: 'true' }, maxItems: 20 });
-    out.count = withP.length;
-    out.list_withParam = withP.slice(0, 20).map(summ);
-  } catch (e) { out.list_withParam_error = e.message; }
-  try {
-    const firstId = (out.list_withParam && out.list_withParam[0] && out.list_withParam[0].id) || null;
-    if (firstId) {
-      try { out.detail_withParam = summ(await billcomGetById({ ...listArgs, resourcePath: '/bills', id: firstId, extraParams: { billApprovals: 'true' } })); } catch (e) { out.detail_withParam_error = e.message; }
-      try { out.detail_noParam = summ(await billcomGetById({ ...listArgs, resourcePath: '/bills', id: firstId })); } catch (e) { out.detail_noParam_error = e.message; }
-    }
-  } catch (e) { out.detail_error = e.message; }
-  res.json(out);
-});
-
 app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
@@ -5054,7 +5066,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   const windowFrom = (cutoffDate.slice(0, 7) + '-01');
   const windowTo = (() => { const d = new Date(); d.setMonth(d.getMonth() + 1); return d.toISOString().slice(0, 10); })();
   try {
-    bills = await billcomListBillsWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo });
+    bills = await billcomListBillsByUpdatedWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo });
   } catch (e) {
     return res.status(502).json({ error: 'Failed to fetch bills: ' + e.message });
   }
@@ -5065,25 +5077,11 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   }
 
   const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
-  // Bills: sync regardless of approval progress. Per client request (CLA, 7/2026)
-  // approvals are NOT required to sync — a bill still awaiting approvers (ASSIGNED)
-  // is imported like any other. The only status we refuse is DENIED, since a
-  // rejected bill should never post to the ledger. Setting body.require_approval
-  // (or config) restores the stricter behavior that waits for full approval.
-  const requireApproval = !!(req.body && req.body.require_approval);
-  const isBillEligible = (bill) => {
-    const a = String(pick(bill, 'approvalStatus', 'status') || '').toUpperCase();
-    const p = String(pick(bill, 'paymentStatus') || '').toUpperCase();
-    if (a === 'DENIED') return false;                 // rejected bills never post
-    if (requireApproval) {
-      // legacy strict mode: only fully-approved / ungated / already-paid bills
-      if (a === 'ASSIGNED') return false;
-      if (a === 'APPROVED' || a === 'UNASSIGNED' || a === '') return true;
-      if (p === 'PAID' || p === 'PARTIAL_PAID' || p === 'PARTIALLY_PAID') return true;
-      return false;
-    }
-    return true;                                      // default: approvals not required
-  };
+  // Bills: APPROVED-ONLY. AP is recorded on approval, so a bill syncs only once it
+  // is fully APPROVED — ASSIGNED/awaiting-approval bills are held until they clear,
+  // and DENIED bills never post. Supersedes the earlier "approvals not required"
+  // behavior (CLA, 7/2026). Approval DATE gating happens per-bill below.
+  const isBillEligible = (bill) => String(pick(bill, 'approvalStatus', 'status') || '').toUpperCase() === 'APPROVED';
   // Payments: only process if actually disbursed (or scheduled to be).
   const isPaymentEligible = (pay) => {
     const s = String(pick(pay, 'paymentStatus', 'status') || '').toUpperCase();
@@ -5137,15 +5135,10 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       result.bills.details.push({ id: billId, status: 'skip', reason: 'already synced' });
       continue;
     }
-    // Cheap cutoff check on the list object's date (avoids an expensive detail
-    // fetch for the many pre-cutoff bills). A detail-based check below is the
-    // safety net for when the list omits a date.
+    // Invoice/list date is kept only for the A/P-aging dedupe below; the sync no
+    // longer gates on invoice date. Gating is by APPROVAL date (per-bill, after the
+    // detail fetch) so back-dated late invoices approved after the cutoff still sync.
     const listDate = pick(bill, 'invoiceDate', 'invoice_date', 'dueDate') || pick(pick(bill, 'invoice') || {}, 'invoiceDate', 'invoice_date');
-    if (listDate && String(listDate) < cutoffDate) {
-      result.bills.skipped++;
-      result.bills.details.push({ id: billId, status: 'skip', reason: 'before cutoff ' + cutoffDate + ' (date ' + listDate + ')' });
-      continue;
-    }
     // A/P aging dedupe: skip bills already present in the uploaded A/P aging
     // (already booked in the GL). Done here on the list object — before the
     // per-run budget gate and the detail fetch — so overlaps neither consume the
@@ -5174,7 +5167,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     // List endpoint omits some fields (notably chartOfAccountId on line items); hydrate from detail.
     let detail = bill;
     try {
-      detail = await billcomGetById({ ...listArgs, resourcePath: '/bills', id: billId });
+      detail = await billcomGetById({ ...listArgs, resourcePath: '/bills', id: billId, extraParams: { billApprovals: 'true' } });
     } catch (e) {
       result.bills.errors++;
       logSync.run(entityId, 'bill', billId, null, 'error', 'detail fetch failed: ' + e.message, now, null);
@@ -5192,10 +5185,14 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       continue;
     }
 
-    // Skip bills dated before the opening-balance cutoff (already in the opening JE).
-    if (String(invoiceDate) < cutoffDate) {
+    // Gate on APPROVAL date (AP is booked on approval). Bills approved before the
+    // cutoff were already booked pre-conversion — skip them. Late invoices approved
+    // on/after the cutoff sync even when their invoice date is older.
+    const approvedDate = billApprovalDate(detail);
+    const approvedDay = approvedDate ? String(approvedDate).slice(0, 10) : null;
+    if (!approvedDay || approvedDay < cutoffDate) {
       result.bills.skipped++;
-      result.bills.details.push({ id: billId, status: 'skip', reason: 'before cutoff ' + cutoffDate + ' (date ' + invoiceDate + ')' });
+      result.bills.details.push({ id: billId, status: 'skip', reason: 'approved before cutoff ' + cutoffDate + ' (approved ' + (approvedDay || 'unknown') + ')' });
       continue;
     }
 
@@ -5294,7 +5291,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
           db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, class_id, location_id) VALUES (?,?,?,?,?,?)')
             .run(r.lastInsertRowid, l.account_code, l.debit, l.credit, l.class_id || null, l.location_id || null);
         }
-        logSync.run(entityId, 'bill', billId, r.lastInsertRowid, 'success', 'created JE #' + num, now, billNumber);
+        logSync.run(entityId, 'bill', billId, r.lastInsertRowid, 'success', 'created JE #' + num + ' (approved ' + approvedDay + ')', now, billNumber);
         return r.lastInsertRowid;
       })();
       result.bills.synced++;

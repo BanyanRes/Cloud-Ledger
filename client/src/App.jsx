@@ -1410,7 +1410,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
           <div>
             <label style={S.label}>Sync Cutoff Date</label>
             <input type="date" value={syncCutoffDate} onChange={e=>setSyncCutoffDate(e.target.value)} style={S.input}/>
-            <div style={{fontSize:11,color:T.textMuted,marginTop:4}}>Only Bill.com invoices dated <b>on or after</b> this date are synced. Set this to the day <b>after</b> your imported GL detail ends (e.g. GL through 4/30 → set 5/1) so already-imported invoices aren't duplicated. Leave blank to sync everything.</div>
+            <div style={{fontSize:11,color:T.textMuted,marginTop:4}}>Only bills <b>approved on or after</b> this date are synced (AP is booked on approval, so a late invoice with an older invoice date still syncs once it's approved). Set this to your CloudLedger go-live date for this entity so bills already booked in the prior system aren't duplicated. Leave blank to sync everything.</div>
           </div>
         </div>
 
