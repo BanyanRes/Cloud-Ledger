@@ -733,7 +733,7 @@ export default function App(){
     ]}]:[]),
     {key:'AP',label:'Accounts Payable',icon:'📥',items:[
       {id:'apaging',label:'A/P Aging',icon:'⏳',section:'reports'},
-      {id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
+      {id:'billcom_sync',label:'Bill.com Sync',icon:'🔄',section:'billcom'},
     ]},
     {key:'REPORTS',label:'Reports',icon:'📊',items:[
       {id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},
@@ -756,6 +756,7 @@ export default function App(){
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
       {id:'users',label:'Users',icon:NI.users,section:'all'},
+      {id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
     ]},
   ];
   // Access filter, then the user's saved order. Items with no saved position sort
@@ -830,6 +831,7 @@ export default function App(){
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='users'&&<UserManagement currentUser={user}/>}
         {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
+        {page==='billcom_sync'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity} initialTab='sync'/>}
         {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} canEdit={canEdit} reqState={reqState} setReqState={setReqState}/>}
         {page==='wp_mgmtfee'&&activeEntity&&isCLRF&&<MgmtFeeWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
@@ -1092,7 +1094,7 @@ function SpreadsheetEditorModal({ file, onClose, onSaved }) {
 }
 
 
-function BillcomSetup({entities,activeEntity,setActiveEntity}) {
+function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
   const[selectedEntity,setSelectedEntity]=useState(activeEntity||(entities[0]?entities[0].id:null));
   const[cfg,setCfg]=useState(null);
   const[loading,setLoading]=useState(false);
@@ -1111,7 +1113,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
   const[unsyncing,setUnsyncing]=useState(false);
 
   // Phase 2: account mapping state
-  const[tab,setTab]=useState('config'); // 'config' | 'mapping' | 'sync'
+  const[tab,setTab]=useState(initialTab||'config'); // 'config' | 'mapping' | 'sync'
   const[bcAccounts,setBcAccounts]=useState([]);
   const[clAccounts,setClAccounts]=useState([]);
   const[mappings,setMappings]=useState({}); // keyed by billcom_account_id
@@ -1195,6 +1197,10 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
     }catch(e){setSyncErr('Failed to load logs: '+e.message);}
     setSyncLogsLoading(false);
   },[selectedEntity]);
+
+  // When opened directly on the Sync view (the Bill.com Sync nav item), load the
+  // sync log once config is known so it shows without a manual Refresh Log click.
+  useEffect(()=>{ if(tab==='sync'&&cfg&&cfg.configured)loadSyncLogs(); },[cfg,tab,loadSyncLogs]);
 
   const runSync=async()=>{
     if(!selectedEntity)return;
