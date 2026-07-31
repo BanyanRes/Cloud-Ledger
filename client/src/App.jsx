@@ -708,7 +708,12 @@ export default function App(){
   const isCLRF = !!(_activeEnt && (_activeEnt.code==='CLRF' || /county\s*line\s*rail\s*fund/i.test(_activeEnt.name||'')));
   const isShellEntity = !!(_activeEnt && _activeEnt.entity_type==='shell');
   const dimsEnabled = !!_activeEnt && !isShellEntity;// location/class dimensions available on every entity EXCEPT shell
-  const arEnabled = !!_activeEnt && !isShellEntity;// AR / customer invoicing available on every entity EXCEPT shell
+  // AR module scope is per-entity by code. Full AR (customers/invoices/recurring
+  // + aging) for these six; A/R Aging only for Turnkey (invoices sync in from
+  // Turnkey Rail, not created here); no AR anywhere else.
+  const AR_FULL_CODES=['BANYANRE1','CLIPPROP','CLRSILSB2','SABINERI','CLRBUNAP','COUNTYLI3'];
+  const arFull = !!_activeEnt && AR_FULL_CODES.includes(_activeEnt.code);
+  const arAgingEnabled = arFull || !!(_activeEnt && _activeEnt.code==='TURNKEYR');
   // Six top-level categories: Accounting, Banking, A/R, Reports, Workpapers,
   // Administration. The rail shows only the categories; clicking one opens a
   // flyout to its right listing that category's pages. Entity-conditional pages
@@ -725,10 +730,12 @@ export default function App(){
       {id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},
       {id:'bankrec',label:'Bank Reconciliation',icon:NI.bankrec,section:'bankrec'},
     ]},
-    ...(arEnabled?[{key:'AR',label:'Accounts Receivable',icon:'🧾',items:[
-      {id:'ar_customers',label:'Customers',icon:'👥',section:'coa'},
-      {id:'ar_invoices',label:'Invoices',icon:'🧾',section:'coa'},
-      {id:'ar_recurring',label:'Recurring',icon:'🔁',section:'coa'},
+    ...(arAgingEnabled?[{key:'AR',label:'Accounts Receivable',icon:'🧾',items:[
+      ...(arFull?[
+        {id:'ar_customers',label:'Customers',icon:'👥',section:'coa'},
+        {id:'ar_invoices',label:'Invoices',icon:'🧾',section:'coa'},
+        {id:'ar_recurring',label:'Recurring',icon:'🔁',section:'coa'},
+      ]:[]),
       {id:'ar_aging',label:'A/R Aging',icon:'⏱️',section:'reports'},
     ]}]:[]),
     {key:'AP',label:'Accounts Payable',icon:'📥',items:[
@@ -812,10 +819,10 @@ export default function App(){
         {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)} openJEId={pendingJEId} clearOpenJE={()=>setPendingJEId(null)}/>}
         {page==='coa'&&activeEntity&&<ChartOfAccounts entityId={activeEntity} entityName={entityName} canEdit={canEdit}/>}
         {page==='dimensions'&&activeEntity&&dimsEnabled&&<DimensionsManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='ar_customers'&&activeEntity&&arEnabled&&<CustomersManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='ar_invoices'&&activeEntity&&arEnabled&&<ArInvoices entityId={activeEntity} entityName={entityName} canEdit={canEdit} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
-        {page==='ar_recurring'&&activeEntity&&arEnabled&&<ArRecurring entityId={activeEntity} entityName={entityName} canEdit={canEdit} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
-        {page==='ar_aging'&&activeEntity&&arEnabled&&<ArAgingReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
+        {page==='ar_customers'&&activeEntity&&arFull&&<CustomersManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='ar_invoices'&&activeEntity&&arFull&&<ArInvoices entityId={activeEntity} entityName={entityName} canEdit={canEdit} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
+        {page==='ar_recurring'&&activeEntity&&arFull&&<ArRecurring entityId={activeEntity} entityName={entityName} canEdit={canEdit} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
+        {page==='ar_aging'&&activeEntity&&arAgingEnabled&&<ArAgingReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
         {page==='banktxn'&&activeEntity&&<BankTransactions entityId={activeEntity} canEdit={canEdit} bankSelAcct={bankSelAcct} setBankSelAcct={setBankSelAcct} bankTxns={bankTxns} setBankTxns={setBankTxns} bankUploading={bankUploading} setBankUploading={setBankUploading} bankStatusFilter={bankStatusFilter} setBankStatusFilter={setBankStatusFilter}/>}
         {page==='bankrec'&&activeEntity&&<BankReconciliation entityId={activeEntity} user={user} canEdit={canEdit}/>}
