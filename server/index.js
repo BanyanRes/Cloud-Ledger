@@ -307,6 +307,7 @@ db.exec(`
     billcom_clearing_code TEXT,
     ar_owner_code TEXT,
     retainage_receivable_code TEXT,
+    cl_project_id INTEGER,
     costs_in_excess_code TEXT,
     cip_code TEXT,
     ap_sub_code TEXT,
@@ -615,6 +616,10 @@ if (!tpmCols.includes('project_code')) {
 if (!tpmCols.includes('retainage_receivable_code')) {
   db.exec("ALTER TABLE turnkey_project_map ADD COLUMN retainage_receivable_code TEXT");
   console.log('[db migrate] turnkey_project_map.retainage_receivable_code added');
+}
+if (!tpmCols.includes('cl_project_id')) {
+  db.exec("ALTER TABLE turnkey_project_map ADD COLUMN cl_project_id INTEGER");
+  console.log('[db migrate] turnkey_project_map.cl_project_id added');
 }
 if (!tpmCols.includes('project_name')) {
   db.exec("ALTER TABLE turnkey_project_map ADD COLUMN project_name TEXT");

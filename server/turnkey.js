@@ -153,6 +153,12 @@ function linkProject(db, params) {
     );
   }
 
+  const finalMap = db.prepare(
+    'SELECT * FROM turnkey_project_map WHERE turnkey_project_id = ?'
+  ).get(turnkey_project_id);
+  // Import the Turnkey project as a CloudLedger project dimension (by code) and
+  // cache its id, so synced activity tags the real project.
+  if (finalMap) resolveProjectDimId(db, finalMap);
   return db.prepare(
     'SELECT * FROM turnkey_project_map WHERE turnkey_project_id = ?'
   ).get(turnkey_project_id);
@@ -236,6 +242,32 @@ function ensureAccount(db, entityId, code, name, type) {
   if (!ex) db.prepare('INSERT INTO accounts (entity_id, code, name, type) VALUES (?, ?, ?, ?)').run(entityId, code, name, type);
 }
 
+// Import a Turnkey project as a CloudLedger project dimension on the entity.
+// Matches an existing dim by code, else by name, else inserts; returns the
+// dim_projects.id. Keeps name/code in sync with Turnkey on re-link.
+function ensureProjectDim(db, entityId, code, name) {
+  let row = code ? db.prepare('SELECT id FROM dim_projects WHERE entity_id = ? AND code = ?').get(entityId, code) : null;
+  if (!row && name) row = db.prepare('SELECT id FROM dim_projects WHERE entity_id = ? AND name = ?').get(entityId, name);
+  if (row) {
+    db.prepare('UPDATE dim_projects SET name = COALESCE(?, name), code = COALESCE(?, code) WHERE id = ?').run(name || null, code || null, row.id);
+    return row.id;
+  }
+  const r = db.prepare("INSERT INTO dim_projects (entity_id, name, code, kind) VALUES (?, ?, ?, 'project')").run(entityId, name || code, code || null);
+  return r.lastInsertRowid;
+}
+
+// Resolve the CloudLedger project dimension id for a mapped Turnkey project,
+// importing it from the stored project code/name on first use and caching it
+// back on the map. Synced lines tag this id, so activity lands on the real
+// project instead of a coincidental raw-id match.
+function resolveProjectDimId(db, map) {
+  if (map.cl_project_id) return map.cl_project_id;
+  const id = ensureProjectDim(db, map.cl_entity_id, map.project_code, map.project_name);
+  db.prepare('UPDATE turnkey_project_map SET cl_project_id = ? WHERE turnkey_project_id = ?').run(id, map.turnkey_project_id);
+  map.cl_project_id = id;
+  return id;
+}
+
 // ===== Sync event handlers =====
 
 // Event 1: Sub pay app approved -> Dr. CIP / Cr. AP-Sub
@@ -246,14 +278,15 @@ function syncSubPayAppApproved(db, payload) {
   const existing = findExistingSync(db, { sync_type: 'sub_payapp_approved', turnkey_id: payload.payapp_id });
   if (existing) return { cl_entry_id: existing.cl_entry_id, idempotent: true };
 
+  const pid = resolveProjectDimId(db, map);
   const entryId = postJE(db, {
     cl_entity_id: map.cl_entity_id,
     date: payload.date,
     memo: 'Sub pay app approved - ' + (payload.vendor_name || ''),
     reference: 'TKR-PA-' + payload.payapp_id,
     lines: [
-      { account_code: map.cip_code, debit: payload.amount, credit: 0, description: 'CIP accrual - ' + payload.vendor_name, project_id: payload.turnkey_project_id },
-      { account_code: map.ap_sub_code, debit: 0, credit: payload.amount, description: 'AP - ' + payload.vendor_name, project_id: payload.turnkey_project_id },
+      { account_code: map.cip_code, debit: payload.amount, credit: 0, description: 'CIP accrual - ' + payload.vendor_name, project_id: pid },
+      { account_code: map.ap_sub_code, debit: 0, credit: payload.amount, description: 'AP - ' + payload.vendor_name, project_id: pid },
     ],
   });
 
@@ -273,6 +306,7 @@ function syncSubPayAppPaid(db, payload) {
   if (existing) return { cl_entry_id: existing.cl_entry_id, idempotent: true };
 
   const creditCode = payload.payment_method === 'bill_com' ? map.billcom_clearing_code : map.cash_account_code;
+  const pid = resolveProjectDimId(db, map);
 
   const entryId = postJE(db, {
     cl_entity_id: map.cl_entity_id,
@@ -280,8 +314,8 @@ function syncSubPayAppPaid(db, payload) {
     memo: 'Sub pay app paid - ' + (payload.vendor_name || '') + ' (' + payload.payment_method + ')',
     reference: 'TKR-PMT-' + payload.payapp_id,
     lines: [
-      { account_code: map.ap_sub_code, debit: payload.amount, credit: 0, description: 'AP clear - ' + payload.vendor_name, project_id: payload.turnkey_project_id },
-      { account_code: creditCode, debit: 0, credit: payload.amount, description: 'Cash/Clearing out - ' + payload.payment_method, project_id: payload.turnkey_project_id },
+      { account_code: map.ap_sub_code, debit: payload.amount, credit: 0, description: 'AP clear - ' + payload.vendor_name, project_id: pid },
+      { account_code: creditCode, debit: 0, credit: payload.amount, description: 'Cash/Clearing out - ' + payload.payment_method, project_id: pid },
     ],
   });
 
@@ -329,11 +363,12 @@ function syncOwnerPayAppIssued(db, payload) {
   const retCode = map.retainage_receivable_code || '11600';
   if (retainage > 0) ensureAccount(db, map.cl_entity_id, retCode, 'Retainage Receivable - Owner', 'Asset');
 
+  const pid = resolveProjectDimId(db, map);
   const lines = [
-    { account_code: map.ar_owner_code, debit: net, credit: 0, description: 'AR - Owner (net of retainage)', project_id: payload.turnkey_project_id },
+    { account_code: map.ar_owner_code, debit: net, credit: 0, description: 'AR - Owner (net of retainage)', project_id: pid },
   ];
-  if (retainage > 0) lines.push({ account_code: retCode, debit: retainage, credit: 0, description: 'Retainage receivable', project_id: payload.turnkey_project_id });
-  lines.push({ account_code: map.billings_uncompleted_code, debit: 0, credit: gross, description: 'Billings on uncompleted contract', project_id: payload.turnkey_project_id });
+  if (retainage > 0) lines.push({ account_code: retCode, debit: retainage, credit: 0, description: 'Retainage receivable', project_id: pid });
+  lines.push({ account_code: map.billings_uncompleted_code, debit: 0, credit: gross, description: 'Billings on uncompleted contract', project_id: pid });
 
   const entryId = postJE(db, {
     cl_entity_id: map.cl_entity_id,
@@ -359,14 +394,15 @@ function syncOwnerPaymentReceived(db, payload) {
   const existing = findExistingSync(db, { sync_type: 'owner_payment_received', turnkey_id: payload.payapp_id });
   if (existing) return { cl_entry_id: existing.cl_entry_id, idempotent: true };
 
+  const pid = resolveProjectDimId(db, map);
   const entryId = postJE(db, {
     cl_entity_id: map.cl_entity_id,
     date: payload.date,
     memo: 'Owner payment received',
     reference: 'TKR-RCT-' + payload.payapp_id,
     lines: [
-      { account_code: map.cash_account_code, debit: payload.amount, credit: 0, description: 'Cash from owner', project_id: payload.turnkey_project_id },
-      { account_code: map.ar_owner_code, debit: 0, credit: payload.amount, description: 'AR clear', project_id: payload.turnkey_project_id },
+      { account_code: map.cash_account_code, debit: payload.amount, credit: 0, description: 'Cash from owner', project_id: pid },
+      { account_code: map.ar_owner_code, debit: 0, credit: payload.amount, description: 'AR clear', project_id: pid },
     ],
   });
 
@@ -390,13 +426,14 @@ function syncMonthEndPOC(db, payload) {
   const existing = findExistingSync(db, { sync_type: 'month_end_poc', turnkey_id: turnkey_id });
   if (existing) return { cl_entry_id: existing.cl_entry_id, idempotent: true };
 
+  const pid = resolveProjectDimId(db, map);
   function getBal(code) {
     const row = db.prepare(
       'SELECT COALESCE(SUM(l.debit), 0) - COALESCE(SUM(l.credit), 0) AS bal ' +
       'FROM journal_lines l ' +
       'JOIN journal_entries e ON e.id = l.entry_id ' +
       'WHERE e.entity_id = ? AND l.account_code = ? AND l.project_id = ? AND e.date <= ?'
-    ).get(map.cl_entity_id, code, String(payload.turnkey_project_id), payload.period_end_date);
+    ).get(map.cl_entity_id, code, String(pid), payload.period_end_date);
     return Number(row.bal || 0);
   }
   const cipBalance = getBal(map.cip_code);
@@ -407,7 +444,6 @@ function syncMonthEndPOC(db, payload) {
   const earnedRevenue = Math.round(pct * payload.contract_amount * 100) / 100;
   const recognizedCost = cipBalance;
 
-  const pid = payload.turnkey_project_id;
   const lines = [];
   if (recognizedCost > 0.005) {
     lines.push({ account_code: map.cost_of_construction_code, debit: recognizedCost, credit: 0, description: 'POC cost recognition', project_id: pid });
@@ -486,7 +522,7 @@ module.exports = {
 
 function computeWipRow(db, map, asOfDate) {
   const eid = map.cl_entity_id;
-  const pid = String(map.turnkey_project_id);
+  const pid = String(map.cl_project_id || map.turnkey_project_id);
 
   // SQL helper: net balance of an account on this entity, scoped to project_id, as of date
   function bal(code) {
