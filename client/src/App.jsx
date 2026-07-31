@@ -796,7 +796,7 @@ export default function App(){
       {navCats.map(c=>{
         const isOpen=!!openCat&&openCat.key===c.key;
         return(<div key={c.key} title={c.label}
-          style={{...S.navItem(isOpen||(activeCat&&activeCat.key===c.key),sidebarCol),display:'flex',alignItems:'center',justifyContent:sidebarCol?'center':'space-between'}}
+          style={{...S.navItem(isOpen||(activeCat&&activeCat.key===c.key),sidebarCol),display:'flex',alignItems:'center',gap:8,justifyContent:sidebarCol?'center':'space-between'}}
           onClick={e=>{const r=e.currentTarget.getBoundingClientRect();setOpenCat(isOpen?null:{key:c.key,top:r.top,left:r.right+6});}}>
           {sidebarCol?<span style={{fontSize:15}}>{c.icon}</span>:<>
             <span><span style={{display:'inline-block',width:22,textAlign:'center',marginRight:8}}>{c.icon}</span>{c.label}</span>
