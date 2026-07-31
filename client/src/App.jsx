@@ -3378,7 +3378,7 @@ function BalanceSheet({entityId,entityName,asOf,setAsOf,canEdit=true}){
   const nColSpan=1+nCols+(prior?2:0);
   const oneYrBefore=d=>{const x=new Date(d+'T00:00:00');x.setFullYear(x.getFullYear()-1);x.setDate(x.getDate()+1);return _ymd(x);};
   const Sec=({title,items,totalGetter,extraNiRow})=>(<><tr><td style={S.sectionHeader} colSpan={nColSpan}>{title}</td></tr>
-    {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,from:oneYrBefore(c.to),to:c.to})}>{fmt(val(a.code,i))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
+    {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,type:a.type,from:oneYrBefore(c.to),to:c.to})}>{fmt(val(a.code,i))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
     {extraNiRow&&<tr><td style={{...S.indentTd,fontStyle:'italic',color:T.textMuted}}>Net Income (current period)</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,fontStyle:'italic'}}>{fmt(niCol(i))}</td>)}{chgCells(niCol)}</tr>}
     <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(totalGetter(i))}</td>)}{chgCells(totalGetter)}</tr></>);
   const colHead=(c,i)=>prior&&i===0?'Prev':(c.label==='Total'?('As of '+anchor):c.label);
@@ -3428,7 +3428,7 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
   const chgCells=(getter)=>{if(!prior)return null;const c=getter(curI),p=getter(priI),pc=rptPct(c,p);return[<td key="d" style={S.tdR}>{fmt(c-p)}</td>,<td key="p" style={{...S.tdR,color:(c-p)>=0?T.green:T.red}}>{pctTxt(pc)}</td>];};
   const nColSpan=1+nCols+(prior?2:0);
   const Sec=({title,items})=>(<><tr><td style={S.sectionHeader} colSpan={nColSpan}>{title}</td></tr>
-    {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,from:c.from,to:c.to})}>{fmt(val(a.code,i))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
+    {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,type:a.type,from:c.from,to:c.to})}>{fmt(val(a.code,i))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
     <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(sumC(items,i))}</td>)}{chgCells(ci=>sumC(items,ci))}</tr></>);
   const TotalRow=({label,getter,big})=>(<tr style={big?S.grandTotalRow:{background:T.bgElevated}}><td style={big?{...S.tdBold,fontSize:15}:{...S.td,fontWeight:700,color:T.textBright}}>{label}</td>{cols.map((c,i)=><td key={i} style={big?{...S.tdBold,textAlign:'right',fontSize:16,color:getter(i)>=0?T.green:T.red}:{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(getter(i))}</td>)}{chgCells(getter)}</tr>);
   const colHead=(c,i)=>prior&&i===0?'Prev':(c.label==='Total'?'Amount':c.label);
@@ -3491,8 +3491,9 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
   };
   const groupKey=l=>groupBy==='class'?(l.class_name||'(no class)'):groupBy==='location'?(l.location_name||'(no location)'):'All';
   const groups=(()=>{if(!rows)return[];const m=new Map();rows.forEach(l=>{const k=groupKey(l);if(!m.has(k))m.set(k,[]);m.get(k).push(l);});return[...m.entries()].sort((a,b)=>a[0].localeCompare(b[0]));})();
-  const amt=l=>(l.debit||0)-(l.credit||0);
-  const grand=rows?rows.reduce((s,l)=>s+amt(l),0):0;
+  const amt=l=>{const isDr=l.account_type==='Asset'||l.account_type==='Expense';return isDr?((l.debit||0)-(l.credit||0)):((l.credit||0)-(l.debit||0));};
+  const bsCodesSet=new Set(accounts.filter(a=>sel.includes(a.code)&&isBS(a.type)).map(a=>a.code));
+  const grand=rows?rows.filter(l=>bsCodesSet.has(l.account_code)).reduce((s,l)=>s+amt(l),0):0;
   const begTotal=begRows.reduce((s,b)=>s+(b.balance||0),0);
   // Column-display + comparative computeds (Liting #2).
   const cols=buildPeriodCols(from,to,colMode);
