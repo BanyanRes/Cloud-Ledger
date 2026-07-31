@@ -893,8 +893,9 @@ async function billcomListPayments(args) {
   return billcomListV3({ ...args, resourcePath: '/payments' });
 }
 
-async function billcomGetById({ sessionId, devKey, baseUrl, resourcePath, id }) {
-  const url = (baseUrl || BILLCOM_BASE_URLS.sandbox) + resourcePath + '/' + encodeURIComponent(id);
+async function billcomGetById({ sessionId, devKey, baseUrl, resourcePath, id, extraParams }) {
+  const qs = extraParams ? ('?' + new URLSearchParams(extraParams).toString()) : '';
+  const url = (baseUrl || BILLCOM_BASE_URLS.sandbox) + resourcePath + '/' + encodeURIComponent(id) + qs;
   const resp = await billcomFetch(url, {
     method: 'GET',
     headers: { 'sessionId': sessionId, 'devKey': devKey, 'Accept': 'application/json' }
@@ -4910,6 +4911,43 @@ app.post('/api/billcom/ap-aging-check/:entity_id', auth, requireEntityAccess('en
     if (hit) overlaps.push({ id: billId, invoice_number: number, date: date || null, vendor: vendorOf(bill) || '', amount, matched_on: hit.matched_on });
   }
   res.json({ ok: true, aging_uploaded: true, aging_as_of: cfg.ap_aging_as_of || null, aging_lines: agingLines.length, cutoff_date: cutoffDate, checked_bills: checked, overlap_count: overlaps.length, overlaps });
+});
+
+// TEMP diagnostic (read-only, no writes): inspect Bill.com v3 approval fields on
+// real bills so we can build approval-date-based sync gating. Remove after use.
+app.get('/api/billcom/approval-probe/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+  let session;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    const devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
+  const listArgs = { sessionId: session.sessionId, devKey: billcomDecrypt(cfg.dev_key_enc), baseUrl: cfg.api_base_url };
+  const summ = (b) => ({
+    id: b.id,
+    invoiceDate: (b.invoice && b.invoice.invoiceDate) || b.invoiceDate || null,
+    createdTime: b.createdTime || null,
+    updatedTime: b.updatedTime || null,
+    approvalStatus: b.approvalStatus || null,
+    approvers: Array.isArray(b.approvers) ? b.approvers.map(a => ({ userId: a.userId, status: a.status, statusChangedTime: a.statusChangedTime, approverOrder: a.approverOrder })) : (b.approvers === undefined ? 'ABSENT' : b.approvers)
+  });
+  const out = {};
+  try {
+    const withP = await billcomListV3({ ...listArgs, resourcePath: '/bills', extraParams: { billApprovals: 'true' }, maxItems: 20 });
+    out.count = withP.length;
+    out.list_withParam = withP.slice(0, 20).map(summ);
+  } catch (e) { out.list_withParam_error = e.message; }
+  try {
+    const firstId = (out.list_withParam && out.list_withParam[0] && out.list_withParam[0].id) || null;
+    if (firstId) {
+      try { out.detail_withParam = summ(await billcomGetById({ ...listArgs, resourcePath: '/bills', id: firstId, extraParams: { billApprovals: 'true' } })); } catch (e) { out.detail_withParam_error = e.message; }
+      try { out.detail_noParam = summ(await billcomGetById({ ...listArgs, resourcePath: '/bills', id: firstId })); } catch (e) { out.detail_noParam_error = e.message; }
+    }
+  } catch (e) { out.detail_error = e.message; }
+  res.json(out);
 });
 
 app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
