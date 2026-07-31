@@ -1114,6 +1114,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
 
   // Phase 2: account mapping state
   const[tab,setTab]=useState(initialTab||'config'); // 'config' | 'mapping' | 'sync'
+  const syncOnly=initialTab==='sync'; // A/P "Bill.com Sync" view: only the Sync panel, no setup chrome
   const[bcAccounts,setBcAccounts]=useState([]);
   const[clAccounts,setClAccounts]=useState([]);
   const[mappings,setMappings]=useState({}); // keyed by billcom_account_id
@@ -1200,7 +1201,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
 
   // When opened directly on the Sync view (the Bill.com Sync nav item), load the
   // sync log once config is known so it shows without a manual Refresh Log click.
-  useEffect(()=>{ if(tab==='sync'&&cfg&&cfg.configured)loadSyncLogs(); },[cfg,tab,loadSyncLogs]);
+  useEffect(()=>{ if((syncOnly||tab==='sync')&&cfg&&cfg.configured)loadSyncLogs(); },[cfg,tab,syncOnly,loadSyncLogs]);
 
   const runSync=async()=>{
     if(!selectedEntity)return;
@@ -1286,6 +1287,10 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
     setSyncResult(null);setSyncLogs([]);setSyncMsg('');setSyncErr('');
   },[selectedEntity]);
 
+  // Follow the top-level entity picker: when the active entity changes up top,
+  // this in-page selector switches to it too (no stale sub-selection).
+  useEffect(()=>{ if(activeEntity&&activeEntity!==selectedEntity)setSelectedEntity(activeEntity); },[activeEntity]);
+
   const save=async()=>{
     if(!selectedEntity){setErr('Select an entity first');return;}
     setSaving(true);setMsg('');setErr('');
@@ -1325,21 +1330,21 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
   return(<div>
     <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
       <div>
-        <div style={{fontSize:22,fontWeight:700,color:T.textBright}}>Bill.com Setup</div>
-        <div style={{fontSize:13,color:T.textMuted,marginTop:4}}>Connect a CloudLedger entity to a Bill.com Organization for AP integration.</div>
+        <div style={{fontSize:22,fontWeight:700,color:T.textBright}}>{syncOnly?'Bill.com Sync':'Bill.com Setup'}</div>
+        <div style={{fontSize:13,color:T.textMuted,marginTop:4}}>{syncOnly?('Pull approved bills and payments from Bill.com into '+(en?en.name:'this entity')+' as journal entries.'):'Connect a CloudLedger entity to a Bill.com Organization for AP integration.'}</div>
       </div>
     </div>
 
-    <div style={{...S.card,padding:20,marginBottom:20}}>
+    {!syncOnly&&<div style={{...S.card,padding:20,marginBottom:20}}>
       <div style={{fontSize:12,fontWeight:600,color:T.textMuted,marginBottom:6}}>ENTITY</div>
       <select value={selectedEntity||''} onChange={e=>setSelectedEntity(parseInt(e.target.value)||null)} style={{...S.input,maxWidth:400}}>
         <option value="">-- Select entity --</option>
         {entities.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
       </select>
-    </div>
+    </div>}
 
     {selectedEntity&&(loading?<div style={{color:T.textMuted}}>Loading...</div>:<>
-      {cfg&&cfg.configured&&<div style={{...S.card,padding:16,marginBottom:16,background:'#f0fdf4',border:'1px solid #86efac'}}>
+      {!syncOnly&&cfg&&cfg.configured&&<div style={{...S.card,padding:16,marginBottom:16,background:'#f0fdf4',border:'1px solid #86efac'}}>
         <div style={{fontSize:13,fontWeight:600,color:'#15803d'}}>Configured</div>
         <div style={{fontSize:12,color:T.textMuted,marginTop:6}}>
           Last tested: {cfg.last_tested_at?new Date(cfg.last_tested_at).toLocaleString():'never'}
@@ -1349,13 +1354,13 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
       </div>}
 
       {/* Phase 2: Tab bar */}
-      <div style={{display:'flex',gap:0,borderBottom:'1px solid '+T.border,marginBottom:16}}>
+      {!syncOnly&&<div style={{display:'flex',gap:0,borderBottom:'1px solid '+T.border,marginBottom:16}}>
         <button onClick={()=>setTab('config')} style={{padding:'10px 18px',fontSize:13,fontWeight:600,background:'transparent',border:'none',borderBottom:tab==='config'?'2px solid '+T.accent:'2px solid transparent',color:tab==='config'?T.textBright:T.textMuted,cursor:'pointer'}}>Config</button>
         <button onClick={()=>{setTab('mapping');if(cfg&&cfg.configured)loadMapping();}} disabled={!cfg||!cfg.configured} style={{padding:'10px 18px',fontSize:13,fontWeight:600,background:'transparent',border:'none',borderBottom:tab==='mapping'?'2px solid '+T.accent:'2px solid transparent',color:tab==='mapping'?T.textBright:T.textMuted,cursor:cfg&&cfg.configured?'pointer':'not-allowed',opacity:cfg&&cfg.configured?1:0.5}}>Account Mapping</button>
         <button onClick={()=>{setTab('sync');if(cfg&&cfg.configured)loadSyncLogs();}} disabled={!cfg||!cfg.configured} style={{padding:'10px 18px',fontSize:13,fontWeight:600,background:'transparent',border:'none',borderBottom:tab==='sync'?'2px solid '+T.accent:'2px solid transparent',color:tab==='sync'?T.textBright:T.textMuted,cursor:cfg&&cfg.configured?'pointer':'not-allowed',opacity:cfg&&cfg.configured?1:0.5}}>Sync</button>
-      </div>
+      </div>}
 
-      {tab==='config'?<>
+      {(!syncOnly&&tab==='config')?<>
       <div style={{...S.card,padding:20}}>
         <div style={{fontSize:14,fontWeight:600,color:T.textBright,marginBottom:16}}>Credentials</div>
 
@@ -1419,7 +1424,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
           Default Cash Account: GL code where payments credit (e.g. 10000 Cash)
         </div>
       </div>
-      </>:tab==='mapping'?<>
+      </>:(!syncOnly&&tab==='mapping')?<>
       {/* Phase 2: Account Mapping branch */}
       <div style={{...S.card,padding:20}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
@@ -1470,6 +1475,10 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
       </div>
       </>:<>
       {/* Phase 3: Sync branch */}
+      {syncOnly&&(!cfg||!cfg.configured)?<div style={{...S.card,padding:20,background:'#fffbeb',border:'1px solid #fcd34d'}}>
+        <div style={{fontSize:14,fontWeight:600,color:'#92400e',marginBottom:4}}>Bill.com isn't configured for {en?en.name:'this entity'}</div>
+        <div style={{fontSize:12,color:'#92400e'}}>An admin can set it up under Administration &rarr; Bill.com Setup. Once it's configured, come back here to sync.</div>
+      </div>:<>
       <div style={{...S.card,padding:20}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:14}}>
           <div>
@@ -1558,6 +1567,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
           </table>
          </div>}
       </div>
+      </>}
       </>}
     </>)}
   </div>);
