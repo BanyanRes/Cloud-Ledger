@@ -1121,7 +1121,6 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
   // Phase 3: sync state
   const[syncing,setSyncing]=useState(false);
   const[syncResult,setSyncResult]=useState(null);
-  const[agingCheck,setAgingCheck]=useState(null);const[agingChecking,setAgingChecking]=useState(false);
   const[syncLogs,setSyncLogs]=useState([]);
   const[syncLogsLoading,setSyncLogsLoading]=useState(false);
   const[syncMsg,setSyncMsg]=useState('');const[syncErr,setSyncErr]=useState('');
@@ -1195,12 +1194,6 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
     setSyncLogsLoading(false);
   },[selectedEntity]);
 
-  const runAgingCheck=async()=>{
-    setAgingChecking(true);setAgingCheck(null);setSyncErr('');
-    try{ const r=await api.checkApAgingOverlap(selectedEntity); setAgingCheck(r); }
-    catch(e){ setSyncErr('A/P aging check failed: '+e.message); }
-    finally{ setAgingChecking(false); }
-  };
   const runSync=async()=>{
     if(!selectedEntity)return;
     setSyncing(true);setSyncMsg('');setSyncErr('');setSyncResult(null);
@@ -1214,6 +1207,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
     // summed because each batch re-scans and re-skips the same pre-cutoff /
     // already-synced bills, so we report the final batch's skipped count only.
     const tot={bs:0,be:0,ps:0,pe:0};
+    const agingOv=new Map();
     try{
       while(round<MAX_ROUNDS){
         round++;
@@ -1223,12 +1217,14 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
         const b=r.bills||{},py=r.payments||{};
         tot.bs+=(b.synced||0);tot.be+=(b.errors||0);
         tot.ps+=(py.synced||0);tot.pe+=(py.errors||0);
+        (b.aging_overlaps||[]).forEach(o=>agingOv.set(o.id,o));
         if(!(b.budget_reached)) break; // caught up
       }
+      if(last&&last.bills)last.bills.aging_overlaps=[...agingOv.values()];
       setSyncResult(last);
       const lb=(last&&last.bills)||{},lp=(last&&last.payments)||{};
       const capNote=(round>=MAX_ROUNDS)?' (stopped at batch limit \u2014 click Sync Now again to continue)':'';
-      setSyncMsg('Done in '+round+' batch'+(round===1?'':'es')+'. Bills: '+tot.bs+' posted, '+tot.be+' errors, '+(lb.skipped||0)+' skipped. Payments: '+tot.ps+' posted, '+tot.pe+' errors, '+(lp.skipped||0)+' skipped.'+capNote);
+      setSyncMsg('Done in '+round+' batch'+(round===1?'':'es')+'. Bills: '+tot.bs+' posted, '+tot.be+' errors, '+(lb.skipped||0)+' skipped. Payments: '+tot.ps+' posted, '+tot.pe+' errors, '+(lp.skipped||0)+' skipped.'+(agingOv.size?(' '+agingOv.size+' already in A/P aging.'):'')+capNote);
       loadSyncLogs();
     }catch(e){setSyncErr('Sync failed after '+round+' batch'+(round===1?'':'es')+': '+e.message+(tot.bs?(' ('+tot.bs+' bills already posted before the error)'):''));}
     setSyncing(false);
@@ -1475,7 +1471,6 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
           <div style={{display:'flex',gap:8}}>
             <button style={S.btnS} onClick={loadSyncLogs} disabled={syncLogsLoading||syncing}>{syncLogsLoading?'Loading...':'Refresh Log'}</button>
             <button style={{...S.btnS,color:'#b91c1c',borderColor:'#fca5a5'}} onClick={runUnsync} disabled={syncing||unsyncing}>{unsyncing?'Un-syncing...':'Un-sync'}</button>
-            <button style={S.btnS} onClick={runAgingCheck} disabled={agingChecking||syncing||unsyncing}>{agingChecking?'Checking…':'Check against A/P aging'}</button>
             <button style={S.btnP} onClick={runSync} disabled={syncing||unsyncing}>{syncing?'Syncing...':'Sync Now'}</button>
           </div>
         </div>
@@ -1483,18 +1478,15 @@ function BillcomSetup({entities,activeEntity,setActiveEntity}) {
         {syncErr&&<div style={{padding:10,marginBottom:12,background:'#fef2f2',border:'1px solid #fecaca',borderRadius:T.radiusSm,color:T.red,fontSize:12}}>{syncErr}</div>}
         {syncMsg&&<div style={{padding:10,marginBottom:12,background:'#f0fdf4',border:'1px solid #86efac',borderRadius:T.radiusSm,color:'#15803d',fontSize:12}}>{syncMsg}</div>}
 
-        {agingCheck&&<div style={{padding:12,marginBottom:12,background:(agingCheck.overlap_count>0)?'#fffbeb':'#f0fdf4',border:'1px solid '+((agingCheck.overlap_count>0)?'#fcd34d':'#86efac'),borderRadius:T.radiusSm,fontSize:12}}>
-          {!agingCheck.aging_uploaded?<div style={{color:'#92400e'}}>{agingCheck.message}</div>:<>
-            <div style={{fontWeight:600,color:(agingCheck.overlap_count>0)?'#92400e':'#15803d',marginBottom:4}}>{(agingCheck.overlap_count>0)?(agingCheck.overlap_count+' bill'+(agingCheck.overlap_count===1?'':'s')+' already in the A/P aging — auto-skipped on sync'):('No overlaps — none of the '+agingCheck.checked_bills+' bills to sync are already in the A/P aging')}</div>
-            <div style={{color:T.textMuted,marginBottom:(agingCheck.overlap_count>0)?8:0}}>A/P aging as of {agingCheck.aging_as_of||'(n/a)'} · {agingCheck.aging_lines} lines · cutoff {agingCheck.cutoff_date} · {agingCheck.checked_bills} bills checked</div>
-            {(agingCheck.overlap_count>0)&&<><div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}><thead><tr>
-              <th style={{textAlign:'left',padding:'4px 6px',color:T.textMuted}}>Invoice #</th><th style={{textAlign:'left',padding:'4px 6px',color:T.textMuted}}>Vendor</th><th style={{textAlign:'left',padding:'4px 6px',color:T.textMuted}}>Date</th><th style={{textAlign:'right',padding:'4px 6px',color:T.textMuted}}>Amount</th><th style={{textAlign:'left',padding:'4px 6px',color:T.textMuted}}>Matched on</th>
-            </tr></thead><tbody>{agingCheck.overlaps.map((o,i)=><tr key={i} style={{borderTop:'1px solid '+T.border}}>
-              <td style={{padding:'4px 6px'}}>{o.invoice_number}</td><td style={{padding:'4px 6px'}}>{o.vendor||'—'}</td><td style={{padding:'4px 6px'}}>{o.date||'—'}</td><td style={{padding:'4px 6px',textAlign:'right'}}>{o.amount!=null?fmt(o.amount):'—'}</td><td style={{padding:'4px 6px'}}>{o.matched_on}</td>
-            </tr>)}</tbody></table></div>
-            <button style={{...S.btnS,marginTop:8}} onClick={()=>{const rows=[['Invoice #','Vendor','Date','Amount','Matched on'],...agingCheck.overlaps.map(o=>[o.invoice_number,o.vendor||'',o.date||'',o.amount!=null?o.amount:'',o.matched_on])];exportToExcel(rows,'AP_aging_skipped_'+(agingCheck.aging_as_of||'report')+'.xlsx');}}>Download skipped report</button></>}
-          </>}
-        </div>}
+        {syncResult&&syncResult.bills&&(syncResult.bills.aging_overlaps||[]).length>0&&(()=>{ const ov=syncResult.bills.aging_overlaps; return (<div style={{padding:12,marginBottom:12,background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:T.radiusSm,fontSize:12}}>
+          <div style={{fontWeight:600,color:'#92400e',marginBottom:4}}>{ov.length+' bill'+(ov.length===1?'':'s')+' skipped — already in the A/P aging (already booked in the GL)'}</div>
+          <div style={{overflowX:'auto'}}><table style={{width:'100%',borderCollapse:'collapse',fontSize:11}}><thead><tr>
+            <th style={{textAlign:'left',padding:'4px 6px',color:T.textMuted}}>Invoice #</th><th style={{textAlign:'left',padding:'4px 6px',color:T.textMuted}}>Vendor</th><th style={{textAlign:'left',padding:'4px 6px',color:T.textMuted}}>Date</th><th style={{textAlign:'right',padding:'4px 6px',color:T.textMuted}}>Amount</th><th style={{textAlign:'left',padding:'4px 6px',color:T.textMuted}}>Matched on</th>
+          </tr></thead><tbody>{ov.map((o,i)=><tr key={i} style={{borderTop:'1px solid '+T.border}}>
+            <td style={{padding:'4px 6px'}}>{o.invoice_number}</td><td style={{padding:'4px 6px'}}>{o.vendor||'—'}</td><td style={{padding:'4px 6px'}}>{o.date||'—'}</td><td style={{padding:'4px 6px',textAlign:'right'}}>{o.amount!=null?fmt(o.amount):'—'}</td><td style={{padding:'4px 6px'}}>{o.matched_on}</td>
+          </tr>)}</tbody></table></div>
+          <button style={{...S.btnS,marginTop:8}} onClick={()=>{const rows=[['Invoice #','Vendor','Date','Amount','Matched on'],...ov.map(o=>[o.invoice_number,o.vendor||'',o.date||'',o.amount!=null?o.amount:'',o.matched_on])];exportToExcel(rows,'AP_aging_skipped.xlsx');}}>Download skipped report</button>
+        </div>); })()}
 
         {syncResult&&syncResult.missing_mappings&&syncResult.missing_mappings.length>0&&(()=>{
           const mm=syncResult.missing_mappings;

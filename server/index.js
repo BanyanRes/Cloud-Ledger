@@ -5098,6 +5098,23 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       result.bills.details.push({ id: billId, status: 'skip', reason: 'before cutoff ' + cutoffDate + ' (date ' + listDate + ')' });
       continue;
     }
+    // A/P aging dedupe: skip bills already present in the uploaded A/P aging
+    // (already booked in the GL). Done here on the list object — before the
+    // per-run budget gate and the detail fetch — so overlaps neither consume the
+    // batch budget nor need a detail round-trip. Reported in aging_overlaps.
+    if (agingLines.length) {
+      const listNumber = pick(bill, 'invoiceNumber', 'invoice_number') || pick(pick(bill, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || billId;
+      const listVendor = vendorOf(bill) || '';
+      const listAmount = Number(pick(bill, 'amount', 'amountDue', 'invoiceAmount') || 0) || null;
+      const agingHit = matchApAgingLine(agingLines, { number: listNumber, date: listDate, vendor: listVendor, amount: listAmount });
+      if (agingHit) {
+        result.bills.skipped++;
+        result.bills.aging_skipped = (result.bills.aging_skipped || 0) + 1;
+        (result.bills.aging_overlaps = result.bills.aging_overlaps || []).push({ id: billId, invoice_number: listNumber, date: listDate || null, vendor: listVendor, amount: listAmount, matched_on: agingHit.matched_on });
+        result.bills.details.push({ id: billId, status: 'skip', reason: 'already in A/P aging (' + agingHit.matched_on + ')' });
+        continue;
+      }
+    }
     // Bounded work: stop starting new bills once the per-run budget or time
     // deadline is hit. Remaining bills are picked up on the next sync run.
     if (billsProcessed >= maxBills || Date.now() > deadline) {
@@ -5132,24 +5149,6 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       result.bills.skipped++;
       result.bills.details.push({ id: billId, status: 'skip', reason: 'before cutoff ' + cutoffDate + ' (date ' + invoiceDate + ')' });
       continue;
-    }
-
-    // A/P aging dedupe: skip bills already present in the uploaded A/P aging
-    // detail (already booked in the GL). Reported in result.bills.aging_overlaps.
-    {
-      const billVendorName = vendorOf(detail) || vendorOf(bill) || '';
-      const billAmount = Number(pick(detail, 'amount', 'amountDue', 'invoiceAmount') || 0) || null;
-      const agingHit = matchApAgingLine(agingLines, { number: billNumber, date: invoiceDate, vendor: billVendorName, amount: billAmount });
-      if (agingHit) {
-        result.bills.skipped++;
-        result.bills.aging_skipped = (result.bills.aging_skipped || 0) + 1;
-        (result.bills.aging_overlaps = result.bills.aging_overlaps || []).push({
-          id: billId, invoice_number: billNumber, date: invoiceDate, vendor: billVendorName,
-          amount: billAmount, matched_on: agingHit.matched_on,
-        });
-        result.bills.details.push({ id: billId, status: 'skip', reason: 'already in A/P aging (' + agingHit.matched_on + ')' });
-        continue;
-      }
     }
 
     const debitLines = [];
