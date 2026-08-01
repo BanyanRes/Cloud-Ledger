@@ -3483,6 +3483,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
   const[rows,setRows]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
   const[begRows,setBegRows]=useState([]); // beginning balances for selected balance-sheet accounts
   const[projects,setProjects]=useState([]);const[projFilter,setProjFilter]=useState(''); // optional single-project filter
+  const[runToken,setRunToken]=useState(0); // bumped after each successful run to auto-export
   const prevDay=(d)=>{const x=new Date(d+'T00:00:00');x.setDate(x.getDate()-1);return _ymd(x);};
   const isBS=(t)=>t==='Asset'||t==='Liability'||t==='Equity';
   useEffect(()=>{api.getAccounts(entityId).then(setAccounts).catch(()=>setAccounts([]));},[entityId]);
@@ -3508,6 +3509,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
         const byCode=new Map((bals||[]).map(b=>[b.code,b.balance]));
         setBegRows(bsSel.map(a=>({code:a.code,name:a.name,type:a.type,balance:byCode.get(a.code)||0})).filter(r=>r.balance!==0));
       }
+      setRunToken(x=>x+1);
     }catch(e){setErr(e.message);}finally{setLoading(false);}
   };
   const groupKey=l=>groupBy==='class'?(l.class_name||'(no class)'):groupBy==='location'?(l.location_name||'(no location)'):groupBy==='project'?(l.project_name||'(no project)'):'All';
@@ -3551,6 +3553,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
     if(begRows.length>0)d.push(['ENDING BALANCE (BS accts: beginning + activity)','','','',...(colMode==='total'?[begTotal+grand]:[...cols.map(()=>''),begTotal+grand]),...(compare?['','','']:[])]);
     exportToExcel(d,'Custom_Detail_'+(to||today())+'.xlsx');
   };
+  useEffect(()=>{if(runToken>0)doExport();},[runToken]); // auto-export after each Run Report
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Custom Detail Report</div><div style={S.sub}>Pick accounts, optionally group by class or location</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='customdetail' currentConfig={{sel,from,to,groupBy,colMode,compare}} onApply={(c)=>{setSel(c.sel||[]);setFrom(c.from||'');setTo(c.to||'');if(c.groupBy)setGroupBy(c.groupBy);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/>{rows&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
     <div style={S.card}>
       <div style={{display:'flex',gap:24,flexWrap:'wrap'}}>
