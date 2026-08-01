@@ -2821,7 +2821,7 @@ app.get('/api/entities/:eid/gl-detail', auth, requireEntityAccess(), (req, res) 
   if (to) { where += ' AND je.date <= ?'; params.push(to); }
   if (location_id) { where += ' AND jl.location_id = ?'; params.push(location_id); }
   if (class_id) { where += ' AND jl.class_id = ?'; params.push(class_id); }
-  if (project_id) { where += ' AND jl.project_id = ?'; params.push(project_id); }
+  if (project_id) { where += ' AND CAST(jl.project_id AS REAL) = CAST(? AS REAL)'; params.push(project_id); }
   if (account_code) { where += ' AND jl.account_code = ?'; params.push(account_code); }
   const rows = db.prepare(`
     SELECT jl.id AS line_id, je.id AS entry_id, je.entry_num, je.date, je.memo,
@@ -3560,7 +3560,7 @@ function computeBalances(eid, opts = {}) {
   let dimFilter = '';
   if (location_id) { dimFilter += ' AND jl.location_id = ?'; params.push(location_id); }
   if (class_id) { dimFilter += ' AND jl.class_id = ?'; params.push(class_id); }
-  if (project_id) { dimFilter += ' AND jl.project_id = ?'; params.push(project_id); }
+  if (project_id) { dimFilter += ' AND CAST(jl.project_id AS REAL) = CAST(? AS REAL)'; params.push(project_id); }
 
   if (close_pl_before && as_of) {
     const priorPL = db.prepare(`SELECT a.type, SUM(jl.debit) as td, SUM(jl.credit) as tc FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=? AND je.date<? AND a.type IN ('Revenue','Expense') GROUP BY a.type`).all(eid, close_pl_before);
