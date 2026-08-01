@@ -3551,7 +3551,7 @@ app.delete('/api/entities/:eid/bank-transactions/batch/:batchId', auth, requireE
 // window, with optional prior-period P&L close into Retained Earnings.
 // opts: { as_of, from, to, close_pl_before, location_id, class_id }
 function computeBalances(eid, opts = {}) {
-  const { as_of, from, to, close_pl_before, location_id, class_id } = opts;
+  const { as_of, from, to, close_pl_before, location_id, class_id, project_id } = opts;
   let dateFilter = ''; const params = [eid];
   if (as_of) { dateFilter = ' AND je.date <= ?'; params.push(as_of); }
   else if (from && to) { dateFilter = ' AND je.date >= ? AND je.date <= ?'; params.push(from, to); }
@@ -3560,6 +3560,7 @@ function computeBalances(eid, opts = {}) {
   let dimFilter = '';
   if (location_id) { dimFilter += ' AND jl.location_id = ?'; params.push(location_id); }
   if (class_id) { dimFilter += ' AND jl.class_id = ?'; params.push(class_id); }
+  if (project_id) { dimFilter += ' AND jl.project_id = ?'; params.push(project_id); }
 
   if (close_pl_before && as_of) {
     const priorPL = db.prepare(`SELECT a.type, SUM(jl.debit) as td, SUM(jl.credit) as tc FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=? AND je.date<? AND a.type IN ('Revenue','Expense') GROUP BY a.type`).all(eid, close_pl_before);

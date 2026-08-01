@@ -112,6 +112,7 @@ export const api = {
     if (opts.close_pl_before) p.push('close_pl_before=' + opts.close_pl_before);
     if (opts.location_id) p.push('location_id=' + opts.location_id);
     if (opts.class_id) p.push('class_id=' + opts.class_id);
+    if (opts.project_id) p.push('project_id=' + opts.project_id);
     return request('/entities/' + eid + '/balances' + (p.length ? '?' + p.join('&') : ''));
   },
   // Fund reporting (CLRF-style LP package)

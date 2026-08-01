@@ -2754,6 +2754,7 @@ function ChartOfAccounts({entityId,entityName,canEdit}){const[accounts,setAccoun
 // ═══ General Ledger ═══
 function GeneralLedger({entityId,entityName,dimsEnabled,from,setFrom,to,setTo,filter,setFilter}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);
   const[editEntry,setEditEntry]=useState(null);
+  const[projects,setProjects]=useState([]);const[projFilter,setProjFilter]=useState(''); // dim_projects list + selected project id
   const[begBals,setBegBals]=useState({}); // account_code -> opening balance as of day before `from`
   // Local-parts date (no UTC shift): the day before `from`, for the opening balance.
   const _prevDay=(d)=>{const x=new Date(d+'T00:00:00');x.setDate(x.getDate()-1);return x.getFullYear()+'-'+String(x.getMonth()+1).padStart(2,'0')+'-'+String(x.getDate()).padStart(2,'0');};
@@ -2762,18 +2763,19 @@ function GeneralLedger({entityId,entityName,dimsEnabled,from,setFrom,to,setTo,fi
     // Opening balances only matter when a start date is set; without `from` the
     // ledger runs from inception so every account correctly opens at 0.
     if(/^\d{4}-\d{2}-\d{2}$/.test(from)){
-      api.getBalances(entityId,{as_of:_prevDay(from)}).then(bals=>{setBegBals(Object.fromEntries((bals||[]).map(b=>[b.code,b.balance||0])));}).catch(()=>setBegBals({}));
+      api.getBalances(entityId,{as_of:_prevDay(from),...(projFilter?{project_id:projFilter}:{})}).then(bals=>{setBegBals(Object.fromEntries((bals||[]).map(b=>[b.code,b.balance||0])));}).catch(()=>setBegBals({}));
     } else setBegBals({});
-  },[entityId,from,to]);
+  },[entityId,from,to,projFilter]);
   useEffect(()=>{reload();},[reload]);
+  useEffect(()=>{api.getProjects(entityId).then(setProjects).catch(()=>setProjects([]));},[entityId]);
   const filtered=accounts.filter(a=>!filter||a.code===filter).sort((a,b)=>a.code.localeCompare(b.code));
   const entryAtts={};entries.forEach(e=>{if(e.attachments?.length>0)entryAtts[e.id]=e.attachments;});
-  const doExport=()=>{const rows=[[entityName||'General Ledger'],['General Ledger'],['Period: '+(from||'Begin')+' to '+(to||today())],[]];filtered.forEach(acct=>{const txns=[];entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code)txns.push({date:e.date,je:'JE-'+String(e.entry_num).padStart(4,'0'),memo:e.memo,debit:l.debit,credit:l.credit});});});if(txns.length===0&&!filter)return;rows.push([acctLabel(acct.code,acct.name)]);rows.push(['Date','JE','Memo','Debit','Credit','Balance']);const isDr=acct.type==='Asset'||acct.type==='Expense';let run=from?(begBals[acct.code]||0):0;if(from)rows.push(['','','Beginning Balance','','',run]);txns.sort((a,b)=>a.date.localeCompare(b.date)).forEach(t=>{run+=isDr?(t.debit-t.credit):(t.credit-t.debit);rows.push([t.date,t.je,t.memo,t.debit||'',t.credit||'',run]);});rows.push([]);});exportToExcel(rows,'GL.xlsx');};
+  const doExport=()=>{const rows=[[entityName||'General Ledger'],['General Ledger'],['Period: '+(from||'Begin')+' to '+(to||today())],[]];filtered.forEach(acct=>{const txns=[];entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code&&(!projFilter||String(l.project_id)===String(projFilter)))txns.push({date:e.date,je:'JE-'+String(e.entry_num).padStart(4,'0'),memo:e.memo,debit:l.debit,credit:l.credit});});});if(txns.length===0&&!filter)return;rows.push([acctLabel(acct.code,acct.name)]);rows.push(['Date','JE','Memo','Debit','Credit','Balance']);const isDr=acct.type==='Asset'||acct.type==='Expense';let run=from?(begBals[acct.code]||0):0;if(from)rows.push(['','','Beginning Balance','','',run]);txns.sort((a,b)=>a.date.localeCompare(b.date)).forEach(t=>{run+=isDr?(t.debit-t.credit):(t.credit-t.debit);rows.push([t.date,t.je,t.memo,t.debit||'',t.credit||'',run]);});rows.push([]);});exportToExcel(rows,'GL.xlsx');};
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}><div><div style={S.h1}>General Ledger</div>{entityName&&<div style={{fontSize:13,color:T.textMuted}}>{entityName}</div>}</div><button style={S.btnExport} onClick={doExport}>Export Excel</button></div><div style={S.sub}/>
     <div style={S.filterBar}><div><label style={S.label}>From</label><input style={S.inputSm} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
       <div><label style={S.label}>To</label><input style={S.inputSm} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
-      <div style={{maxWidth:280}}><label style={S.label}>Account</label><select style={{...S.inputSm,width:'100%'}} value={filter} onChange={e=>setFilter(e.target.value)}><option value="">All accounts</option>{accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></div></div>
-    {filtered.map(acct=>{const txns=[];entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code)txns.push({...l,date:e.date,memo:e.memo,jeNum:e.entry_num,jeId:e.id});});});
+      <div style={{maxWidth:280}}><label style={S.label}>Account</label><select style={{...S.inputSm,width:'100%'}} value={filter} onChange={e=>setFilter(e.target.value)}><option value="">All accounts</option>{accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></div>{projects.length>0&&<div style={{maxWidth:280}}><label style={S.label}>Project</label><select style={{...S.inputSm,width:'100%'}} value={projFilter} onChange={e=>setProjFilter(e.target.value)}><option value="">All projects</option>{projects.map(p=><option key={p.id} value={p.id}>{p.code?p.code+' — '+p.name:p.name}</option>)}</select></div>}</div>
+    {filtered.map(acct=>{const txns=[];entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code&&(!projFilter||String(l.project_id)===String(projFilter)))txns.push({...l,date:e.date,memo:e.memo,jeNum:e.entry_num,jeId:e.id});});});
       if(txns.length===0&&!filter)return null;txns.sort((a,b)=>a.date.localeCompare(b.date));const dr=acct.type==='Asset'||acct.type==='Expense';const beg=from?(begBals[acct.code]||0):0;let run=beg;
       return(<div key={acct.code} style={S.cardFlush}><div style={{padding:'14px 20px',display:'flex',alignItems:'center',gap:10,borderBottom:'1px solid '+T.border}}>
         <span style={{fontWeight:700,color:T.textBright,fontSize:14}}>{acct.code}</span><span>{acct.name}</span><span style={S.tag(acct.type)}>{acct.type}</span></div>
