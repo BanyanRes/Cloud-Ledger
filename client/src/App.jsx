@@ -3508,7 +3508,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
       }
     }catch(e){setErr(e.message);}finally{setLoading(false);}
   };
-  const groupKey=l=>groupBy==='class'?(l.class_name||'(no class)'):groupBy==='location'?(l.location_name||'(no location)'):'All';
+  const groupKey=l=>groupBy==='class'?(l.class_name||'(no class)'):groupBy==='location'?(l.location_name||'(no location)'):groupBy==='project'?(l.project_name||'(no project)'):'All';
   const groups=(()=>{if(!rows)return[];const m=new Map();rows.forEach(l=>{const k=groupKey(l);if(!m.has(k))m.set(k,[]);m.get(k).push(l);});return[...m.entries()].sort((a,b)=>a[0].localeCompare(b[0]));})();
   const amt=l=>{const isDr=l.account_type==='Asset'||l.account_type==='Expense';return isDr?((l.debit||0)-(l.credit||0)):((l.credit||0)-(l.debit||0));};
   const bsCodesSet=new Set(accounts.filter(a=>sel.includes(a.code)&&isBS(a.type)).map(a=>a.code));
@@ -3564,7 +3564,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
           <div style={{marginBottom:10,display:'flex',gap:6,flexWrap:'wrap'}}>{PRESETS.map(([k,lbl])=><button key={k} onClick={()=>{const r=presetRange(k);setFrom(r.from);setTo(r.to);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'5px 9px',cursor:'pointer'}}>{lbl}</button>)}</div>
           <div style={{marginBottom:10}}><label style={S.label}>Columns</label><select style={{...S.inputSm,width:'100%'}} value={colMode} onChange={e=>setColMode(e.target.value)}>{COL_MODES.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div>
           <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,marginBottom:10,cursor:'pointer',color:T.textMuted}}><input type="checkbox" checked={compare} onChange={e=>setCompare(e.target.checked)}/>Compare to prior period</label>
-          {dimsEnabled&&<div><label style={S.label}>Group by</label><select style={{...S.inputSm,width:'100%'}} value={groupBy} onChange={e=>setGroupBy(e.target.value)}><option value="none">No grouping</option><option value="class">{classTerm()==='Class'?'Class / Investor':classTerm()}</option><option value="location">Location</option></select></div>}
+          {dimsEnabled&&<div><label style={S.label}>Group by</label><select style={{...S.inputSm,width:'100%'}} value={groupBy} onChange={e=>setGroupBy(e.target.value)}><option value="none">No grouping</option><option value="class">{classTerm()==='Class'?'Class / Investor':classTerm()}</option><option value="location">Location</option><option value="project">Project</option></select></div>}
         </div>
       </div>
       {err&&<div style={S.err}>{err}</div>}
