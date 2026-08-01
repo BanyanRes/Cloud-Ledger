@@ -3482,9 +3482,11 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
   const[colMode,setColMode]=useState('total');const[compare,setCompare]=useState(false);const[priorRows,setPriorRows]=useState([]);
   const[rows,setRows]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
   const[begRows,setBegRows]=useState([]); // beginning balances for selected balance-sheet accounts
+  const[projects,setProjects]=useState([]);const[projFilter,setProjFilter]=useState(''); // optional single-project filter
   const prevDay=(d)=>{const x=new Date(d+'T00:00:00');x.setDate(x.getDate()-1);return _ymd(x);};
   const isBS=(t)=>t==='Asset'||t==='Liability'||t==='Equity';
   useEffect(()=>{api.getAccounts(entityId).then(setAccounts).catch(()=>setAccounts([]));},[entityId]);
+  useEffect(()=>{api.getProjects(entityId).then(setProjects).catch(()=>setProjects([]));},[entityId]);
   useEffect(()=>{if(pendingConfig){if(pendingConfig.sel)setSel(pendingConfig.sel);setFrom(pendingConfig.from||'');setTo(pendingConfig.to||'');if(pendingConfig.groupBy)setGroupBy(pendingConfig.groupBy);clearPending&&clearPending();}},[]);
   useEffect(()=>{if(pendingConfig){if(pendingConfig.sel)setSel(pendingConfig.sel);if(pendingConfig.dim)setDim(pendingConfig.dim);setFrom(pendingConfig.from||'');setTo(pendingConfig.to||'');clearPending&&clearPending();}},[]);
   const toggle=code=>setSel(s=>s.includes(code)?s.filter(c=>c!==code):[...s,code]);
@@ -3493,16 +3495,16 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
     if(!sel.length){setErr('Select at least one account');return;}
     setLoading(true);setErr('');setRows(null);setBegRows([]);
     try{
-      const all=await api.getGLDetail(entityId,{from:from||undefined,to:to||undefined});
+      const all=await api.getGLDetail(entityId,{from:from||undefined,to:to||undefined,...(projFilter?{project_id:projFilter}:{})});
       const selSet=new Set(sel);
       setRows((all.lines||all||[]).filter(l=>selSet.has(l.account_code)));
       // Comparative: pull the equal-length prior window's activity for the same accounts.
-      if(compare&&from&&to){const pw=priorWindow(from,to);if(pw){const pall=await api.getGLDetail(entityId,{from:pw.from,to:pw.to});setPriorRows((pall.lines||pall||[]).filter(l=>selSet.has(l.account_code)));}else setPriorRows([]);}else setPriorRows([]);
+      if(compare&&from&&to){const pw=priorWindow(from,to);if(pw){const pall=await api.getGLDetail(entityId,{from:pw.from,to:pw.to,...(projFilter?{project_id:projFilter}:{})});setPriorRows((pall.lines||pall||[]).filter(l=>selSet.has(l.account_code)));}else setPriorRows([]);}else setPriorRows([]);
       // Beginning balance only applies to balance-sheet accounts and only when a
       // start date is set (otherwise the period runs from inception → beg = 0).
       const bsSel=accounts.filter(a=>selSet.has(a.code)&&isBS(a.type));
       if(from&&bsSel.length){
-        const bals=await api.getBalances(entityId,{as_of:prevDay(from)});
+        const bals=await api.getBalances(entityId,{as_of:prevDay(from),...(projFilter?{project_id:projFilter}:{})});
         const byCode=new Map((bals||[]).map(b=>[b.code,b.balance]));
         setBegRows(bsSel.map(a=>({code:a.code,name:a.name,type:a.type,balance:byCode.get(a.code)||0})).filter(r=>r.balance!==0));
       }
@@ -3565,6 +3567,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
           <div style={{marginBottom:10}}><label style={S.label}>Columns</label><select style={{...S.inputSm,width:'100%'}} value={colMode} onChange={e=>setColMode(e.target.value)}>{COL_MODES.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div>
           <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,marginBottom:10,cursor:'pointer',color:T.textMuted}}><input type="checkbox" checked={compare} onChange={e=>setCompare(e.target.checked)}/>Compare to prior period</label>
           {dimsEnabled&&<div><label style={S.label}>Group by</label><select style={{...S.inputSm,width:'100%'}} value={groupBy} onChange={e=>setGroupBy(e.target.value)}><option value="none">No grouping</option><option value="class">{classTerm()==='Class'?'Class / Investor':classTerm()}</option><option value="location">Location</option><option value="project">Project</option></select></div>}
+          {projects.length>0&&<div style={{marginTop:10}}><label style={S.label}>Project</label><select style={{...S.inputSm,width:'100%'}} value={projFilter} onChange={e=>setProjFilter(e.target.value)}><option value="">All projects</option>{projects.map(p=><option key={p.id} value={p.id}>{p.code?p.code+' — '+p.name:p.name}</option>)}</select></div>}
         </div>
       </div>
       {err&&<div style={S.err}>{err}</div>}
