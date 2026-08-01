@@ -3528,7 +3528,9 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
   const pctTxt=p=>p==null?'—':(p>=0?'+':'')+p.toFixed(1)+'%';
   const cmpCells=(cur,pri)=>{const d=cur-pri;const p=pri!==0?(d/Math.abs(pri))*100:null;return[<td key="pp" style={{...S.tdR,fontWeight:700}}>{fmt(pri)}</td>,<td key="dd" style={{...S.tdR,fontWeight:700,color:d>=0?T.green:T.red}}>{fmt(d)}</td>,<td key="pc" style={{...S.tdR,fontWeight:700,color:d>=0?T.green:T.red}}>{pctTxt(p)}</td>];};
   const doExport=()=>{
-    const d=[[entityName||'Custom Detail Report'],['Custom Detail Report'],['Period: '+(from||'Begin')+' to '+(to||today())],[]];
+    const _projObj=projFilter?projects.find(p=>String(p.id)===String(projFilter)):null;
+    const _projLabel=_projObj?(_projObj.code?_projObj.code+' — '+_projObj.name:_projObj.name):'';
+    const d=[[entityName||'Custom Detail Report'],['Custom Detail Report'],...(_projLabel?[['Project: '+_projLabel]]:[]),['Period: '+(from||'Begin')+' to '+(to||today())],[]];
     if(begRows.length>0){
       d.push(['Beginning Balances — Balance Sheet accounts as of '+from]);
       d.push(['','Account','','','','','Balance']);
