@@ -3544,7 +3544,11 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
     groups.forEach(([g,lines])=>{
       if(groupBy!=='none')d.push([g]);
       d.push(['Account','Date','JE','Description',...amtHdr,...(showTotal?['Total']:[]),...cmpHdr]);
-      lines.forEach(l=>{const a=amt(l);const ci=colIdxOf(l.date);const cells=cols.map((c,k)=>(colMode==='total'||k===ci)?a:'');d.push([l.account_code+' '+l.account_name,l.date,'JE-'+String(l.entry_num).padStart(4,'0'),l.description||l.memo||'',...cells,...(showTotal?[a]:[]),...(compare?['','','']:[])]);});
+      const _byA=[];const _im=new Map();lines.forEach(l=>{const k=l.account_code;if(!_im.has(k)){_im.set(k,_byA.length);_byA.push([k,l.account_name,[]]);}_byA[_im.get(k)][2].push(l);});
+      _byA.forEach(([acode,aname,alines])=>{
+        alines.forEach(l=>{const a=amt(l);const ci=colIdxOf(l.date);const cells=cols.map((c,k)=>(colMode==='total'||k===ci)?a:'');d.push([l.account_code+' '+l.account_name,l.date,'JE-'+String(l.entry_num).padStart(4,'0'),l.description||l.memo||'',...cells,...(showTotal?[a]:[]),...(compare?['','','']:[])]);});
+        const as=sumByCol(alines);d.push(['Total '+acode+' '+aname,'','','',...as.arr,...(showTotal?[as.tot]:[]),...(compare?['','','']:[])]);
+      });
       const {arr,tot}=sumByCol(lines);const pri=priorGroupMap.get(g)||0;
       d.push(['Total'+(groupBy!=='none'?' for '+g:''),'','','',...arr,...(showTotal?[tot]:[]),...(compare?[pri,tot-pri,pctN(tot,pri)]:[])]);d.push([]);
     });
@@ -3591,12 +3595,15 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
       </tr></thead>
       <tbody>{groups.map(([g,lines])=>{const {arr,tot}=sumByCol(lines);const pri=priorGroupMap.get(g)||0;return<Fragment key={g}>
         {groupBy!=='none'&&<tr style={{background:T.bgElevated}}><td style={{...S.tdBold,color:T.textBright}} colSpan={totalColCount}>{g}</td></tr>}
-        {lines.map((l,i)=>{const a=amt(l);const ci=colIdxOf(l.date);return<tr key={i}>
-          <td style={S.td}>{l.account_code} {l.account_name}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.date}</td><td style={S.td}>JE-{String(l.entry_num).padStart(4,'0')}</td><td style={S.td}>{l.description||l.memo||''}</td>
-          {cols.map((c,k)=><td key={k} style={{...S.tdR,color:a<0?T.red:T.textBright}}>{(colMode==='total'||k===ci)?fmt(a):''}</td>)}
-          {showTotal&&<td style={{...S.tdR,color:a<0?T.red:T.textBright}}>{fmt(a)}</td>}
-          {compare&&<><td style={S.tdR}></td><td style={S.tdR}></td><td style={S.tdR}></td></>}
-        </tr>;})}
+        {(()=>{const byA=[];const im=new Map();lines.forEach(l=>{const k=l.account_code;if(!im.has(k)){im.set(k,byA.length);byA.push([k,l.account_name,[]]);}byA[im.get(k)][2].push(l);});return byA.map(([acode,aname,alines])=>{const as=sumByCol(alines);return<Fragment key={'acct'+acode}>
+          {alines.map((l,i)=>{const a=amt(l);const ci=colIdxOf(l.date);return<tr key={acode+'-'+i}>
+            <td style={S.td}>{l.account_code} {l.account_name}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.date}</td><td style={S.td}>JE-{String(l.entry_num).padStart(4,'0')}</td><td style={S.td}>{l.description||l.memo||''}</td>
+            {cols.map((c,k)=><td key={k} style={{...S.tdR,color:a<0?T.red:T.textBright}}>{(colMode==='total'||k===ci)?fmt(a):''}</td>)}
+            {showTotal&&<td style={{...S.tdR,color:a<0?T.red:T.textBright}}>{fmt(a)}</td>}
+            {compare&&<><td style={S.tdR}></td><td style={S.tdR}></td><td style={S.tdR}></td></>}
+          </tr>;})}
+          <tr style={{borderTop:'1px solid '+T.border}}><td style={{...S.td,fontWeight:600,fontStyle:'italic',color:T.textMuted}} colSpan={descCols}>Total {acode} {aname}</td>{as.arr.map((v,k)=><td key={k} style={{...S.tdR,fontWeight:600}}>{fmt(v)}</td>)}{showTotal&&<td style={{...S.tdR,fontWeight:600}}>{fmt(as.tot)}</td>}{compare&&<><td style={S.tdR}></td><td style={S.tdR}></td><td style={S.tdR}></td></>}</tr>
+        </Fragment>;});})()}
         {groupBy!=='none'&&<tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600}} colSpan={descCols}>Total for {g}</td>{arr.map((v,k)=><td key={k} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(v)}</td>)}{showTotal&&<td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(tot)}</td>}{compare&&cmpCells(tot,pri)}</tr>}
       </Fragment>;})}
         {(()=>{const {arr,tot}=sumByCol(rows||[]);return<tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={descCols}>PERIOD ACTIVITY</td>{arr.map((v,k)=><td key={k} style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(v)}</td>)}{showTotal&&<td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(tot)}</td>}{compare&&cmpCells(tot,priorGrand)}</tr>;})()}
