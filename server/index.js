@@ -1789,39 +1789,52 @@ function glParseIntacctHtml(buffer) {
   const trRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
   const tdRe = /<t[dh][^>]*>([\s\S]*?)<\/t[dh]>/gi;
   const HDR = /^(\S.*?)\s+-\s+([\s\S]*?)\s+\(Balance forward/i;
-  const out = [];
-  let cur = null; // {code, name}
+  // First pass: collect every table row's cells.
+  const allRows = [];
   let m;
   while ((m = trRe.exec(scope))) {
     const cells = []; let c;
     tdRe.lastIndex = 0;
     while ((c = tdRe.exec(m[1]))) cells.push(clean(c[1]));
-    if (!cells.length) continue;
-    // Account section header: 2 cells, first contains "Balance forward".
+    if (cells.length) allRows.push(cells);
+  }
+  // Locate the transaction header row (names both Debit and Credit) and map
+  // columns by NAME. Intacct exports vary in how many dimension columns they
+  // include — e.g. a single "Project" (9 cols) vs. "Department" + "Location"
+  // (10 cols) — which shifts the Debit/Credit positions. Hardcoding indices
+  // misreads the wider layouts (reading the JNL code as the debit), which
+  // scrambles every entry so nothing balances.
+  let headerNames = null;
+  for (const r of allRows) {
+    const low = r.map(x => String(x).toLowerCase());
+    if (low.some(x => x.includes('debit')) && low.some(x => x.includes('credit'))) {
+      headerNames = r.map((c, i) => (String(c).trim() || ('Column ' + (i + 1))));
+      break;
+    }
+  }
+  if (!headerNames) return null;
+  let dateIdx = headerNames.findIndex(h => /posted|post date|transaction date|^date$/i.test(h));
+  if (dateIdx < 0) dateIdx = 0;
+  const isTxnDate = s => /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(String(s == null ? '' : s).trim());
+  const out = [];
+  let cur = null; // {code, name}
+  for (const cells of allRows) {
+    // Account section header: first cell contains "Balance forward".
     if (cells.length >= 2 && /balance forward/i.test(cells[0])) {
       const hm = HDR.exec(cells[0]);
       if (hm) cur = { code: hm[1].trim(), name: hm[2].trim() };
       continue;
     }
     if (/^totals for/i.test(cells[0])) continue; // account subtotal
-    // Transaction row: 9 cells, first is a date, inside an account section.
-    if (cur && cells.length >= 9 && /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(cells[0])) {
-      out.push({
-        'Account Number': cur.code,
-        'Account Name': cur.name,
-        'Posted dt.': cells[0],
-        'Doc dt.': cells[1],
-        'Memo/Description': cells[3],
-        'Project': cells[4],
-        'JNL': cells[5],
-        'Debit': cells[6],
-        'Credit': cells[7],
-      });
+    // Transaction row: the posting-date column holds a date, inside an account section.
+    if (cur && isTxnDate(cells[dateIdx])) {
+      const obj = { 'Account Number': cur.code, 'Account Name': cur.name };
+      headerNames.forEach((h, j) => { obj[h] = (cells[j] != null ? cells[j] : ''); });
+      out.push(obj);
     }
   }
   if (!out.length) return null;
-  const columns = ['Account Number', 'Account Name', 'Posted dt.', 'Doc dt.', 'Memo/Description', 'Project', 'JNL', 'Debit', 'Credit'];
-  return { columns, rows: out };
+  return { columns: ['Account Number', 'Account Name', ...headerNames], rows: out };
 }
 
 // RealPage/Yardi-style property "General Ledger" export (.xlsx). Layout: a
