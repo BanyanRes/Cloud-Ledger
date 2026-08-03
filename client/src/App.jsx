@@ -93,7 +93,7 @@ const acctLabel = (code, name) => code + ' - ' + name;
 let _activeEntityCode = null;
 const CLASS_DIM_LABELS = { TURNKEYR: 'Pay Application' };
 const classTerm = () => CLASS_DIM_LABELS[_activeEntityCode] || 'Class';
-function exportToExcel(data, fn) { const ws = XLSX.utils.aoa_to_sheet(data); ws['!cols'] = data[0].map((_, ci) => ({ wch: Math.min(Math.max(...data.map(r => String(r[ci]||'').length), 8)+2, 40) })); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); XLSX.writeFile(wb, fn); }
+function exportToExcel(data, fn, opts) { opts = opts || {}; const moneyFmt = opts.numFmt || '#,##0.00;(#,##0.00)'; const plain = new Set(opts.plainCols || []); const ws = XLSX.utils.aoa_to_sheet(data); const range = XLSX.utils.decode_range(ws['!ref']); for (let R = range.s.r; R <= range.e.r; R++) { for (let C = range.s.c; C <= range.e.c; C++) { if (plain.has(C)) continue; const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })]; if (cell && cell.t === 'n') cell.z = moneyFmt; } } ws['!cols'] = data[0].map((_, ci) => ({ wch: Math.min(Math.max(...data.map(r => (typeof r[ci] === 'number' ? r[ci].toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).length : String(r[ci]||'').length)), 8)+2, 40) })); const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); XLSX.writeFile(wb, fn); }
 const BLANK_JE = () => ({date:today(),memo:'',lines:[{account_code:'',debit:'',credit:'',description:''},{account_code:'',debit:'',credit:'',description:''}]});
 const SIDEBAR_KEY = 'cl_sidebar';
 
@@ -2647,7 +2647,7 @@ function ArAgingReport({entityId,entityName}){
     const t=data.totals;
     d.push(['TOTAL','','','','',t.current,t.d1_30,t.d31_60,t.d61_90,t.d90_plus,t.gl,t.total]);
     d.push(['Reconciliation vs GL '+arLabel+' ('+fmt(data.gl_ar_balance)+')','','','','','','','','','','',data.recon_diff]);
-    exportToExcel(d,'AR_Aging_'+data.as_of+'.xlsx');
+    exportToExcel(d,'AR_Aging_'+data.as_of+'.xlsx',{plainCols:[4]});
   };
   const hasGL=data&&data.gl_rows&&data.gl_rows.length>0;
   const hasAnything=data&&(data.rows.length>0||hasGL);
@@ -3799,7 +3799,7 @@ function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPend
     const gt=data.grand_total;
     d.push(['TOTAL','','','','','',gt.current,gt.d1_30,gt.d31_60,gt.d61_90,gt.d91_plus,gt.gl,gt.total]);
     d.push(['Reconciliation vs GL '+(data.ap_account||'202000')+' ('+fmt(data.gl_balance)+')','','','','','','','','','','','',data.recon_diff]);
-    exportToExcel(d,'AP_Aging_'+data.as_of+'.xlsx');
+    exportToExcel(d,'AP_Aging_'+data.as_of+'.xlsx',{plainCols:[5]});
   };
   const hasAnything=data&&(data.bill_count>0||(data.gl_rows&&data.gl_rows.length>0));
   return(<div>{showUpload&&<ApAgingCutoffModal entityId={entityId} entityName={entityName} onClose={()=>setShowUpload(false)} onDone={()=>{setShowUpload(false);}}/>}<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>A/P Aging Detail</div><div style={S.sub}>Built from GL account {data?data.ap_account:'202000'} &middot; ties to the book{data&&data.billcom_error?' · Bill.com enrich error: '+data.billcom_error:''}</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><button style={S.btnS} onClick={()=>setShowUpload(true)}>Upload aging detail</button><MemorizeBar entityId={entityId} reportType='apaging' currentConfig={{asOf}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);}} canEdit={canEdit}/>{hasAnything&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
