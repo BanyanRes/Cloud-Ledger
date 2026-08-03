@@ -7503,7 +7503,10 @@ function backupAuth(req, res, next) {
 }
 app.get('/api/admin/backup', backupAuth, async (req, res) => {
   const stamp = new Date().toISOString().slice(0, 10);
-  const tmp = path.join(path.dirname(DB_PATH), '_backup_tmp_' + Date.now() + '.db');
+  // Write the snapshot to the OS temp dir (large ephemeral overlay), NOT the
+  // data volume — the volume only has room for the live DB, and a same-volume
+  // copy would fail with SQLITE_FULL.
+  const tmp = path.join(require('os').tmpdir(), '_cl_backup_tmp_' + Date.now() + '.db');
   try {
     await db.backup(tmp);
     res.setHeader('Content-Type', 'application/octet-stream');
