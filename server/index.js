@@ -1824,6 +1824,61 @@ function glParseIntacctHtml(buffer) {
   return { columns, rows: out };
 }
 
+// Sage Intacct's "General Ledger report" saved as a real .xlsx (not the HTML
+// variant handled above) lays each account out as a banded section-header row
+// ("<code> - <name> (Balance forward ...)"), then its transaction rows, then a
+// "Totals for ..." row — with NO account column on the transaction rows. Detect
+// that shape from the parsed grid and flatten it, carrying the account code/name
+// down onto every transaction row. Returns null for a normal flat table (one
+// that already has its own account column) so the generic reader handles it.
+function glParseIntacctXlsxGrid(aoa) {
+  const lc = s => String(s == null ? '' : s).toLowerCase().trim();
+  const cell = (r, i) => String((r && r[i] != null) ? r[i] : '').trim();
+  // Transaction header row = the one that names both Debit and Credit.
+  let hdrIdx = -1;
+  for (let i = 0; i < Math.min(aoa.length, 25); i++) {
+    const names = (aoa[i] || []).map(lc);
+    if (names.some(n => n.includes('debit')) && names.some(n => n.includes('credit'))) { hdrIdx = i; break; }
+  }
+  if (hdrIdx === -1) return null;
+  const headerNames = aoa[hdrIdx].map((c, i) => { const t = String(c).trim(); return t || ('Column ' + (i + 1)); });
+  // If a real account column already exists, this is a flat file — let the generic path handle it.
+  const hasAcctCol = headerNames.some(h => {
+    const n = lc(h);
+    return n === 'account' || n === 'code' || n === 'gl account' || n.includes('account number') ||
+           n.includes('account #') || n.includes('account code') || n.includes('acct');
+  });
+  if (hasAcctCol) return null;
+  let dateIdx = headerNames.findIndex(h => { const n = lc(h); return n.includes('posted') || n.includes('post date') || n.includes('transaction date') || n === 'date'; });
+  if (dateIdx === -1) dateIdx = 0;
+  const debitIdx = headerNames.findIndex(h => lc(h).includes('debit'));
+  const creditIdx = headerNames.findIndex(h => lc(h).includes('credit'));
+  const isDate = v => { const s = String(v == null ? '' : v).trim(); return /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(s) || /^\d{4}-\d{1,2}-\d{1,2}/.test(s); };
+  const isNum = v => { const s = String(v == null ? '' : v).replace(/[,$()\s]/g, ''); return s !== '' && !isNaN(Number(s)); };
+  const ACCT = /^(\S+)\s*-\s*(.+)$/;
+  const stripSuffix = s => s.replace(/\s*\((?:balance forward|as of).*$/i, '').trim();
+  const rows = [];
+  let curCode = null, curName = null, acctHeaders = 0;
+  for (let i = hdrIdx + 1; i < aoa.length; i++) {
+    const r = aoa[i];
+    if (!r) continue;
+    const first = cell(r, 0);
+    const dcell = cell(r, dateIdx);
+    const am = first ? ACCT.exec(first) : null;
+    const isAcctHdr = am && /\d/.test(am[1]) && !/\s/.test(am[1]) && !isDate(dcell);
+    if (isAcctHdr) { curCode = am[1].trim(); curName = stripSuffix(am[2]); acctHeaders++; continue; }
+    if (/^totals for|^grand total/i.test(first)) continue;
+    const looksTxn = isDate(dcell) || (debitIdx >= 0 && isNum(r[debitIdx])) || (creditIdx >= 0 && isNum(r[creditIdx]));
+    if (looksTxn && curCode != null) {
+      const obj = { 'Account Number': curCode, 'Account Name': curName };
+      headerNames.forEach((h, j) => { obj[h] = (r[j] == null ? '' : r[j]); });
+      rows.push(obj);
+    }
+  }
+  if (acctHeaders < 2 || rows.length === 0) return null;
+  return { columns: ['Account Number', 'Account Name', ...headerNames], rows };
+}
+
 function glReadGrid(buffer) {
   // Intacct HTML GL export (.xls that's really HTML) — flatten it first.
   const intacct = glParseIntacctHtml(buffer);
@@ -1834,6 +1889,9 @@ function glReadGrid(buffer) {
   // row with the most non-empty cells as the header.
   const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: false, raw: false });
   if (!aoa.length) return { columns: [], rows: [] };
+  // Intacct GL report saved as .xlsx (banded account sections) — flatten if detected.
+  const banded = glParseIntacctXlsxGrid(aoa);
+  if (banded) return banded;
   let hdrIdx = 0, best = -1;
   for (let i = 0; i < Math.min(aoa.length, 15); i++) {
     const filled = aoa[i].filter(c => String(c).trim()).length;
