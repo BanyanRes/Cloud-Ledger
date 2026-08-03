@@ -5165,11 +5165,23 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // match a line's account against a GL account by name we must resolve the id
   // to its name via the chart-of-accounts list. Best-effort: if this fetch
   // fails, auto-mapping simply won't find names and the sync behaves as before.
+  // Resolve Bill.com account-id -> name LAZILY. The full chart of accounts is
+  // large and paginated (slow), and it is only needed to auto-map account ids
+  // that are NOT already in billcom_account_map. Fetch it at most once, and only
+  // when an unmapped id is actually encountered — so a fully-mapped entity's sync
+  // never pays the COA download (which is what was making the Banyan sync 502).
   const bcNameById = new Map();
-  try {
-    const bcAll = await billcomListAccounts(listArgs);
-    for (const a of bcAll) { if (a && a.id != null) bcNameById.set(String(a.id), a.name || ''); }
-  } catch (e) { console.log('[billcom sync] account-name lookup failed: ' + e.message); }
+  let bcNamesLoaded = false;
+  async function ensureBcNames() {
+    if (bcNamesLoaded) return;
+    bcNamesLoaded = true;
+    try {
+      console.log('[billcom sync] entity ' + entityId + ': loading Bill.com chart of accounts (unmapped account seen)');
+      const bcAll = await billcomListAccounts(listArgs);
+      for (const a of bcAll) { if (a && a.id != null) bcNameById.set(String(a.id), a.name || ''); }
+      console.log('[billcom sync] entity ' + entityId + ': COA loaded, ' + bcNameById.size + ' accounts');
+    } catch (e) { console.log('[billcom sync] account-name lookup failed: ' + e.message); }
+  }
 
   // Bounded sync: process at most maxBills per invocation so the request always
   // returns well under Railway's gateway ceiling. Dedup via billcom_sync_log makes
@@ -5200,16 +5212,21 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // future-dated due/process dates. Union+dedupe by id.
   const windowFrom = (cutoffDate.slice(0, 7) + '-01');
   const windowTo = (() => { const d = new Date(); d.setMonth(d.getMonth() + 1); return d.toISOString().slice(0, 10); })();
+  console.log('[billcom sync] entity ' + entityId + ': cutoff ' + cutoffDate + ', fetching bills ' + windowFrom + '..' + windowTo);
   try {
     bills = await billcomListBillsByUpdatedWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo });
   } catch (e) {
+    console.error('[billcom sync] entity ' + entityId + ' bills fetch failed: ' + e.message);
     return res.status(502).json({ error: 'Failed to fetch bills: ' + e.message });
   }
+  console.log('[billcom sync] entity ' + entityId + ': ' + bills.length + ' bills fetched, fetching payments');
   try {
     payments = await billcomListPaymentsWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo });
   } catch (e) {
+    console.error('[billcom sync] entity ' + entityId + ' payments fetch failed: ' + e.message);
     return res.status(502).json({ error: 'Failed to fetch payments: ' + e.message });
   }
+  console.log('[billcom sync] entity ' + entityId + ': ' + payments.length + ' payments fetched, processing (max ' + maxBills + ')');
 
   const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
   // Bills: APPROVED-ONLY. AP is recorded on approval, so a bill syncs only once it
@@ -5343,6 +5360,9 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
         continue;
       }
       let mapping = mapById.get(acctId);
+      // Only pay for the (slow) Bill.com COA name lookup when this id isn't
+      // already mapped and we still need a name to auto-map it.
+      if (!mapping) await ensureBcNames();
       // Prefer the name from the Bill.com chart-of-accounts lookup (keyed by id);
       // line items usually omit the name. Fall back to any name on the line.
       const bcName = bcNameById.get(acctId) || pick(li, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || pick(cls, 'chartOfAccountName', 'chart_of_account_name', 'accountName') || '';
