@@ -5266,6 +5266,12 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   const vendorOf = (obj) => vendorById.get(String(pick(obj, 'vendorId', 'vendor_id') || (pick(obj, 'vendor') || {}).id || '')) || pick(pick(obj, 'vendor') || {}, 'name', 'vendorName') || null;
   const backfillVendor = db.prepare("UPDATE journal_entries SET vendor = ? WHERE entity_id = ? AND memo = ? AND (vendor IS NULL OR vendor = '')");
 
+  // Bills approved before the cutoff are a permanent skip. We persist that skip
+  // (status 'skip_cutoff') the first time we determine it, so later batches can
+  // skip them here CHEAPLY — before the per-batch budget gate and the expensive
+  // per-bill detail fetch. Without this, an entity whose window is all pre-cutoff
+  // bills re-fetches and re-scans the same 25 bills every batch and never advances.
+  const alreadyPreCutoff = db.prepare("SELECT 1 FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'bill' AND billcom_id = ? AND status = 'skip_cutoff' LIMIT 1");
   let billsProcessed = 0;
   result.bills.budget_reached = false;
   for (const bill of bills) {
@@ -5285,6 +5291,11 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       if (vn && bnum) { try { backfillVendor.run(vn, entityId, 'Bill.com bill #' + bnum); } catch (e) {} }
       result.bills.skipped++;
       result.bills.details.push({ id: billId, status: 'skip', reason: 'already synced' });
+      continue;
+    }
+    if (alreadyPreCutoff.get(entityId, billId)) {
+      result.bills.skipped++;
+      result.bills.details.push({ id: billId, status: 'skip', reason: 'approved before cutoff (cached)' });
       continue;
     }
     // Invoice/list date is kept only for the A/P-aging dedupe below; the sync no
@@ -5344,6 +5355,9 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     const approvedDay = approvedDate ? String(approvedDate).slice(0, 10) : null;
     if (!approvedDay || approvedDay < cutoffDate) {
       result.bills.skipped++;
+      // Persist so later batches skip this bill cheaply (before the budget gate
+      // and detail fetch) instead of re-fetching it every run.
+      try { logSync.run(entityId, 'bill', billId, null, 'skip_cutoff', 'approved before cutoff ' + cutoffDate + ' (approved ' + (approvedDay || 'unknown') + ')', now, billNumber); } catch (e) {}
       result.bills.details.push({ id: billId, status: 'skip', reason: 'approved before cutoff ' + cutoffDate + ' (approved ' + (approvedDay || 'unknown') + ')' });
       continue;
     }
