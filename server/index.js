@@ -1456,7 +1456,7 @@ app.get('/api/entities', auth, (req, res) => {
 });
 app.post('/api/entities', auth, requireRole('Admin','Accountant'), (req, res) => {
   const { name } = req.body; if (!name) return res.status(400).json({ error: 'Name required' });
-  const entityType = ['development','shell'].includes(req.body.entity_type) ? req.body.entity_type : 'accounting';
+  const entityType = ['development','shell','operating'].includes(req.body.entity_type) ? req.body.entity_type : 'accounting';
   const displayId = (req.body.display_id || '').trim() || null;
   // Auto-generate a code from the name (used internally for sorting/uniqueness)
   const baseCode = name.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8) || 'ENT';
@@ -1477,7 +1477,7 @@ app.put('/api/entities/:id', auth, requireRole('Admin','Accountant'), (req, res)
   if (!name) return res.status(400).json({ error: 'Name required' });
   let entityType = ent.entity_type;
   if (req.body.entity_type !== undefined) {
-    if (!['development','accounting','shell'].includes(req.body.entity_type)) return res.status(400).json({ error: 'entity_type must be development, accounting, or shell' });
+    if (!['development','accounting','shell','operating'].includes(req.body.entity_type)) return res.status(400).json({ error: 'entity_type must be development, accounting, shell, or operating' });
     entityType = req.body.entity_type;
   }
   let displayId = ent.display_id;
@@ -1824,6 +1824,66 @@ function glParseIntacctHtml(buffer) {
   return { columns, rows: out };
 }
 
+// RealPage/Yardi-style property "General Ledger" export (.xlsx). Layout: a
+// header row (Property, Property Name, Date, Period, Person/Description, Control,
+// Reference, Debit, Credit, Balance, Remarks); then per account a "= Beginning
+// Balance =" row whose Property cell holds the account code (e.g. "11020-000")
+// and whose Person/Description cell holds the account name; then transaction
+// rows (Property cell holds the property code, not the account, so there is no
+// per-row account column); then an "= Ending Balance =" row (no date; carries
+// account totals). Flatten by carrying the code/name down onto each transaction
+// row. The Control value (the J-###### document id) becomes the reference so the
+// two sides of each entry group into one balanced JE. Returns null otherwise.
+function glParseYardiXlsxGrid(aoa) {
+  const lc = s => String(s == null ? '' : s).toLowerCase().trim();
+  const cell = (r, i) => String((r && r[i] != null) ? r[i] : '').trim();
+  let hdrIdx = -1;
+  for (let i = 0; i < Math.min(aoa.length, 25); i++) {
+    const names = (aoa[i] || []).map(lc);
+    if (names.some(n => n === 'property') && names.some(n => n.includes('remarks')) &&
+        names.some(n => n.includes('debit')) && names.some(n => n.includes('credit'))) { hdrIdx = i; break; }
+  }
+  if (hdrIdx === -1) return null;
+  const hdr = aoa[hdrIdx].map(c => String(c).trim());
+  const find = pred => hdr.findIndex(h => pred(lc(h)));
+  const dateIdx = find(n => n === 'date');
+  const descIdx = find(n => n.includes('description'));
+  const ctrlIdx = find(n => n === 'control');
+  const debitIdx = find(n => n.includes('debit'));
+  const creditIdx = find(n => n.includes('credit'));
+  if (dateIdx < 0 || debitIdx < 0 || creditIdx < 0) return null;
+  const isDate = v => { const s = String(v == null ? '' : v).trim(); return /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(s) || /^\d{4}-\d{1,2}-\d{1,2}/.test(s); };
+  const ACCT = /^\d{3,6}-\d{2,4}$/;   // account code e.g. 11020-000, 14105-007
+  const rows = [];
+  let curCode = null, curName = null, acctHeaders = 0;
+  for (let i = hdrIdx + 1; i < aoa.length; i++) {
+    const r = aoa[i];
+    if (!r) continue;
+    const first = cell(r, 0);
+    if (ACCT.test(first)) {                       // account section boundary (Beginning Balance row)
+      curCode = first;
+      const nm = descIdx >= 0 ? cell(r, descIdx) : '';
+      if (nm) curName = nm;                        // Person/Description holds the account name here
+      acctHeaders++;
+      continue;
+    }
+    const dcell = dateIdx >= 0 ? cell(r, dateIdx) : '';
+    if (curCode && isDate(dcell)) {                // transaction row (ending-balance rows have no date)
+      rows.push({
+        'Account Number': curCode,
+        'Account Name': curName || '',
+        'Date': r[dateIdx],
+        'Reference': ctrlIdx >= 0 ? r[ctrlIdx] : '',
+        'Person/Description': descIdx >= 0 ? r[descIdx] : '',
+        'Debit': r[debitIdx],
+        'Credit': r[creditIdx],
+      });
+    }
+  }
+  if (acctHeaders < 2 || rows.length === 0) return null;
+  return { columns: ['Account Number', 'Account Name', 'Date', 'Reference', 'Person/Description', 'Debit', 'Credit'], rows };
+}
+
 // Sage Intacct's "General Ledger report" saved as a real .xlsx (not the HTML
 // variant handled above) lays each account out as a banded section-header row
 // ("<code> - <name> (Balance forward ...)"), then its transaction rows, then a
@@ -1889,6 +1949,9 @@ function glReadGrid(buffer) {
   // row with the most non-empty cells as the header.
   const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', blankrows: false, raw: false });
   if (!aoa.length) return { columns: [], rows: [] };
+  // RealPage/Yardi property GL saved as .xlsx (banded, account code in Property col) — flatten if detected.
+  const yardi = glParseYardiXlsxGrid(aoa);
+  if (yardi) return yardi;
   // Intacct GL report saved as .xlsx (banded account sections) — flatten if detected.
   const banded = glParseIntacctXlsxGrid(aoa);
   if (banded) return banded;
