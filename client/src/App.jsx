@@ -469,7 +469,7 @@ function GlobalSearch({entities,activeEntity,onSelectEntity,onGo,onPickJE,onPick
       </div></>}
   </div>);
 }
-function EntityPicker({entities,activeId,onSelect,onManage}){const[open,setOpen]=useState(false);const[search,setSearch]=useState('');const active=entities.find(e=>e.id===activeId);
+function EntityPicker({entities,activeId,onSelect,onManage,defaultId,onSetDefault}){const[open,setOpen]=useState(false);const[search,setSearch]=useState('');const active=entities.find(e=>e.id===activeId);
   const filtered=entities.filter(e=>e.name.toLowerCase().includes(search.toLowerCase()));
   return(<div style={{position:'relative'}}><div style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',padding:'6px 14px',borderRadius:T.radiusSm,background:T.bgElevated,border:'1px solid '+T.border}} onClick={()=>setOpen(!open)}>
     <span style={{fontWeight:600,color:T.textBright,fontSize:13,maxWidth:240,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{active?.name||'Select entity'}</span>
@@ -477,8 +477,9 @@ function EntityPicker({entities,activeId,onSelect,onManage}){const[open,setOpen]
     {open&&<><div style={{position:'fixed',inset:0,zIndex:50}} onClick={()=>{setOpen(false);setSearch('');}}/>
       <div style={{position:'absolute',top:'100%',left:0,background:'#fff',border:'1px solid '+T.border,borderRadius:T.radius,maxHeight:380,overflowY:'auto',zIndex:100,boxShadow:T.shadowLg,width:340,marginTop:6}}>
         <div style={{position:'sticky',top:0,padding:12,background:'#fff',borderBottom:'1px solid '+T.border}}><input style={S.input} placeholder={'Search '+entities.length+' entities...'} value={search} onChange={e=>setSearch(e.target.value)} autoFocus/></div>
-        {filtered.map(e=><div key={e.id} style={{padding:'10px 16px',cursor:'pointer',background:e.id===activeId?T.accentDim:'transparent',borderLeft:e.id===activeId?'3px solid '+T.accent:'3px solid transparent'}} onClick={()=>{onSelect(e.id);setOpen(false);setSearch('');}}>
-          <span style={{fontWeight:600,color:T.textBright,fontSize:13}}>{e.name}</span></div>)}
+        {filtered.map(e=><div key={e.id} style={{display:'flex',alignItems:'center',gap:8,padding:'10px 16px',cursor:'pointer',background:e.id===activeId?T.accentDim:'transparent',borderLeft:e.id===activeId?'3px solid '+T.accent:'3px solid transparent'}} onClick={()=>{onSelect(e.id);setOpen(false);setSearch('');}}>
+          <span style={{flex:1,fontWeight:600,color:T.textBright,fontSize:13}}>{e.name}</span>
+          {onSetDefault&&<button title={e.id===defaultId?'Default entity — loads on refresh (click to unset)':'Set as default entity (loads on refresh)'} onClick={ev=>{ev.stopPropagation();onSetDefault(e.id===defaultId?null:e.id);}} style={{background:'none',border:'none',cursor:'pointer',fontSize:16,lineHeight:1,color:e.id===defaultId?T.accent:T.textDim,padding:'0 2px'}}>{e.id===defaultId?'★':'☆'}</button>}</div>)}
         <div style={{borderTop:'1px solid '+T.border,padding:12}}><button style={{...S.btnS,width:'100%'}} onClick={()=>{onManage();setOpen(false);}}>Manage Entities</button></div></div></>}</div>);}
 
 // ═══ Main App — JE form state lives here so it persists across modal open/close ═══
@@ -557,6 +558,7 @@ function NavFlyout({catKey,catLabel,items,pos,page,canReorder,onPick,onClose,onR
 
 export default function App(){
   const[user,setUser]=useState(null);const[entities,setEntities]=useState([]);const[activeEntity,setActiveEntity]=useState(null);
+  const[defaultEntityId,setDefaultEntityId]=useState(null); // per-user preferred entity loaded on refresh
   // Workpapers modal openable from the header (any page), for the active entity.
   const[wpEntity,setWpEntity]=useState(null);
   const[page,setPage]=useState('dashboard');const[loading,setLoading]=useState(true);
@@ -688,7 +690,8 @@ export default function App(){
 
   useEffect(()=>{try{localStorage.setItem(SIDEBAR_KEY,String(sidebarCol));}catch{}},[sidebarCol]);
   useEffect(()=>{const t=api.getToken();if(t){api.me().then(u=>{if(u)setUser(u);}).catch(()=>api.clearToken()).finally(()=>setLoading(false));}else setLoading(false);},[]);
-  useEffect(()=>{if(user)api.getEntities().then(e=>{setEntities(e);if(e.length>0&&!activeEntity)setActiveEntity(e[0].id);});},[user]);
+  useEffect(()=>{if(user)Promise.all([api.getEntities(),api.getMyPrefs().catch(()=>({}))]).then(([e,p])=>{setEntities(e);if(p&&p.defaultEntityId!=null)setDefaultEntityId(p.defaultEntityId);if(e.length>0&&!activeEntity){const def=p&&p.defaultEntityId;setActiveEntity((def!=null&&e.find(x=>x.id===def))?def:e[0].id);}});},[user]);
+  const setDefaultEntity=(id)=>{setDefaultEntityId(id);api.saveMyPrefs({defaultEntityId:id}).catch(err=>console.error('[prefs] save default entity failed:',err.message));};
   const refreshEntities=useCallback(async()=>{const e=await api.getEntities();setEntities(e);return e;},[]);
   const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
   // Read-only users (Viewer) SEE the same sections as an Accountant but cannot edit.
@@ -789,7 +792,7 @@ export default function App(){
     <div style={S.topBar}><div style={{display:'flex',alignItems:'center',gap:16}}>
       <button style={{...S.btnGhost,fontSize:18,padding:'4px 6px',color:T.textMuted}} onClick={()=>setSidebarCol(c=>!c)}>{sidebarCol?'\u2630':'\u2190'}</button>
       <div style={{display:'flex',alignItems:'center',gap:10}}><Logo size={32}/>{!sidebarCol&&<div style={{fontSize:17,fontWeight:800,color:T.textBright}}>CloudLedger</div>}</div>
-      <div style={{width:1,height:28,background:T.border}}/>{_activeEnt&&<button style={{...S.btnGhost,fontSize:18,padding:'4px 8px',lineHeight:1}} title={'Open '+_activeEnt.name+' Workpapers'} onClick={()=>setWpEntity(_activeEnt)}>📁</button>}<EntityPicker entities={entities} activeId={activeEntity} onSelect={setActiveEntity} onManage={()=>setPage('entities')}/>{entities.length>0&&<GlobalSearch entities={entities} activeEntity={activeEntity} onSelectEntity={setActiveEntity} onGo={setPage} onPickJE={(id)=>{setPendingJEId(id);setPage('journal');}} onPickAccount={(code)=>{setPendingAcctCode(code);setPage('coa');}}/>}</div>
+      <div style={{width:1,height:28,background:T.border}}/>{_activeEnt&&<button style={{...S.btnGhost,fontSize:18,padding:'4px 8px',lineHeight:1}} title={'Open '+_activeEnt.name+' Workpapers'} onClick={()=>setWpEntity(_activeEnt)}>📁</button>}<EntityPicker entities={entities} activeId={activeEntity} onSelect={setActiveEntity} onManage={()=>setPage('entities')} defaultId={defaultEntityId} onSetDefault={setDefaultEntity}/>{entities.length>0&&<GlobalSearch entities={entities} activeEntity={activeEntity} onSelectEntity={setActiveEntity} onGo={setPage} onPickJE={(id)=>{setPendingJEId(id);setPage('journal');}} onPickAccount={(code)=>{setPendingAcctCode(code);setPage('coa');}}/>}</div>
       <div style={{display:'flex',alignItems:'center',gap:10}}>
         {canEdit&&activeEntity&&<button style={{...S.btnP,position:'relative'}} onClick={()=>setShowJE(true)}>+ Journal Entry{jeHasContent&&<span style={{position:'absolute',top:-3,right:-3,width:8,height:8,borderRadius:4,background:T.orange,border:'2px solid #fff'}}/>}</button>}
         <span style={{fontSize:13,fontWeight:500}}>{titleName(user.name)}</span><span style={S.badge}>{user.role}</span>
