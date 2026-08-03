@@ -7477,6 +7477,49 @@ app.get('/api/entities/:eid/fund-statements.pdf', auth, requireEntityAccess(), r
 });
 
 
+// ── Database backup (online snapshot) ───────────────────────────────────────
+// GET /api/admin/backup — returns a consistent copy of the entire SQLite
+// database. db.backup() takes a live-safe snapshot even while writes are in
+// flight (no downtime, no locking). Auth accepts either the BACKUP_TOKEN env
+// var (Authorization: Bearer <token> or ?token=) for unattended automation, or
+// a normal Admin JWT for a browser-initiated download.
+const BACKUP_TOKEN = process.env.BACKUP_TOKEN || '';
+function backupAuth(req, res, next) {
+  const hdr = req.headers['authorization'] || '';
+  const token = hdr.startsWith('Bearer ') ? hdr.slice(7) : ((req.query && req.query.token) || '');
+  if (BACKUP_TOKEN && token) {
+    const a = Buffer.from(String(token));
+    const b = Buffer.from(BACKUP_TOKEN);
+    if (a.length === b.length && cryptoMod.timingSafeEqual(a, b)) return next();
+  }
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    if (payload.role !== 'Admin') return res.status(403).json({ error: 'Forbidden' });
+    req.user = payload;
+    return next();
+  } catch (e) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+}
+app.get('/api/admin/backup', backupAuth, async (req, res) => {
+  const stamp = new Date().toISOString().slice(0, 10);
+  const tmp = path.join(path.dirname(DB_PATH), '_backup_tmp_' + Date.now() + '.db');
+  try {
+    await db.backup(tmp);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', 'attachment; filename="cloudledger-' + stamp + '.db"');
+    const stream = fs.createReadStream(tmp);
+    stream.pipe(res);
+    const cleanup = () => { try { fs.unlinkSync(tmp); } catch (e) {} };
+    stream.on('close', cleanup);
+    stream.on('error', () => { cleanup(); if (!res.headersSent) res.status(500).end(); });
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch (_) {}
+    console.error('[backup] failed:', e);
+    if (!res.headersSent) res.status(500).json({ error: 'Backup failed: ' + e.message });
+  }
+});
+
 if (process.env.NODE_ENV === 'production') app.get('*', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
