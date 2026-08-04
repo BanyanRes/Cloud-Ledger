@@ -5397,17 +5397,20 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       continue;
     }
 
-    // Gate on APPROVAL date (AP is booked on approval). Bills approved before the
-    // cutoff were already booked pre-conversion — skip them. Late invoices approved
-    // on/after the cutoff sync even when their invoice date is older.
+    // Gate on the bill's DOCUMENT (invoice) date, which is the basis the GL detail
+    // import uses to book bills. Any bill dated on/before the cutoff is already in
+    // the GL through that date, so skip it. (Previously gated on APPROVAL date,
+    // which double-posted bills dated on/before the cutoff but approved afterward —
+    // e.g. a 06/30 bill approved 07/31 was in the GL import AND re-synced.)
     const approvedDate = billApprovalDate(detail);
     const approvedDay = approvedDate ? String(approvedDate).slice(0, 10) : null;
-    if (!approvedDay || approvedDay < cutoffDate) {
+    const invDay = invoiceDate ? String(invoiceDate).slice(0, 10) : null;
+    if (!invDay || invDay <= cutoffDate) {
       result.bills.skipped++;
       // Persist so later batches skip this bill cheaply (before the budget gate
       // and detail fetch) instead of re-fetching it every run.
-      try { logSync.run(entityId, 'bill', billId, null, 'skip_cutoff', 'approved before cutoff ' + cutoffDate + ' (approved ' + (approvedDay || 'unknown') + ')', now, billNumber); } catch (e) {}
-      result.bills.details.push({ id: billId, status: 'skip', reason: 'approved before cutoff ' + cutoffDate + ' (approved ' + (approvedDay || 'unknown') + ')' });
+      try { logSync.run(entityId, 'bill', billId, null, 'skip_cutoff', 'document date ' + (invDay || 'unknown') + ' on/before cutoff ' + cutoffDate + ' (already in GL)', now, billNumber); } catch (e) {}
+      result.bills.details.push({ id: billId, status: 'skip', reason: 'document date ' + (invDay || 'unknown') + ' on/before cutoff ' + cutoffDate + ' (already in GL)' });
       continue;
     }
 
