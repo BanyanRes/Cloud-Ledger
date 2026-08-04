@@ -1382,7 +1382,7 @@ app.post('/api/auth/admin-reset-password', auth, requireRole('Admin'), (req, res
 });
 
 // ═══ Users ═══
-app.get('/api/users', auth, requireRole('Admin'), (req, res) => res.json(db.prepare('SELECT id, name, email, role, created_at FROM users').all()));
+app.get('/api/users', auth, requireRole('Admin'), (req, res) => res.json(db.prepare('SELECT id, name, email, role, created_at FROM users ORDER BY name COLLATE NOCASE ASC').all()));
 app.delete('/api/users/:id', auth, requireRole('Admin'), (req, res) => { if (+req.params.id === req.user.id) return res.status(400).json({ error: 'Cannot delete self' }); db.prepare('DELETE FROM users WHERE id = ?').run(req.params.id); res.json({ success: true }); });
 app.put('/api/users/:id', auth, requireRole('Admin'), (req, res) => { db.prepare('UPDATE users SET name = ?, role = ? WHERE id = ?').run(req.body.name, req.body.role, req.params.id); res.json({ success: true }); });
 
