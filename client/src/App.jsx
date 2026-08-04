@@ -3281,6 +3281,7 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
 // ═══ Account Drill-Down Modal (12-month GL detail from TB) ═══
 function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp,onClose,onChanged}){
   const[reloadKey,setReloadKey]=useState(0);
+  const[q,setQ]=useState(''); // free-text filter over the visible transaction rows
   // Committed range that actually drives the query (item 2: only updates when the
   // user clicks Refresh, so the window doesn't reload on every typed digit).
   const[from,setFrom]=useState(fromProp);
@@ -3332,6 +3333,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
   let running=begBal;
   const totalDr=lines.reduce((s,l)=>s+l.debit,0);
   const totalCr=lines.reduce((s,l)=>s+l.credit,0);
+  const matchQ=(l)=>{if(!q)return true;const s=q.toLowerCase();return (l.memo||'').toLowerCase().includes(s)||(l.offset||'').toLowerCase().includes(s)||(l.vendor||'').toLowerCase().includes(s)||('je-'+String(l.entry_num).padStart(4,'0')).includes(s)||(l.date||'').includes(s)||String(l.debit).includes(s)||String(l.credit).includes(s);};
   const doExport=()=>{const acctLabel=acct.code+' - '+acct.name;
     const d=[[entityName||'Account Detail'],[acctLabel],['Period: '+from+' to '+to],[],['Date','JE','Account',classTerm(),'Location','Memo','Offset Account','Vendor/Payee','Debit','Credit','Balance']];
     d.push(['','','','','','Beginning Balance','','','','',begBal]);
@@ -3343,7 +3345,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14,gap:16}}>
       <div><div style={{fontSize:18,fontWeight:700,color:T.textBright}}>{acct.code} &mdash; {acct.name}</div>
         <div style={{display:'flex',alignItems:'center',gap:8,marginTop:6}}><label style={{fontSize:11,color:T.textMuted}}>From</label><input type="date" value={fromDraft} max={toDraft} onChange={e=>setFromDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')applyDates();}} style={{...S.inputSm,padding:'4px 8px',fontSize:12}}/><label style={{fontSize:11,color:T.textMuted}}>To</label><input type="date" value={toDraft} min={fromDraft} onChange={e=>setToDraft(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')applyDates();}} style={{...S.inputSm,padding:'4px 8px',fontSize:12}}/><button onClick={applyDates} disabled={!datesDirty} style={{background:datesDirty?T.accent:T.bgElevated,border:'1px solid '+(datesDirty?T.accent:T.border),borderRadius:6,color:datesDirty?'#fff':T.textMuted,fontSize:11,fontWeight:600,padding:'4px 12px',cursor:datesDirty?'pointer':'default'}}>Refresh</button><button onClick={()=>{setFromDraft(fromProp);setToDraft(toProp);setFrom(fromProp);setTo(toProp);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'4px 8px',cursor:'pointer'}}>Reset</button>
-        <span style={{width:1,height:16,background:T.border,margin:'0 2px'}}/>{PRESETS.map(([k,lbl])=><button key={k} onClick={()=>{const r=presetRange(k);setFromDraft(r.from);setToDraft(r.to);setFrom(r.from);setTo(r.to);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'4px 8px',cursor:'pointer'}}>{lbl}</button>)}</div>
+        <span style={{width:1,height:16,background:T.border,margin:'0 2px'}}/>{PRESETS.map(([k,lbl])=><button key={k} onClick={()=>{const r=presetRange(k);setFromDraft(r.from);setToDraft(r.to);setFrom(r.from);setTo(r.to);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'4px 8px',cursor:'pointer'}}>{lbl}</button>)}<span style={{width:1,height:16,background:T.border,margin:'0 2px'}}/><input value={q} onChange={e=>setQ(e.target.value)} placeholder={'\\uD83D\\uDD0D Search memo / offset / vendor / JE\\u2026'} style={{...S.inputSm,padding:'4px 10px',fontSize:12,width:250}}/>{q&&<button onClick={()=>setQ('')} title="Clear search" style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'4px 8px',cursor:'pointer'}}>Clear</button>}</div>
         <div style={{marginTop:6}}><span style={S.tag(acct.type)}>{acct.type}</span></div></div>
       <button style={S.btnExport} onClick={doExport}>Export Excel</button>
     </div>
@@ -3362,6 +3364,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
            {lines.length===0?
              <tr><td colSpan={8} style={{...S.td,textAlign:'center',padding:30,color:T.textDim}}>No activity in this period{from>'2015-01-01'&&<div style={{marginTop:10}}><button onClick={()=>{setFromDraft('2015-01-01');setFrom('2015-01-01');}} style={{...S.btnS,fontSize:12,padding:'6px 14px'}}>View all activity</button><div style={{fontSize:11,color:T.textMuted,marginTop:6}}>The default view shows the last 12 months. This account's activity may be older \u2014 e.g. an investment purchase.</div></div>}</td></tr>
              :lines.map((l,i)=>{running+=isDr?(l.debit-l.credit):(l.credit-l.debit);
+               if(!matchQ(l))return null;
                const tip=(l.created_by?'Posted by '+l.created_by:'')+(l.created_at?(l.created_by?' on ':'Posted on ')+new Date(l.created_at+(l.created_at.includes('Z')||l.created_at.includes('+')?'':'Z')).toLocaleString('en-US',{timeZone:'America/Los_Angeles',year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true,timeZoneName:'short'}):'');
                return<tr key={i}>
                  <td style={{...S.td,color:T.textMuted,whiteSpace:'nowrap'}}>{l.date}</td>
