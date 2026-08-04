@@ -1130,6 +1130,9 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
   const[defaultClearingAcct,setDefaultClearingAcct]=useState('');
   const[syncCutoffDate,setSyncCutoffDate]=useState(''); // only sync invoices dated on/after this
   const[unsyncing,setUnsyncing]=useState(false);
+  const[cfgIds,setCfgIds]=useState(null); // entity_ids that have Bill.com configured
+  const[showAllEnts,setShowAllEnts]=useState(false);
+  useEffect(()=>{api.getBillcomEntities().then(r=>setCfgIds(new Set(r.entity_ids||[]))).catch(()=>setCfgIds(new Set()));},[]);
 
   // Phase 2: account mapping state
   const[tab,setTab]=useState(initialTab||'config'); // 'config' | 'mapping' | 'sync'
@@ -1356,10 +1359,12 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
 
     {!syncOnly&&<div style={{...S.card,padding:20,marginBottom:20}}>
       <div style={{fontSize:12,fontWeight:600,color:T.textMuted,marginBottom:6}}>ENTITY</div>
+      {(()=>{const listed=(showAllEnts||!cfgIds)?entities:entities.filter(e=>cfgIds.has(e.id)||e.id===selectedEntity);return(
       <select value={selectedEntity||''} onChange={e=>setSelectedEntity(parseInt(e.target.value)||null)} style={{...S.input,maxWidth:400}}>
         <option value="">-- Select entity --</option>
-        {entities.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
-      </select>
+        {listed.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}
+      </select>);})()}
+      <label style={{display:'inline-flex',alignItems:'center',gap:6,marginLeft:12,fontSize:12,color:T.textMuted,cursor:'pointer'}}><input type="checkbox" checked={showAllEnts} onChange={e=>setShowAllEnts(e.target.checked)}/>Show all entities</label>
     </div>}
 
     {selectedEntity&&(loading?<div style={{color:T.textMuted}}>Loading...</div>:<>

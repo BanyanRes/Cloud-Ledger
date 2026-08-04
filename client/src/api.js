@@ -298,6 +298,7 @@ export const api = {
   moveEntityFile: (id, folderPath) => request('/entity-files/' + id + '/move', { method: 'PUT', body: { folder_path: folderPath } }),
 
   // Bill.com integration
+  getBillcomEntities: () => request('/billcom/entities'),
   getBillcomConfig: (entityId) => request('/billcom/config/' + entityId),
   saveBillcomConfig: (entityId, body) => request('/billcom/config/' + entityId, { method: 'PUT', body }),
   setBillcomCutoff: (entityId, syncCutoffDate, lines, asOf) => request('/billcom/config/' + entityId + '/cutoff', { method: 'PUT', body: { sync_cutoff_date: syncCutoffDate || null, ...(lines ? { lines, as_of: asOf || null } : {}) } }),

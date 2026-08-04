@@ -4386,6 +4386,12 @@ app.get('/api/turnkey/sync-log/:turnkey_project_id', turnkeyAuth, turnkey.requir
 });
 
 // === Bill.com integration routes ===
+// List entity ids that have a Bill.com configuration (used to filter the setup
+// entity dropdown to only Bill.com-enabled entities).
+app.get('/api/billcom/entities', auth, requireRole('Admin', 'Accountant'), (req, res) => {
+  const ids = db.prepare('SELECT entity_id FROM billcom_config').all().map(r => r.entity_id);
+  res.json({ entity_ids: ids });
+});
 app.get('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
   const row = db.prepare('SELECT entity_id, environment, api_base_url, username, password_enc, org_id, dev_key_enc, default_ap_account, default_cash_account, default_clearing_account, sync_cutoff_date, last_tested_at, last_test_status, last_test_message, updated_by, updated_at FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
   if (!row) return res.json({ configured: false });
