@@ -440,6 +440,13 @@ if (!ueaCols.includes('access_level')) {
   db.exec("UPDATE user_entity_access SET access_level = 'view' WHERE user_id IN (SELECT id FROM users WHERE role = 'Viewer')");
   console.log('[db migrate] user_entity_access.access_level added (viewers backfilled to view)');
 }
+// Same per-entity level on GROUP grants: a group can confer Full or View-only
+// access to each of its entities. Existing group grants default to 'full'.
+const ugeaCols = db.prepare("PRAGMA table_info(user_group_entity_access)").all().map(c => c.name);
+if (!ugeaCols.includes('access_level')) {
+  db.exec("ALTER TABLE user_group_entity_access ADD COLUMN access_level TEXT NOT NULL DEFAULT 'full'");
+  console.log('[db migrate] user_group_entity_access.access_level added (default full)');
+}
 // display_id: short user-facing identifier (e.g. "0005 B1a") used as a filename
 // prefix for requisition invoice packets. Optional; falls back to entity name.
 if (!entCols.includes('display_id')) {
@@ -1178,10 +1185,13 @@ function entityAccessLevel(userId, userRole, entityId) {
   if (userRole === 'Admin') return 'full';
   const row = db.prepare('SELECT access_level FROM user_entity_access WHERE user_id = ? AND entity_id = ?').get(userId, entityId);
   if (row) return row.access_level === 'view' ? 'view' : 'full';
+  // Group grants for this entity: Full wins over View across the user's groups.
+  const grpLevels = db.prepare('SELECT ga.access_level lvl FROM user_group_entity_access ga JOIN user_group_members m ON m.group_id = ga.group_id WHERE m.user_id = ? AND ga.entity_id = ?').all(userId, entityId);
+  if (grpLevels.length) return grpLevels.some(g => g.lvl !== 'view') ? 'full' : 'view';
   const direct = db.prepare('SELECT 1 FROM user_entity_access WHERE user_id = ? LIMIT 1').get(userId);
   const grp = db.prepare('SELECT 1 FROM user_group_members WHERE user_id = ? LIMIT 1').get(userId);
   if (!direct && !grp) return userRole === 'Viewer' ? 'view' : 'full'; // legacy all-access
-  return 'full'; // access via group grant
+  return 'full';
 }
 function requireEntityAccess(paramName) {
   return (req, res, next) => {
@@ -1437,8 +1447,10 @@ app.get('/api/groups/:id', auth, requireRole('Admin'), (req, res) => {
   const g = db.prepare('SELECT id, name, created_at FROM user_groups WHERE id = ?').get(req.params.id);
   if (!g) return res.status(404).json({ error: 'Group not found' });
   const member_ids = db.prepare('SELECT user_id FROM user_group_members WHERE group_id = ?').all(g.id).map(r => r.user_id);
-  const entity_ids = db.prepare('SELECT entity_id FROM user_group_entity_access WHERE group_id = ? ORDER BY entity_id').all(g.id).map(r => r.entity_id);
-  res.json({ ...g, member_ids, entity_ids });
+  const entRows = db.prepare('SELECT entity_id, access_level FROM user_group_entity_access WHERE group_id = ? ORDER BY entity_id').all(g.id);
+  const entity_ids = entRows.map(r => r.entity_id);
+  const levels = Object.fromEntries(entRows.map(r => [r.entity_id, r.access_level === 'view' ? 'view' : 'full']));
+  res.json({ ...g, member_ids, entity_ids, levels });
 });
 // Create a group.
 app.post('/api/groups', auth, requireRole('Admin'), (req, res) => {
@@ -1470,13 +1482,15 @@ app.put('/api/groups/:id/entities', auth, requireRole('Admin'), (req, res) => {
   const gid = parseInt(req.params.id);
   if (!db.prepare('SELECT id FROM user_groups WHERE id = ?').get(gid)) return res.status(404).json({ error: 'Group not found' });
   const ids = Array.isArray(req.body.entity_ids) ? req.body.entity_ids.map(n => parseInt(n)).filter(n => Number.isInteger(n)) : [];
+  const levels = (req.body.levels && typeof req.body.levels === 'object') ? req.body.levels : {};
+  const lvlFor = (eid) => (String(levels[eid] != null ? levels[eid] : (levels[String(eid)] || 'full')) === 'view' ? 'view' : 'full');
   const tx = db.transaction(() => {
     db.prepare('DELETE FROM user_group_entity_access WHERE group_id = ?').run(gid);
-    const ins = db.prepare('INSERT OR IGNORE INTO user_group_entity_access (group_id, entity_id) VALUES (?, ?)');
-    for (const eid of ids) ins.run(gid, eid);
+    const ins = db.prepare('INSERT OR IGNORE INTO user_group_entity_access (group_id, entity_id, access_level) VALUES (?, ?, ?)');
+    for (const eid of ids) ins.run(gid, eid, lvlFor(eid));
   });
   tx();
-  res.json({ group_id: gid, entity_ids: ids });
+  res.json({ group_id: gid, entity_ids: ids, levels });
 });
 
 // ═══ Entities ═══

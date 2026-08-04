@@ -42,7 +42,7 @@ export const api = {
   getGroups: () => request('/groups'),
   getGroup: (id) => request('/groups/' + id),
   setGroupMembers: (id, user_ids) => request('/groups/' + id + '/members', { method: 'PUT', body: { user_ids } }),
-  setGroupEntities: (id, entity_ids) => request('/groups/' + id + '/entities', { method: 'PUT', body: { entity_ids } }),
+  setGroupEntities: (id, entity_ids, levels) => request('/groups/' + id + '/entities', { method: 'PUT', body: { entity_ids, levels } }),
 
   // Entities
   getEntities: () => request('/entities'),

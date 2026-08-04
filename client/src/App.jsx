@@ -5094,14 +5094,15 @@ function UserManagement({currentUser}){
   // ── User groups (e.g. CLA): bundle members + grant entity access at once ──
   const[groups,setGroups]=useState([]);
   const[groupModal,setGroupModal]=useState(null);
-  const[gMembers,setGMembers]=useState([]);const[gEntities,setGEntities]=useState([]);const[gAllEntities,setGAllEntities]=useState([]);
+  const[gMembers,setGMembers]=useState([]);const[gEntities,setGEntities]=useState([]);const[gAllEntities,setGAllEntities]=useState([]);const[gLevels,setGLevels]=useState({});
   const[gSaving,setGSaving]=useState(false);const[gErr,setGErr]=useState('');
   const loadGroups=useCallback(()=>{api.getGroups().then(setGroups).catch(()=>{});},[]);
   useEffect(()=>{loadGroups();},[loadGroups]);
-  const openGroup=async(g)=>{setGroupModal(g);setGErr('');setGSaving(false);try{const[detail,ents]=await Promise.all([api.getGroup(g.id),api.getEntities()]);setGMembers(detail.member_ids||[]);setGEntities(detail.entity_ids||[]);setGAllEntities(ents);}catch(e){setGErr(e.message);}};
+  const openGroup=async(g)=>{setGroupModal(g);setGErr('');setGSaving(false);try{const[detail,ents]=await Promise.all([api.getGroup(g.id),api.getEntities()]);setGMembers(detail.member_ids||[]);setGEntities(detail.entity_ids||[]);setGLevels(detail.levels||{});setGAllEntities(ents);}catch(e){setGErr(e.message);}};
   const toggleGMember=(id)=>setGMembers(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
   const toggleGEntity=(id)=>setGEntities(p=>p.includes(id)?p.filter(x=>x!==id):[...p,id]);
-  const saveGroup=async()=>{setGSaving(true);setGErr('');try{await api.setGroupMembers(groupModal.id,gMembers);await api.setGroupEntities(groupModal.id,gEntities);setGroupModal(null);loadGroups();}catch(e){setGErr(e.message);}setGSaving(false);};
+  const setGLevel=(id,lvl)=>setGLevels(p=>({...p,[id]:lvl}));
+  const saveGroup=async()=>{setGSaving(true);setGErr('');try{await api.setGroupMembers(groupModal.id,gMembers);await api.setGroupEntities(groupModal.id,gEntities,gLevels);setGroupModal(null);loadGroups();}catch(e){setGErr(e.message);}setGSaving(false);};
   const changeRole=async(userId,newRole)=>{try{await api.updateUser(userId,{name:users.find(u=>u.id===userId)?.name,role:newRole});setEditingRole(null);loadUsers();}catch(e){alert(e.message);}};
 
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
@@ -5219,6 +5220,9 @@ function UserManagement({currentUser}){
                 <input type="checkbox" checked={gEntities.includes(e.id)} onChange={()=>toggleGEntity(e.id)}/>
                 <span style={{color:T.textBright,fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{e.name}</span>
                 {e.code&&<span style={{color:T.textMuted,fontSize:10,fontFamily:'monospace'}}>{e.code}</span>}
+                {gEntities.includes(e.id)&&<span style={{marginLeft:'auto',display:'flex',gap:4}} onClick={ev=>ev.preventDefault()}>
+                  {[['full','Full'],['view','View']].map(([lv,lbl])=><button key={lv} type="button" onClick={ev=>{ev.preventDefault();ev.stopPropagation();setGLevel(e.id,lv);}} style={{fontSize:9,padding:'1px 6px',borderRadius:4,border:'1px solid '+T.border,cursor:'pointer',background:((gLevels[e.id]||'full')===lv)?T.accent:'transparent',color:((gLevels[e.id]||'full')===lv)?'#fff':T.textMuted}}>{lbl}</button>)}
+                </span>}
               </label>
             ))}
             {gAllEntities.length===0&&<div style={{padding:12,color:T.textMuted,fontSize:12,textAlign:'center'}}>No entities</div>}
