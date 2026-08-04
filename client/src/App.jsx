@@ -92,9 +92,12 @@ const acctLabel = (code, name) => code + ' - ' + name;
 // refreshed by <App> on every render (top-down), so child components read the
 // current entity's term. Extend the map to relabel Class for other entities.
 let _activeEntityCode = null;
+// Active entity's display id (its "entity id"), or its name when there's no
+// display id — prepended to exported Excel filenames.
+let _activeEntityFileTag = '';
 const CLASS_DIM_LABELS = { TURNKEYR: 'Pay Application' };
 const classTerm = () => CLASS_DIM_LABELS[_activeEntityCode] || 'Class';
-function exportToExcel(data, fn, opts) { opts = opts || {}; const moneyFmt = opts.numFmt || '#,##0.00;(#,##0.00)'; const plain = new Set(opts.plainCols || []); const ws = XLSX.utils.aoa_to_sheet(data); const range = XLSX.utils.decode_range(ws['!ref']); for (let R = range.s.r; R <= range.e.r; R++) { for (let C = range.s.c; C <= range.e.c; C++) { if (plain.has(C)) continue; const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })]; if (cell && cell.t === 'n') cell.z = moneyFmt; } } const fmtLen = v => (typeof v === 'number' ? v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).length : String(v == null ? '' : v).length); const nCols = data.reduce((m, r) => Math.max(m, (r ? r.length : 0)), 0); const colW = []; for (let c = 0; c < nCols; c++) { let w = 8; for (const r of data) { if (r && r[c] != null && r[c] !== '') w = Math.max(w, fmtLen(r[c])); } colW.push({ wch: Math.min(w + 2, 60) }); } ws['!cols'] = colW; const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); XLSX.writeFile(wb, fn); }
+function exportToExcel(data, fn, opts) { opts = opts || {}; const moneyFmt = opts.numFmt || '#,##0.00;(#,##0.00)'; const plain = new Set(opts.plainCols || []); const ws = XLSX.utils.aoa_to_sheet(data); const range = XLSX.utils.decode_range(ws['!ref']); for (let R = range.s.r; R <= range.e.r; R++) { for (let C = range.s.c; C <= range.e.c; C++) { if (plain.has(C)) continue; const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })]; if (cell && cell.t === 'n') cell.z = moneyFmt; } } const fmtLen = v => (typeof v === 'number' ? v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).length : String(v == null ? '' : v).length); const nCols = data.reduce((m, r) => Math.max(m, (r ? r.length : 0)), 0); const colW = []; for (let c = 0; c < nCols; c++) { let w = 8; for (const r of data) { if (r && r[c] != null && r[c] !== '') w = Math.max(w, fmtLen(r[c])); } colW.push({ wch: Math.min(w + 2, 60) }); } ws['!cols'] = colW; const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); const _pfx = String(_activeEntityFileTag || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, ''); const _out = (_pfx && fn.indexOf(_pfx + '_') !== 0) ? (_pfx + '_' + fn) : fn; XLSX.writeFile(wb, _out); }
 const BLANK_JE = () => ({date:today(),memo:'',lines:[{account_code:'',debit:'',credit:'',description:''},{account_code:'',debit:'',credit:'',description:''}]});
 const SIDEBAR_KEY = 'cl_sidebar';
 
@@ -710,6 +713,7 @@ export default function App(){
 
   const _activeEnt = entities.find(e=>e.id===activeEntity);
   _activeEntityCode = _activeEnt ? _activeEnt.code : null; // drives per-entity Class relabel (classTerm)
+  _activeEntityFileTag = _activeEnt ? (_activeEnt.display_id || _activeEnt.name || '') : '';
   const isTurnkeyEntity = !!(_activeEnt && (_activeEnt.code==='TURNKEYR' || /turnkey\s*rail/i.test(_activeEnt.name||'')));
   const isDevEntity = !!(_activeEnt && _activeEnt.entity_type==='development');
   // County Line Rail Fund — the only entity with the Management Fee workpaper for now.
