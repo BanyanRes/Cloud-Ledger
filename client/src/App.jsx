@@ -471,6 +471,9 @@ function GlobalSearch({entities,activeEntity,onSelectEntity,onGo,onPickJE,onPick
   </div>);
 }
 function EntityPicker({entities,activeId,onSelect,onManage,defaultId,onSetDefault}){const[open,setOpen]=useState(false);const[search,setSearch]=useState('');const active=entities.find(e=>e.id===activeId);
+  const activeRef=useRef(null);
+  // When the list opens, scroll the currently-selected entity into view so it's visible.
+  useEffect(()=>{if(open&&!search&&activeRef.current){try{activeRef.current.scrollIntoView({block:'center'});}catch(_){}}},[open]);
   const filtered=entities.filter(e=>e.name.toLowerCase().includes(search.toLowerCase()));
   return(<div style={{position:'relative'}}><div style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',padding:'6px 14px',borderRadius:T.radiusSm,background:T.bgElevated,border:'1px solid '+T.border}} onClick={()=>setOpen(!open)}>
     <span style={{fontWeight:600,color:T.textBright,fontSize:13,maxWidth:240,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{active?.name||'Select entity'}</span>
@@ -478,8 +481,9 @@ function EntityPicker({entities,activeId,onSelect,onManage,defaultId,onSetDefaul
     {open&&<><div style={{position:'fixed',inset:0,zIndex:50}} onClick={()=>{setOpen(false);setSearch('');}}/>
       <div style={{position:'absolute',top:'100%',left:0,background:'#fff',border:'1px solid '+T.border,borderRadius:T.radius,maxHeight:380,overflowY:'auto',zIndex:100,boxShadow:T.shadowLg,width:340,marginTop:6}}>
         <div style={{position:'sticky',top:0,padding:12,background:'#fff',borderBottom:'1px solid '+T.border}}><input style={S.input} placeholder={'Search '+entities.length+' entities...'} value={search} onChange={e=>setSearch(e.target.value)} autoFocus/></div>
-        {filtered.map(e=><div key={e.id} style={{display:'flex',alignItems:'center',gap:8,padding:'10px 16px',cursor:'pointer',background:e.id===activeId?T.accentDim:'transparent',borderLeft:e.id===activeId?'3px solid '+T.accent:'3px solid transparent'}} onClick={()=>{onSelect(e.id);setOpen(false);setSearch('');}}>
+        {filtered.map(e=><div key={e.id} ref={e.id===activeId?activeRef:null} style={{display:'flex',alignItems:'center',gap:8,padding:'10px 16px',cursor:'pointer',background:e.id===activeId?T.accentDim:'transparent',borderLeft:e.id===activeId?'3px solid '+T.accent:'3px solid transparent'}} onClick={()=>{onSelect(e.id);setOpen(false);setSearch('');}}>
           <span style={{flex:1,fontWeight:600,color:T.textBright,fontSize:13}}>{e.name}</span>
+          {e.id===activeId&&<span style={{fontSize:10,fontWeight:700,color:T.accent,background:T.accent+'18',padding:'2px 6px',borderRadius:4,whiteSpace:'nowrap'}}>Current</span>}
           {onSetDefault&&<button title={e.id===defaultId?'Default entity — loads on refresh (click to unset)':'Set as default entity (loads on refresh)'} onClick={ev=>{ev.stopPropagation();onSetDefault(e.id===defaultId?null:e.id);}} style={{background:'none',border:'none',cursor:'pointer',fontSize:16,lineHeight:1,color:e.id===defaultId?T.accent:T.textDim,padding:'0 2px'}}>{e.id===defaultId?'★':'☆'}</button>}</div>)}
         <div style={{borderTop:'1px solid '+T.border,padding:12}}><button style={{...S.btnS,width:'100%'}} onClick={()=>{onManage();setOpen(false);}}>Manage Entities</button></div></div></>}</div>);}
 
