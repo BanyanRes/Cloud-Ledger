@@ -697,7 +697,7 @@ export default function App(){
   const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
   // Read-only users (Viewer) SEE the same sections as an Accountant but cannot edit.
   // canEdit gates every write control; it must never be derived from mere visibility.
-  const canEdit = !!user && (user.role==='Admin' || user.role==='Accountant');
+  const canEdit = !!user && (user.role==='Admin' || (()=>{ const ae=activeEntity?entities.find(e=>e.id===activeEntity):null; return ae&&ae.access_level ? ae.access_level==='full' : user.role==='Accountant'; })());
   if(loading)return<div style={{...S.app,display:'flex',alignItems:'center',justifyContent:'center'}}><div style={{color:T.textMuted}}>Loading...</div></div>;
   const _resetToken=(()=>{try{return new URLSearchParams(window.location.search).get('reset_token');}catch{return null;}})();
   if(_resetToken)return<ResetPasswordScreen token={_resetToken}/>;
@@ -5066,14 +5066,16 @@ function UserManagement({currentUser}){
   const[accessGroups,setAccessGroups]=useState([]); // groups the user belongs to (with entity_ids)
   const[accessEffective,setAccessEffective]=useState(null); // null=all, else union of individual+group minus exclusions
   const[accessExclusions,setAccessExclusions]=useState([]); // per-user entity ids to subtract (negative overrides)
+  const[accessLevels,setAccessLevels]=useState({}); // entity_id -> 'full' | 'view' for individual grants
   const openAccess=async(u)=>{
-    setAccessUser(u);setAccessErr('');setAccessSaving(false);setAccessGroups([]);setAccessEffective(null);setAccessExclusions([]);
+    setAccessUser(u);setAccessErr('');setAccessSaving(false);setAccessGroups([]);setAccessEffective(null);setAccessExclusions([]);setAccessLevels({});
     try{
       const[ents,acc]=await Promise.all([api.getEntities(),api.getUserEntityAccess(u.id)]);
       setAccessAllEntities(ents);
       setAccessEntities(acc.entity_ids||[]);
       setAccessGroups(acc.groups||[]);
       setAccessExclusions(acc.exclusions||[]);
+      setAccessLevels(acc.levels||{});
       setAccessEffective(acc.effective===undefined?null:acc.effective);
     }catch(e){setAccessErr(e.message);}
   };
@@ -5081,9 +5083,10 @@ function UserManagement({currentUser}){
   // Toggle an entity granted via group membership: unchecking adds it to the
   // per-user exclusion list (subtracted from effective access); rechecking removes it.
   const toggleAccessExclusion=(id)=>setAccessExclusions(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id]);
+  const setAccessLevel=(id,lvl)=>setAccessLevels(prev=>({...prev,[id]:lvl}));
   const saveAccess=async()=>{
     setAccessSaving(true);setAccessErr('');
-    try{await api.setUserEntityAccess(accessUser.id,accessEntities,accessExclusions);setAccessUser(null);}
+    try{await api.setUserEntityAccess(accessUser.id,accessEntities,accessExclusions,accessLevels);setAccessUser(null);}
     catch(e){setAccessErr(e.message);}
     setAccessSaving(false);
   };
@@ -5173,6 +5176,9 @@ function UserManagement({currentUser}){
             {e.code&&<span style={{color:T.textMuted,fontSize:11,fontFamily:'monospace'}}>{e.code}</span>}
             {inGroup&&!excluded&&<span style={{marginLeft:'auto',fontSize:10,color:T.accent,background:T.accent+'18',padding:'2px 6px',borderRadius:4,whiteSpace:'nowrap'}}>via {viaGroups.join(', ')}</span>}
             {inGroup&&excluded&&<span style={{marginLeft:'auto',fontSize:10,color:T.danger||'#c0392b',background:(T.danger||'#c0392b')+'18',padding:'2px 6px',borderRadius:4,whiteSpace:'nowrap'}}>excluded</span>}
+            {accessEntities.includes(e.id)&&!inGroup&&<span style={{marginLeft:'auto',display:'flex',gap:4}} onClick={ev=>ev.preventDefault()}>
+              {[['full','Full'],['view','View only']].map(([lv,lbl])=><button key={lv} type="button" onClick={ev=>{ev.preventDefault();ev.stopPropagation();setAccessLevel(e.id,lv);}} style={{fontSize:10,padding:'2px 8px',borderRadius:4,border:'1px solid '+T.border,cursor:'pointer',background:((accessLevels[e.id]||'full')===lv)?T.accent:'transparent',color:((accessLevels[e.id]||'full')===lv)?'#fff':T.textMuted}}>{lbl}</button>)}
+            </span>}
           </label>
           );
         })}

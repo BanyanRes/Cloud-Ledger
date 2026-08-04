@@ -430,6 +430,16 @@ if (!entCols.includes('entity_type')) {
   db.exec("ALTER TABLE entities ADD COLUMN entity_type TEXT NOT NULL DEFAULT 'accounting'");
   console.log('[db migrate] entities.entity_type added (default accounting)');
 }
+// Per-entity access LEVEL on individual grants: 'full' (create/edit, like an
+// Accountant) or 'view' (read-only, like a Viewer). Lets one user be Full on some
+// entities and View-only on others. Backfill preserves today's access: a Viewer's
+// existing grants become 'view'; everyone else's stay 'full'.
+const ueaCols = db.prepare("PRAGMA table_info(user_entity_access)").all().map(c => c.name);
+if (!ueaCols.includes('access_level')) {
+  db.exec("ALTER TABLE user_entity_access ADD COLUMN access_level TEXT NOT NULL DEFAULT 'full'");
+  db.exec("UPDATE user_entity_access SET access_level = 'view' WHERE user_id IN (SELECT id FROM users WHERE role = 'Viewer')");
+  console.log('[db migrate] user_entity_access.access_level added (viewers backfilled to view)');
+}
 // display_id: short user-facing identifier (e.g. "0005 B1a") used as a filename
 // prefix for requisition invoice packets. Optional; falls back to entity name.
 if (!entCols.includes('display_id')) {
@@ -1160,16 +1170,36 @@ function listAccessibleEntityIds(userId, userRole) {
   for (const r of excl) set.delete(r.entity_id);
   return [...set];
 }
+// Effective access level for a user on ONE entity: 'full' (create/edit) or 'view'
+// (read-only). Admin is always full. A direct per-user grant carries its own level;
+// access that comes only through a group is full; a legacy all-access user (no
+// grants at all) inherits from their global role (Viewer => view, else full).
+function entityAccessLevel(userId, userRole, entityId) {
+  if (userRole === 'Admin') return 'full';
+  const row = db.prepare('SELECT access_level FROM user_entity_access WHERE user_id = ? AND entity_id = ?').get(userId, entityId);
+  if (row) return row.access_level === 'view' ? 'view' : 'full';
+  const direct = db.prepare('SELECT 1 FROM user_entity_access WHERE user_id = ? LIMIT 1').get(userId);
+  const grp = db.prepare('SELECT 1 FROM user_group_members WHERE user_id = ? LIMIT 1').get(userId);
+  if (!direct && !grp) return userRole === 'Viewer' ? 'view' : 'full'; // legacy all-access
+  return 'full'; // access via group grant
+}
 function requireEntityAccess(paramName) {
   return (req, res, next) => {
     const eid = parseInt(req.params[paramName || 'eid']);
     if (!eid) return res.status(400).json({ error: 'Invalid entity id' });
     if (!userHasEntityAccess(req.user.id, req.user.role, eid)) return res.status(403).json({ error: 'No access to this entity' });
+    // Scope the effective role to THIS entity so write gates honor a per-entity
+    // 'view' grant even when the user's global role would otherwise permit writes.
+    const lvl = entityAccessLevel(req.user.id, req.user.role, eid);
+    req.entityRole = req.user.role === 'Admin' ? 'Admin' : (lvl === 'view' ? 'Viewer' : 'Accountant');
     next();
   };
 }
 
-function requireRole(...roles) { return (req, res, next) => { if (!roles.includes(req.user.role) && req.user.role !== 'Admin') return res.status(403).json({ error: 'Forbidden' }); next(); }; }
+// Write/section gate. When an entity-scoped route ran requireEntityAccess first,
+// req.entityRole holds the caller's level FOR THAT ENTITY and takes precedence;
+// otherwise the caller's global role is used (non-entity routes).
+function requireRole(...roles) { return (req, res, next) => { const role = req.entityRole || req.user.role; if (!roles.includes(role) && role !== 'Admin') return res.status(403).json({ error: 'Forbidden' }); next(); }; }
 
 // Gate Requisition/Invoice-Packet features to development-project entities only.
 // Reads the entity id from the named route param (default 'entity_id'); rejects
@@ -1349,7 +1379,7 @@ app.put('/api/users/:id', auth, requireRole('Admin'), (req, res) => { db.prepare
 // Entity access management (Admin only)
 app.get('/api/users/:id/entity-access', auth, requireRole('Admin'), (req, res) => {
   const uid = parseInt(req.params.id);
-  const rows = db.prepare('SELECT entity_id FROM user_entity_access WHERE user_id = ? ORDER BY entity_id').all(uid);
+  const rows = db.prepare('SELECT entity_id, access_level FROM user_entity_access WHERE user_id = ? ORDER BY entity_id').all(uid);
   // Also surface access the user gets through group membership, so the modal can
   // show effective access (individual grants alone are misleading once a user is
   // in a group like CLA/Weaver).
@@ -1366,7 +1396,8 @@ app.get('/api/users/:id/entity-access', auth, requireRole('Admin'), (req, res) =
   if (user && user.role === 'Admin') effective = null;
   else if (rows.length === 0 && groups.length === 0) effective = null;
   else effective = [...new Set([...rows.map(r => r.entity_id), ...groupEntityIds])].filter(id => !exclusions.includes(id));
-  res.json({ user_id: uid, entity_ids: rows.map(r => r.entity_id), groups: groupsDetail, group_entity_ids: groupEntityIds, exclusions, effective });
+  const levels = Object.fromEntries(rows.map(r => [r.entity_id, r.access_level === 'view' ? 'view' : 'full']));
+  res.json({ user_id: uid, entity_ids: rows.map(r => r.entity_id), levels, groups: groupsDetail, group_entity_ids: groupEntityIds, exclusions, effective });
 });
 app.put('/api/users/:id/entity-access', auth, requireRole('Admin'), (req, res) => {
   const userId = parseInt(req.params.id);
@@ -1374,17 +1405,19 @@ app.put('/api/users/:id/entity-access', auth, requireRole('Admin'), (req, res) =
   if (!targetUser) return res.status(404).json({ error: 'User not found' });
   if (targetUser.role === 'Admin') return res.status(400).json({ error: 'Admins always have all-entity access; cannot restrict' });
   const ids = Array.isArray(req.body.entity_ids) ? req.body.entity_ids.map(n => parseInt(n)).filter(n => Number.isInteger(n)) : [];
+  const levels = (req.body.levels && typeof req.body.levels === 'object') ? req.body.levels : {};
+  const lvlFor = (eid) => (String(levels[eid] != null ? levels[eid] : (levels[String(eid)] || 'full')) === 'view' ? 'view' : 'full');
   const exclusions = Array.isArray(req.body.exclusions) ? req.body.exclusions.map(n => parseInt(n)).filter(n => Number.isInteger(n)) : [];
   const tx = db.transaction(() => {
     db.prepare('DELETE FROM user_entity_access WHERE user_id = ?').run(userId);
-    const ins = db.prepare('INSERT INTO user_entity_access (user_id, entity_id) VALUES (?, ?)');
-    for (const eid of ids) ins.run(userId, eid);
+    const ins = db.prepare('INSERT INTO user_entity_access (user_id, entity_id, access_level) VALUES (?, ?, ?)');
+    for (const eid of ids) ins.run(userId, eid, lvlFor(eid));
     db.prepare('DELETE FROM user_entity_exclusions WHERE user_id = ?').run(userId);
     const insX = db.prepare('INSERT OR IGNORE INTO user_entity_exclusions (user_id, entity_id) VALUES (?, ?)');
     for (const eid of exclusions) insX.run(userId, eid);
   });
   tx();
-  res.json({ user_id: userId, entity_ids: ids, exclusions });
+  res.json({ user_id: userId, entity_ids: ids, levels, exclusions });
 });
 
 
@@ -1449,10 +1482,12 @@ app.put('/api/groups/:id/entities', auth, requireRole('Admin'), (req, res) => {
 // ═══ Entities ═══
 app.get('/api/entities', auth, (req, res) => {
   const ids = listAccessibleEntityIds(req.user.id, req.user.role);
-  if (ids === null) return res.json(db.prepare('SELECT * FROM entities ORDER BY code').all());
+  // Attach the caller's per-entity access level so the client can gate write UI.
+  const withLevel = (rows) => rows.map(e => ({ ...e, access_level: entityAccessLevel(req.user.id, req.user.role, e.id) }));
+  if (ids === null) return res.json(withLevel(db.prepare('SELECT * FROM entities ORDER BY code').all()));
   if (ids.length === 0) return res.json([]);
   const placeholders = ids.map(() => '?').join(',');
-  res.json(db.prepare('SELECT * FROM entities WHERE id IN (' + placeholders + ') ORDER BY code').all(...ids));
+  res.json(withLevel(db.prepare('SELECT * FROM entities WHERE id IN (' + placeholders + ') ORDER BY code').all(...ids)));
 });
 app.post('/api/entities', auth, requireRole('Admin','Accountant'), (req, res) => {
   const { name } = req.body; if (!name) return res.status(400).json({ error: 'Name required' });
