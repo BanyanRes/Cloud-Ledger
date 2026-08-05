@@ -2551,13 +2551,12 @@ function ArOpeningUploadModal({entityId,asOf,onClose,onImported}){
   const [preview,setPreview]=useState(null);
   const [err,setErr]=useState('');
   const [force,setForce]=useState(false);
-  const [allowOver,setAllowOver]=useState(false);
   const [saving,setSaving]=useState(false);
   const [fileName,setFileName]=useState('');
   const fmtDate=(v)=>{ if(v===null||v===undefined||v==='')return null; if(v instanceof Date&&!isNaN(v)){return v.getFullYear()+'-'+String(v.getMonth()+1).padStart(2,'0')+'-'+String(v.getDate()).padStart(2,'0');} const s=String(v).trim(); if(!s)return null; if(s.indexOf('/')>=0){const p=s.split(' ')[0].split('/'); if(p.length===3){let y=p[2]; if(y.length===2)y='20'+y; return y+'-'+p[0].padStart(2,'0')+'-'+p[1].padStart(2,'0');}} if(s.length>=10&&s.charAt(4)==='-')return s.slice(0,10); return null; };
   const num=(v)=>{ if(v===null||v===undefined||v==='')return null; if(typeof v==='number')return v; const n=parseFloat(String(v).split(',').join('').split('$').join('')); return isNaN(n)?null:n; };
   const onFile=async(file)=>{
-    setErr('');setPreview(null);setParsing(true);setAllowOver(false);setFileName(file.name);
+    setErr('');setPreview(null);setParsing(true);setFileName(file.name);
     try{
       const buf=await file.arrayBuffer();
       const wb=XLSX.read(buf,{type:'array',cellDates:true});
@@ -2601,13 +2600,10 @@ function ArOpeningUploadModal({entityId,asOf,onClose,onImported}){
     }catch(e){ setErr(e.message||String(e)); } finally{ setParsing(false); }
   };
   const doImport=async()=>{ if(!preview)return; setSaving(true);setErr('');
-    try{ const res=await api.arOpeningImport(entityId,preview.items,force,{as_of:preview.asOf,allow_over_gl:allowOver}); onImported(res); }
+    try{ const res=await api.arOpeningImport(entityId,preview.items,force); onImported(res); }
     catch(e){ setErr(e.message||String(e)); } finally{ setSaving(false); }
   };
   const tie=preview&&preview.recon!==null?Math.abs(preview.recon)<0.005:null;
-  // recon = GL control balance - file total. Negative means the detail claims MORE
-  // open A/R than the control account holds, which is never a valid subledger.
-  const overGl=!!(preview&&preview.recon!==null&&preview.recon<-0.005);
   return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:640}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Upload A/R aging detail</div>
@@ -2624,14 +2620,12 @@ function ArOpeningUploadModal({entityId,asOf,onClose,onImported}){
       <div style={{display:'flex',justifyContent:'space-between',fontSize:13,padding:'3px 0'}}><span style={{color:T.textMuted}}>Grand total</span><span style={{fontWeight:600}}>{'$'+fmt(preview.total)}</span></div>
       <div style={{display:'flex',justifyContent:'space-between',fontSize:13,padding:'6px 0 3px',marginTop:6}}><span style={{color:T.textMuted}}>GL control balance</span><span>{preview.glBalance!==null?'$'+fmt(preview.glBalance):'-'}</span></div>
       {preview.recon!==null&&<div style={{display:'flex',justifyContent:'space-between',fontSize:13,padding:'3px 0'}}><span style={{color:T.textMuted}}>Difference</span><span style={{fontWeight:700,color:tie?T.green:T.orange}}>{tie?'ties out':'$'+fmt(preview.recon)+' off'}</span></div>}
-      {preview.recon!==null&&!tie&&!overGl&&<div style={{fontSize:12,color:T.orange,marginTop:6}}>This detail does not tie to the GL control balance as of {preview.asOf}. You can still import; the aging will carry the difference as an un-itemized residual.</div>}
-      {overGl&&<div style={{fontSize:12,color:T.red,marginTop:6,fontWeight:600}}>This detail is ${fmt(Math.abs(preview.recon))} MORE than the GL control balance as of {preview.asOf}. A subledger cannot hold more open A/R than its control account. This usually means the wrong entity is selected, or this file belongs to a different entity. Check the entity selector before importing.</div>}
+      {preview.recon!==null&&!tie&&<div style={{fontSize:12,color:T.orange,marginTop:6}}>This detail does not tie to the GL control balance as of {preview.asOf}. You can still import; the aging will carry the difference as an un-itemized residual.</div>}
     </div>}
     {preview&&<label style={{display:'flex',alignItems:'center',gap:8,fontSize:12,color:T.textMuted,marginBottom:12}}><input type="checkbox" style={S.checkbox} checked={force} onChange={e=>setForce(e.target.checked)}/>Replace even if cash receipts were already applied to opening items</label>}
-    {overGl&&<label style={{display:'flex',alignItems:'center',gap:8,fontSize:12,color:T.red,marginBottom:12}}><input type="checkbox" style={S.checkbox} checked={allowOver} onChange={e=>setAllowOver(e.target.checked)}/>I checked the entity and the file &mdash; import anyway</label>}
     <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
       <button style={S.btnS} onClick={onClose} disabled={saving}>Cancel</button>
-      <button style={{...S.btnP,opacity:(!preview||saving||(overGl&&!allowOver))?0.5:1}} onClick={doImport} disabled={!preview||saving||(overGl&&!allowOver)}>{saving?'Importing…':(preview?'Import '+preview.count+' items':'Import')}</button>
+      <button style={{...S.btnP,opacity:(!preview||saving)?0.5:1}} onClick={doImport} disabled={!preview||saving}>{saving?'Importing…':(preview?'Import '+preview.count+' items':'Import')}</button>
     </div>
   </div></div>);
 }
