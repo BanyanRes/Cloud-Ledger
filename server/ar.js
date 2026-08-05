@@ -454,11 +454,33 @@ function buildAging(db, eid, asOf) {
   const bucketsTotal = totals.total;
   // If a legacy opening subledger has been imported, the control balance is now
   // itemized into aged buckets, so the GL column becomes the residual not yet on
-  // the subledger. buckets + residual == control balance, so recon ties to 0.
+  // the subledger: residual = control balance - buckets.
+  //
+  // That residual is only meaningful in ONE direction. A POSITIVE residual is
+  // legitimate: control-account money the subledger has not detailed yet. A
+  // NEGATIVE residual means the subledger claims more open A/R than the control
+  // account holds, which is never legitimate — the wrong detail was imported
+  // (wrong file or wrong entity), or items are double-counted. Netting that into
+  // the GL column would make buckets + residual == control balance by
+  // construction, so recon_diff would be identically zero and the tie-out would
+  // report a pass regardless of what the subledger contained. So a negative
+  // residual is deliberately NOT absorbed: glTotal stays 0, the report totals
+  // what the subledger actually says, and the overclaim surfaces in recon_diff.
+  // A POSITIVE residual IS still absorbed, so recon_diff stays zero there by
+  // construction: a green tie-out means "no overclaim", NOT "fully itemized". It
+  // is therefore reported separately as opening_residual, and the report labels a
+  // partially-itemized subledger amber rather than green.
+  let openingResidual = 0, openingOverclaim = 0;
   const hasOpening = db.prepare("SELECT COUNT(*) AS c FROM ar_invoices WHERE entity_id = ? AND origin = 'opening'").get(eid).c > 0;
   if (hasOpening) {
-    glTotal = r2(glBalance - bucketsTotal);
-    if (Math.abs(glTotal) >= 0.005) glRows.push({ entry_id: null, entry_num: null, date: asOf, memo: 'Un-itemized GL balance (not yet on the subledger)', amount: glTotal });
+    const residual = r2(glBalance - bucketsTotal);
+    if (residual >= 0.005) {
+      glTotal = residual;
+      openingResidual = residual;
+      glRows.push({ entry_id: null, entry_num: null, date: asOf, memo: 'Un-itemized GL balance (not yet on the subledger)', amount: residual });
+    } else if (residual <= -0.005) {
+      openingOverclaim = r2(-residual);
+    }
   } else if (codeList.length) {
     // Own only the JEs of NON-void invoices, plus receipt JEs. A void invoice's
     // accrual and its reversal are deliberately left un-owned so both fall into
@@ -493,6 +515,7 @@ function buildAging(db, eid, asOf) {
     rows: rows, totals: totals, detail: detail,
     gl_rows: glRows, gl_total: glTotal,
     gl_ar_balance: glBalance, recon_diff: r2(glBalance - totals.total),
+    opening_residual: openingResidual, opening_overclaim: openingOverclaim,
   };
 }
 
@@ -503,6 +526,51 @@ function buildAging(db, eid, asOf) {
 // Idempotent per entity: existing opening items with no receipts are replaced.
 function importOpeningItems(db, eid, items, opts = {}) {
   const arCode = defaultArAccount(db, eid) || '12000';
+
+  // ── guard: the detail may not claim more open A/R than the control account
+  // actually holds. A grand total above the GL balance means the wrong entity is
+  // selected or the wrong file was picked — the subledger would itemize money
+  // that is not on the control account. Under-claiming is legitimate (a partial
+  // itemization) and surfaces as the un-itemized residual in the aging report.
+  // Checked BEFORE any existing opening items are deleted, so a rejected import
+  // leaves the current subledger intact.
+  const itemsTotal = r2(items.reduce((s, it) => s + r2(it.amount), 0));
+  // Never skip the guard just because no as_of was supplied — a caller that omits
+  // it is exactly the caller least likely to have checked. But the basis matters:
+  //   • With an as_of, compare to the control balance AT that date. Exact.
+  //   • Without one, compare to the PEAK balance the control account has ever
+  //     held. Two wrong bases were tried first and both produce false rejections:
+  //     max(document date in file) reads the account before the legacy opening JE
+  //     posts (document dates precede the posting date, which is why opening items
+  //     age by posting date), and the current balance is lower than the file
+  //     whenever cash has been applied since cutover — which broke re-importing
+  //     the original aging. The peak is immune to both and still catches a
+  //     wrong-entity file, which overshoots at every date.
+  let guardBasis;
+  if (isDate(opts.as_of)) {
+    guardBasis = r2((db.prepare('SELECT COALESCE(SUM(jl.debit - jl.credit), 0) AS bal FROM journal_lines jl '
+      + 'JOIN journal_entries je ON je.id = jl.entry_id '
+      + 'WHERE je.entity_id = ? AND je.date <= ? AND jl.account_code = ?').get(eid, opts.as_of, arCode) || {}).bal || 0);
+  } else {
+    const daily = db.prepare('SELECT je.date AS d, SUM(jl.debit - jl.credit) AS amt FROM journal_lines jl '
+      + 'JOIN journal_entries je ON je.id = jl.entry_id '
+      + 'WHERE je.entity_id = ? AND jl.account_code = ? GROUP BY je.date ORDER BY je.date').all(eid, arCode);
+    let run = 0; guardBasis = 0;
+    for (const row of daily) { run = r2(run + Number(row.amt || 0)); if (run > guardBasis) guardBasis = run; }
+  }
+  {
+    const bal = guardBasis;
+    const over = r2(itemsTotal - bal);
+    if (over > 0.01 && !opts.allow_over_gl) {
+      const ent = (db.prepare('SELECT name FROM entities WHERE id = ?').get(eid) || {}).name || ('entity ' + eid);
+      throw new Error('This detail totals ' + itemsTotal.toFixed(2) + ', but account ' + arCode + ' on ' + ent
+        + ' holds only ' + bal.toFixed(2) + (isDate(opts.as_of) ? ' as of ' + opts.as_of : ' at its highest')
+        + ' — the detail is ' + over.toFixed(2)
+        + ' MORE than the GL. That usually means the wrong entity is selected or the file belongs to another'
+        + ' entity. Nothing was imported. Re-send with allow_over_gl:true to override.');
+    }
+  }
+
   const existing = db.prepare("SELECT id FROM ar_invoices WHERE entity_id = ? AND origin = 'opening'").all(eid).map(r => r.id);
   if (existing.length) {
     const ph = existing.map(() => '?').join(',');
@@ -906,7 +974,11 @@ function registerArRoutes(app, ctx) {
     try {
       const items = Array.isArray(req.body && req.body.items) ? req.body.items : null;
       if (!items || !items.length) throw new Error('items[] is required');
-      res.json(importOpeningItems(db, req.params.eid, items, { who: who(req), force: !!(req.body && req.body.force) }));
+      const b = req.body || {};
+      res.json(importOpeningItems(db, req.params.eid, items, {
+        who: who(req), force: !!b.force,
+        as_of: b.as_of, allow_over_gl: !!b.allow_over_gl,
+      }));
     } catch (e) { fail(res, e); }
   });
 
