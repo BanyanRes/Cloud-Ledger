@@ -686,6 +686,7 @@ export default function App(){
   const[bankTxns,setBankTxns]=useState([]);const[bankUploading,setBankUploading]=useState(false);
   // Report filter state lifted so they persist across page navigation
   const[tbAsOf,setTbAsOf]=useState(today());
+  const[tbFrom,setTbFrom]=useState('');// '' = fiscal year to date (prior behaviour)
   const[wipAsOf,setWipAsOf]=useState(today());
   const[bsAsOf,setBsAsOf]=useState(today());
   const[isFrom,setIsFrom]=useState(fy_start());const[isTo,setIsTo]=useState(today());
@@ -838,7 +839,7 @@ export default function App(){
         {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
         {page==='banktxn'&&activeEntity&&<BankTransactions entityId={activeEntity} canEdit={canEdit} bankSelAcct={bankSelAcct} setBankSelAcct={setBankSelAcct} bankTxns={bankTxns} setBankTxns={setBankTxns} bankUploading={bankUploading} setBankUploading={setBankUploading} bankStatusFilter={bankStatusFilter} setBankStatusFilter={setBankStatusFilter}/>}
         {page==='bankrec'&&activeEntity&&<BankReconciliation entityId={activeEntity} user={user} canEdit={canEdit}/>}
-        {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} isClrf={_activeEnt?.code==='COUNTYLI1'} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf} canEdit={canEdit}/>}
+        {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} isClrf={_activeEnt?.code==='COUNTYLI1'} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf} from={tbFrom} setFrom={setTbFrom} canEdit={canEdit}/>}
         {page==='bs'&&activeEntity&&<BalanceSheet entityId={activeEntity} entityName={entityName} asOf={bsAsOf} setAsOf={setBsAsOf} canEdit={canEdit}/>}
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo} canEdit={canEdit}/>}
         {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='customdetail'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
@@ -3208,7 +3209,7 @@ function ReportControls({dateFilter,setDateFilter,colMode,setColMode,compare,set
   </>);
 }
 
-function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEdit=true}){
+function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,from,setFrom,canEdit=true}){
   const[data,setData]=useState([]);
   const[dateFilter,setDateFilter]=useState('all');const[colMode,setColMode]=useState('total');const[compare,setCompare]=useState(false);
   const[rk,setRk]=useState(0);
@@ -3226,6 +3227,10 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   // Guard: while the user is editing the date input, asOf can briefly be '' or a partial string like '2026-'.
   // Avoid crashing the page on Invalid Date — fall back to today() until a complete YYYY-MM-DD is entered.
   const validAsOf=/^\d{4}-\d{2}-\d{2}$/.test(asOf)&&!isNaN(new Date(asOf+'T00:00:00').getTime())?asOf:today();
+  // Period start. Blank falls back to fiscal-year-to-date, which is what the report
+  // did before this control existed. Ignored until a complete, in-range date is typed,
+  // so a half-entered value never fires a query.
+  const validFrom=/^\d{4}-\d{2}-\d{2}$/.test(String(from||''))&&!isNaN(new Date(from+'T00:00:00').getTime())&&from<=validAsOf?from:'';
   const fyS=validAsOf.slice(0,4)+'-01-01';
   const locName=locId?(locations.find(l=>String(l.id)===String(locId))?.name||''):'';
   const className=classId?(classes.find(c=>String(c.id)===String(classId))?.name||''):'';
@@ -3243,7 +3248,11 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   const prior=(compare&&colMode==='total'&&periods[0]&&periods[0].from)?rptPriorWindow(periods[0]):null;
   const cols=useMemo(()=>prior?[prior,...periods]:periods,[JSON.stringify(prior),JSON.stringify(periods)]);
   const dimArgs=useMemo(()=>({...(locId?{location_id:locId}:{}),...(classId?{class_id:classId}:{}),...(projId?{project_id:projId}:{})}),[locId,classId,projId]);
-  useEffect(()=>{let ok=true;Promise.all(cols.map(c=>api.getBalances(entityId,dimmed?{as_of:c.to,...dimArgs}:{as_of:c.to,close_pl_before:c.to.slice(0,4)+'-01-01'}).catch(()=>[]))).then(r=>{if(ok)setData(r);});return()=>{ok=false;};},[entityId,JSON.stringify(cols),JSON.stringify(dimArgs),dimmed,rk]);
+  // Whole-entity: close_pl_before = period start, so balance-sheet accounts carry their
+  // closing balance at the as-of date while P&L accounts carry activity from the start
+  // date and Retained Earnings sits at its start-date balance. Dimension-scoped: the
+  // report is already activity-based, so a start date becomes a plain from/to window.
+  useEffect(()=>{let ok=true;Promise.all(cols.map(c=>api.getBalances(entityId,dimmed?(validFrom?{from:validFrom,to:c.to,...dimArgs}:{as_of:c.to,...dimArgs}):{as_of:c.to,close_pl_before:validFrom||(c.to.slice(0,4)+'-01-01')}).catch(()=>[]))).then(r=>{if(ok)setData(r);});return()=>{ok=false;};},[entityId,JSON.stringify(cols),JSON.stringify(dimArgs),dimmed,validFrom,rk]);
   useEffect(()=>{api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));},[entityId]);
   useEffect(()=>{api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
   useEffect(()=>{api.getProjects(entityId).then(d=>setProjects(d||[])).catch(()=>setProjects([]));},[entityId]);
@@ -3259,10 +3268,11 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   const oneYrBefore=d=>{const x=new Date(d+'T00:00:00');x.setFullYear(x.getFullYear()-1);x.setDate(x.getDate()+1);return _ymd(x);};
   const colHead=(c,i)=>prior&&i===0?'Prev':(c.label==='Total'?'':c.label);
   const fnameTag=[locName,className,projName].filter(Boolean).map(s=>s.replace(/[^A-Za-z0-9]+/g,'_')).join('_');
-  const doExport=()=>{const lbl=scopeLabel?(' — '+scopeLabel):'';const hdr=['Code','Account','Type'];cols.forEach((c,i)=>{const h=colHead(c,i);hdr.push((h?h+' ':'')+'Debit',(h?h+' ':'')+'Credit');});const d=[[entityName||'Trial Balance'],['Trial Balance'+lbl],['As of '+anchor],[],hdr];
+  const periodLbl=validFrom?(dimmed?('Activity '+validFrom+' to '+anchor):('P&L '+validFrom+' to '+anchor+' · balance sheet as of '+anchor)):('As of '+anchor);
+  const doExport=()=>{const lbl=scopeLabel?(' — '+scopeLabel):'';const hdr=['Code','Account','Type'];cols.forEach((c,i)=>{const h=colHead(c,i);hdr.push((h?h+' ':'')+'Debit',(h?h+' ':'')+'Credit');});const d=[[entityName||'Trial Balance'],['Trial Balance'+lbl],[periodLbl],[],hdr];
     rows.forEach(r=>{const row=[r.code,r.name,r.type];cols.forEach((c,i)=>{const x=drcr(r.code,i);row.push(x.dr||'',x.cr||'');});d.push(row);});
     const tot=['','','Total'];cols.forEach((c,i)=>{tot.push(totDr(i),totCr(i));});d.push([]);d.push(tot);
-    exportToExcel(d,'TB'+(fnameTag?'_'+fnameTag:'')+'_'+anchor+'.xlsx');};
+    exportToExcel(d,'TB'+(fnameTag?'_'+fnameTag:'')+'_'+(validFrom?validFrom+'_to_':'')+anchor+'.xlsx');};
   const amtStyle={...S.tdR,cursor:'pointer'};
   // GL detail export (optionally scoped to the selected location and/or investor).
   // Pulls flat lines with running balance from /gl-detail through the as-of date;
@@ -3279,13 +3289,14 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
     }catch(e){alert('GL export failed: '+e.message);}
   };
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-    <div style={S.filterBar}><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
+    <div style={S.filterBar}><div><label style={S.label}>From Date</label><input style={S.inputSm} type="date" value={from||''} max={validAsOf} onChange={e=>setFrom(e.target.value)} title="Leave blank for fiscal year to date. Set a date to run a period trial balance: balance-sheet accounts show their closing balance on the As of date, P&L accounts show activity from this date, and Retained Earnings shows its balance at this date."/></div>
+      <div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
       <ReportControls dateFilter={dateFilter} setDateFilter={setDateFilter} colMode={colMode} setColMode={setColMode} compare={compare} setCompare={setCompare}/>
       {showProj&&<div><label style={S.label}>Project</label><select style={S.inputSm} value={projId} onChange={e=>setProjId(e.target.value)}><option value="">All (whole entity)</option>{projects.map(p=><option key={p.id} value={p.id}>{p.code&&p.code!==p.name?p.code+' — '+p.name:p.name}{p.line_count!=null?(' ('+p.line_count+')'):''}</option>)}</select></div>}
       {showLocInv&&<div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>}
       {showLocInv&&<div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div>}</div>
-    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='trial' currentConfig={{asOf,dateFilter,colMode,compare}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={doExport}>Export TB</button></div></div>
-    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Trial Balance{scopeLabel?(' — '+scopeLabel):''}</div><div style={{fontSize:13,color:T.textMuted}}>As of {asOf}{dimmed?' · dimension-tagged activity only':''}</div></div>
+    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='trial' currentConfig={{asOf,from,dateFilter,colMode,compare}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);if(c.from!==undefined)setFrom(c.from||'');if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={doExport}>Export TB</button></div></div>
+    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Trial Balance{scopeLabel?(' — '+scopeLabel):''}</div><div style={{fontSize:13,color:T.textMuted}}>{periodLbl}{dimmed?' · dimension-tagged activity only':''}</div></div>
     <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520}}>
       <thead><tr><th style={S.th}>Code</th><th style={S.th}>Account</th><th style={S.th}>Type</th>
         {cols.map((c,i)=>{const h=colHead(c,i);return[<th key={'hd'+i} style={S.thR}>{(h?h+' ':'')}Debit</th>,<th key={'hc'+i} style={S.thR}>{(h?h+' ':'')}Credit</th>];})}
