@@ -5890,6 +5890,10 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   }
 
   const glTotal = glRows.reduce((s, r) => s + r.amount, 0);
+  // Once the GL-sourced A/P nets to zero (e.g. the legacy balance was cleared by a
+  // journal entry), drop those GL entries from the report entirely — they no longer
+  // represent anything outstanding, so the report shows only real open items.
+  if (Math.abs(glTotal) < 0.005) { grand.total -= grand.gl; grand.gl = 0; glRows.length = 0; }
   const vendorsOut = Array.from(byVendor.values())
     .sort((a, b) => a.vendor.localeCompare(b.vendor))
     .map(g => ({ ...g, rows: g.rows.sort((x, y) => String(x.date).localeCompare(String(y.date))) }));
@@ -5907,7 +5911,7 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
     bucket_order: buckets,
     vendors: vendorsOut,
     gl_rows: glRows.sort((a, b) => String(a.date).localeCompare(String(b.date))),
-    gl_total: glTotal,
+    gl_total: glRows.reduce((s, r) => s + r.amount, 0),
     grand_total: grand,
     gl_balance: glBalance,
     recon_diff: reconDiff,
