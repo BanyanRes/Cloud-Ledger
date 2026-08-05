@@ -400,7 +400,17 @@ function invoiceEmailHtml({ entityName, invoice, settings }) {
 // backdating a real invoice and needs no per-entity cutover date. By construction
 // aged buckets + GL column == GL control balance, so recon_diff is ~0.
 function buildAging(db, eid, asOf) {
-  const invoices = db.prepare("SELECT * FROM ar_invoices WHERE entity_id = ? AND status != 'void' AND invoice_date <= ? ORDER BY customer_name, invoice_date, invoice_num").all(eid, asOf);
+  // Filter on COALESCE(aging_date, invoice_date), not invoice_date alone.
+  // aging_date is NULL for native invoices, so they still cut off by invoice
+  // (accrual) date. For an opening item it is the legacy GL posting date, which
+  // is what actually decides whether the item is on the control account as of
+  // the report date. Cutting those off by invoice_date is wrong whenever the
+  // source aging has no invoice-date column: invoice_date then falls back to the
+  // due date, and every item due after the as-of date silently dropped out of
+  // the buckets and reappeared as an un-itemized residual. SRN's own detail hid
+  // 120,966.20 of open A/R that way — 10 of its 15 items.
+  const invoices = db.prepare("SELECT * FROM ar_invoices WHERE entity_id = ? AND status != 'void' "
+    + "AND COALESCE(aging_date, invoice_date) <= ? ORDER BY customer_name, COALESCE(aging_date, invoice_date), invoice_num").all(eid, asOf);
   const recByInv = new Map();
   for (const r of db.prepare('SELECT invoice_id, SUM(amount) AS paid FROM ar_receipts WHERE entity_id = ? AND date <= ? GROUP BY invoice_id').all(eid, asOf)) {
     recByInv.set(r.invoice_id, Number(r.paid || 0));
