@@ -5762,7 +5762,7 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   //    the authoritative AP record: credits = bills, debits = payments/relief.
   //    The report is built from here so it ALWAYS ties to the GL balance.
   const glLines = db.prepare(
-    `SELECT jl.id AS line_id, je.id AS entry_id, je.entry_num, je.date, je.memo,
+    `SELECT jl.id AS line_id, je.id AS entry_id, je.entry_num, je.date, je.memo, je.vendor,
             jl.debit, jl.credit, jl.description
        FROM journal_lines jl JOIN journal_entries je ON jl.entry_id = je.id
       WHERE je.entity_id = ? AND jl.account_code = ? AND je.date <= ?
@@ -5776,11 +5776,12 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   //    invoice → aged Bill.com row. Everything else → GL column.
   const syncedEntryIds = new Set();
   const billcomIdByEntry = new Map();
+  const invNumByEntry = new Map();
   try {
     const rows = db.prepare(
-      "SELECT cl_entry_id, billcom_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'bill' AND status = 'success' AND cl_entry_id IS NOT NULL"
+      "SELECT cl_entry_id, billcom_id, invoice_number FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'bill' AND status = 'success' AND cl_entry_id IS NOT NULL"
     ).all(entityId);
-    for (const r of rows) { syncedEntryIds.add(r.cl_entry_id); billcomIdByEntry.set(r.cl_entry_id, String(r.billcom_id)); }
+    for (const r of rows) { syncedEntryIds.add(r.cl_entry_id); billcomIdByEntry.set(r.cl_entry_id, String(r.billcom_id)); if (r.invoice_number) invNumByEntry.set(r.cl_entry_id, String(r.invoice_number)); }
   } catch (e) { /* sync log optional */ }
 
   // ── 3. FIFO net: apply debits (payments/relief) against the oldest open
@@ -5816,39 +5817,17 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   for (const c of creditQueue) {
     if (c.remaining > 0.005) openItems.push({
       line_id: c.line_id, entry_id: c.entry_id, entry_num: c.entry_num,
-      date: c.date, memo: c.memo || '', description: c.description || '', amount: c.remaining,
+      date: c.date, memo: c.memo || '', description: c.description || '', vendor: c.vendor || '', amount: c.remaining,
     });
   }
 
-  // ── 4. Enrich Bill.com-synced items with vendor + due date from Bill.com.
-  //    Only attempt the (slow) Bill.com pull if there ARE synced items to enrich.
-  const hasSynced = openItems.some(it => syncedEntryIds.has(it.entry_id));
-  const billByNum = new Map(); // invoiceNumber -> { vendor, dueDate }
-  const vendorById = new Map();
+  // ── 4. Vendor + invoice number for Bill.com-synced items come from LOCAL data
+  //    now (the JE's vendor field, populated at sync, plus the sync log's
+  //    invoice_number), so the report builds instantly — no live Bill.com login,
+  //    vendor list, or multi-year bill fetch. Due date defaults to the line date
+  //    (aging is computed off the line date regardless).
   let billcomError = null;
-  if (hasSynced && cfg) {
-    try {
-      const password = billcomDecrypt(cfg.password_enc);
-      const devKey = billcomDecrypt(cfg.dev_key_enc);
-      const session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-      const listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
-      const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
-      let vendors = [];
-      try { vendors = await billcomListVendors({ ...listArgs, maxItems: 5000 }); } catch (e) {}
-      for (const v of vendors) { const id = String(pick(v, 'id') || ''); const n = pick(v, 'name', 'vendorName', 'companyName'); if (id && n) vendorById.set(id, n); }
-      // dueDate-window paginator: the only reliable way to page Bill.com /bills
-      const bills = await billcomListBillsWindowed({ ...listArgs, fromDate: '2024-01-01', toDate: asOf });
-      for (const b of bills) {
-        const num = pick(b, 'invoiceNumber', 'invoice_number') || pick(pick(b, 'invoice') || {}, 'invoiceNumber');
-        if (!num) continue;
-        const vid = String(pick(b, 'vendorId', 'vendor_id') || (pick(b, 'vendor') || {}).id || '');
-        billByNum.set(String(num), { vendor: vendorById.get(vid) || pick(pick(b, 'vendor') || {}, 'name') || null, dueDate: pick(b, 'dueDate', 'due_date') || null });
-      }
-    } catch (e) { billcomError = e.message; }
-  }
-
-  // Invoice # is stored in the import memo as "... — <invoiceNum>".
-  const invNumFromMemo = (memo) => { const m = String(memo || '').match(/—\s*(.+?)\s*$/); return m ? m[1].trim() : null; };
+  const invNumFromMemo = (memo) => { const s = String(memo || ''); const h = s.match(/#\s*([^\s].*?)\s*$/); if (h) return h[1].trim(); const m = s.match(/—\s*(.+?)\s*$/); return m ? m[1].trim() : null; };
 
   // ── 5. Build buckets for Bill.com invoices; sum GL column for the rest.
   const buckets = ['current', 'd1_30', 'd31_60', 'd61_90', 'd91_plus'];
@@ -5861,12 +5840,11 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   const grand = emptyBuckets();
 
   for (const it of openItems) {
-    const num = invNumFromMemo(it.memo);
-    const enrich = (num && billByNum.get(String(num))) || null;
-    const isBillcom = syncedEntryIds.has(it.entry_id) && enrich;
+    const num = invNumByEntry.get(it.entry_id) || invNumFromMemo(it.memo) || String(it.entry_num);
+    const isBillcom = syncedEntryIds.has(it.entry_id);
     if (isBillcom) {
-      const vname = enrich.vendor || ('Vendor');
-      const dueDate = enrich.dueDate || it.date;
+      const vname = it.vendor || 'Vendor';
+      const dueDate = it.date;
       const dpd = dayDiff(asOf, it.date); // age by invoice (GL line) date
       const bk = bucketOf(dpd);
       if (!byVendor.has(vname)) byVendor.set(vname, { vendor: vname, rows: [], subtotal: emptyBuckets() });
