@@ -7326,6 +7326,22 @@ require('./devcosts').registerDevCostsRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ CLRF Valuation Summary workpaper ═══
+// POST /api/workpapers/valuation-summary/:entity_id/generate { quarter_end }
+// Takes the prior quarter's valuation workbook from Workpapers/Valuation/<Qn YYYY>,
+// injects the GL-derived book carrying values (CLRF 121011/21/31/41), the CLIP
+// development cost (CLIP GL Dev Costs tab), and the re-solved stabilization
+// discount so J12 holds, then saves the result into the target quarter's folder.
+// See server/valuation.js.
+require('./valuation').registerValuationRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ Financial Statements package generator ═══
 // Generates GL-derived financial statements (Balance Sheet, Operations, Cash
 // Flows, Members' Equity) for an entity as of a date, on a monthly/quarterly/
