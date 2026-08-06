@@ -3600,7 +3600,20 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
 });
 
 app.put('/api/entities/:eid/bank-transactions/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
-  const { account_code, memo, project_id, class_id, location_id } = req.body;
+  const { account_code, memo, project_id, class_id, location_id, amount } = req.body;
+  // Optional amount correction — used to fix a mis-parsed figure (e.g. a PDF
+  // row flagged [VERIFY AMOUNT] where a glued reference number bled a digit into
+  // the amount). Allowed ONLY on a not-yet-posted row, since a posted row already
+  // has a GL journal entry that would no longer match. Sign is preserved from the
+  // supplied value; pass a signed number.
+  if (amount !== undefined && amount !== null && amount !== '') {
+    const cur = db.prepare('SELECT status FROM bank_transactions WHERE id=? AND entity_id=?').get(req.params.id, req.params.eid);
+    if (!cur) return res.status(404).json({ error: 'Transaction not found' });
+    if (cur.status === 'posted') return res.status(400).json({ error: 'Cannot change amount on a posted transaction; unpost it first' });
+    const amt = Number(amount);
+    if (!isFinite(amt) || amt === 0) return res.status(400).json({ error: 'amount must be a non-zero number' });
+    db.prepare('UPDATE bank_transactions SET amount=? WHERE id=? AND entity_id=?').run(amt, req.params.id, req.params.eid);
+  }
   // Setting a single account_code clears any existing splits
   db.transaction(() => {
     db.prepare('DELETE FROM bank_transaction_splits WHERE txn_id=?').run(req.params.id);
