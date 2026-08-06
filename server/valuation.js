@@ -41,12 +41,15 @@ const CLIP_ENTITY_ID = 54;
 // broken requisition link).
 const CLIP_CONCLUDED_VALUATION = 149431786.26;
 
-// The four book-carrying-value accounts on CLRF -> their SOI rows.
+// The four book-carrying-value accounts on CLRF -> their SOI rows. For each we
+// drive, from the trial balance: the account name into the Company column (A),
+// the GL account code into the repurposed "GL Account" column (E), and the
+// balance into the Cost column (J). Summary!D12-15 read the J* cells.
 const BCV = {
-  '121031': { label: 'SRN', soi: 'J7' },
-  '121011': { label: 'CLIP', soi: 'J9' },
-  '121041': { label: 'Silsbee', soi: 'J11' },
-  '121021': { label: 'Buna', soi: 'J13' },
+  '121031': { label: 'SRN', row: 7, nameCell: 'A7', codeCell: 'E7', cost: 'J7' },
+  '121011': { label: 'CLIP', row: 9, nameCell: 'A9', codeCell: 'E9', cost: 'J9' },
+  '121041': { label: 'Silsbee', row: 11, nameCell: 'A11', codeCell: 'E11', cost: 'J11' },
+  '121021': { label: 'Buna', row: 13, nameCell: 'A13', codeCell: 'E13', cost: 'J13' },
 };
 
 // CLIP development-cost account set (mirrors server/devcosts.js). Two groups.
@@ -244,14 +247,30 @@ async function transform(templateBuf, gl, qtr) {
   };
   for (const k of Object.keys(P)) if (!P[k]) throw new Error('template missing sheet for ' + k);
 
-  // (1) Book carrying values into SOI, then recompute SOI totals.
+  // (1) Rebuild the SOI investment lines directly from the CLRF trial balance so
+  // the tab plainly shows where each figure comes from: TB account name in the
+  // Company column (A), the GL account code in column E (its header is relabeled
+  // "GL Account" below), and the balance in the Cost column (J). Summary!D12-15
+  // read the J cells, and J15/J17 total them.
   let soi = await zip.file(P.soi).async('string');
+  // Preserve each cell's existing style so the sheet keeps its formatting.
+  const inlineStr = (ref, s, txt) => '<c r="' + ref + '"' + (s ? ' s="' + s + '"' : '')
+    + ' t="inlineStr"><is><t xml:space="preserve">' + xmlEsc(txt) + '</t></is></c>';
   for (const code of Object.keys(BCV)) {
     const meta = BCV[code];
     const v = r2(gl.bcv[code]);
-    const s = styleOf(soi, meta.soi);
-    soi = replaceCell(soi, meta.soi, numCell(meta.soi, s, v));
+    const nm = (gl.bcvName && gl.bcvName[code]) ? gl.bcvName[code] : meta.label;
+    // Company name (col A) from the TB account name.
+    soi = replaceCell(soi, meta.nameCell, inlineStr(meta.nameCell, styleOf(soi, meta.nameCell), nm));
+    // GL account code (col E), repurposed from the old "Date of Acquisition" cell.
+    soi = replaceCell(soi, meta.codeCell, inlineStr(meta.codeCell, styleOf(soi, meta.codeCell), code));
+    // Cost/book carrying value (col J).
+    soi = replaceCell(soi, meta.cost, numCell(meta.cost, styleOf(soi, meta.cost), v));
   }
+  // Relabel the header (row 6): E6 was "Date of Acquisition" -> "GL Account", and
+  // blank the hidden "Number of Shares" header G6 so nothing misleading remains.
+  soi = replaceCell(soi, 'E6', inlineStr('E6', styleOf(soi, 'E6'), 'GL Account'));
+  { const s = styleOf(soi, 'G6'); soi = replaceCell(soi, 'G6', '<c r="G6"' + (s ? ' s="' + s + '"' : '') + '/>'); }
   const bcvTotal = r2(Object.keys(BCV).reduce((a, c) => a + r2(gl.bcv[c]), 0));
   { const s = styleOf(soi, 'J15'); soi = replaceCell(soi, 'J15', fCell('J15', s, 'SUM(J7:J14)', bcvTotal)); }
   { const s = styleOf(soi, 'J17'); soi = replaceCell(soi, 'J17', fCell('J17', s, 'J15', bcvTotal)); }
@@ -384,9 +403,11 @@ function gatherGl(ctx, qtr) {
   const clrfByCode = {};
   for (const x of clrfRows) clrfByCode[String(x.code)] = x;
   const bcv = {};
+  const bcvName = {};
   for (const code of Object.keys(BCV)) {
     const row = clrfByCode[code];
     bcv[code] = row ? r2(row.balance) : 0;
+    bcvName[code] = row && row.name ? String(row.name) : '';
   }
   const clipRows = computeBalances(CLIP_ENTITY_ID, { as_of: qtr.end });
   const clipByCode = {};
@@ -401,7 +422,7 @@ function gatherGl(ctx, qtr) {
     const row = clipByCode[pair[0]]; const v = row ? r2(row.balance) : 0;
     balances[pair[0]] = v; oaTotal = r2(oaTotal + v); if (!row) missing.push(pair[0]);
   }
-  return { bcv: bcv, dev: { as_of: qtr.end, balances: balances, ltiTotal: ltiTotal, oaTotal: oaTotal, missing: missing } };
+  return { bcv: bcv, bcvName: bcvName, dev: { as_of: qtr.end, balances: balances, ltiTotal: ltiTotal, oaTotal: oaTotal, missing: missing } };
 }
 
 // -- Route registration -------------------------------------------------------
