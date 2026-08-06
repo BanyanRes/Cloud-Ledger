@@ -3613,6 +3613,9 @@ app.put('/api/entities/:eid/bank-transactions/:id', auth, requireEntityAccess(),
     const amt = Number(amount);
     if (!isFinite(amt) || amt === 0) return res.status(400).json({ error: 'amount must be a non-zero number' });
     db.prepare('UPDATE bank_transactions SET amount=? WHERE id=? AND entity_id=?').run(amt, req.params.id, req.params.eid);
+    // Once the amount is verified/corrected, drop the [VERIFY AMOUNT] flag from
+    // the description so the grid no longer shows a stale warning on this row.
+    db.prepare("UPDATE bank_transactions SET description = REPLACE(description, '[VERIFY AMOUNT] ', '') WHERE id=? AND entity_id=?").run(req.params.id, req.params.eid);
   }
   // Setting a single account_code clears any existing splits
   db.transaction(() => {
