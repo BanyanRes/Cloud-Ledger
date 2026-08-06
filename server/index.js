@@ -3352,12 +3352,34 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
 
   try {
     let rows = []; // each: { date: 'YYYY-MM-DD', description: string, amount: number }
+    let reconciled = false; // set true if a PDF parse tied to statement control totals
+    let ctrlInfo = null;    // {deposits, checks, prev, curr} when available
 
     if (isPdf) {
       // ── PDF bank statement parsing ──
       const data = await pdfParse(req.file.buffer);
       const text = data.text || '';
       let lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
+
+      // ── Control totals for post-parse reconciliation ──
+      // Most statements print summary control totals we can check the parse
+      // against: "Deposits/Credits 3 3,030,021.64 +" and "Checks/Debits 4
+      // 2,825,643.75 -", plus Previous/Current balance. pdf-parse sometimes
+      // misplaces the space between a row's trailing digits and its amount by one
+      // character, stealing a leading digit INTO the amount (e.g. a ref ending
+      // "...072926" + " 22,372.55" comes out "...07292" + "622,372.55"). Because
+      // the corrupted token is itself well-formed, no regex can catch it — but it
+      // makes the deposit/debit total NOT tie. We use these control totals as the
+      // arbiter to detect and repair such single-digit corruption after parsing.
+      const _num = s => { if (s == null) return null; const neg = /-\s*$/.test(s); const v = parseFloat(String(s).replace(/[,$\s\-]/g, '')); if (!isFinite(v)) return null; return neg ? -v : v; };
+      // rx has two capture groups: integer part and 2-digit decimal. Join with a
+      // literal dot so "3,030,021" + "64" becomes 3030021.64, not 303002164.
+      const _grabAmt = (rx) => { const m = text.match(rx); return m ? _num(m[1] + '.' + m[2]) : null; };
+      // "Deposits/Credits <count> <amount> +"  — amount is the LAST money-looking token on the line
+      const ctrlDeposits = _grabAmt(/deposits?\s*\/?\s*credits[^\n]*?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})\s*\+?/i);
+      const ctrlChecks   = _grabAmt(/checks?\s*\/?\s*debits[^\n]*?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})\s*-?/i);
+      const ctrlPrev     = _grabAmt(/previous\s*balance[^\n]*?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})/i);
+      const ctrlCurr     = _grabAmt(/current\s*(?:statement\s*)?balance[^\n]*?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})/i);
 
       // Some PDFs (e.g. Sunflower Bank / First National 1870) linearize through
       // pdf-parse with ALL inter-word spaces stripped, so a transaction row comes
@@ -3513,6 +3535,48 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
         rows.push({ date: usedDate, description: desc.substring(0, 500), amount, needs_review: needsReview });
       }
 
+      // ── Reconcile against control totals; auto-repair stolen-leading-digit rows.
+      // pdf-parse can steal one leading digit of a description INTO the amount
+      // (a well-formed but wrong token). When the parsed deposit/debit totals do
+      // NOT tie to the statement's summary control totals, try trimming a single
+      // leading digit off candidate amounts (3+ integer digits) to find the
+      // reading that makes BOTH totals reconcile. Applied only when it resolves
+      // uniquely; otherwise the row keeps its needs_review flag for manual check.
+      const _EPS = 0.02;
+      const depTotal = () => rows.filter(r => r.amount > 0).reduce((a, r) => a + r.amount, 0);
+      const chkTotal = () => rows.filter(r => r.amount < 0).reduce((a, r) => a + Math.abs(r.amount), 0);
+      const depOK = ctrlDeposits == null || Math.abs(depTotal() - ctrlDeposits) < _EPS;
+      const chkOK = ctrlChecks == null || Math.abs(chkTotal() - ctrlChecks) < _EPS;
+      if ((ctrlDeposits != null || ctrlChecks != null) && (!depOK || !chkOK)) {
+        // Candidate rows: integer part has >1 digit so a leading digit can be trimmed.
+        const trimCand = (v) => {
+          const abs = Math.abs(v); const s = abs.toFixed(2); const [ip, dp] = s.split('.');
+          if (ip.length <= 1) return null;
+          const t = parseFloat(ip.slice(1) + '.' + dp);
+          return t > 0 ? (v < 0 ? -t : t) : null;
+        };
+        // Try trimming exactly one candidate row (covers the common single-corruption
+        // case) and accept the first that makes the relevant side(s) tie.
+        for (let i = 0; i < rows.length; i++) {
+          const orig = rows[i].amount;
+          const cand = trimCand(orig);
+          if (cand == null) continue;
+          rows[i].amount = cand;
+          const nowDepOK = ctrlDeposits == null || Math.abs(depTotal() - ctrlDeposits) < _EPS;
+          const nowChkOK = ctrlChecks == null || Math.abs(chkTotal() - ctrlChecks) < _EPS;
+          if (nowDepOK && nowChkOK) { rows[i].needs_review = false; break; }
+          rows[i].amount = orig; // revert; keep looking
+        }
+      }
+      // Re-evaluate: if totals now tie, clear any residual review flags that were
+      // only about amount ambiguity (the batch is proven correct against control).
+      const finalDepOK = ctrlDeposits == null || Math.abs(depTotal() - ctrlDeposits) < _EPS;
+      const finalChkOK = ctrlChecks == null || Math.abs(chkTotal() - ctrlChecks) < _EPS;
+      reconciled = (ctrlDeposits != null || ctrlChecks != null) && finalDepOK && finalChkOK;
+      ctrlInfo = { deposits: ctrlDeposits, checks: ctrlChecks, prev: ctrlPrev, curr: ctrlCurr,
+        parsed_deposits: +depTotal().toFixed(2), parsed_checks: +chkTotal().toFixed(2) };
+      if (reconciled) rows.forEach(r => { r.needs_review = false; });
+
       if (rows.length === 0) {
         return res.status(400).json({
           error: 'Could not extract transactions from this PDF. The parser found ' + lines.length + ' text lines but no recognizable transaction rows. Try exporting as CSV or Excel from your bank instead.',
@@ -3593,7 +3657,8 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
     })();
 
     res.json({ count, batch_id: batchId, format: isPdf ? 'pdf' : 'csv/xlsx',
-      needs_review: reviewRows.length, review_rows: reviewRows });
+      needs_review: reviewRows.length, review_rows: reviewRows,
+      reconciled, control_totals: ctrlInfo });
   } catch (e) {
     res.status(400).json({ error: 'Failed to parse file: ' + e.message });
   }
