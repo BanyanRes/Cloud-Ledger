@@ -3382,7 +3382,17 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       // "RF#105925009476061126" glued in front of "663,719.62" — can't be sucked
       // into the amount. A decimal ".dd" is REQUIRED. Supports a leading sign, a
       // TRAILING minus (bank convention: "2,880.00-"), and parenthesized negatives.
-      const moneyRx = /\(?[-+]?\$?(?:\d{1,3}(?:,\d{3})+|\d{1,7})\.\d{2}-?\)?/g;
+      // LEFT BOUNDARY (?<![\d,]): the integer part must NOT be immediately preceded
+      // by a digit or comma, so a reference number glued to the amount with no
+      // space (e.g. "...RF#...07292622,372.55") can't donate its trailing digit to
+      // the amount (which produced a bogus 622,372.55 instead of 22,372.55).
+      const moneyRx = /(?<![\d,])\(?[-+]?\$?(?:\d{1,3}(?:,\d{3})+|\d{1,7})\.\d{2}-?\)?/g;
+      // Recovery scan for the fully-glued case where moneyRx (with its left
+      // boundary) finds nothing because the amount is fused to a longer digit run.
+      // We take the amount as the DECIMAL plus the minimal integer part to its
+      // left, then flag the row for manual review since the exact integer/amount
+      // split can be ambiguous when everything is glued.
+      const gluedMoneyRx = /(\d{1,3}(?:,\d{3})+|\d{1,7})\.\d{2}-?/g;
 
       // Keywords that indicate money OUT / money IN, used only as a fallback to
       // fix the sign when neither the amount token NOR the section header settles it.
@@ -3445,14 +3455,26 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
         if (!usedDate) continue; // no date context yet — skip preamble lines
 
         const money = line.match(moneyRx);
-        if (!money || !money.length) continue;
-
-        // The transaction amount is the LAST money token on the line. A plain
-        // transaction row has exactly one; if a row ever carried a running
-        // balance too, the activity amount precedes the balance — but these
-        // statements put only the amount on the row, so "last" is safe and also
-        // avoids grabbing a glued-in figure earlier in the description.
-        const amtTok = money[money.length - 1];
+        let amtTok, needsReview = false;
+        if (money && money.length) {
+          // The transaction amount is the LAST money token on the line. A plain
+          // transaction row has exactly one; if a row ever carried a running
+          // balance too, the activity amount precedes the balance — but these
+          // statements put only the amount on the row, so "last" is safe and also
+          // avoids grabbing a glued-in figure earlier in the description.
+          amtTok = money[money.length - 1];
+        } else {
+          // No clean money token (its left boundary was a digit) — the amount is
+          // fused to a preceding digit run. Recover the trailing decimal amount so
+          // the row still imports, but FLAG it: the integer/amount split can be
+          // ambiguous when fully glued (e.g. "...07292622,372.55" could read as
+          // 22,372.55 or 622,372.55). The recovered value uses the minimal
+          // comma-grouped reading; the reviewer confirms it against the statement.
+          const glued = line.match(gluedMoneyRx);
+          if (!glued || !glued.length) continue;
+          amtTok = glued[glued.length - 1];
+          needsReview = true;
+        }
         let amount = parseAmt(amtTok);
         if (amount === 0) continue;
 
@@ -3460,7 +3482,10 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
         let afterDate = line;
         const dm = line.match(dateHeadRx) || line.match(altDateRx);
         if (dm && dm.index === 0) afterDate = line.slice(dm[0].length);
-        const firstMoneyIdx = afterDate.search(moneyRx);
+        // For a clean token, cut the description at the first money token; for a
+        // glued token, cut at where the recovered amount starts in the line.
+        let firstMoneyIdx = afterDate.search(moneyRx);
+        if (firstMoneyIdx < 0) { const gi = afterDate.lastIndexOf(amtTok); firstMoneyIdx = gi; }
         let desc = (firstMoneyIdx > 0 ? afterDate.slice(0, firstMoneyIdx) : afterDate).trim();
         desc = desc.replace(/[()]+$/g, '').replace(/^[()]+/g, '').trim();
         if (!desc) continue;
@@ -3485,7 +3510,7 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
         }
 
         if (amount === 0 || !desc) continue;
-        rows.push({ date: usedDate, description: desc.substring(0, 500), amount });
+        rows.push({ date: usedDate, description: desc.substring(0, 500), amount, needs_review: needsReview });
       }
 
       if (rows.length === 0) {
@@ -3554,14 +3579,21 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
     const batchId = 'batch-' + Date.now();
     const ins = db.prepare('INSERT INTO bank_transactions (entity_id, bank_account_code, date, description, amount, batch_id) VALUES (?,?,?,?,?,?)');
     let count = 0;
+    const reviewRows = [];
     db.transaction(() => {
       for (const r of rows) {
-        ins.run(req.params.eid, bankAccount, r.date, r.description, r.amount, batchId);
+        // A glued-amount row (reference number fused to the amount) has an
+        // ambiguous integer/amount split; mark its description so it's obvious in
+        // the grid that the amount must be verified against the statement.
+        const desc = r.needs_review ? ('[VERIFY AMOUNT] ' + r.description) : r.description;
+        ins.run(req.params.eid, bankAccount, r.date, desc, r.amount, batchId);
         count++;
+        if (r.needs_review) reviewRows.push({ date: r.date, description: r.description, amount: r.amount });
       }
     })();
 
-    res.json({ count, batch_id: batchId, format: isPdf ? 'pdf' : 'csv/xlsx' });
+    res.json({ count, batch_id: batchId, format: isPdf ? 'pdf' : 'csv/xlsx',
+      needs_review: reviewRows.length, review_rows: reviewRows });
   } catch (e) {
     res.status(400).json({ error: 'Failed to parse file: ' + e.message });
   }
