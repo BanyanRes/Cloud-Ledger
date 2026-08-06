@@ -55,7 +55,7 @@ const AFFILIATE = {
 };
 const DESCRIPTION = {
   'Management Fee': 'Compensation to County Line Rail Operations, LLC for providing exclusive rail services at each '
-    + 'Fund facility - including rail car handling, switching, spotting, transloading, and coordinating with the '
+    + 'Fund facility — including rail car handling, switching, spotting, transloading, and coordinating with the '
     + 'Class I railroads.',
   'Comp Reimbursement': 'Reimbursement to County Line Rail Operations, LLC for compensation paid to its employees '
     + "for personnel costs directly benefiting the Fund's rail assets, including rail operations, sales and "
@@ -66,7 +66,7 @@ const DESCRIPTION = {
 };
 const BASIS = {
   'Management Fee': 'Tiered percentage of Effective Gross Income (EGI) per facility, applied separately to rail vs. '
-    + 'non-rail activities. Rail Services: 10% on first $5M of annualized EGI, 8.5% from $5M-$10M, 7.5% above $10M. '
+    + 'non-rail activities. Rail Services: 10% on first $5M of annualized EGI, 8.5% from $5M–$10M, 7.5% above $10M. '
     + 'Non-Rail Management: flat 3% of EGI. EGI = Net Effective Rent (gross rent less concessions, refunds, '
     + 'vacancies) plus other operating revenues; excludes equity contributions, loan/insurance/condemnation '
     + 'proceeds, and capital asset sales.',
@@ -173,6 +173,23 @@ const GREEN = F({ color: { argb: 'FF008000' } });  // cross-sheet formula
 const SMALL = F({ size: 9 });
 const SMALLI = F({ size: 9, italic: true });
 const AMBER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF2CC' } };
+
+// ── Summary-of-Fees tab styling. This tab alone mirrors the client's
+// "Fee & Expense to GP" deliverable: Times New Roman throughout, a plain
+// thin-bordered header (no navy fill), and accounting-format amounts. The other
+// tabs keep the Arial/navy CloudLedger theme above.
+const SUM_MONEY = '_($* #,##0.00_);_($* (#,##0.00);_($* -??_);_(@_)';
+const SF = (o = {}) => Object.assign({ name: 'Times New Roman', size: 10 }, o);
+const SF_SMALL = SF();
+const SF_HDR = SF({ bold: true });
+const THIN = { style: 'thin' };
+// Spell the quarter end out as "MARCH 31, 2026" to match the deliverable header.
+const MONTHS = ['JANUARY', 'FEBRUARY', 'MARCH', 'APRIL', 'MAY', 'JUNE', 'JULY',
+  'AUGUST', 'SEPTEMBER', 'OCTOBER', 'NOVEMBER', 'DECEMBER'];
+const spellQuarterEnd = (end) => {
+  const [y, m, d] = String(end).split('-').map(Number);
+  return MONTHS[m - 1] + ' ' + d + ', ' + y;
+};
 
 function headerRow(ws, rowNum, labels, widths) {
   const row = ws.getRow(rowNum);
@@ -287,35 +304,62 @@ function buildWorkbook(data) {
   }
 
   // ── Summary of Fees ───────────────────────────────────────────────────────
-  s.getCell('A1').value = 'COUNTY LINE RAIL FUND I, LP';
-  s.getCell('A1').font = F({ size: 12, bold: true });
-  s.getCell('A2').value = 'SCHEDULE OF FEES PAID TO THE GENERAL PARTNER AND AFFILIATES';
-  s.getCell('A2').font = F({ bold: true });
-  s.getCell('A3').value = 'FOR THE QUARTER ENDED ' + q.end;
-  s.getCell('A3').font = F({ bold: true });
-  s.getCell('A4').value = '(Amounts in USD)';
-  s.getCell('A4').font = SMALLI;
-  s.getCell('A5').value = 'Portfolio companies included: '
-    + data.properties.map((p) => p.entity_name + ' (' + p.entity_id + ')').join('  ·  ');
-  s.getCell('A5').font = F({ size: 9, italic: true, color: { argb: 'FF008000' } });
-  headerRow(s, 7, ['Fee Type', 'Description', 'Basis of Calculation', 'GP Affiliate',
-    'Portfolio Company', 'Amount'], [34, 52, 58, 26, 22, 18]);
+  // This tab mirrors the client's "Fee & Expense to GP" deliverable exactly:
+  // Times New Roman, a merged/centered title block, a plain thin-bordered header,
+  // subtotal labels that read "Total management fees" / "Total reimbursements" /
+  // "Total development fees", accounting-format amounts, and no memo block. The
+  // memo accounts still surface on the GL Data tab; they are simply excluded from
+  // the face of this schedule.
+  s.getColumn(1).width = 24; s.getColumn(2).width = 45; s.getColumn(3).width = 55;
+  s.getColumn(4).width = 28; s.getColumn(5).width = 26; s.getColumn(6).width = 16;
+  const centerTitle = (rowNum, text, opts) => {
+    s.mergeCells('A' + rowNum + ':F' + rowNum);
+    const c = s.getCell('A' + rowNum);
+    c.value = text; c.font = opts.font;
+    c.alignment = { horizontal: 'center', vertical: 'center', wrapText: true };
+    s.getRow(rowNum).height = opts.height;
+  };
+  centerTitle(1, 'COUNTY LINE RAIL FUND I, LP', { font: SF({ size: 12, bold: true }), height: 18 });
+  centerTitle(2, 'SCHEDULE OF FEES PAID TO THE GENERAL PARTNER AND AFFILIATES',
+    { font: SF({ size: 11, bold: true }), height: 18 });
+  centerTitle(3, 'FOR THE QUARTER ENDED ' + spellQuarterEnd(q.end),
+    { font: SF({ size: 11, bold: true }), height: 15.75 });
+  centerTitle(4, '(Amounts in USD)', { font: SF({ size: 10, italic: true }), height: 13.5 });
+
+  // Header row (row 6) - black bold text, no fill, thin rule above and below.
+  const HDR_LABELS = ['Fee Type', 'Description', 'Basis of Calculation', 'GP Affiliate',
+    'Portfolio Company', 'Amount'];
+  const hRow = s.getRow(6); hRow.height = 21.75;
+  HDR_LABELS.forEach((t, i) => {
+    const c = hRow.getCell(i + 1);
+    c.value = t; c.font = SF_HDR;
+    c.alignment = { horizontal: 'center', vertical: 'center', wrapText: true };
+    c.border = { top: THIN, bottom: THIN };
+  });
+
+  // Subtotal labels match the deliverable's plural wording exactly.
   const LABELS = { 'Management Fee': 'Management Fee',
     'Comp Reimbursement': 'Employee Compensation Reimbursement', 'Development Fee': 'Development Fee' };
-  r = 9;
+  const TOTAL_LABELS = { 'Management Fee': 'Total management fees',
+    'Comp Reimbursement': 'Total reimbursements', 'Development Fee': 'Total development fees' };
+
+  r = 8;
   const subtotals = [];
   for (const cat of ['Management Fee', 'Comp Reimbursement', 'Development Fee']) {
     const first = r;
     const head = s.getRow(r);
-    head.getCell(1).value = LABELS[cat]; head.getCell(1).font = F({ bold: true });
+    // Fee-type label is bold + italic on the deliverable.
+    head.getCell(1).value = LABELS[cat]; head.getCell(1).font = SF({ bold: true, italic: true });
+    head.getCell(1).alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
     [[2, DESCRIPTION[cat]], [3, BASIS[cat]], [4, AFFILIATE[cat]]].forEach((pair) => {
-      const c = head.getCell(pair[0]); c.value = pair[1]; c.font = SMALL;
-      c.alignment = { wrapText: true, vertical: 'top' };
+      const c = head.getCell(pair[0]); c.value = pair[1]; c.font = SF_SMALL;
+      c.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
     });
-    s.getRow(r).height = cat === 'Management Fee' ? 92 : 78;
+    s.getRow(r).height = cat === 'Management Fee' ? 91 : 65;
     for (const p of data.properties) {
       const row = s.getRow(r);
-      row.getCell(5).value = p.label; row.getCell(5).font = F();
+      const eCell = row.getCell(5); eCell.value = p.label; eCell.font = SF_SMALL;
+      eCell.alignment = { horizontal: 'left', vertical: r === first ? 'top' : 'center' };
       const c = row.getCell(6);
       if (cat === 'Development Fee') {
         c.value = { formula: "'Dev Fee Detail'!F" + devRows[p.label] };
@@ -324,50 +368,45 @@ function buildWorkbook(data) {
           + ",'GL Data'!$A$" + glFirst + ':$A$' + glLast + ',$E' + r
           + ",'GL Data'!$G$" + glFirst + ':$G$' + glLast + ',"' + cat + '")' };
       }
-      c.font = GREEN; c.numFmt = MONEY;
+      c.font = SF_SMALL; c.numFmt = SUM_MONEY;
+      c.alignment = { horizontal: 'right', vertical: r === first ? 'top' : 'center' };
       r += 1;
     }
     const tr = s.getRow(r);
-    tr.getCell(5).value = 'Total ' + LABELS[cat].toLowerCase();
-    tr.getCell(5).font = F({ bold: true });
+    const lc = tr.getCell(5);
+    lc.value = TOTAL_LABELS[cat]; lc.font = SF_HDR;
+    lc.alignment = { horizontal: 'left', vertical: 'center' };
+    lc.border = { bottom: THIN };
     const tc = tr.getCell(6);
     tc.value = { formula: 'SUM(F' + first + ':F' + (r - 1) + ')' };
-    tc.font = F({ bold: true }); tc.numFmt = MONEY; tc.border = { top: { style: 'thin' } };
+    tc.font = SF_HDR; tc.numFmt = SUM_MONEY;
+    tc.alignment = { horizontal: 'right', vertical: 'center' };
+    tc.border = { top: THIN, bottom: THIN };
     subtotals.push(r);
     r += 2;
   }
-  const gr = s.getRow(r);
-  gr.getCell(1).value = 'Total fees and expenses to GP/Affiliates';
-  gr.getCell(1).font = F({ bold: true });
-  const gc = gr.getCell(6);
+
+  // Grand total: label merged A:E, amount in F with a double bottom rule.
+  r += 1;
+  s.mergeCells('A' + r + ':E' + r);
+  const gr = s.getCell('A' + r);
+  gr.value = 'Total fees and expenses to GP/Affiliates'; gr.font = SF_HDR;
+  gr.alignment = { horizontal: 'left', vertical: 'center' };
+  s.getRow(r).height = 15;
+  const gc = s.getCell('F' + r);
   gc.value = { formula: subtotals.map((x) => 'F' + x).join('+') };
-  gc.font = F({ bold: true }); gc.numFmt = MONEY;
-  gc.border = { top: { style: 'thin' }, bottom: { style: 'double' } };
+  gc.font = SF_HDR; gc.numFmt = SUM_MONEY;
+  gc.alignment = { horizontal: 'right', vertical: 'center' };
+  gc.border = { bottom: { style: 'double' } };
+
   r += 2;
-  s.getCell('A' + r).value = "Note: None of the fees presented above is applied to offset the Fund's Management "
+  s.mergeCells('A' + r + ':F' + r);
+  const noteCell = s.getCell('A' + r);
+  noteCell.value = "Note: None of the fees presented above is applied to offset the Fund's Management "
     + 'Fee payable to the General Partner.';
-  s.getCell('A' + r).font = SMALLI;
-  r += 2;
-  if (hasMemo) {
-    s.getCell('A' + r).value = 'MEMO - related-party accounts on the trial balances NOT included above';
-    s.getCell('A' + r).font = F({ bold: true });
-    r += 1;
-    const mf = r;
-    for (const code of Object.keys(MEMO_ACCOUNTS)) {
-      if (!data.properties.some((p) => p.memo[code] != null)) continue;
-      s.getCell('A' + r).value = code + ' ' + MEMO_ACCOUNTS[code];
-      s.getCell('A' + r).font = SMALL;
-      const c = s.getCell('F' + r);
-      c.value = { formula: "SUMIFS('GL Data'!$H$" + memoFirst + ':$H$' + memoLast
-        + ",'GL Data'!$E$" + memoFirst + ':$E$' + memoLast + ',"' + code + '")' };
-      c.font = GREEN; c.numFmt = MONEY;
-      r += 1;
-    }
-    s.getCell('A' + r).value = 'Total memo items'; s.getCell('A' + r).font = F({ bold: true });
-    const c = s.getCell('F' + r);
-    c.value = { formula: 'SUM(F' + mf + ':F' + (r - 1) + ')' };
-    c.font = F({ bold: true }); c.numFmt = MONEY; c.border = { top: { style: 'thin' } };
-  }
+  noteCell.font = SF({ size: 9, italic: true });
+  noteCell.alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+  s.getRow(r).height = 18;
 
   // ── Fee Reasonableness ────────────────────────────────────────────────────
   fr.getCell('A1').value = 'MANAGEMENT FEE - EFFECTIVE RATE vs STATED BASIS';
