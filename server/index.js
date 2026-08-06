@@ -4529,6 +4529,65 @@ app.post('/api/billcom/config/:entity_id/test', auth, requireEntityAccess('entit
   }
 });
 
+// ── TEMP DIAGNOSTIC (read-only): why aren't PAYMENTS syncing? Lists payments in
+// a processDate window with the exact eligibility flags performPaymentReconcileCore
+// applies. Writes NOTHING. Remove after debugging Buna payment sync.
+app.get('/api/billcom/_paydiag/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
+  const cutoffDate = String(cfg.sync_cutoff_date || '2026-01-01');
+  const asOf = String(req.query.as_of || new Date().toISOString().slice(0,10));
+  const from = String(req.query.from || cutoffDate.slice(0,7)+'-01');
+  const to = String(req.query.to || (() => { const d = new Date(asOf+'T00:00:00'); d.setMonth(d.getMonth()+1); return d.toISOString().slice(0,10); })());
+  let session, devKey;
+  try {
+    const password = billcomDecrypt(cfg.password_enc); devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
+  const listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+  const pick = (o,...ks)=>{ for(const k of ks) if(o&&o[k]!=null) return o[k]; return null; };
+  let payments;
+  try { payments = await billcomListPaymentsWindowed({ ...listArgs, fromDate: from, toDate: to }); }
+  catch (e) { return res.status(502).json({ error: 'payments fetch failed: ' + e.message }); }
+  // Which billcom bill ids are actually synced into CL (relief requires this)
+  const syncedBillIds = new Set(db.prepare(
+    "SELECT billcom_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'bill' AND status = 'success' AND cl_entry_id IS NOT NULL"
+  ).all(entityId).map(r => String(r.billcom_id)));
+  const rows = payments.map(p => {
+    const status = String(pick(p,'status','paymentStatus')||'').toUpperCase();
+    const pd = pick(p,'processDate','process_date','paymentDate');
+    const pday = pd ? String(pd).slice(0,10) : null;
+    const voids = pick(p,'voidInfo');
+    const voided = Array.isArray(voids) && voids.length > 0;
+    const cancelReq = pick(p,'cancelRequestSubmitted') === true;
+    let allocs = Array.isArray(pick(p,'billPayments')) ? pick(p,'billPayments') : null;
+    if (!allocs || !allocs.length) { const bid = pick(p,'billId'); allocs = bid ? [{billId:bid, amount:pick(p,'amount','paymentAmount')}] : []; }
+    const billIds = allocs.map(a => String(pick(a,'billId','bill_id')||'')).filter(Boolean);
+    return {
+      id: String(pick(p,'id')||''),
+      amount: pick(p,'amount','paymentAmount'),
+      status, processDate: pday,
+      voided, cancelReq,
+      is_paid: status === 'PAID',
+      in_window: !!(pday && pday > cutoffDate && pday <= asOf),
+      bill_ids: billIds,
+      bills_synced_in_cl: billIds.map(b => syncedBillIds.has(b)),
+      any_bill_synced: billIds.some(b => syncedBillIds.has(b)),
+    };
+  });
+  const wouldRelieve = rows.filter(r => r.is_paid && !r.voided && !r.cancelReq && r.in_window && r.any_bill_synced);
+  res.json({
+    entity_id: entityId, window: { from, to }, cutoffDate, asOf,
+    total_fetched: payments.length,
+    paid: rows.filter(r=>r.is_paid).length,
+    paid_in_window: rows.filter(r=>r.is_paid && r.in_window).length,
+    paid_in_window_with_synced_bill: wouldRelieve.length,
+    synced_bill_count_in_cl: syncedBillIds.size,
+    payments: rows,
+  });
+});
+
 // ── Bill.com Phase 2: Chart of Accounts + Mappings ──
 
 app.get('/api/billcom/accounts/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
