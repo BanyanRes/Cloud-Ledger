@@ -7315,6 +7315,17 @@ require('./gpfees').registerGpFeesRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ CLIP Development Costs ═══
+// GET /api/entities/:eid/dev-costs?as_of=YYYY-MM-DD — total capitalized
+// development cost (Total Long Term Investments + Total Other Assets), the
+// figure that feeds the CLIP line of the CLRF valuation schedule. See
+// server/devcosts.js for the account set and exclusions.
+require('./devcosts').registerDevCostsRoutes(app, {
+  auth,
+  requireEntityAccess,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ Financial Statements package generator ═══
 // Generates GL-derived financial statements (Balance Sheet, Operations, Cash
 // Flows, Members' Equity) for an entity as of a date, on a monthly/quarterly/
