@@ -3369,7 +3369,9 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       // Cut off everything from the Daily Balance Summary onward: that table and
       // the disclosures that follow also begin lines with dates but are NOT
       // transactions (folding them in would double-count balances as activity).
-      const stopIdx = lines.findIndex(l => /daily balance summary|balance summary/i.test(l));
+      // \s* between words so it still matches when pdf-parse strips inter-word
+      // spaces ("DailyBalanceSummary").
+      const stopIdx = lines.findIndex(l => /daily\s*balance\s*summary|balance\s*summary/i.test(l));
       if (stopIdx >= 0) lines = lines.slice(0, stopIdx);
 
       // Date at the very start of the line (with or without a following space).
@@ -3383,9 +3385,21 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       const moneyRx = /\(?[-+]?\$?(?:\d{1,3}(?:,\d{3})+|\d{1,7})\.\d{2}-?\)?/g;
 
       // Keywords that indicate money OUT / money IN, used only as a fallback to
-      // fix the sign when the amount token itself carries no sign.
+      // fix the sign when neither the amount token NOR the section header settles it.
       const withdrawalRx = /withdraw|payment|payable|debit|paid out|ach debit|wire out|xfer\s*(from|out)|check\b|chk\b|pmt\b|svc\b|fee\b/i;
       const depositRx = /deposit|credit|interest\s*(paid|capitali|earned|income)|ach credit|wire in|xfer\s*in/i;
+
+      // Section headers. Statements (e.g. Sunflower Bank / First National 1870)
+      // group rows under a section that determines sign far more reliably than
+      // the description: a row under "Deposits" is an inflow even if its memo says
+      // "AP PAYMENT" (a customer's payment TO us), and a row under "Electronic
+      // Transactions"/"Checks" is an outflow. Deposit amounts carry NO sign;
+      // debits carry a trailing minus. We track the current section as we walk the
+      // linearized text and use it as the PRIMARY sign source. section: +1 inflow,
+      // -1 outflow, 0 unknown (fall back to token sign then keywords).
+      const sectionInRx = /^(deposits|deposits\s*\/\s*credits|credits|additions)\b/i;
+      const sectionOutRx = /^(electronic transactions|checks paid|checks paid electronically|checks\/debits|withdrawals|debits|other debits|checks)\b/i;
+      const sectionNeutralRx = /^(commercial\s*checking\s*summary|account\s*summary|daily\s*balance\s*summary|balance\s*summary|overdraft)/i;
 
       const parseDate = s => {
         let m = s.match(dateHeadRx);
@@ -3417,8 +3431,14 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       };
 
       let lastDate = null;
+      let section = 0; // +1 = deposits/credits, -1 = debits/checks, 0 = unknown
       for (const line of lines) {
         if (/statement date/i.test(line)) continue; // header, not a transaction
+        // Update the section context from any header line BEFORE trying to parse
+        // the line as a transaction (header lines carry no money token anyway).
+        if (sectionInRx.test(line)) { section = 1; continue; }
+        if (sectionOutRx.test(line)) { section = -1; continue; }
+        if (sectionNeutralRx.test(line)) { section = 0; continue; }
         const lineDate = parseDate(line);
         if (lineDate) lastDate = lineDate;
         const usedDate = lineDate || lastDate;
@@ -3445,12 +3465,23 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
         desc = desc.replace(/[()]+$/g, '').replace(/^[()]+/g, '').trim();
         if (!desc) continue;
 
-        // Fallback sign fix: only when the token had no explicit sign (i.e. it
-        // came through positive) and the description clearly indicates direction.
+        // Sign resolution, in priority order:
+        //  1. An EXPLICIT sign on the token always wins (trailing "-", parens, or
+        //     a leading +/-). e.g. "35,738.74-" is unambiguously an outflow.
+        //  2. Otherwise the SECTION header settles it: a bare amount under
+        //     "Deposits" is an inflow; under "Electronic Transactions"/"Checks"
+        //     it's an outflow. This is what fixes a customer payment whose memo
+        //     reads "AP PAYMENT" but which is listed under Deposits.
+        //  3. Only when there is NO section context do we fall back to description
+        //     keywords (older/loose statements with no section grouping).
         const tokenHadSign = /^[-+]/.test(amtTok.trim()) || /-\)?$/.test(amtTok.trim()) || /^\(.*\)$/.test(amtTok.trim());
         if (!tokenHadSign) {
-          if (amount > 0 && withdrawalRx.test(desc) && !depositRx.test(desc)) amount = -amount;
-          else if (amount < 0 && depositRx.test(desc) && !withdrawalRx.test(desc)) amount = Math.abs(amount);
+          if (section === 1) amount = Math.abs(amount);
+          else if (section === -1) amount = -Math.abs(amount);
+          else {
+            if (amount > 0 && withdrawalRx.test(desc) && !depositRx.test(desc)) amount = -amount;
+            else if (amount < 0 && depositRx.test(desc) && !withdrawalRx.test(desc)) amount = Math.abs(amount);
+          }
         }
 
         if (amount === 0 || !desc) continue;
