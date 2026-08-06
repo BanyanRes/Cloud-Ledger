@@ -3054,7 +3054,8 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
           {canEdit&&<button style={{...S.btnS,color:T.teal,borderColor:T.teal+'40'}} onClick={()=>setShowAddAcct(true)}>+ New Account</button>}
           {canEdit&&filteredTxns.some(t=>t.status!=='posted')&&<button style={{...S.btnD,padding:'8px 14px',fontSize:12}} disabled={discarding} onClick={discardAllUnposted}>{discarding?'Discarding...':'Discard '+filteredTxns.filter(t=>t.status!=='posted').length+' unposted'}</button>}
           {canEdit&&filteredTxns.some(t=>t.status==='coded')&&<button style={S.btnP} onClick={postCoded}>Post {filteredTxns.filter(t=>t.status==='coded').length} to GL</button>}</div></div>
-      <table style={{...S.table,tableLayout:'fixed',width:'100%'}}>
+      <div style={{overflowX:'auto',width:'100%'}}>
+      <table style={{...S.table,tableLayout:'fixed',width:colW.date+colW.desc+colW.amount+colW.gl+colW.memo+colW.status+36,minWidth:'100%'}}>
         <colgroup><col style={{width:colW.date}}/><col style={{width:colW.desc}}/><col style={{width:colW.amount}}/><col style={{width:colW.gl}}/><col style={{width:colW.memo}}/><col style={{width:colW.status}}/><col style={{width:36}}/></colgroup>
         <thead><tr>
           <th style={{...S.th,position:'relative',borderRight:'1px solid '+T.borderLight}}>Date{resizeHandle('date')}</th>
@@ -3093,7 +3094,7 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
               : <input style={S.inputSm} placeholder="Memo" value={t.memo||''} onChange={e=>{const v=e.target.value;setTxns(prev=>prev.map(x=>x.id===t.id?{...x,memo:v}:x));}} onBlur={()=>codeTransaction(t.id,t.account_code,t.memo)}/>)}</td>
           <td style={{...S.td,borderRight:'1px solid '+T.borderLight}}><span style={{fontSize:10,fontWeight:600,padding:'3px 8px',borderRadius:20,background:t.status==='posted'?T.greenDim:t.status==='matched'?T.tealDim:t.status==='coded'?T.accentDim:T.orangeDim,color:t.status==='posted'?T.green:t.status==='matched'?T.teal:t.status==='coded'?T.accent:T.orange}}>{t.status}</span></td>
           <td style={S.td}>{canEdit&&t.status!=='posted'&&<button style={S.btnGhost} onClick={async()=>{await api.deleteBankTransaction(entityId,t.id);setTxns(prev=>prev.filter(x=>x.id!==t.id));}}>x</button>}</td>
-        </tr>)}</tbody></table></div>}
+        </tr>)}</tbody></table></div></div>}
     {selAcct&&filteredTxns.length===0&&!uploading&&<div style={{...S.card,textAlign:'center',padding:60,color:T.textDim}}>No transactions yet. Upload a bank statement above.</div>}
     {showAddAcct&&<QuickAddAccountModal entityId={entityId} onClose={()=>setShowAddAcct(false)} onCreated={a=>{setAccounts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)));if(a.bank_acct)setBankAccts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)));}}/>}
     {splitTxn&&<SplitBankTransactionModal txn={splitTxn} accounts={accounts} excludeCode={selAcct} entityId={entityId} onClose={()=>setSplitTxn(null)} onSaved={()=>{setSplitTxn(null);loadTxns(selAcct,statusFilter);}}/>}
