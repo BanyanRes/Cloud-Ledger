@@ -4529,53 +4529,6 @@ app.post('/api/billcom/config/:entity_id/test', auth, requireEntityAccess('entit
   }
 });
 
-// ── TEMP DIAGNOSTIC (read-only): why aren't bills syncing? Lists bills in a date
-// window with the exact eligibility flags the sync uses. Writes NOTHING. Remove
-// after debugging Buna July sync.
-app.get('/api/billcom/_diag/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
-  const from = String(req.query.from || (cfg.sync_cutoff_date || '2026-06-30').slice(0,7)+'-01');
-  const to = String(req.query.to || (() => { const d = new Date(); d.setMonth(d.getMonth()+1); return d.toISOString().slice(0,10); })());
-  const cutoffDate = String(cfg.sync_cutoff_date || '2026-01-01');
-  let session, devKey;
-  try {
-    const password = billcomDecrypt(cfg.password_enc); devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
-  const listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
-  const pick = (o,...ks)=>{ for(const k of ks) if(o&&o[k]!=null) return o[k]; return null; };
-  let bills;
-  try { bills = await billcomListBillsByUpdatedWindowed({ ...listArgs, fromDate: from, toDate: to }); }
-  catch (e) { return res.status(502).json({ error: 'bills fetch failed: ' + e.message }); }
-  const rows = bills.map(b => {
-    const id = String(pick(b,'id')||'');
-    const status = String(pick(b,'approvalStatus','status')||'').toUpperCase();
-    const invDate = pick(b,'invoiceDate','invoice_date','dueDate');
-    const invDay = invDate ? String(invDate).slice(0,10) : null;
-    const approvedDate = billApprovalDate(b);
-    return {
-      id, invoiceNumber: pick(b,'invoiceNumber','invoice_number'),
-      amount: pick(b,'amount','amountDue','invoiceAmount'),
-      approvalStatus: status,
-      invoiceDate: invDay, dueDate: (pick(b,'dueDate')||'').toString().slice(0,10),
-      approvalDate: approvedDate ? String(approvedDate).slice(0,10) : null,
-      updatedTime: (pick(b,'updatedTime')||'').toString().slice(0,10),
-      eligible_approved: status === 'APPROVED',
-      passes_cutoff: !!(invDay && invDay > cutoffDate),
-    };
-  });
-  res.json({
-    entity_id: entityId, window: { from, to }, cutoffDate,
-    total_fetched: bills.length,
-    approved: rows.filter(r=>r.eligible_approved).length,
-    approved_and_after_cutoff: rows.filter(r=>r.eligible_approved && r.passes_cutoff).length,
-    july_bills: rows.filter(r=>r.invoiceDate && r.invoiceDate >= '2026-07-01' && r.invoiceDate <= '2026-07-31'),
-    bills: rows,
-  });
-});
-
 // ── Bill.com Phase 2: Chart of Accounts + Mappings ──
 
 app.get('/api/billcom/accounts/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
