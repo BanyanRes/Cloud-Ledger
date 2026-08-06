@@ -34,6 +34,13 @@ const JSZip = require('jszip');
 const CLRF_ENTITY_ID = 40;
 const CLIP_ENTITY_ID = 54;
 
+// Appraiser's concluded CLIP total valuation (Summary!J12). Held constant across
+// quarters while H12 (dev cost) is refreshed and the stabilization discount plugs
+// the difference. Used as the anchor when the template's own J12 cache is not a
+// clean number (in the distributed workbook it is #VALUE!, because H12 pulls a
+// broken requisition link).
+const CLIP_CONCLUDED_VALUATION = 149431786.26;
+
 // The four book-carrying-value accounts on CLRF -> their SOI rows.
 const BCV = {
   '121031': { label: 'SRN', soi: 'J7' },
@@ -162,6 +169,15 @@ function numFromCell(xml, ref) {
   if (!m) throw new Error('no cached value for ' + ref);
   return r2(Number(m[1]));
 }
+// Like numFromCell but never throws: returns null when the cell is missing, has
+// no cached value, or the cache is an error string (e.g. "#VALUE!") that does not
+// parse to a finite number.
+function numFromCellSafe(xml, ref) {
+  const m = xml.match(new RegExp('<c r="' + ref + '"[^>]*>(?:<f[^>]*>[\\s\\S]*?</f>|<f[^>]*/>)?<v>([^<]+)</v>'));
+  if (!m) return null;
+  const n = Number(m[1]);
+  return isFinite(n) ? n : null;
+}
 const numCell = (ref, s, v) => '<c r="' + ref + '"' + (s ? ' s="' + s + '"' : '') + '><v>' + v + '</v></c>';
 const fCell = (ref, s, f, v) => '<c r="' + ref + '"' + (s ? ' s="' + s + '"' : '') + '><f>' + xmlEsc(f) + '</f><v>' + v + '</v></c>';
 
@@ -279,7 +295,18 @@ async function transform(templateBuf, gl, qtr) {
   let summary = await zip.file(P.summary).async('string');
   const equipXml = await zip.file(P.equip).async('string');
   const equip = numFromCell(equipXml, 'C11');
-  const targetJ12 = numFromCell(summary, 'J12'); // appraiser's carried-forward conclusion
+
+  // Target CLIP total valuation (J12). We hold this at the appraiser's concluded
+  // total while H12 rises to the GL dev cost, solving the stabilization discount
+  // as the plug (the Q1 2026 methodology). We must NOT read this from the
+  // template's J12 cache: in the distributed workbook H12 pulls the requisition
+  // link 'CLIP Dev Costs'!I40, which resolves to #VALUE! (broken external ref),
+  // and that error cascades into J12 -> its cache is "#VALUE!", which parses to
+  // NaN/0 and blows up the plug. So anchor to the fixed concluded value, and only
+  // trust the template's J12 when it is a clean finite number.
+  const rawJ12 = numFromCellSafe(summary, 'J12');
+  const targetJ12 = (rawJ12 !== null && isFinite(rawJ12) && rawJ12 > 0)
+    ? r2(rawJ12) : CLIP_CONCLUDED_VALUATION;
 
   // Book Carrying Value column D references SOI (D12=SOI!J9 CLIP, D13=SOI!J11
   // Silsbee, D14=SOI!J13 Buna, D15=SOI!J7 SRN, D16=SUM). Refresh their caches so
@@ -301,8 +328,8 @@ async function transform(templateBuf, gl, qtr) {
   const I68 = r2(I69 - I67);
   const G12 = I12; const K12 = targetJ12;
 
-  const g13 = numFromCell(summary, 'G13'), g14 = numFromCell(summary, 'G14'), g15 = numFromCell(summary, 'G15');
-  const k13 = numFromCell(summary, 'K13'), k14 = numFromCell(summary, 'K14'), k15 = numFromCell(summary, 'K15');
+  const g13 = numFromCellSafe(summary, 'G13') || 0, g14 = numFromCellSafe(summary, 'G14') || 0, g15 = numFromCellSafe(summary, 'G15') || 0;
+  const k13 = numFromCellSafe(summary, 'K13') || 0, k14 = numFromCellSafe(summary, 'K14') || 0, k15 = numFromCellSafe(summary, 'K15') || 0;
   const G16 = r2(G12 + g13 + g14 + g15);
   const H16 = H12, I16 = I12, J16 = targetJ12;
   const K16 = r2(K12 + k13 + k14 + k15);
