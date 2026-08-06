@@ -3376,10 +3376,33 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       // literal dot so "3,030,021" + "64" becomes 3030021.64, not 303002164.
       const _grabAmt = (rx) => { const m = text.match(rx); return m ? _num(m[1] + '.' + m[2]) : null; };
       // "Deposits/Credits <count> <amount> +"  — amount is the LAST money-looking token on the line
-      const ctrlDeposits = _grabAmt(/deposits?\s*\/?\s*credits[^\n]*?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})\s*\+?/i);
-      const ctrlChecks   = _grabAmt(/checks?\s*\/?\s*debits[^\n]*?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})\s*-?/i);
+      let ctrlDeposits = _grabAmt(/deposits?\s*\/?\s*credits[^\n]*?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})\s*\+?/i);
+      let ctrlChecks   = _grabAmt(/checks?\s*\/?\s*debits[^\n]*?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})\s*-?/i);
       const ctrlPrev     = _grabAmt(/previous\s*balance[^\n]*?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})/i);
       const ctrlCurr     = _grabAmt(/current\s*(?:statement\s*)?balance[^\n]*?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})/i);
+      // pdf-parse strips ALL spaces on some statements, so the summary line's
+      // transaction COUNT glues onto the amount: "Deposits/Credits33,030,021.64+"
+      // is count 3 + amount 3,030,021.64, but the regex reads 33,030,021.64.
+      // The Previous/Current Balance lines have no count column, so they parse
+      // cleanly — use the balance identity (prev + deposits - checks = curr) as
+      // the arbiter: try trimming 0-3 leading digits off each raw total and
+      // accept the UNIQUE pair that satisfies the identity. If zero or multiple
+      // pairs tie, keep the raw values (reconciliation then simply won't fire,
+      // which falls back to flagging — never a wrong silent repair).
+      if (ctrlPrev != null && ctrlCurr != null && ctrlDeposits != null && ctrlChecks != null) {
+        const _cands = (v) => {
+          const out = [v]; const s = Math.abs(v).toFixed(2); const [ip, dp] = s.split('.');
+          for (let k = 1; k <= 3 && k < ip.length; k++) {
+            const t = parseFloat(ip.slice(k) + '.' + dp); if (t > 0) out.push(t);
+          }
+          return out;
+        };
+        const target = +(ctrlCurr - ctrlPrev).toFixed(2);
+        const ties = [];
+        for (const d of _cands(ctrlDeposits)) for (const c of _cands(ctrlChecks))
+          if (Math.abs(d - c - target) < 0.005) ties.push([d, c]);
+        if (ties.length === 1) { ctrlDeposits = ties[0][0]; ctrlChecks = ties[0][1]; }
+      }
 
       // Some PDFs (e.g. Sunflower Bank / First National 1870) linearize through
       // pdf-parse with ALL inter-word spaces stripped, so a transaction row comes
