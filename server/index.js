@@ -7302,6 +7302,19 @@ app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAcce
   });
 });
 
+// ═══ CLRF workpaper: Schedule of Fees Paid to the GP & Affiliates ═══
+// Quarterly. Reads the four CLRF portfolio-company ledgers, builds the schedule,
+// saves one copy per period under the entity's workpaper folder, and returns the
+// .xlsx. See server/gpfees.js for the development-fee measurement rule.
+require('./gpfees').registerGpFeesRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ Financial Statements package generator ═══
 // Generates GL-derived financial statements (Balance Sheet, Operations, Cash
 // Flows, Members' Equity) for an entity as of a date, on a monthly/quarterly/
