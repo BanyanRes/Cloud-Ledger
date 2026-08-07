@@ -275,6 +275,13 @@ export const api = {
   createBankCodingNote: (eid, note) => request('/entities/' + eid + '/bank-coding-notes', { method: 'POST', body: note }),
   updateBankCodingNote: (eid, id, note) => request('/entities/' + eid + '/bank-coding-notes/' + id, { method: 'PUT', body: note }),
   deleteBankCodingNote: (eid, id) => request('/entities/' + eid + '/bank-coding-notes/' + id, { method: 'DELETE' }),
+  uploadBankCodingNoteFiles: (eid, id, files) => {
+    const fd = new FormData();
+    for (const f of files) fd.append('files', f);
+    return request('/entities/' + eid + '/bank-coding-notes/' + id + '/attachments', { method: 'POST', body: fd });
+  },
+  bankCodingNoteFileUrl: (id) => API_BASE + '/bank-coding-note-attachments/' + id + '/download?token=' + encodeURIComponent(getToken() || ''),
+  deleteBankCodingNoteFile: (id) => request('/bank-coding-note-attachments/' + id, { method: 'DELETE' }),
 
   // Bank Rec
   getReconciliations: (eid) => request('/entities/' + eid + '/reconciliations'),

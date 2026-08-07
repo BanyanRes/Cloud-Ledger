@@ -2828,10 +2828,13 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
   const[notes,setNotes]=useState([]);const[err,setErr]=useState('');const[msg,setMsg]=useState('');const[showAddAcct,setShowAddAcct]=useState(false);
   const blank={bank_account_code:selAcct||'',note:'',match_amount:'',amount_tolerance:'0',match_date:'',desc_keyword:'',account_code:'',memo:'',dim:'',one_shot:true};
   const[form,setForm]=useState(blank);const[editId,setEditId]=useState(null);
+  // Files staged in the form. For a new note they're uploaded right after the
+  // note is created; when editing an existing note they upload immediately.
+  const[stagedFiles,setStagedFiles]=useState([]);const[uploadingFiles,setUploadingFiles]=useState(false);
   const load=useCallback(()=>{api.getBankCodingNotes(entityId).then(setNotes).catch(e=>setErr(e.message));},[entityId]);
   useEffect(()=>{load();},[load]);
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
-  const reset=()=>{setForm(blank);setEditId(null);};
+  const reset=()=>{setForm(blank);setEditId(null);setStagedFiles([]);};
   // One tagged dimension per note (Project / Location / Class), mirroring the coding grid.
   const projOpts=dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}));
   const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
@@ -2839,7 +2842,14 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
   const dimOpts=[...projOpts,...locOpts,...clsOpts];const showDims=dimOpts.length>0;
   const dimFromNote=n=>n.project_id?'project:'+n.project_id:n.location_id?'location:'+n.location_id:n.class_id?'class:'+n.class_id:'';
   const dimLabel=n=>{const v=dimFromNote(n);const o=dimOpts.find(x=>x.v===v);return o?o.label:'';};
-  const startEdit=n=>{setEditId(n.id);setForm({bank_account_code:n.bank_account_code||'',note:n.note||'',match_amount:String(n.match_amount),amount_tolerance:String(n.amount_tolerance||0),match_date:n.date_from||n.date_to||'',desc_keyword:n.desc_keyword||'',account_code:n.account_code||'',memo:n.memo||'',dim:dimFromNote(n),one_shot:!!n.one_shot});};
+  const startEdit=n=>{setEditId(n.id);setStagedFiles([]);setForm({bank_account_code:n.bank_account_code||'',note:n.note||'',match_amount:String(n.match_amount),amount_tolerance:String(n.amount_tolerance||0),match_date:n.date_from||n.date_to||'',desc_keyword:n.desc_keyword||'',account_code:n.account_code||'',memo:n.memo||'',dim:dimFromNote(n),one_shot:!!n.one_shot});};
+  // Attach picked files. When the note is already saved (editId), upload now;
+  // otherwise stage them to upload right after the note is created on save.
+  const onPickFiles=async e=>{const files=Array.from(e.target.files||[]);e.target.value='';if(!files.length)return;
+    if(editId){setUploadingFiles(true);setErr('');try{await api.uploadBankCodingNoteFiles(entityId,editId,files);setMsg('Support added');load();}catch(ex){setErr(ex.message);}finally{setUploadingFiles(false);}}
+    else{setStagedFiles(prev=>[...prev,...files]);}};
+  const removeStaged=i=>setStagedFiles(prev=>prev.filter((_,ix)=>ix!==i));
+  const delAttachment=async(aid)=>{if(!confirm('Remove this supporting document?'))return;try{await api.deleteBankCodingNoteFile(aid);load();}catch(e){setErr(e.message);}};
   const save=async()=>{setErr('');setMsg('');
     const[dk,di]=form.dim?form.dim.split(':'):['',''];
     // Precise date is stored as a single-day window (date_from == date_to).
@@ -2847,7 +2857,11 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
     if(!isFinite(body.match_amount)||body.match_amount===0){setErr('Enter a signed wire amount (negative for money out).');return;}
     if(!body.match_date){setErr('Enter the transaction date.');return;}
     if(!body.account_code){setErr('Choose the GL account to code the wire to.');return;}
-    try{if(editId)await api.updateBankCodingNote(entityId,editId,body);else await api.createBankCodingNote(entityId,body);setMsg(editId?'Note updated':'Note saved');reset();load();}catch(e){setErr(e.message);}};
+    try{
+      if(editId){await api.updateBankCodingNote(entityId,editId,body);}
+      else{const r=await api.createBankCodingNote(entityId,body);if(stagedFiles.length&&r&&r.id){setUploadingFiles(true);try{await api.uploadBankCodingNoteFiles(entityId,r.id,stagedFiles);}finally{setUploadingFiles(false);}}}
+      setMsg(editId?'Note updated':'Note saved');reset();load();
+    }catch(e){setErr(e.message);}};
   const del=async id=>{if(!confirm('Delete this wire note?'))return;try{await api.deleteBankCodingNote(entityId,id);load();}catch(e){setErr(e.message);}};
   const toggleActive=async n=>{try{await api.updateBankCodingNote(entityId,n.id,{active:!n.active});load();}catch(e){setErr(e.message);}};
   const acctName=code=>{const a=accounts.find(x=>x.code===code);return a?acctLabel(a.code,a.name):code;};
@@ -2881,7 +2895,26 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
       <div style={S.row}>
         <div style={{...S.col,flex:2}}><label style={S.label}>Memo (optional)</label><input style={S.input} value={form.memo} onChange={e=>set('memo',e.target.value)}/></div>
       </div>
-      <div style={{display:'flex',alignItems:'center',gap:16,marginTop:6}}>
+      <div style={{marginTop:4}}>
+        <label style={S.label}>Support (email copy, PDF, Excel — optional)</label>
+        <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+          <div style={{position:'relative',display:'inline-block',overflow:'hidden'}}>
+            <button style={{...S.btnS,pointerEvents:'none'}} disabled={uploadingFiles}>{uploadingFiles?'Uploading...':'+ Attach files'}</button>
+            <input type="file" multiple accept=".pdf,.xlsx,.xls,.csv,.eml,.msg,.png,.jpg,.jpeg,.doc,.docx,.txt" style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:'pointer'}} onChange={onPickFiles}/>
+          </div>
+          {/* Already-saved attachments (edit mode) */}
+          {editId&&(notes.find(n=>n.id===editId)?.attachments||[]).map(a=><span key={a.id} style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:11,background:T.bgSoft||'#f1f1f1',border:'1px solid '+T.border,borderRadius:12,padding:'3px 9px'}}>
+            <a href={api.bankCodingNoteFileUrl(a.id)} target="_blank" rel="noreferrer" style={{color:T.accent,textDecoration:'none'}} title={a.original_name}>{a.original_name.length>24?a.original_name.slice(0,24)+'…':a.original_name}</a>
+            <span style={{cursor:'pointer',color:T.red,fontWeight:700}} onClick={()=>delAttachment(a.id)}>×</span>
+          </span>)}
+          {/* Staged files not yet uploaded (new note) */}
+          {stagedFiles.map((f,i)=><span key={i} style={{display:'inline-flex',alignItems:'center',gap:6,fontSize:11,background:T.orange+'18',border:'1px solid '+T.orange+'55',borderRadius:12,padding:'3px 9px'}} title="Will upload when you save">
+            {f.name.length>24?f.name.slice(0,24)+'…':f.name}
+            <span style={{cursor:'pointer',color:T.red,fontWeight:700}} onClick={()=>removeStaged(i)}>×</span>
+          </span>)}
+        </div>
+      </div>
+      <div style={{display:'flex',alignItems:'center',gap:16,marginTop:10}}>
         <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.text,cursor:'pointer'}}><input type="checkbox" checked={form.one_shot} onChange={e=>set('one_shot',e.target.checked)}/>Match only one wire (recommended)</label>
         <div style={{flex:1}}/>
         {editId&&<button style={S.btnS} onClick={reset}>Cancel</button>}
@@ -2892,7 +2925,7 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
     <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:8}}>Saved notes ({notes.length})</div>
     {notes.length===0?<div style={{fontSize:12,color:T.textMuted,padding:'12px 0'}}>No notes yet.</div>:
     <table style={S.table}><thead><tr>
-      <th style={S.th}>Bank Acct</th><th style={S.th}>Date</th><th style={S.thR}>Amount (±tol)</th><th style={S.th}>Keyword</th><th style={S.th}>Codes To</th><th style={S.th}>Dimension</th><th style={S.th}>Note</th><th style={S.th}>Status</th><th style={S.th}></th>
+      <th style={S.th}>Bank Acct</th><th style={S.th}>Date</th><th style={S.thR}>Amount (±tol)</th><th style={S.th}>Keyword</th><th style={S.th}>Codes To</th><th style={S.th}>Dimension</th><th style={S.th}>Note</th><th style={S.th}>Support</th><th style={S.th}>Status</th><th style={S.th}></th>
     </tr></thead><tbody>{notes.map(n=><tr key={n.id} style={n.active?{}:{opacity:0.5}}>
       <td style={{...S.td,fontSize:11}}>{bankName(n.bank_account_code)}</td>
       <td style={{...S.td,fontSize:11,color:T.textMuted}}>{n.date_from||n.date_to||'—'}</td>
@@ -2901,6 +2934,7 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
       <td style={{...S.td,fontSize:11}} title={n.account_code?acctName(n.account_code):''}>{n.account_code?acctName(n.account_code):'—'}</td>
       <td style={{...S.td,fontSize:11,color:T.textMuted}} title={dimLabel(n)}>{dimLabel(n)?(dimLabel(n).length>22?dimLabel(n).slice(0,22)+'…':dimLabel(n)):'—'}</td>
       <td style={{...S.td,fontSize:11,color:T.textMuted}} title={n.note||''}>{n.note?(n.note.length>24?n.note.slice(0,24)+'…':n.note):'—'}</td>
+      <td style={{...S.td,fontSize:11}}>{(n.attachments&&n.attachments.length)?<span style={{display:'inline-flex',gap:4,flexWrap:'wrap'}}>{n.attachments.map(a=><a key={a.id} href={api.bankCodingNoteFileUrl(a.id)} target="_blank" rel="noreferrer" style={{color:T.accent,textDecoration:'none'}} title={a.original_name}>📎</a>)}<span style={{color:T.textMuted}}>{n.attachments.length}</span></span>:'—'}</td>
       <td style={{...S.td,fontSize:11}}>{n.matched_count>0?<span style={{color:T.teal,fontWeight:600}} title={'Matched '+n.matched_count+'× · last '+(n.last_matched_at||'')}>Matched {n.matched_count}×</span>:(n.active?<span style={{color:T.orange}}>Waiting</span>:<span style={{color:T.textMuted}}>Inactive</span>)}{n.one_shot?'':<span style={{color:T.textMuted,fontSize:10}} title="Recurring"> ↻</span>}</td>
       <td style={{...S.td}}>{canEdit&&<div style={{display:'flex',gap:4}}>
         <button style={{...S.btnGhost,fontSize:11,padding:'4px 6px'}} onClick={()=>startEdit(n)}>Edit</button>

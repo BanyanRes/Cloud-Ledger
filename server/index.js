@@ -192,6 +192,16 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now'))
   );
   CREATE INDEX IF NOT EXISTS idx_bcn_entity ON bank_coding_notes(entity_id, active);
+  -- Supporting documents for a wire coding note (email copy, PDF, Excel, etc).
+  -- Mirrors journal_attachments: the bytes live on disk under UPLOAD_DIR, this
+  -- row holds the metadata. Cascades when the note is deleted.
+  CREATE TABLE IF NOT EXISTS bank_coding_note_attachments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id INTEGER NOT NULL REFERENCES bank_coding_notes(id) ON DELETE CASCADE,
+    filename TEXT NOT NULL, original_name TEXT NOT NULL,
+    mime_type TEXT, size INTEGER, created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_bcna_note ON bank_coding_note_attachments(note_id);
   CREATE TABLE IF NOT EXISTS cleared_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
@@ -3987,7 +3997,8 @@ app.delete('/api/entities/:eid/bank-transactions/batch/:batchId', auth, requireE
 // the note is kept for reference (matched_count/last_matched_at record the hit).
 app.get('/api/entities/:eid/bank-coding-notes', auth, requireEntityAccess(), (req, res) => {
   const rows = db.prepare('SELECT * FROM bank_coding_notes WHERE entity_id=? ORDER BY active DESC, id DESC').all(req.params.eid);
-  res.json(rows.map(r => ({ ...r, splits: r.splits_json ? JSON.parse(r.splits_json) : null })));
+  const attStmt = db.prepare('SELECT id, original_name, mime_type, size FROM bank_coding_note_attachments WHERE note_id=? ORDER BY id');
+  res.json(rows.map(r => ({ ...r, splits: r.splits_json ? JSON.parse(r.splits_json) : null, attachments: attStmt.all(r.id) })));
 });
 
 app.post('/api/entities/:eid/bank-coding-notes', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
@@ -4045,8 +4056,48 @@ app.put('/api/entities/:eid/bank-coding-notes/:id', auth, requireEntityAccess(),
 });
 
 app.delete('/api/entities/:eid/bank-coding-notes/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  // Remove any supporting-doc files from disk before the row (and its
+  // attachment rows via cascade) are deleted.
+  const atts = db.prepare('SELECT a.filename FROM bank_coding_note_attachments a JOIN bank_coding_notes n ON n.id=a.note_id WHERE a.note_id=? AND n.entity_id=?').all(req.params.id, req.params.eid);
+  atts.forEach(a => { try { fs.unlinkSync(path.join(UPLOAD_DIR, a.filename)); } catch {} });
   const r = db.prepare('DELETE FROM bank_coding_notes WHERE id=? AND entity_id=?').run(req.params.id, req.params.eid);
   res.json({ deleted: r.changes });
+});
+
+// ── Wire-note supporting documents (email copy / PDF / Excel / etc) ──
+app.post('/api/entities/:eid/bank-coding-notes/:id/attachments', auth, requireEntityAccess(), requireRole('Admin','Accountant'), upload.array('files', 10), (req, res) => {
+  const note = db.prepare('SELECT id FROM bank_coding_notes WHERE id=? AND entity_id=?').get(req.params.id, req.params.eid);
+  if (!note) { (req.files||[]).forEach(f => { try { fs.unlinkSync(path.join(UPLOAD_DIR, f.filename)); } catch {} }); return res.status(404).json({ error: 'Note not found' }); }
+  if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files' });
+  const ins = db.prepare('INSERT INTO bank_coding_note_attachments (note_id, filename, original_name, mime_type, size) VALUES (?,?,?,?,?)');
+  const results = [];
+  for (const f of req.files) {
+    const r = ins.run(req.params.id, f.filename, f.originalname, f.mimetype, f.size);
+    results.push({ id: r.lastInsertRowid, original_name: f.originalname, mime_type: f.mimetype, size: f.size });
+  }
+  res.json(results);
+});
+
+app.get('/api/bank-coding-note-attachments/:id/download', (req, res) => {
+  const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'No token' });
+  try { jwt.verify(token, JWT_SECRET); } catch { return res.status(401).json({ error: 'Invalid token' }); }
+  const att = db.prepare('SELECT * FROM bank_coding_note_attachments WHERE id=?').get(req.params.id);
+  if (!att) return res.status(404).json({ error: 'Not found' });
+  const filepath = path.resolve(UPLOAD_DIR, att.filename);
+  if (!fs.existsSync(filepath)) return res.status(404).json({ error: 'File missing' });
+  const inlineTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+  const disposition = inlineTypes.includes(att.mime_type) ? 'inline' : 'attachment';
+  res.setHeader('Content-Disposition', disposition + '; filename="' + att.original_name + '"');
+  res.setHeader('Content-Type', att.mime_type || 'application/octet-stream');
+  res.sendFile(filepath, err => { if (err && !res.headersSent) res.status(500).json({ error: 'Failed to send file' }); });
+});
+
+app.delete('/api/bank-coding-note-attachments/:id', auth, requireRole('Admin','Accountant'), (req, res) => {
+  const att = db.prepare('SELECT * FROM bank_coding_note_attachments WHERE id=?').get(req.params.id);
+  if (att) { try { fs.unlinkSync(path.join(UPLOAD_DIR, att.filename)); } catch {} }
+  db.prepare('DELETE FROM bank_coding_note_attachments WHERE id=?').run(req.params.id);
+  res.json({ success: true });
 });
 
 // ═══ Balances (with soft close) ═══
