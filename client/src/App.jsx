@@ -2828,6 +2828,11 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
   const[notes,setNotes]=useState([]);const[err,setErr]=useState('');const[msg,setMsg]=useState('');const[showAddAcct,setShowAddAcct]=useState(false);
   const blank={bank_account_code:selAcct||'',note:'',match_amount:'',amount_tolerance:'0',match_date:'',desc_keyword:'',account_code:'',memo:'',dim:'',one_shot:true};
   const[form,setForm]=useState(blank);const[editId,setEditId]=useState(null);
+  // Refs to the native date/amount inputs. Some browsers (and autofill/date
+  // pickers) can set the field's displayed value without firing React's
+  // onChange, leaving form.match_date empty at submit. On save we read the live
+  // input value as the source of truth so a visible date is never rejected.
+  const dateRef=useRef(null);const amountRef=useRef(null);
   // Files staged in the form. For a new note they're uploaded right after the
   // note is created; when editing an existing note they upload immediately.
   const[stagedFiles,setStagedFiles]=useState([]);const[uploadingFiles,setUploadingFiles]=useState(false);
@@ -2852,10 +2857,14 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
   const delAttachment=async(aid)=>{if(!confirm('Remove this supporting document?'))return;try{await api.deleteBankCodingNoteFile(aid);load();}catch(e){setErr(e.message);}};
   const save=async()=>{setErr('');setMsg('');
     const[dk,di]=form.dim?form.dim.split(':'):['',''];
+    // Read live input values as source of truth (guards against a displayed
+    // date/amount that never fired onChange, e.g. via autofill or the picker).
+    const matchDate=(dateRef.current&&dateRef.current.value)||form.match_date||'';
+    const matchAmountRaw=(amountRef.current&&amountRef.current.value)||form.match_amount||'';
     // Precise date is stored as a single-day window (date_from == date_to).
-    const body={bank_account_code:form.bank_account_code||null,note:form.note||null,match_amount:Number(form.match_amount),amount_tolerance:Number(form.amount_tolerance)||0,date_from:form.match_date||null,date_to:form.match_date||null,desc_keyword:form.desc_keyword||null,account_code:form.account_code||null,memo:form.memo||null,project_id:dk==='project'?di:null,class_id:dk==='class'?Number(di):null,location_id:dk==='location'?Number(di):null,one_shot:!!form.one_shot};
+    const body={bank_account_code:form.bank_account_code||null,note:form.note||null,match_amount:Number(matchAmountRaw),amount_tolerance:Number(form.amount_tolerance)||0,date_from:matchDate||null,date_to:matchDate||null,desc_keyword:form.desc_keyword||null,account_code:form.account_code||null,memo:form.memo||null,project_id:dk==='project'?di:null,class_id:dk==='class'?Number(di):null,location_id:dk==='location'?Number(di):null,one_shot:!!form.one_shot};
     if(!isFinite(body.match_amount)||body.match_amount===0){setErr('Enter a signed wire amount (negative for money out).');return;}
-    if(!body.match_date){setErr('Enter the transaction date.');return;}
+    if(!body.date_from){setErr('Enter the transaction date.');return;}
     if(!body.account_code){setErr('Choose the GL account to code the wire to.');return;}
     try{
       if(editId){await api.updateBankCodingNote(entityId,editId,body);}
@@ -2876,10 +2885,10 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
       <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:12}}>{editId?'Edit note':'New note'}</div>
       <div style={S.row}>
         <div style={S.col}><label style={S.label}>Bank Account</label><select style={S.select} value={form.bank_account_code} onChange={e=>set('bank_account_code',e.target.value)}><option value="">Any account</option>{(bankAccts||[]).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></div>
-        <div style={S.col}><label style={S.label}>Transaction Date</label><input style={S.input} type="date" value={form.match_date} onChange={e=>set('match_date',e.target.value)}/></div>
+        <div style={S.col}><label style={S.label}>Transaction Date</label><input ref={dateRef} style={S.input} type="date" value={form.match_date} onChange={e=>set('match_date',e.target.value)}/></div>
       </div>
       <div style={S.row}>
-        <div style={S.col}><label style={S.label}>Wire Amount (signed)</label><input style={S.input} type="number" step="0.01" placeholder="-250000.00 (out) / 250000.00 (in)" value={form.match_amount} onChange={e=>set('match_amount',e.target.value)}/></div>
+        <div style={S.col}><label style={S.label}>Wire Amount (signed)</label><input ref={amountRef} style={S.input} type="number" step="0.01" placeholder="-250000.00 (out) / 250000.00 (in)" value={form.match_amount} onChange={e=>set('match_amount',e.target.value)}/></div>
         <div style={S.col}><label style={S.label}>Amount Tolerance (±$)</label><input style={S.input} type="number" step="0.01" min="0" value={form.amount_tolerance} onChange={e=>set('amount_tolerance',e.target.value)}/></div>
         <div style={S.col}><label style={S.label}>Description contains (optional)</label><input style={S.input} placeholder="e.g. WIRE, FEDWIRE" value={form.desc_keyword} onChange={e=>set('desc_keyword',e.target.value)}/></div>
       </div>
