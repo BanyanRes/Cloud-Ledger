@@ -271,6 +271,15 @@ function writeRowCells(ws, r, row) {
   put(COL.amount, row.amount);
   put(COL.req, row.req);
   put(COL.date, row.date);
+  // Budget Code: a grouping label (col C on Braker-style logs) that the
+  // Budget-to-Actual SUMIFs match on. Only written when the workbook actually
+  // HAS a detected Budget Code column (COL.budgetcode is set by the header
+  // detector) AND this row carries a value — so standard templates without the
+  // column are untouched, and rows we couldn't derive a code for fall through to
+  // the passthrough restore below (which carries a prior period's value forward).
+  if (COL.budgetcode != null && row.budgetcode != null && String(row.budgetcode).trim() !== '') {
+    ws.getCell(r, COL.budgetcode).value = row.budgetcode;
+  }
   // Restore unmapped pass-through columns (e.g. Braker's "Budget Code") at their
   // original column index so extra columns survive the rebuild (the clear loop
   // wipes cols 1-11; these are the ones the engine doesn't otherwise rewrite).
@@ -966,6 +975,20 @@ async function rollForward(workbook, newCurrent, meta = {}) {
     addFrom(curWs); addFrom(priorWs);
   }
 
+  // Budget Code (col C on Braker-style logs) map: cost code -> the Budget Code
+  // grouping label used in the prior/current logs. The Budget-to-Actual SUMIFs
+  // match this column against the account-name rows, so a current-log row with a
+  // blank Budget Code is invisible to the B2A (its "payment this period" reads 0,
+  // and the dev-fee / contingency figures that depend on it go stale). App-synced
+  // invoices arrive with only the numeric cost code, so derive the Budget Code
+  // from the code using the pairings ALREADY present in this workbook's logs.
+  // Only built when the workbook actually has a detected Budget Code column.
+  const budgetCodeByCode = new Map();
+  if (COL.budgetcode != null) {
+    const addFrom = (ws) => { if (!ws) return; const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0); for (let r = 1; r <= last; r++) { const code = cellCode(ws.getCell(r, COL.code)); const bc = cellStr(ws.getCell(r, COL.budgetcode)).trim(); if (code != null && String(code) !== '' && bc && !budgetCodeByCode.has(String(code))) budgetCodeByCode.set(String(code), bc); } };
+    addFrom(curWs); addFrom(priorWs);
+  }
+
   // 1a. Clean up the prior log: drop zero/blank-amount duplicate rows where the
   //     same invoice (vendor + bill#) also appears with a real amount elsewhere
   //     (one invoice coded to two cost codes — one real, one $0 placeholder).
@@ -1070,6 +1093,16 @@ async function rollForward(workbook, newCurrent, meta = {}) {
     if (inv && !(inv.bankcat != null && String(inv.bankcat).trim())) {
       const bc = bankcatByCode.get(String(inv.code));
       if (bc) inv.bankcat = bc;
+    }
+  }
+  // Fill Budget Code on any current row that lacks it, so the B2A's "payment
+  // this period" SUMIF (keyed on col C) picks the row up. Derived from the cost
+  // code via the pairings already in this workbook's logs. No-op when the
+  // template has no Budget Code column (budgetCodeByCode is empty).
+  for (const inv of effectiveCurrent) {
+    if (inv && !(inv.budgetcode != null && String(inv.budgetcode).trim())) {
+      const bg = budgetCodeByCode.get(String(inv.code));
+      if (bg) inv.budgetcode = bg;
     }
   }
   const curInfo = replaceCurrentLog(curWs, effectiveCurrent, meta);
@@ -1402,7 +1435,7 @@ function replaceCurrentLog(ws, rows, meta) {
         cat: row.cat || row.name, code: row.code, bankcat: row.bankcat, gl: row.gl ?? row.code,
         name: row.name, vendor: row.vendor, bill: row.bill,
         amount: row.amount, req: row.req || (meta.reqNumber ? 'Req#' + meta.reqNumber : undefined),
-        date: row.date,
+        date: row.date, budgetcode: row.budgetcode,
       });
       // Regenerate per-row derived columns (e.g. "Total" = Amount Paid + Check)
       // so the B2A's SUMIF over the Current Log's Total column sees this line.

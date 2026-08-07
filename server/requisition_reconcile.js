@@ -163,6 +163,11 @@ function detectInvoiceCols(ws) {
     ['bankcat', t => /bank\s*cost\s*cat/.test(t)],
     ['name',    t => /cost code name/.test(t)],
     ['code',    t => /cost code\s*#|cost code\s*(number|no)\b|^cost code$/.test(t)],
+    // "Budget Code" is a grouping label some properties (e.g. Braker) carry in an
+    // extra column; the Budget-to-Actual SUMIFs match on it. Anchor on "budget" so
+    // it never collides with the "Cost Code" rule above. Kept out of DEFAULT_COL so
+    // templates without the column don't get a phantom budgetcode slot.
+    ['budgetcode', t => /budget\s*code/.test(t)],
     ['cat',     t => /cost category/.test(t)],
     ['gl',      t => /gl coding|gl account|^g\/?l$|^gl\b/.test(t)],
     ['vendor',  t => /vendor|payee/.test(t)],
