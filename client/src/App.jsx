@@ -2819,6 +2819,80 @@ function GeneralLedger({entityId,entityName,dimsEnabled,from,setFrom,to,setTo,fi
     {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={()=>{setEditEntry(null);reload();}}/>}
     </div>);}
 
+// ═══ Wire Coding Notes Modal ═══
+// Leave a note during the month describing how a wire should be coded. On the
+// next statement upload, a row whose amount (within tolerance) and date (within
+// the window) match the note is auto-populated with the note's GL coding and
+// arrives 'coded' for review. The note is kept for reference after it fires.
+function WireNotesModal({entityId,selAcct,bankAccts,accounts,canEdit=true,onClose}){
+  const[notes,setNotes]=useState([]);const[err,setErr]=useState('');const[msg,setMsg]=useState('');
+  const blank={bank_account_code:selAcct||'',note:'',match_amount:'',amount_tolerance:'0',date_from:'',date_to:'',desc_keyword:'',account_code:'',memo:'',one_shot:true};
+  const[form,setForm]=useState(blank);const[editId,setEditId]=useState(null);
+  const load=useCallback(()=>{api.getBankCodingNotes(entityId).then(setNotes).catch(e=>setErr(e.message));},[entityId]);
+  useEffect(()=>{load();},[load]);
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const reset=()=>{setForm(blank);setEditId(null);};
+  const startEdit=n=>{setEditId(n.id);setForm({bank_account_code:n.bank_account_code||'',note:n.note||'',match_amount:String(n.match_amount),amount_tolerance:String(n.amount_tolerance||0),date_from:n.date_from||'',date_to:n.date_to||'',desc_keyword:n.desc_keyword||'',account_code:n.account_code||'',memo:n.memo||'',one_shot:!!n.one_shot});};
+  const save=async()=>{setErr('');setMsg('');
+    const body={bank_account_code:form.bank_account_code||null,note:form.note||null,match_amount:Number(form.match_amount),amount_tolerance:Number(form.amount_tolerance)||0,date_from:form.date_from||null,date_to:form.date_to||null,desc_keyword:form.desc_keyword||null,account_code:form.account_code||null,memo:form.memo||null,one_shot:!!form.one_shot};
+    if(!isFinite(body.match_amount)||body.match_amount===0){setErr('Enter a signed wire amount (negative for money out).');return;}
+    if(!body.account_code){setErr('Choose the GL account to code the wire to.');return;}
+    try{if(editId)await api.updateBankCodingNote(entityId,editId,body);else await api.createBankCodingNote(entityId,body);setMsg(editId?'Note updated':'Note saved');reset();load();}catch(e){setErr(e.message);}};
+  const del=async id=>{if(!confirm('Delete this wire note?'))return;try{await api.deleteBankCodingNote(entityId,id);load();}catch(e){setErr(e.message);}};
+  const toggleActive=async n=>{try{await api.updateBankCodingNote(entityId,n.id,{active:!n.active});load();}catch(e){setErr(e.message);}};
+  const acctName=code=>{const a=accounts.find(x=>x.code===code);return a?acctLabel(a.code,a.name):code;};
+  const bankName=code=>{if(!code)return'Any account';const a=(bankAccts||[]).find(x=>x.code===code);return a?acctLabel(a.code,a.name):code;};
+
+  return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:920}} onClick={e=>e.stopPropagation()}>
+    <button style={S.modalClose} onClick={onClose}>&times;</button>
+    <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Wire Coding Notes</div>
+    <div style={{fontSize:12,color:T.textMuted,marginBottom:18}}>Leave a note for a wire processed this month. When you upload the bank statement, the matching row is auto-coded (status Coded) for your review before posting.</div>
+    {err&&<div style={S.err}>{err}</div>}{msg&&<div style={S.success}>{msg}</div>}
+    {canEdit&&<div style={{border:'1px solid '+T.border,borderRadius:T.radiusXs,padding:16,marginBottom:20,background:T.bgSoft||'#fafafa'}}>
+      <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:12}}>{editId?'Edit note':'New note'}</div>
+      <div style={S.row}>
+        <div style={S.col}><label style={S.label}>Bank Account</label><select style={S.select} value={form.bank_account_code} onChange={e=>set('bank_account_code',e.target.value)}><option value="">Any account</option>{(bankAccts||[]).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></div>
+        <div style={S.col}><label style={S.label}>Wire Amount (signed)</label><input style={S.input} type="number" step="0.01" placeholder="-250000.00 (out) / 250000.00 (in)" value={form.match_amount} onChange={e=>set('match_amount',e.target.value)}/></div>
+        <div style={S.col}><label style={S.label}>Amount Tolerance (±$)</label><input style={S.input} type="number" step="0.01" min="0" value={form.amount_tolerance} onChange={e=>set('amount_tolerance',e.target.value)}/></div>
+      </div>
+      <div style={S.row}>
+        <div style={S.col}><label style={S.label}>Date From</label><input style={S.input} type="date" value={form.date_from} onChange={e=>set('date_from',e.target.value)}/></div>
+        <div style={S.col}><label style={S.label}>Date To</label><input style={S.input} type="date" value={form.date_to} onChange={e=>set('date_to',e.target.value)}/></div>
+        <div style={S.col}><label style={S.label}>Description contains (optional)</label><input style={S.input} placeholder="e.g. WIRE, FEDWIRE" value={form.desc_keyword} onChange={e=>set('desc_keyword',e.target.value)}/></div>
+      </div>
+      <div style={S.row}>
+        <div style={{...S.col,flex:2}}><label style={S.label}>Code to GL Account</label><select style={S.select} value={form.account_code} onChange={e=>set('account_code',e.target.value)}><option value="">Select account...</option>{accounts.map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></div>
+        <div style={{...S.col,flex:2}}><label style={S.label}>Memo (optional)</label><input style={S.input} value={form.memo} onChange={e=>set('memo',e.target.value)}/></div>
+      </div>
+      <div style={{display:'flex',alignItems:'center',gap:16,marginTop:6}}>
+        <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.text,cursor:'pointer'}}><input type="checkbox" checked={form.one_shot} onChange={e=>set('one_shot',e.target.checked)}/>Match only one wire (recommended)</label>
+        <div style={{flex:1}}/>
+        {editId&&<button style={S.btnS} onClick={reset}>Cancel</button>}
+        <button style={S.btnP} onClick={save}>{editId?'Update note':'Save note'}</button>
+      </div>
+      <div style={{fontSize:11,color:T.textMuted,marginTop:10}}>Note stays saved for reference after it matches. Leave the date window open if you're unsure when the wire will clear. Use a description keyword only if the amount alone might collide with another transaction.</div>
+    </div>}
+    <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:8}}>Saved notes ({notes.length})</div>
+    {notes.length===0?<div style={{fontSize:12,color:T.textMuted,padding:'12px 0'}}>No notes yet.</div>:
+    <table style={S.table}><thead><tr>
+      <th style={S.th}>Bank Acct</th><th style={S.thR}>Amount (±tol)</th><th style={S.th}>Date Window</th><th style={S.th}>Keyword</th><th style={S.th}>Codes To</th><th style={S.th}>Note</th><th style={S.th}>Status</th><th style={S.th}></th>
+    </tr></thead><tbody>{notes.map(n=><tr key={n.id} style={n.active?{}:{opacity:0.5}}>
+      <td style={{...S.td,fontSize:11}}>{bankName(n.bank_account_code)}</td>
+      <td style={{...S.tdR,fontWeight:700,color:n.match_amount>=0?T.green:T.red}}>{n.match_amount>=0?'+':''}{fmt(n.match_amount)}{Number(n.amount_tolerance)>0?<span style={{color:T.textMuted,fontWeight:400,fontSize:11}}> ±{fmt(n.amount_tolerance)}</span>:null}</td>
+      <td style={{...S.td,fontSize:11,color:T.textMuted}}>{n.date_from||'—'} → {n.date_to||'—'}</td>
+      <td style={{...S.td,fontSize:11}}>{n.desc_keyword||'—'}</td>
+      <td style={{...S.td,fontSize:11}} title={n.account_code?acctName(n.account_code):''}>{n.account_code?acctName(n.account_code):'—'}</td>
+      <td style={{...S.td,fontSize:11,color:T.textMuted}} title={n.note||''}>{n.note?(n.note.length>28?n.note.slice(0,28)+'…':n.note):'—'}</td>
+      <td style={{...S.td,fontSize:11}}>{n.matched_count>0?<span style={{color:T.teal,fontWeight:600}} title={'Matched '+n.matched_count+'× · last '+(n.last_matched_at||'')}>Matched {n.matched_count}×</span>:(n.active?<span style={{color:T.orange}}>Waiting</span>:<span style={{color:T.textMuted}}>Inactive</span>)}{n.one_shot?'':<span style={{color:T.textMuted,fontSize:10}} title="Recurring"> ↻</span>}</td>
+      <td style={{...S.td}}>{canEdit&&<div style={{display:'flex',gap:4}}>
+        <button style={{...S.btnGhost,fontSize:11,padding:'4px 6px'}} onClick={()=>startEdit(n)}>Edit</button>
+        <button style={{...S.btnGhost,fontSize:11,padding:'4px 6px',color:T.textMuted}} onClick={()=>toggleActive(n)}>{n.active?'Disable':'Enable'}</button>
+        <button style={{...S.btnGhost,fontSize:11,padding:'4px 6px',color:T.red}} onClick={()=>del(n.id)}>Delete</button>
+      </div>}</td>
+    </tr>)}</tbody></table>}
+  </div></div>);
+}
+
 // ═══ Bank Transactions (state lifted to App for navigation persistence) ═══
 // ═══ Bank Transaction Split Modal ═══
 function BankMatchModal({txn, entityId, onClose, onMatched}){
@@ -2973,6 +3047,7 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
   const[uploadProgress,setUploadProgress]=useState('');const[discarding,setDiscarding]=useState(false);
   const[splitTxn,setSplitTxn]=useState(null);
   const[matchTxn,setMatchTxn]=useState(null);
+  const[showNotes,setShowNotes]=useState(false);
   // Dimensions (Location / Class / Project) available to tag when coding a txn.
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);const[dimProjects,setDimProjects]=useState([]);
   // Resizable column widths — persisted per-user in localStorage
@@ -2996,7 +3071,7 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
       setUploadProgress('Auto-categorizing '+r.count+' transactions...');
       const imported=await api.getBankTransactions(entityId,selAcct,'pending');let auto=0;
       for(const t of imported){if(!t.account_code){const sg=suggestAccount(t.description,accounts,selAcct);if(sg){await api.codeBankTransaction(entityId,t.id,sg.code,t.memo||t.description);auto++;}}}
-      setMsg(r.count+' imported'+(auto>0?', '+auto+' auto-categorized':''));loadTxns(selAcct,statusFilter);}catch(ex){setErr(ex.message);}finally{setUploading(false);setUploadProgress('');}};
+      setMsg(r.count+' imported'+(r.auto_coded>0?', '+r.auto_coded+' auto-coded from wire notes':'')+(auto>0?', '+auto+' auto-categorized':''));loadTxns(selAcct,statusFilter);}catch(ex){setErr(ex.message);}finally{setUploading(false);setUploadProgress('');}};
   const cancelUpload=()=>{setUploading(false);setUploadProgress('');setMsg('Upload cancelled');};
   const discardAllUnposted=async()=>{const unposted=txns.filter(t=>t.status!=='posted');if(!unposted.length){setErr('Nothing to discard');return;}
     const batchIds=[...new Set(unposted.map(t=>t.batch_id).filter(Boolean))];
@@ -3036,7 +3111,9 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
           :<div style={{position:'relative',display:'inline-block',overflow:'hidden'}}>
             <button style={{...S.btnP,pointerEvents:'none'}}>Upload CSV / Excel / PDF</button>
             <input type="file" accept=".csv,.xlsx,.xls,.pdf" style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:'pointer'}} onChange={onFileSelected}/></div>}
+        <button style={{...S.btnS,color:T.orange,borderColor:T.orange+'40'}} onClick={()=>setShowNotes(true)} title="Leave a note during the month so a wire is auto-coded when the statement is uploaded">Wire Notes</button>
       </div>}
+    {showNotes&&<WireNotesModal entityId={entityId} selAcct={selAcct} bankAccts={bankAccts} accounts={accounts} canEdit={canEdit} onClose={()=>setShowNotes(false)}/>}
     </div>
     {err&&<div style={S.err}>{err}</div>}{msg&&<div style={S.success}>{msg}</div>}
     </div>

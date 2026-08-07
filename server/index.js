@@ -164,6 +164,34 @@ db.exec(`
     amount REAL NOT NULL,
     memo TEXT
   );
+  -- Wire coding notes: a note left during the month so that when the bank
+  -- statement is uploaded, the matching wire row is auto-populated with its GL
+  -- coding (status 'coded') instead of arriving 'pending'. Matches on amount
+  -- within a tolerance and a date window; an optional description keyword can
+  -- further narrow it. The note is kept for reference after it fires. When
+  -- one_shot=1 the note stops matching further rows once it has grabbed one wire.
+  CREATE TABLE IF NOT EXISTS bank_coding_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    bank_account_code TEXT,            -- NULL = any account for this entity
+    note TEXT,                         -- free-text reminder shown in the grid
+    match_amount REAL NOT NULL,        -- signed; sign is compared too
+    amount_tolerance REAL NOT NULL DEFAULT 0,  -- +/- dollars allowed on the match
+    date_from TEXT,                    -- YYYY-MM-DD inclusive (NULL = open)
+    date_to TEXT,                      -- YYYY-MM-DD inclusive (NULL = open)
+    desc_keyword TEXT,                 -- optional case-insensitive substring
+    account_code TEXT,                 -- single-account coding (or use splits)
+    splits_json TEXT,                  -- JSON [{account_code,amount,memo,project_id,class_id,location_id}]
+    memo TEXT,
+    project_id TEXT, class_id INTEGER, location_id INTEGER,
+    one_shot INTEGER NOT NULL DEFAULT 1,
+    active INTEGER NOT NULL DEFAULT 1,
+    matched_count INTEGER NOT NULL DEFAULT 0,
+    last_matched_at TEXT,
+    created_by TEXT,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_bcn_entity ON bank_coding_notes(entity_id, active);
   CREATE TABLE IF NOT EXISTS cleared_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
@@ -3330,6 +3358,36 @@ app.delete('/api/attachments/:id', auth, requireRole('Admin','Accountant'), (req
 });
 
 // ═══ Bank Transaction Upload & Coding ═══
+
+// Find the best active coding note for a parsed statement row. Matching keys:
+// signed amount within tolerance, date inside [date_from,date_to] (open ends
+// allowed), and — if the note carries a desc_keyword — a case-insensitive
+// substring hit on the description. When several notes match, the tightest
+// amount tolerance wins (most specific), then the smallest date window, then
+// oldest note. one_shot notes already at matched_count>0 are skipped.
+function findCodingNote(entityId, bankAccount, row) {
+  const notes = db.prepare(
+    `SELECT * FROM bank_coding_notes
+      WHERE entity_id=? AND active=1
+        AND (bank_account_code IS NULL OR bank_account_code=?)
+        AND (one_shot=0 OR matched_count=0)`
+  ).all(entityId, bankAccount);
+  const candidates = notes.filter(n => {
+    const tol = Number(n.amount_tolerance) || 0;
+    if (Math.abs(Number(row.amount) - Number(n.match_amount)) > tol + 1e-6) return false;
+    if (n.date_from && row.date < n.date_from) return false;
+    if (n.date_to && row.date > n.date_to) return false;
+    if (n.desc_keyword && !(row.description || '').toLowerCase().includes(n.desc_keyword.toLowerCase())) return false;
+    return true;
+  });
+  if (!candidates.length) return null;
+  const span = n => (n.date_from && n.date_to)
+    ? (Date.parse(n.date_to) - Date.parse(n.date_from)) : Number.MAX_SAFE_INTEGER;
+  candidates.sort((a, b) =>
+    (Number(a.amount_tolerance) - Number(b.amount_tolerance)) || (span(a) - span(b)) || (a.id - b.id));
+  return candidates[0];
+}
+
 app.get('/api/entities/:eid/bank-transactions', auth, requireEntityAccess(), (req, res) => {
   const { bank_account, status } = req.query;
   let sql = 'SELECT * FROM bank_transactions WHERE entity_id = ?'; const params = [req.params.eid];
@@ -3665,7 +3723,9 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
     // ── Insert into database (shared path for both PDF and CSV/XLSX) ──
     const batchId = 'batch-' + Date.now();
     const ins = db.prepare('INSERT INTO bank_transactions (entity_id, bank_account_code, date, description, amount, batch_id) VALUES (?,?,?,?,?,?)');
+    const insSplit = db.prepare('INSERT INTO bank_transaction_splits (txn_id, account_code, amount, memo, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?)');
     let count = 0;
+    let autoCoded = 0;
     const reviewRows = [];
     db.transaction(() => {
       for (const r of rows) {
@@ -3673,14 +3733,40 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
         // ambiguous integer/amount split; mark its description so it's obvious in
         // the grid that the amount must be verified against the statement.
         const desc = r.needs_review ? ('[VERIFY AMOUNT] ' + r.description) : r.description;
-        ins.run(req.params.eid, bankAccount, r.date, desc, r.amount, batchId);
+        const info = ins.run(req.params.eid, bankAccount, r.date, desc, r.amount, batchId);
         count++;
         if (r.needs_review) reviewRows.push({ date: r.date, description: r.description, amount: r.amount });
+
+        // ── Wire coding notes: auto-populate coding from a matching note ──
+        // A glued/unverified amount is not trustworthy enough to match on, so
+        // skip auto-coding those rows.
+        if (!r.needs_review) {
+          const note = findCodingNote(req.params.eid, bankAccount, r);
+          if (note) {
+            const txnId = info.lastInsertRowid;
+            let splits = null;
+            if (note.splits_json) { try { splits = JSON.parse(note.splits_json); } catch { splits = null; } }
+            if (Array.isArray(splits) && splits.length) {
+              for (const s of splits) {
+                insSplit.run(txnId, s.account_code, Math.abs(Number(s.amount)), s.memo || note.memo || null,
+                  s.project_id || null, s.class_id || null, s.location_id || null);
+              }
+              db.prepare("UPDATE bank_transactions SET account_code=NULL, memo=?, status='coded' WHERE id=?")
+                .run(note.memo || null, txnId);
+            } else if (note.account_code) {
+              db.prepare("UPDATE bank_transactions SET account_code=?, memo=?, project_id=?, class_id=?, location_id=?, status='coded' WHERE id=?")
+                .run(note.account_code, note.memo || null, note.project_id || null, note.class_id || null, note.location_id || null, txnId);
+            }
+            db.prepare("UPDATE bank_coding_notes SET matched_count=matched_count+1, last_matched_at=datetime('now') WHERE id=?").run(note.id);
+            autoCoded++;
+          }
+        }
       }
     })();
 
     res.json({ count, batch_id: batchId, format: isPdf ? 'pdf' : 'csv/xlsx',
       needs_review: reviewRows.length, review_rows: reviewRows,
+      auto_coded: autoCoded,
       reconciled, control_totals: ctrlInfo });
   } catch (e) {
     res.status(400).json({ error: 'Failed to parse file: ' + e.message });
@@ -3892,6 +3978,74 @@ app.delete('/api/entities/:eid/bank-transactions/:id', auth, requireEntityAccess
 
 app.delete('/api/entities/:eid/bank-transactions/batch/:batchId', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const r = db.prepare('DELETE FROM bank_transactions WHERE entity_id=? AND batch_id=? AND status != ?').run(req.params.eid, req.params.batchId, 'posted');
+  res.json({ deleted: r.changes });
+});
+
+// ═══ Bank Coding Notes (wire pre-coding) ═══
+// Leave a note during the month describing how a wire should be coded; on the
+// next statement upload the matching row is auto-populated (status 'coded') and
+// the note is kept for reference (matched_count/last_matched_at record the hit).
+app.get('/api/entities/:eid/bank-coding-notes', auth, requireEntityAccess(), (req, res) => {
+  const rows = db.prepare('SELECT * FROM bank_coding_notes WHERE entity_id=? ORDER BY active DESC, id DESC').all(req.params.eid);
+  res.json(rows.map(r => ({ ...r, splits: r.splits_json ? JSON.parse(r.splits_json) : null })));
+});
+
+app.post('/api/entities/:eid/bank-coding-notes', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const b = req.body || {};
+  if (b.match_amount === undefined || b.match_amount === null || b.match_amount === '' || !isFinite(Number(b.match_amount)) || Number(b.match_amount) === 0)
+    return res.status(400).json({ error: 'match_amount is required and must be a non-zero signed number' });
+  const splits = Array.isArray(b.splits) && b.splits.length ? b.splits : null;
+  if (!splits && !b.account_code)
+    return res.status(400).json({ error: 'Provide account_code or splits for the coding' });
+  if (splits) for (const s of splits) {
+    if (!s.account_code) return res.status(400).json({ error: 'Each split needs an account_code' });
+    if (!(Number(s.amount) > 0)) return res.status(400).json({ error: 'Each split amount must be > 0' });
+  }
+  const info = db.prepare(
+    `INSERT INTO bank_coding_notes
+      (entity_id, bank_account_code, note, match_amount, amount_tolerance, date_from, date_to, desc_keyword,
+       account_code, splits_json, memo, project_id, class_id, location_id, one_shot, active, created_by)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).run(
+    req.params.eid, b.bank_account_code || null, b.note || null,
+    Number(b.match_amount), Number(b.amount_tolerance) || 0,
+    b.date_from || null, b.date_to || null, b.desc_keyword || null,
+    splits ? null : b.account_code, splits ? JSON.stringify(splits) : null,
+    b.memo || null, b.project_id || null, b.class_id || null, b.location_id || null,
+    b.one_shot === false ? 0 : 1, 1, req.user.name
+  );
+  res.json({ id: info.lastInsertRowid, success: true });
+});
+
+app.put('/api/entities/:eid/bank-coding-notes/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const existing = db.prepare('SELECT * FROM bank_coding_notes WHERE id=? AND entity_id=?').get(req.params.id, req.params.eid);
+  if (!existing) return res.status(404).json({ error: 'Note not found' });
+  const b = req.body || {};
+  const splits = Array.isArray(b.splits) ? (b.splits.length ? b.splits : null) : undefined;
+  const val = (k, fallback) => (b[k] === undefined ? fallback : b[k]);
+  db.prepare(
+    `UPDATE bank_coding_notes SET
+       bank_account_code=?, note=?, match_amount=?, amount_tolerance=?, date_from=?, date_to=?, desc_keyword=?,
+       account_code=?, splits_json=?, memo=?, project_id=?, class_id=?, location_id=?, one_shot=?, active=?
+     WHERE id=? AND entity_id=?`
+  ).run(
+    val('bank_account_code', existing.bank_account_code), val('note', existing.note),
+    b.match_amount === undefined ? existing.match_amount : Number(b.match_amount),
+    b.amount_tolerance === undefined ? existing.amount_tolerance : Number(b.amount_tolerance),
+    val('date_from', existing.date_from), val('date_to', existing.date_to), val('desc_keyword', existing.desc_keyword),
+    splits === undefined ? existing.account_code : (splits ? null : val('account_code', existing.account_code)),
+    splits === undefined ? existing.splits_json : (splits ? JSON.stringify(splits) : null),
+    val('memo', existing.memo), val('project_id', existing.project_id),
+    val('class_id', existing.class_id), val('location_id', existing.location_id),
+    b.one_shot === undefined ? existing.one_shot : (b.one_shot ? 1 : 0),
+    b.active === undefined ? existing.active : (b.active ? 1 : 0),
+    req.params.id, req.params.eid
+  );
+  res.json({ success: true });
+});
+
+app.delete('/api/entities/:eid/bank-coding-notes/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const r = db.prepare('DELETE FROM bank_coding_notes WHERE id=? AND entity_id=?').run(req.params.id, req.params.eid);
   res.json({ deleted: r.changes });
 });
 

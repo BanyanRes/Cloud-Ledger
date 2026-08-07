@@ -270,6 +270,12 @@ export const api = {
   deleteBankTransaction: (eid, id) => request('/entities/' + eid + '/bank-transactions/' + id, { method: 'DELETE' }),
   deleteBankBatch: (eid, batchId) => request('/entities/' + eid + '/bank-transactions/batch/' + batchId, { method: 'DELETE' }),
 
+  // Wire coding notes (auto-populate coding on statement upload)
+  getBankCodingNotes: (eid) => request('/entities/' + eid + '/bank-coding-notes'),
+  createBankCodingNote: (eid, note) => request('/entities/' + eid + '/bank-coding-notes', { method: 'POST', body: note }),
+  updateBankCodingNote: (eid, id, note) => request('/entities/' + eid + '/bank-coding-notes/' + id, { method: 'PUT', body: note }),
+  deleteBankCodingNote: (eid, id) => request('/entities/' + eid + '/bank-coding-notes/' + id, { method: 'DELETE' }),
+
   // Bank Rec
   getReconciliations: (eid) => request('/entities/' + eid + '/reconciliations'),
   getCleared: (eid, code) => request('/entities/' + eid + '/cleared/' + code),
