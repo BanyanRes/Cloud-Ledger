@@ -4052,12 +4052,13 @@ function ValuationWorkpaper({entityId,entityName,canEdit=true}){
       <div style={{fontWeight:700,color:T.green,marginBottom:8}}>
         {result.quarter} workpapers generated &middot; filed under {result.folder}</div>
       {solve&&<table style={{...S.table,minWidth:520,marginBottom:10}}><tbody>
-        <tr><td style={S.tdBold}>Investment</td><td style={{...S.tdBold,textAlign:'right'}}>Solved Valuation</td>
-          <td style={{...S.tdBold,textAlign:'right'}}>Est. Proceeds</td><td style={{...S.tdBold,textAlign:'right'}}>Unrealized G/(L)</td></tr>
+        <tr><td style={S.tdBold}>Investment</td><td style={{...S.tdBold,textAlign:'right'}}>Valuation</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>Est. Proceeds</td><td style={{...S.tdBold,textAlign:'right'}}>Book Carrying Value</td><td style={{...S.tdBold,textAlign:'right'}}>Unrealized G/(L)</td></tr>
         {[['CLIP','clip'],['Silsbee','silsbee'],['Buna','buna'],['SRN','srn']].map(([lbl,k])=>(
           <tr key={k}><td style={S.td}>{lbl}</td>
             <td style={S.tdR}>{fmt(solve[k].valuation)}</td>
             <td style={S.tdR}>{fmt(solve[k].proceeds)}</td>
+            <td style={S.tdR}>{inv&&inv.J?fmt(inv.J[k]):'—'}</td>
             <td style={S.tdR}>{result.unrealized?fmt(result.unrealized[k]):'—'}</td></tr>))}
       </tbody></table>}
       {inv&&<div style={{fontSize:12,color:T.textMuted}}>Investment workpaper: <strong>{inv.folder_path}/{inv.original_name}</strong>{inv.replaced>0?' (replaced prior copy)':''}</div>}
