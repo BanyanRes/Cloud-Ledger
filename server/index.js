@@ -1056,6 +1056,24 @@ function billApprovalDate(bill) {
   return latest || (bill && bill.createdTime) || null;
 }
 
+// TRUE only when EVERY approver on the bill — across all approval layers — has
+// APPROVED. Banyan/CLA policy (8/2026): Bill.com carries two approval layers and
+// the sync must hold a bill until all approvers in every layer have signed off.
+// The bill's overall approvalStatus can read APPROVED before that is true depending
+// on how the multi-layer policy resolves, so we check the per-approver list
+// directly (requires billApprovals=true on the fetch, i.e. use the DETAIL object).
+// Returns false if the approver list is absent or empty, so a bill can never sync
+// on missing approver data — approval must be positively demonstrated, never assumed.
+function allApproversApproved(bill) {
+  const aps = Array.isArray(bill && bill.approvers) ? bill.approvers : [];
+  if (aps.length === 0) return false;
+  for (const a of aps) {
+    const s = String((a && a.status) || '').toUpperCase();
+    if (s !== 'APPROVED') return false; // any ASSIGNED / PENDING / DENIED layer holds the bill
+  }
+  return true;
+}
+
 // Bill.com v3 /payments has the SAME broken offset pagination as /bills (nextPage
 // returns the same first 100 rows), so a plain paged fetch silently caps at the
 // first page and never sees newer payments. Mirror the bills approach: walk
@@ -5767,6 +5785,18 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     const invoiceDate = pick(detail, 'invoiceDate', 'invoice_date') || pick(pick(detail, 'invoice') || {}, 'invoiceDate', 'invoice_date') || pick(detail, 'dueDate');
     const billNumber = pick(detail, 'invoiceNumber', 'invoice_number') || pick(pick(detail, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || billId;
     const lineItems = pick(detail, 'lineItems', 'line_items', 'billLineItems') || [];
+
+    // Authoritative approval gate: every approver in EVERY layer must have approved
+    // (Banyan/CLA policy, 8/2026 — two approval layers). The list-level
+    // isBillEligible check above is a cheap pre-filter on the bill's overall status;
+    // this is the real gate, run on the detail object where the per-approver list is
+    // populated (billApprovals=true). Held bills are skipped, NOT errored, and are
+    // NOT persisted as a permanent skip — they should sync later once fully approved.
+    if (!allApproversApproved(detail)) {
+      result.bills.skipped++;
+      result.bills.details.push({ id: billId, status: 'skip', reason: 'awaiting approval (not all approvers approved)' });
+      continue;
+    }
 
     if (!invoiceDate || !Array.isArray(lineItems) || lineItems.length === 0) {
       result.bills.errors++;
