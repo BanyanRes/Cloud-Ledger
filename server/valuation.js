@@ -408,6 +408,24 @@ async function transform(templateBuf, gl, qtr) {
   { const s = styleOf(sales, 'I69'); sales = replaceCell(sales, 'I69', fCell('I69', s, 'SUM(I67:I68)', I69)); }
   zip.file(P.sales, sales);
 
+  // Drop the calculation chain. The replaced SOI sheet's formula cells (A2, J15,
+  // J17 on sheetId 47) stay registered in xl/calcChain.xml, but the TB grid that
+  // now occupies that sheet part has different formula cells — and stale
+  // calcChain entries pointing at cells with no formulas make Excel flag the
+  // workbook as corrupt on open. Removing the whole part (and its
+  // [Content_Types].xml Override and workbook.xml.rels Relationship) is safe:
+  // Excel rebuilds the calc chain silently. NOTE: JSZip remove() is recursive on
+  // folder paths; this targets the single calcChain.xml file only.
+  if (zip.file('xl/calcChain.xml')) {
+    zip.remove('xl/calcChain.xml');
+    const ctNow = await zip.file('[Content_Types].xml').async('string');
+    zip.file('[Content_Types].xml',
+      ctNow.replace(/<Override PartName="\/xl\/calcChain\.xml"[^>]*\/>/, ''));
+    const wrelsNow = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+    zip.file('xl/_rels/workbook.xml.rels',
+      wrelsNow.replace(/<Relationship [^>]*Target="[^"]*calcChain\.xml"[^>]*\/>/, ''));
+  }
+
   const outBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
   const summaryData = {
     quarter: qtr.label,
