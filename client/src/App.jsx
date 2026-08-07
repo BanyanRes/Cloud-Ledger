@@ -4930,36 +4930,83 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   // the most authoritative source for this requisition, so it takes precedence
   // over the server catalog when auto-filling. Built when the workbook is chosen.
   const[wbCoaMap,setWbCoaMap]=useState({});
+  // Vendor(normalized) -> {code,name,budget} and code -> {name,budget}, parsed
+  // from the uploaded workbook's invoice logs. Used to auto-code invoices for
+  // entities with no CloudLedger coding history (e.g. Braker, whose reports were
+  // built in Excel), and to populate the Budget Code column (Braker-only).
+  const[wbVendorMap,setWbVendorMap]=useState({});
+  const[wbBudgetMap,setWbBudgetMap]=useState({});
+  // Normalize a vendor string for matching: lowercase, strip punctuation and
+  // common company suffixes, collapse whitespace. Mirrors the server's normVendor
+  // closely enough for the workbook-seeded fallback (exact/looser matches only).
+  const normVend=(s)=>String(s==null?'':s).toLowerCase()
+    .replace(/\(reclass\)/g,' ').replace(/[.,]/g,' ')
+    .replace(/\b(llc|inc|lp|llp|pllc|pc|ltd|co|corp|company|incorporated)\b/g,' ')
+    .replace(/\s+/g,' ').trim();
   const parseWorkbookCoaMap=async(file)=>{
     try{
       const buf=await file.arrayBuffer();
       const wb=XLSX.read(buf,{type:'array'});
-      const ws=wb.Sheets['Prior Invoice Log'];
-      if(!ws){setWbCoaMap({});return;}
-      const rows=XLSX.utils.sheet_to_json(ws,{header:1,blankrows:false});
-      // Detect the Cost Code # and Cost Code Name columns by HEADER text. Layouts
-      // differ: SRN/Silsbee put the name in col F (index 5), but HP/Braker put it
-      // in col D (index 3) with the Bill # in col F — hard-coding index 5 there
-      // reads the bill number as the cost-code name (e.g. 349979). Fall back to the
-      // SRN positions (code=2, name=5) only if the headers aren't found.
-      let codeIdx=2,nameIdx=5,hdrRow=-1;
-      for(let i=0;i<Math.min(rows.length,8);i++){
-        const cells=(rows[i]||[]).map(c=>String(c==null?'':c).toLowerCase().replace(/\s+/g,' ').trim());
-        const ci=cells.findIndex(t=>/cost code\s*#|cost code\s*(number|no)\b|^cost code$/.test(t));
-        const ni=cells.findIndex(t=>/cost code name/.test(t));
-        if(ci>=0&&ni>=0){codeIdx=ci;nameIdx=ni;hdrRow=i;break;}
+      // Scan BOTH invoice logs. The Prior log is the richest source (it carries
+      // every historical vendor->code->name->budget pairing); the Current log adds
+      // this-period vendors. Later sheets don't overwrite an existing mapping, so
+      // the Prior log (parsed first) wins on conflicts.
+      const sheetNames=['Prior Invoice Log','Current Invoice Log'];
+      const m={};                 // code -> cost_code_name (existing behavior)
+      // Frequency tallies. A vendor or a cost code can carry more than one
+      // coding across history; we pick the MOST COMMON pairing (the mode) rather
+      // than the top-most row, so e.g. Strategic HFC's code 11634 resolves to its
+      // 9-of-10 'HFC Construction Monitoring Fee' budget, not the single stray
+      // 'Sales Tax Exemption' row. Ties fall back to the first seen.
+      const vTally={};            // vendorKey -> Map('code||name||budget' -> {count,code,name,budget,order})
+      const bTally={};            // code -> Map(budget -> {count,order}); also firstName per code
+      const bName={};             // code -> first non-empty cost_code_name
+      let ord=0,sawAny=false;
+      const bumpV=(k,code,name,budget)=>{const key=code+'||'+name+'||'+budget;let t=vTally[k];if(!t){t=new Map();vTally[k]=t;}let e=t.get(key);if(!e){e={count:0,code,name,budget,order:ord++};t.set(key,e);}e.count++;};
+      const bumpB=(code,budget)=>{let t=bTally[code];if(!t){t=new Map();bTally[code]=t;}let e=t.get(budget);if(!e){e={count:0,order:ord++};t.set(budget,e);}e.count++;};
+      for(const sn of sheetNames){
+        const ws=wb.Sheets[sn];
+        if(!ws)continue;
+        sawAny=true;
+        const rows=XLSX.utils.sheet_to_json(ws,{header:1,blankrows:false});
+        // Detect columns by HEADER text. Layouts differ (SRN name in col F,
+        // HP/Braker name in col D with Bill # in col F), and Braker carries an
+        // extra "Budget Code" column. Fall back to SRN positions if not found.
+        let codeIdx=2,nameIdx=5,budgetIdx=-1,vendorIdx=-1,hdrRow=-1;
+        for(let i=0;i<Math.min(rows.length,8);i++){
+          const cells=(rows[i]||[]).map(c=>String(c==null?'':c).toLowerCase().replace(/\s+/g,' ').trim());
+          const ci=cells.findIndex(t=>/cost code\s*#|cost code\s*(number|no)\b|^cost code$/.test(t));
+          const ni=cells.findIndex(t=>/cost code name/.test(t));
+          if(ci>=0&&ni>=0){
+            codeIdx=ci;nameIdx=ni;hdrRow=i;
+            budgetIdx=cells.findIndex(t=>/budget\s*code/.test(t));  // Braker-only; -1 elsewhere
+            vendorIdx=cells.findIndex(t=>/vendor|payee/.test(t));
+            break;
+          }
+        }
+        for(let i=(hdrRow>=0?hdrRow+1:0);i<rows.length;i++){
+          const row=rows[i];if(!row)continue;
+          const code=row[codeIdx]!=null?String(row[codeIdx]).trim():'';
+          const name=row[nameIdx]!=null?String(row[nameIdx]).trim():'';
+          if(!code||!/\d/.test(code))continue;          // skip headers / subtotal rows (no numeric code)
+          if(/total/i.test(name))continue;               // skip "X Total" subtotal label rows
+          const budget=budgetIdx>=0&&row[budgetIdx]!=null?String(row[budgetIdx]).trim():'';
+          const vendor=vendorIdx>=0&&row[vendorIdx]!=null?String(row[vendorIdx]).trim():'';
+          if(name&&!m[code])m[code]=name;                // first (top-most) name for a code wins
+          if(name&&!bName[code])bName[code]=name;
+          if(budget)bumpB(code,budget);                  // tally budgets per code
+          if(vendor){const vk=normVend(vendor);if(vk)bumpV(vk,code,name,budget);}  // tally codings per vendor
+        }
       }
-      const m={};
-      for(let i=(hdrRow>=0?hdrRow+1:0);i<rows.length;i++){
-        const row=rows[i];
-        const code=row&&row[codeIdx]!=null?String(row[codeIdx]).trim():'';
-        const name=row&&row[nameIdx]!=null?String(row[nameIdx]).trim():'';
-        if(!code||!/\d/.test(code))continue;          // skip headers / subtotal rows (no numeric code)
-        if(/total/i.test(name))continue;               // skip "X Total" subtotal label rows
-        if(name&&!m[code])m[code]=name;                // first (top-most) name for a code wins
-      }
-      setWbCoaMap(m);
-    }catch{setWbCoaMap({});}
+      if(!sawAny){setWbCoaMap({});setWbVendorMap({});setWbBudgetMap({});return;}
+      // Finalize: pick the modal budget per code, and the modal coding per vendor.
+      const pickMode=(t)=>{let best=null;for(const[k,e]of t){if(!best||e.count>best.count||(e.count===best.count&&e.order<best.order))best={key:k,...e};}return best;};
+      const bmap={};              // code -> {name,budget}
+      for(const code of Object.keys(bTally)){const best=pickMode(bTally[code]);bmap[code]={name:bName[code]||'',budget:best?best.key:''};}
+      const vmap={};              // normalized vendor -> {code,name,budget}
+      for(const vk of Object.keys(vTally)){const best=pickMode(vTally[vk]);if(best)vmap[vk]={code:best.code||'',name:best.name||'',budget:best.budget||''};}
+      setWbCoaMap(m);setWbVendorMap(vmap);setWbBudgetMap(bmap);
+    }catch{setWbCoaMap({});setWbVendorMap({});setWbBudgetMap({});}
   };
 
   // Read each uploaded invoice with Claude and append an editable card.
@@ -4967,14 +5014,29 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     setRfReadErr('');setRfReading(n=>n+files.length);
     for(const f of files){
       try{const r=await api.readRequisitionInvoice(entityId,f);
+        // Server prediction relies on CloudLedger coding history. Entities whose
+        // reports were built in Excel (e.g. Braker) have no history, so cost_code
+        // comes back blank. Fall back to the uploaded workbook: match the invoice
+        // vendor against the workbook's vendor->coding map to seed cost code, name,
+        // and Budget Code. Every field remains editable in the card.
+        let cc=r.cost_code||'';
+        let ccName=(cc&&wbCoaMap[String(cc).trim()])||r.cost_code_name||'';
+        let budget='';
+        if(!cc&&r.vendor){const seed=wbVendorMap[normVend(r.vendor)];if(seed){cc=seed.code||'';if(!ccName)ccName=seed.name||'';budget=seed.budget||'';}}
+        // Budget Code follows the cost code when the workbook has a Budget Code
+        // column (Braker-only). The vendor seed's budget is vendor-specific and
+        // wins; only fall back to the per-code modal budget when the vendor seed
+        // gave none (e.g. the code was typed by hand). Empty without the column.
+        if(!budget&&cc){const b=wbBudgetMap[String(cc).trim()];if(b&&b.budget)budget=b.budget;}
         setRfCards(cards=>[...cards,{
           _id:Date.now()+'-'+Math.random().toString(36).slice(2,7),
           filename:r.filename||f.name,
-          cost_code:r.cost_code||'',
+          cost_code:cc,
           // Prefer the name from THIS workbook's cost-code catalog (authoritative
           // for the requisition) over the server prediction, whose learned history
           // may carry a mis-columned name for templates like HP/Braker.
-          cost_code_name:(r.cost_code&&wbCoaMap[String(r.cost_code).trim()])||r.cost_code_name||'',
+          cost_code_name:ccName,
+          budget_code:budget,
           vendor:r.vendor||'',
           bill:r.bill_number||'',
           amount:r.amount!=null?String(r.amount):'',
@@ -5002,6 +5064,13 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
       const prevName=nameFor(c.cost_code);
       const nameIsAuto=!c.cost_code_name||(prevName&&c.cost_code_name===prevName);
       if(newName&&nameIsAuto)next.cost_code_name=newName;
+      // Refresh the Budget Code from the new cost code (Braker-only; the map is
+      // empty for templates without a Budget Code column, so this is a no-op there).
+      const budgetFor=code=>{const k=String(code).trim();const b=wbBudgetMap[k];return b?(b.budget||''):'';};
+      const newBudget=budgetFor(val);
+      const prevBudget=budgetFor(c.cost_code);
+      const budgetIsAuto=!c.budget_code||(prevBudget&&c.budget_code===prevBudget);
+      if(newBudget&&budgetIsAuto)next.budget_code=newBudget;
     }
     return next;
   }));
@@ -5011,7 +5080,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     if(!rfFile){setRfErr('Upload the prior requisition workbook (.xlsx) first.');return;}
     const newCurrent=rfCards.map(c=>{
       const amount=c.amount!==''?parseFloat(String(c.amount).replace(/[$,]/g,'')):NaN;
-      return {code:c.cost_code||undefined,name:c.cost_code_name||undefined,vendor:c.vendor||undefined,bill:c.bill||undefined,date:c.date||undefined,...(Number.isFinite(amount)?{amount}:{})};
+      return {code:c.cost_code||undefined,name:c.cost_code_name||undefined,budgetcode:c.budget_code||undefined,vendor:c.vendor||undefined,bill:c.bill||undefined,date:c.date||undefined,...(Number.isFinite(amount)?{amount}:{})};
     }).filter(x=>Number.isFinite(x.amount));
     if(!newCurrent.length){setRfErr('Add at least one invoice with an amount before rolling forward.');return;}
     // Send the kept invoices (with their original bytes) to be persisted now.
@@ -5102,6 +5171,9 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
             <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
               <div style={{flex:'1 1 90px'}}><label style={S.label}>Cost Code</label><input style={S.input} value={c.cost_code} onChange={e=>updateCard(c._id,'cost_code',e.target.value)}/></div>
               <div style={{flex:'2 1 160px'}}><label style={S.label}>Cost Code Name</label><input style={S.input} value={c.cost_code_name} onChange={e=>updateCard(c._id,'cost_code_name',e.target.value)}/></div>
+              {Object.values(wbBudgetMap).some(b=>b&&b.budget)&&(
+              <div style={{flex:'1 1 130px'}}><label style={S.label}>Budget Code</label><input style={S.input} value={c.budget_code||''} onChange={e=>updateCard(c._id,'budget_code',e.target.value)}/></div>
+              )}
               <div style={{flex:'2 1 160px'}}><label style={S.label}>Vendor</label><input style={S.input} value={c.vendor} onChange={e=>updateCard(c._id,'vendor',e.target.value)}/></div>
               <div style={{flex:'1 1 120px'}}><label style={S.label}>Bill #</label><input style={S.input} value={c.bill} onChange={e=>updateCard(c._id,'bill',e.target.value)}/></div>
               <div style={{flex:'1 1 110px'}}><label style={S.label}>Amount</label><input style={S.input} value={c.amount} onChange={e=>updateCard(c._id,'amount',e.target.value)}/></div>
