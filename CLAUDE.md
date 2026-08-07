@@ -27,5 +27,6 @@ Guidance for Claude working in this repository.
 ## Style
 
 - English for all conversation, code, commits, and output by default. Korean only when explicitly requested.
+- **Always respond in plain English.** Explain things in clear, everyday language — avoid jargon, dense technical phrasing, and walls of terminology. When a technical term is unavoidable, say what it means in passing. This applies to all replies, not just client-facing ones.
 - Proceed end-to-end autonomously; don't ask "should I continue?" between steps.
 - Never enter credentials. Never trigger Bill.com syncs.
