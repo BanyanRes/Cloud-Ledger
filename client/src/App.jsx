@@ -4062,8 +4062,6 @@ function ValuationWorkpaper({entityId,entityName,canEdit=true}){
       </tbody></table>}
       {inv&&<div style={{fontSize:12,color:T.textMuted}}>Investment workpaper: <strong>{inv.folder_path}/{inv.original_name}</strong>{inv.replaced>0?' (replaced prior copy)':''}</div>}
       {val&&<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Valuation workbook: <strong>{val.folder_path}/{val.original_name}</strong>{val.replaced>0?' (replaced prior copy)':''}</div>}
-      {inv&&inv.template_from&&<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Investment template: {inv.template_from}</div>}
-      {val&&val.template_from&&<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Valuation template: {val.template_from}</div>}
     </div>}
   </div></div>);
 }
