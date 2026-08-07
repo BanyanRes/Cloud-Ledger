@@ -344,6 +344,52 @@ function replaceSheetData(xml, rows) {
   return out;
 }
 
+// Remove any anchored drawings (pasted financial-statement snapshots) from a
+// worksheet: drop the <drawing> element and its sheet relationship, then delete
+// the drawing part, its rels, and any media images used ONLY by that drawing.
+// sheetPath is the "xl/worksheets/sheetN.xml" entry for the tab. Returns the
+// (possibly rewritten) sheet XML; the zip is mutated in place for parts.
+async function stripSheetDrawings(zip, sheetPath, sheetXml) {
+  const relPath = 'xl/worksheets/_rels/' + sheetPath.split('/').pop() + '.rels';
+  const relFile = zip.file(relPath);
+  if (!relFile) return sheetXml;
+  let rels = await relFile.async('string');
+  const drawingRels = [...rels.matchAll(/<Relationship\b[^>]*Type="[^"]*\/drawing"[^>]*>/g)];
+  if (!drawingRels.length) return sheetXml;
+  for (const rm of drawingRels) {
+    const rId = (rm[0].match(/Id="([^"]+)"/) || [])[1];
+    const target = (rm[0].match(/Target="([^"]+)"/) || [])[1];
+    if (!target) continue;
+    const drawingPath = 'xl/' + target.replace(/^\.\.\//, '').replace(/^\//, '');
+    const drawingRelPath = 'xl/drawings/_rels/' + drawingPath.split('/').pop() + '.rels';
+    const drawRelFile = zip.file(drawingRelPath);
+    if (drawRelFile) {
+      const drx = await drawRelFile.async('string');
+      const media = [...drx.matchAll(/Target="([^"]+)"/g)]
+        .map((m) => 'xl/' + m[1].replace(/^\.\.\//, '').replace(/^\//, ''));
+      for (const mediaPath of media) {
+        const base = mediaPath.split('/').pop();
+        let sharedElsewhere = false;
+        for (const rp of Object.keys(zip.files)) {
+          if (!/drawings\/_rels\/.*\.rels$/.test(rp) || rp === drawingRelPath) continue;
+          const other = await zip.file(rp).async('string');
+          if (other.includes(base)) { sharedElsewhere = true; break; }
+        }
+        if (!sharedElsewhere && zip.file(mediaPath)) zip.remove(mediaPath);
+      }
+      zip.remove(drawingRelPath);
+    }
+    if (zip.file(drawingPath)) zip.remove(drawingPath);
+    const ct = await zip.file('[Content_Types].xml').async('string');
+    zip.file('[Content_Types].xml',
+      ct.replace(new RegExp('<Override PartName="/' + drawingPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"[^>]*/>'), ''));
+    if (rId) rels = rels.replace(new RegExp('<Relationship\\b[^>]*Id="' + rId + '"[^>]*/>'), '');
+  }
+  zip.file(relPath, rels);
+  const cleaned = sheetXml.replace(/<drawing\b[^>]*\/>/g, '').replace(/<drawing\b[^>]*>[\s\S]*?<\/drawing>/g, '');
+  return cleaned;
+}
+
 // -- Investment workbook builder ---------------------------------------------------
 async function buildInvestmentWorkbook(templateBuf, data) {
   const { qtr, port, books, fvAdj, booksExact, solve, devTotal, params } = data;
@@ -368,7 +414,10 @@ async function buildInvestmentWorkbook(templateBuf, data) {
   const tbSheet = { clip: 'CLIP TB', silsbee: 'Silsbee TB', srn: 'SRN TB', buna: 'Buna TB' };
   for (const k of Object.keys(tbSheet)) {
     if (!built[k].loanRef) throw new Error('no 25xxx loan balance found for ' + k);
-    zip.file(P[tbSheet[k]], replaceSheetData(await zip.file(P[tbSheet[k]]).async('string'), built[k].rows));
+    let sx = replaceSheetData(await zip.file(P[tbSheet[k]]).async('string'), built[k].rows);
+    // drop the pasted financial-statement snapshot images anchored on the tab
+    sx = await stripSheetDrawings(zip, P[tbSheet[k]], sx);
+    zip.file(P[tbSheet[k]], sx);
   }
 
   // entity tabs: valuation link + loan refs
