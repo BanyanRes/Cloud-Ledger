@@ -535,9 +535,9 @@ function saveFile(ctx, eid, folder, original, buf, who) {
   fs.mkdirSync(dir, { recursive: true });
   const stored = Date.now() + '_' + Math.floor(Math.random() * 1e6) + '_' + original.replace(/[^A-Za-z0-9._-]/g, '_');
   fs.writeFileSync(path.join(dir, stored), buf);
-  db.prepare("INSERT INTO entity_files (entity_id, folder_path, stored_filename, original_name, size, mime_type, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))")
+  const ins2 = db.prepare("INSERT INTO entity_files (entity_id, folder_path, stored_filename, original_name, size, mime_type, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))")
     .run(eid, folder, stored, original, buf.length, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', who);
-  return { folder_path: folder, original_name: original, replaced: prior.length };
+  return { file_id: Number(ins2.lastInsertRowid), folder_path: folder, original_name: original, replaced: prior.length };
 }
 
 // -- Route ---------------------------------------------------------------------------
