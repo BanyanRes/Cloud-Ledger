@@ -2821,21 +2821,31 @@ function GeneralLedger({entityId,entityName,dimsEnabled,from,setFrom,to,setTo,fi
 
 // ═══ Wire Coding Notes Modal ═══
 // Leave a note during the month describing how a wire should be coded. On the
-// next statement upload, a row whose amount (within tolerance) and date (within
-// the window) match the note is auto-populated with the note's GL coding and
+// next statement upload, a row whose amount (within tolerance) and exact date
+// match the note is auto-populated with the note's GL coding + dimension and
 // arrives 'coded' for review. The note is kept for reference after it fires.
-function WireNotesModal({entityId,selAcct,bankAccts,accounts,canEdit=true,onClose}){
-  const[notes,setNotes]=useState([]);const[err,setErr]=useState('');const[msg,setMsg]=useState('');
-  const blank={bank_account_code:selAcct||'',note:'',match_amount:'',amount_tolerance:'0',date_from:'',date_to:'',desc_keyword:'',account_code:'',memo:'',one_shot:true};
+function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBankAccts,locations=[],classes=[],dimProjects=[],canEdit=true,onClose}){
+  const[notes,setNotes]=useState([]);const[err,setErr]=useState('');const[msg,setMsg]=useState('');const[showAddAcct,setShowAddAcct]=useState(false);
+  const blank={bank_account_code:selAcct||'',note:'',match_amount:'',amount_tolerance:'0',match_date:'',desc_keyword:'',account_code:'',memo:'',dim:'',one_shot:true};
   const[form,setForm]=useState(blank);const[editId,setEditId]=useState(null);
   const load=useCallback(()=>{api.getBankCodingNotes(entityId).then(setNotes).catch(e=>setErr(e.message));},[entityId]);
   useEffect(()=>{load();},[load]);
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
   const reset=()=>{setForm(blank);setEditId(null);};
-  const startEdit=n=>{setEditId(n.id);setForm({bank_account_code:n.bank_account_code||'',note:n.note||'',match_amount:String(n.match_amount),amount_tolerance:String(n.amount_tolerance||0),date_from:n.date_from||'',date_to:n.date_to||'',desc_keyword:n.desc_keyword||'',account_code:n.account_code||'',memo:n.memo||'',one_shot:!!n.one_shot});};
+  // One tagged dimension per note (Project / Location / Class), mirroring the coding grid.
+  const projOpts=dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}));
+  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
+  const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
+  const dimOpts=[...projOpts,...locOpts,...clsOpts];const showDims=dimOpts.length>0;
+  const dimFromNote=n=>n.project_id?'project:'+n.project_id:n.location_id?'location:'+n.location_id:n.class_id?'class:'+n.class_id:'';
+  const dimLabel=n=>{const v=dimFromNote(n);const o=dimOpts.find(x=>x.v===v);return o?o.label:'';};
+  const startEdit=n=>{setEditId(n.id);setForm({bank_account_code:n.bank_account_code||'',note:n.note||'',match_amount:String(n.match_amount),amount_tolerance:String(n.amount_tolerance||0),match_date:n.date_from||n.date_to||'',desc_keyword:n.desc_keyword||'',account_code:n.account_code||'',memo:n.memo||'',dim:dimFromNote(n),one_shot:!!n.one_shot});};
   const save=async()=>{setErr('');setMsg('');
-    const body={bank_account_code:form.bank_account_code||null,note:form.note||null,match_amount:Number(form.match_amount),amount_tolerance:Number(form.amount_tolerance)||0,date_from:form.date_from||null,date_to:form.date_to||null,desc_keyword:form.desc_keyword||null,account_code:form.account_code||null,memo:form.memo||null,one_shot:!!form.one_shot};
+    const[dk,di]=form.dim?form.dim.split(':'):['',''];
+    // Precise date is stored as a single-day window (date_from == date_to).
+    const body={bank_account_code:form.bank_account_code||null,note:form.note||null,match_amount:Number(form.match_amount),amount_tolerance:Number(form.amount_tolerance)||0,date_from:form.match_date||null,date_to:form.match_date||null,desc_keyword:form.desc_keyword||null,account_code:form.account_code||null,memo:form.memo||null,project_id:dk==='project'?di:null,class_id:dk==='class'?Number(di):null,location_id:dk==='location'?Number(di):null,one_shot:!!form.one_shot};
     if(!isFinite(body.match_amount)||body.match_amount===0){setErr('Enter a signed wire amount (negative for money out).');return;}
+    if(!body.match_date){setErr('Enter the transaction date.');return;}
     if(!body.account_code){setErr('Choose the GL account to code the wire to.');return;}
     try{if(editId)await api.updateBankCodingNote(entityId,editId,body);else await api.createBankCodingNote(entityId,body);setMsg(editId?'Note updated':'Note saved');reset();load();}catch(e){setErr(e.message);}};
   const del=async id=>{if(!confirm('Delete this wire note?'))return;try{await api.deleteBankCodingNote(entityId,id);load();}catch(e){setErr(e.message);}};
@@ -2846,22 +2856,29 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,canEdit=true,onClos
   return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:920}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Wire Coding Notes</div>
-    <div style={{fontSize:12,color:T.textMuted,marginBottom:18}}>Leave a note for a wire processed this month. When you upload the bank statement, the matching row is auto-coded (status Coded) for your review before posting.</div>
+    <div style={{fontSize:12,color:T.textMuted,marginBottom:18}}>Leave a note for a wire processed this month. When you upload the bank statement, the row matching the amount and date is auto-coded (status Coded) for your review before posting.</div>
     {err&&<div style={S.err}>{err}</div>}{msg&&<div style={S.success}>{msg}</div>}
     {canEdit&&<div style={{border:'1px solid '+T.border,borderRadius:T.radiusXs,padding:16,marginBottom:20,background:T.bgSoft||'#fafafa'}}>
       <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:12}}>{editId?'Edit note':'New note'}</div>
       <div style={S.row}>
         <div style={S.col}><label style={S.label}>Bank Account</label><select style={S.select} value={form.bank_account_code} onChange={e=>set('bank_account_code',e.target.value)}><option value="">Any account</option>{(bankAccts||[]).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></div>
-        <div style={S.col}><label style={S.label}>Wire Amount (signed)</label><input style={S.input} type="number" step="0.01" placeholder="-250000.00 (out) / 250000.00 (in)" value={form.match_amount} onChange={e=>set('match_amount',e.target.value)}/></div>
-        <div style={S.col}><label style={S.label}>Amount Tolerance (±$)</label><input style={S.input} type="number" step="0.01" min="0" value={form.amount_tolerance} onChange={e=>set('amount_tolerance',e.target.value)}/></div>
+        <div style={S.col}><label style={S.label}>Transaction Date</label><input style={S.input} type="date" value={form.match_date} onChange={e=>set('match_date',e.target.value)}/></div>
       </div>
       <div style={S.row}>
-        <div style={S.col}><label style={S.label}>Date From</label><input style={S.input} type="date" value={form.date_from} onChange={e=>set('date_from',e.target.value)}/></div>
-        <div style={S.col}><label style={S.label}>Date To</label><input style={S.input} type="date" value={form.date_to} onChange={e=>set('date_to',e.target.value)}/></div>
+        <div style={S.col}><label style={S.label}>Wire Amount (signed)</label><input style={S.input} type="number" step="0.01" placeholder="-250000.00 (out) / 250000.00 (in)" value={form.match_amount} onChange={e=>set('match_amount',e.target.value)}/></div>
+        <div style={S.col}><label style={S.label}>Amount Tolerance (±$)</label><input style={S.input} type="number" step="0.01" min="0" value={form.amount_tolerance} onChange={e=>set('amount_tolerance',e.target.value)}/></div>
         <div style={S.col}><label style={S.label}>Description contains (optional)</label><input style={S.input} placeholder="e.g. WIRE, FEDWIRE" value={form.desc_keyword} onChange={e=>set('desc_keyword',e.target.value)}/></div>
       </div>
       <div style={S.row}>
-        <div style={{...S.col,flex:2}}><label style={S.label}>Code to GL Account</label><select style={S.select} value={form.account_code} onChange={e=>set('account_code',e.target.value)}><option value="">Select account...</option>{accounts.map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></div>
+        <div style={{...S.col,flex:2}}><label style={S.label}>Code to GL Account</label>
+          <div style={{display:'flex',gap:6}}>
+            <select style={{...S.select,flex:1}} value={form.account_code} onChange={e=>set('account_code',e.target.value)}><option value="">Select account...</option>{accounts.map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select>
+            <button style={{...S.btnS,color:T.teal,borderColor:T.teal+'40',whiteSpace:'nowrap'}} onClick={()=>setShowAddAcct(true)} title="Create a new GL account">+ New</button>
+          </div>
+        </div>
+        {showDims&&<div style={{...S.col,flex:2}}><label style={S.label}>Dimension (optional)</label><select style={S.select} value={form.dim} onChange={e=>set('dim',e.target.value)}><option value="">None</option>{dimOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</select></div>}
+      </div>
+      <div style={S.row}>
         <div style={{...S.col,flex:2}}><label style={S.label}>Memo (optional)</label><input style={S.input} value={form.memo} onChange={e=>set('memo',e.target.value)}/></div>
       </div>
       <div style={{display:'flex',alignItems:'center',gap:16,marginTop:6}}>
@@ -2870,19 +2887,20 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,canEdit=true,onClos
         {editId&&<button style={S.btnS} onClick={reset}>Cancel</button>}
         <button style={S.btnP} onClick={save}>{editId?'Update note':'Save note'}</button>
       </div>
-      <div style={{fontSize:11,color:T.textMuted,marginTop:10}}>Note stays saved for reference after it matches. Leave the date window open if you're unsure when the wire will clear. Use a description keyword only if the amount alone might collide with another transaction.</div>
+      <div style={{fontSize:11,color:T.textMuted,marginTop:10}}>The row must match the transaction date exactly. Widen the amount tolerance if the statement figure may differ slightly (e.g. wire fees). Add a description keyword only if the amount alone might collide with another transaction.</div>
     </div>}
     <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:8}}>Saved notes ({notes.length})</div>
     {notes.length===0?<div style={{fontSize:12,color:T.textMuted,padding:'12px 0'}}>No notes yet.</div>:
     <table style={S.table}><thead><tr>
-      <th style={S.th}>Bank Acct</th><th style={S.thR}>Amount (±tol)</th><th style={S.th}>Date Window</th><th style={S.th}>Keyword</th><th style={S.th}>Codes To</th><th style={S.th}>Note</th><th style={S.th}>Status</th><th style={S.th}></th>
+      <th style={S.th}>Bank Acct</th><th style={S.th}>Date</th><th style={S.thR}>Amount (±tol)</th><th style={S.th}>Keyword</th><th style={S.th}>Codes To</th><th style={S.th}>Dimension</th><th style={S.th}>Note</th><th style={S.th}>Status</th><th style={S.th}></th>
     </tr></thead><tbody>{notes.map(n=><tr key={n.id} style={n.active?{}:{opacity:0.5}}>
       <td style={{...S.td,fontSize:11}}>{bankName(n.bank_account_code)}</td>
+      <td style={{...S.td,fontSize:11,color:T.textMuted}}>{n.date_from||n.date_to||'—'}</td>
       <td style={{...S.tdR,fontWeight:700,color:n.match_amount>=0?T.green:T.red}}>{n.match_amount>=0?'+':''}{fmt(n.match_amount)}{Number(n.amount_tolerance)>0?<span style={{color:T.textMuted,fontWeight:400,fontSize:11}}> ±{fmt(n.amount_tolerance)}</span>:null}</td>
-      <td style={{...S.td,fontSize:11,color:T.textMuted}}>{n.date_from||'—'} → {n.date_to||'—'}</td>
       <td style={{...S.td,fontSize:11}}>{n.desc_keyword||'—'}</td>
       <td style={{...S.td,fontSize:11}} title={n.account_code?acctName(n.account_code):''}>{n.account_code?acctName(n.account_code):'—'}</td>
-      <td style={{...S.td,fontSize:11,color:T.textMuted}} title={n.note||''}>{n.note?(n.note.length>28?n.note.slice(0,28)+'…':n.note):'—'}</td>
+      <td style={{...S.td,fontSize:11,color:T.textMuted}} title={dimLabel(n)}>{dimLabel(n)?(dimLabel(n).length>22?dimLabel(n).slice(0,22)+'…':dimLabel(n)):'—'}</td>
+      <td style={{...S.td,fontSize:11,color:T.textMuted}} title={n.note||''}>{n.note?(n.note.length>24?n.note.slice(0,24)+'…':n.note):'—'}</td>
       <td style={{...S.td,fontSize:11}}>{n.matched_count>0?<span style={{color:T.teal,fontWeight:600}} title={'Matched '+n.matched_count+'× · last '+(n.last_matched_at||'')}>Matched {n.matched_count}×</span>:(n.active?<span style={{color:T.orange}}>Waiting</span>:<span style={{color:T.textMuted}}>Inactive</span>)}{n.one_shot?'':<span style={{color:T.textMuted,fontSize:10}} title="Recurring"> ↻</span>}</td>
       <td style={{...S.td}}>{canEdit&&<div style={{display:'flex',gap:4}}>
         <button style={{...S.btnGhost,fontSize:11,padding:'4px 6px'}} onClick={()=>startEdit(n)}>Edit</button>
@@ -2890,6 +2908,7 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,canEdit=true,onClos
         <button style={{...S.btnGhost,fontSize:11,padding:'4px 6px',color:T.red}} onClick={()=>del(n.id)}>Delete</button>
       </div>}</td>
     </tr>)}</tbody></table>}
+    {showAddAcct&&<QuickAddAccountModal entityId={entityId} onClose={()=>setShowAddAcct(false)} onCreated={a=>{if(setAccounts)setAccounts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)));if(a.bank_acct&&setBankAccts)setBankAccts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)));set('account_code',a.code);}}/>}
   </div></div>);
 }
 
@@ -3113,7 +3132,7 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
             <input type="file" accept=".csv,.xlsx,.xls,.pdf" style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:'pointer'}} onChange={onFileSelected}/></div>}
         <button style={{...S.btnS,color:T.orange,borderColor:T.orange+'40'}} onClick={()=>setShowNotes(true)} title="Leave a note during the month so a wire is auto-coded when the statement is uploaded">Wire Notes</button>
       </div>}
-    {showNotes&&<WireNotesModal entityId={entityId} selAcct={selAcct} bankAccts={bankAccts} accounts={accounts} canEdit={canEdit} onClose={()=>setShowNotes(false)}/>}
+    {showNotes&&<WireNotesModal entityId={entityId} selAcct={selAcct} bankAccts={bankAccts} accounts={accounts} setAccounts={setAccounts} setBankAccts={setBankAccts} locations={locations} classes={classes} dimProjects={dimProjects} canEdit={canEdit} onClose={()=>setShowNotes(false)}/>}
     </div>
     {err&&<div style={S.err}>{err}</div>}{msg&&<div style={S.success}>{msg}</div>}
     </div>
