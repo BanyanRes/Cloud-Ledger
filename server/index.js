@@ -7493,14 +7493,15 @@ require('./devcosts').registerDevCostsRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
-// ═══ CLRF Valuation Summary workpaper ═══
-// POST /api/workpapers/valuation-summary/:entity_id/generate { quarter_end }
-// Takes the prior quarter's valuation workbook from Workpapers/Valuation/<Qn YYYY>,
-// injects the GL-derived book carrying values (CLRF 121011/21/31/41), the CLIP
-// development cost (CLIP GL Dev Costs tab), and the re-solved stabilization
-// discount so J12 holds, then saves the result into the target quarter's folder.
-// See server/valuation.js.
-require('./valuation').registerValuationRoutes(app, {
+// ═══ CLRF Investment & Valuation workpapers ═══
+// POST /api/workpapers/investment-valuation/:entity_id/generate { quarter_end }
+// One run produces TWO workbooks under Workpapers/Investment & Valuation/<Qn YYYY>:
+// the Investment workpaper (portfolio TBs, NWC/loans, hypothetical-liquidation
+// waterfall, SOLVED valuations under the frozen-unrealized-gain convention) and
+// the Valuation workbook generated against those solved amounts so its Summary
+// matches the investment workpaper's Valuations tab exactly.
+// See server/invval.js and server/valuation.js.
+require('./invval').registerInvValRoutes(app, {
   db,
   auth,
   requireEntityAccess,

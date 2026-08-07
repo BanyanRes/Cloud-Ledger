@@ -465,23 +465,17 @@ export const api = {
   // Workpapers › Valuation Summary (CLRF): take the prior quarter's valuation
   // workbook and inject the GL-derived figures for the target quarter, saving a
   // copy under Workpapers › Valuation › <quarter>.
-  valuationSummaryGenerate: async (eid, quarterEnd) => {
+  investmentValuationGenerate: async (eid, quarterEnd) => {
     const token = getToken();
-    const res = await fetch(API_BASE + '/workpapers/valuation-summary/' + eid + '/generate', {
+    const res = await fetch(API_BASE + '/workpapers/investment-valuation/' + eid + '/generate', {
       method: 'POST',
       headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
       body: JSON.stringify({ quarter_end: quarterEnd }),
     });
     if (res.status === 401) { clearToken(); window.location.reload(); return null; }
-    const ctype = res.headers.get('content-type') || '';
-    if (!res.ok || ctype.includes('application/json')) {
-      let data = {}; try { data = await res.json(); } catch {}
-      throw new Error(data.error || 'Report failed');
-    }
-    let summary = {}; try { summary = JSON.parse(res.headers.get('x-valuation-summary') || '{}'); } catch {}
-    const cd = res.headers.get('content-disposition') || '';
-    const m = cd.match(/filename="?([^"]+)"?/);
-    return { blob: await res.blob(), filename: m ? m[1] : 'CLRF_Valuation.xlsx', summary };
+    let data = {}; try { data = await res.json(); } catch {}
+    if (!res.ok) throw new Error(data.error || 'Report failed');
+    return data;
   },
 
   // Workpapers › Financial Statements: preview tie-outs, then generate the

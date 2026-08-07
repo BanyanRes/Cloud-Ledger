@@ -772,7 +772,7 @@ export default function App(){
       ...(isDevEntity?[{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
       ...(isCLRF?[{id:'wp_mgmtfee',label:'Management Fee',icon:'📄',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_gpfees',label:'GP Fees & Expenses',icon:'🤝',section:'workpapers'}]:[]),
-      ...(isCLRF?[{id:'wp_valuation',label:'Valuation Summary',icon:'🏦',section:'workpapers'}]:[]),
+      ...(isCLRF?[{id:'wp_valuation',label:'Investment & Valuation',icon:'🏦',section:'workpapers'}]:[]),
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
@@ -3984,104 +3984,22 @@ function GpFeesWorkpaper({entityId,entityName,canEdit=true}){
     {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
     {result&&<div style={{...S.card,marginTop:18,padding:14,background:'#f3faf5'}}>
       <div style={{fontWeight:700,color:T.green,marginBottom:8}}>
-        {result.quarter} report downloaded{result.replaced>0?' · replaced the previous copy':''}</div>
-      {t&&<table style={{...S.table,minWidth:360,marginBottom:10}}><tbody>
-        <tr><td style={S.td}>Management fee</td><td style={S.tdR}>{fmt(t.management_fee)}</td></tr>
-        <tr><td style={S.td}>Employee compensation reimbursement</td><td style={S.tdR}>{fmt(t.comp_reimbursement)}</td></tr>
-        <tr><td style={S.td}>Development fee</td><td style={S.tdR}>{fmt(t.development_fee)}</td></tr>
-        <tr style={S.grandTotalRow}><td style={S.tdBold}>Total fees to GP/Affiliates</td>
-          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(t.total)}</td></tr>
+        {result.quarter} workpapers generated &middot; filed under {result.folder}</div>
+      {solve&&<table style={{...S.table,minWidth:520,marginBottom:10}}><tbody>
+        <tr><td style={S.tdBold}>Investment</td><td style={{...S.tdBold,textAlign:'right'}}>Solved Valuation</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>Est. Proceeds</td><td style={{...S.tdBold,textAlign:'right'}}>Unrealized G/(L)</td>
+          <td style={S.tdBold}>Status</td></tr>
+        {[['CLIP','clip'],['Silsbee','silsbee'],['Buna','buna'],['SRN','srn']].map(([lbl,k])=>(
+          <tr key={k}><td style={S.td}>{lbl}</td>
+            <td style={S.tdR}>{fmt(solve[k].valuation)}</td>
+            <td style={S.tdR}>{fmt(solve[k].proceeds)}</td>
+            <td style={S.tdR}>{result.unrealized?fmt(result.unrealized[k]):'—'}</td>
+            <td style={S.td}>{k==='clip'?'solved (book + frozen gain)':(solve[k].changed?'raised to clear book +$350k':'carried forward')}</td></tr>))}
       </tbody></table>}
-      {result.saved_to&&<div style={{fontSize:12,color:T.textMuted}}>Filed at <strong>{result.saved_to}</strong></div>}
-      {result.entities&&<div style={{fontSize:12,color:T.textMuted,marginTop:4}}>
-        Portfolio companies included: {result.entities.join(' · ')}</div>}
-    </div>}
-  </div></div>);
-}
-
-// ─── Workpapers › Valuation Summary (CLRF, quarterly) ───────────────────────
-// Enter a quarter end, run the report. The server reads the prior quarter's
-// valuation workbook from Workpapers › Valuation, injects the GL-derived book
-// carrying values (CLRF 121011/21/31/41), the CLIP development cost, and the
-// re-solved stabilization discount, then files the result under the target
-// quarter and returns the .xlsx.
-function ValuationWorkpaper({entityId,entityName,canEdit=true}){
-  const QUARTER_ENDS=['03-31','06-30','09-30','12-31'];
-  const isQuarterEnd=(d)=>/^\d{4}-\d{2}-\d{2}$/.test(d)&&QUARTER_ENDS.includes(d.slice(5));
-  const defaultQE=()=>{const t=today();const y=Number(t.slice(0,4));const cands=[];
-    for(const yy of [y,y-1])for(const mm of QUARTER_ENDS)cands.push(yy+'-'+mm);
-    const past=cands.filter(d=>d<=t).sort();return past.length?past[past.length-1]:(y-1)+'-12-31';};
-  const[qe,setQe]=useState(defaultQE());
-  const[busy,setBusy]=useState(false);
-  const[err,setErr]=useState('');
-  const[result,setResult]=useState(null);
-  const valid=isQuarterEnd(qe);
-  const run=async()=>{
-    if(!valid)return;
-    setBusy(true);setErr('');setResult(null);
-    try{
-      const r=await api.valuationSummaryGenerate(entityId,qe);
-      if(!r)return;
-      const url=URL.createObjectURL(r.blob);
-      const a=document.createElement('a');a.href=url;a.download=r.filename;
-      document.body.appendChild(a);a.click();document.body.removeChild(a);
-      setTimeout(()=>URL.revokeObjectURL(url),4000);
-      setResult(r.summary||{});
-    }catch(e){ setErr(e.message||String(e)); }
-    finally{ setBusy(false); }
-  };
-  const bcv=result&&result.book_carrying_value?result.book_carrying_value:null;
-  const dc=result&&result.clip_dev_cost?result.clip_dev_cost:null;
-  const cv=result&&result.clip_valuation?result.clip_valuation:null;
-  return(<div><div style={S.card}>
-    {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
-    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Valuation Summary</div>
-    <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:760,lineHeight:1.5}}>
-      Rolls the prior quarter&rsquo;s valuation workbook forward: updates the book carrying values from
-      the CLRF trial balance, refreshes the CLIP development cost from the CLIP general ledger, and
-      re-solves the sales-comparison stabilization discount so the CLIP total valuation holds. The
-      prior quarter&rsquo;s file is read from Workpapers &rsaquo; Valuation, and a copy of the new quarter
-      is filed there; re-running a quarter replaces that quarter&rsquo;s file.
-    </div>
-    <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
-      <div><label style={S.label}>Quarter End Date</label>
-        <input style={S.inputSm} type="date" value={qe} onChange={e=>{setQe(e.target.value);setErr('');setResult(null);}}/></div>
-      <button style={{...S.btnP,opacity:(!valid||busy||!canEdit)?0.5:1}} disabled={!valid||busy||!canEdit} onClick={run}>
-        {busy?'Running…':'Run Report'}</button>
-    </div>
-    {!valid&&qe&&<div style={{fontSize:12,color:T.orange,marginTop:10}}>
-      Enter a quarter end date: March 31, June 30, September 30 or December 31.</div>}
-    {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
-    {result&&<div style={{...S.card,marginTop:18,padding:14,background:'#f3faf5'}}>
-      <div style={{fontWeight:700,color:T.green,marginBottom:8}}>
-        {result.quarter} report downloaded{result.replaced>0?' · replaced the previous copy':''}</div>
-      {bcv&&bcv.by_property&&<table style={{...S.table,minWidth:360,marginBottom:10}}><tbody>
-        <tr><td style={S.tdBold} colSpan={2}>Book Carrying Value</td></tr>
-        {Object.keys(bcv.by_property).map(k=>(
-          <tr key={k}><td style={S.td}>{k}</td><td style={S.tdR}>{fmt(bcv.by_property[k])}</td></tr>))}
-        <tr style={S.grandTotalRow}><td style={S.tdBold}>Total</td>
-          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(bcv.total)}</td></tr>
-      </tbody></table>}
-      {dc&&<table style={{...S.table,minWidth:360,marginBottom:10}}><tbody>
-        <tr><td style={S.tdBold} colSpan={2}>CLIP Development Cost (GL)</td></tr>
-        <tr><td style={S.td}>Total Long Term Investments</td><td style={S.tdR}>{fmt(dc.long_term_investments)}</td></tr>
-        <tr><td style={S.td}>Total Other Assets</td><td style={S.tdR}>{fmt(dc.other_assets)}</td></tr>
-        <tr style={S.grandTotalRow}><td style={S.tdBold}>Total Development Cost</td>
-          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(dc.total)}</td></tr>
-      </tbody></table>}
-      {cv&&<table style={{...S.table,minWidth:360,marginBottom:10}}><tbody>
-        <tr><td style={S.tdBold} colSpan={2}>CLIP Sales-Comparison Approach</td></tr>
-        <tr><td style={S.td}>As-Complete + Land</td><td style={S.tdR}>{fmt(cv.as_complete_plus_land_I67)}</td></tr>
-        <tr><td style={S.td}>Stabilization Discount{cv.stabilization_pct!=null?(' ('+cv.stabilization_pct+'%)'):''}</td>
-          <td style={S.tdR}>{fmt(cv.stabilization_discount_I68)}</td></tr>
-        <tr><td style={S.td}>Sales &ldquo;As Is&rdquo;</td><td style={S.tdR}>{fmt(cv.sales_as_is_I69)}</td></tr>
-        <tr style={S.grandTotalRow}><td style={S.tdBold}>CLIP Total Valuation</td>
-          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(cv.total_valuation_J12)}</td></tr>
-      </tbody></table>}
-      {result.template_from&&<div style={{fontSize:12,color:T.textMuted}}>Template: <strong>{result.template_from}</strong></div>}
-      {result.saved_to&&<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Filed at <strong>{result.saved_to}</strong></div>}
-      {result.missing_dev_accounts&&result.missing_dev_accounts.length>0&&<div style={{fontSize:12,color:T.orange,marginTop:6}}>
-        Dev-cost accounts not found in CLIP GL (treated as 0): {result.missing_dev_accounts.join(', ')}</div>}
+      {inv&&<div style={{fontSize:12,color:T.textMuted}}>Investment workpaper: <strong>{inv.folder_path}/{inv.original_name}</strong>{inv.replaced>0?' (replaced prior copy)':''}</div>}
+      {val&&<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Valuation workbook: <strong>{val.folder_path}/{val.original_name}</strong>{val.replaced>0?' (replaced prior copy)':''}</div>}
+      {inv&&inv.template_from&&<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Investment template: {inv.template_from}</div>}
+      {val&&val.template_from&&<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Valuation template: {val.template_from}</div>}
     </div>}
   </div></div>);
 }

@@ -113,15 +113,27 @@ function priorQuarterOf(qtr) {
 function findTemplate(ctx, eid, qtr) {
   const { db, workpapersDir } = ctx;
   const prior = priorQuarterOf(qtr);
+  // Search order: (1) the combined Investment & Valuation folder for the prior
+  // quarter (new pipeline; name-filtered so the Investment Balance workbook in
+  // the same folder is never picked up), (2) the legacy Workpapers/Valuation
+  // folder, (3) the newest Valuation workbook from either tree.
+  const ivFolder = 'Workpapers/Investment & Valuation/' + prior.quarter + ' ' + prior.year;
   const priorFolder = 'Workpapers/Valuation/' + prior.quarter + ' ' + prior.year;
   let row = db.prepare(
     'SELECT * FROM entity_files WHERE entity_id=? AND folder_path=? '
-    + "AND original_name LIKE '%.xlsx' ORDER BY id DESC LIMIT 1"
-  ).get(eid, priorFolder);
+    + "AND original_name LIKE '%Valuation%.xlsx' ORDER BY id DESC LIMIT 1"
+  ).get(eid, ivFolder);
   if (!row) {
     row = db.prepare(
-      "SELECT * FROM entity_files WHERE entity_id=? AND folder_path LIKE 'Workpapers/Valuation/%' "
+      'SELECT * FROM entity_files WHERE entity_id=? AND folder_path=? '
       + "AND original_name LIKE '%.xlsx' ORDER BY id DESC LIMIT 1"
+    ).get(eid, priorFolder);
+  }
+  if (!row) {
+    row = db.prepare(
+      "SELECT * FROM entity_files WHERE entity_id=? AND (folder_path LIKE 'Workpapers/Valuation/%' "
+      + "OR folder_path LIKE 'Workpapers/Investment & Valuation/%') "
+      + "AND original_name LIKE '%Valuation%.xlsx' ORDER BY id DESC LIMIT 1"
     ).get(eid);
   }
   if (!row) return null;
@@ -259,7 +271,12 @@ function buildTbSheetXml(tb) {
 }
 
 // -- Core transform: template bytes + GL data + quarter -> new bytes ----------
-async function transform(templateBuf, gl, qtr) {
+// targets (optional, from the Investment & Valuation solve):
+//   { clipJ12: number, approaches: { silsbee, buna, srn: number|null } }
+// clipJ12 overrides the CLIP total-valuation anchor; each non-null approaches
+// entry raises that entity's cost (E) and sales (G) approach figures on the
+// Summary so K = ROUND(MIN(E,G),-4) concludes at the solved amount.
+async function transform(templateBuf, gl, qtr, targets) {
   const zip = await JSZip.loadAsync(templateBuf);
 
   const wbXml = await zip.file('xl/workbook.xml').async('string');
@@ -358,8 +375,9 @@ async function transform(templateBuf, gl, qtr) {
   // NaN/0 and blows up the plug. So anchor to the fixed concluded value, and only
   // trust the template's J12 when it is a clean finite number.
   const rawJ12 = numFromCellSafe(summary, 'J12');
-  const targetJ12 = (rawJ12 !== null && isFinite(rawJ12) && rawJ12 > 0)
-    ? r2(rawJ12) : CLIP_CONCLUDED_VALUATION;
+  const targetJ12 = (targets && isFinite(targets.clipJ12) && targets.clipJ12 > 0)
+    ? r2(targets.clipJ12)
+    : (rawJ12 !== null && isFinite(rawJ12) && rawJ12 > 0) ? r2(rawJ12) : CLIP_CONCLUDED_VALUATION;
 
   // Book Carrying Value column D links directly to the TB tab: each investment
   // account's balance cell (=TB!C<row>) feeds its Summary row (D12=CLIP,
@@ -381,8 +399,27 @@ async function transform(templateBuf, gl, qtr) {
   const I68 = r2(I69 - I67);
   const G12 = I12; const K12 = targetJ12;
 
-  const g13 = numFromCellSafe(summary, 'G13') || 0, g14 = numFromCellSafe(summary, 'G14') || 0, g15 = numFromCellSafe(summary, 'G15') || 0;
-  const k13 = numFromCellSafe(summary, 'K13') || 0, k14 = numFromCellSafe(summary, 'K14') || 0, k15 = numFromCellSafe(summary, 'K15') || 0;
+  let g13 = numFromCellSafe(summary, 'G13') || 0, g14 = numFromCellSafe(summary, 'G14') || 0, g15 = numFromCellSafe(summary, 'G15') || 0;
+  let k13 = numFromCellSafe(summary, 'K13') || 0, k14 = numFromCellSafe(summary, 'K14') || 0, k15 = numFromCellSafe(summary, 'K15') || 0;
+  // Per-entity concluded-valuation targets from the Investment & Valuation
+  // solve. A non-null target raises that row's cost (E) and sales (G) approach
+  // figures to the target so K = ROUND(MIN(E,G),-4) concludes at it; null
+  // leaves the carried-forward appraiser figures untouched.
+  if (targets && targets.approaches) {
+    const rowByKey = { silsbee: 13, buna: 14, srn: 15 };
+    for (const key of Object.keys(rowByKey)) {
+      const t = targets.approaches[key];
+      if (t === null || t === undefined || !isFinite(t)) continue;
+      const row = rowByKey[key];
+      summary = replaceCell(summary, 'E' + row, numCell('E' + row, styleOf(summary, 'E' + row), r2(t)));
+      summary = replaceCell(summary, 'G' + row, numCell('G' + row, styleOf(summary, 'G' + row), r2(t)));
+      summary = replaceCell(summary, 'K' + row,
+        fCell('K' + row, styleOf(summary, 'K' + row), 'ROUND(MIN(E' + row + ',G' + row + '),-4)', r2(t)));
+      if (row === 13) { g13 = r2(t); k13 = r2(t); }
+      if (row === 14) { g14 = r2(t); k14 = r2(t); }
+      if (row === 15) { g15 = r2(t); k15 = r2(t); }
+    }
+  }
   const G16 = r2(G12 + g13 + g14 + g15);
   const H16 = H12, I16 = I12, J16 = targetJ12;
   const K16 = r2(K12 + k13 + k14 + k15);
