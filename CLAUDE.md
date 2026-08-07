@@ -4,7 +4,7 @@ Guidance for Claude working in this repository.
 
 ## Commit & deploy workflow
 
-- **When an update is made, commit AND push to `origin/main` without stopping to ask.** Do not pause for confirmation before pushing. `main` auto-deploys to Railway (`cloud-ledger.up.railway.app`, ~2–3 min).
+- **When an update is made, commit AND push to `origin/main` without stopping to ask.** Do not pause for confirmation before pushing, and never ask "do you want me to commit and push?" — this is a standing, pre-authorized instruction. Just commit and push. `main` auto-deploys to Railway (`cloud-ledger.up.railway.app`, ~2–3 min).
 - Stage only named production files by explicit `git add <file>` — never `git add -A`/`.`. Scratch files (`_*.js`, `*.b64`, `*.pdf`, `*.jpg`, `*.png`, `_tmp*`) are never committed.
 - Commit-message footer: `Co-Authored-By: Claude <noreply@anthropic.com>`
 - Git identity: Jimmy Yun / `jyun@banyanres.com`. Never use `jimmyyun1212@gmail.com` for commits.

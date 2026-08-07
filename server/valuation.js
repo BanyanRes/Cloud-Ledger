@@ -298,6 +298,13 @@ async function transform(templateBuf, gl, qtr) {
   const soiSheetRe = /(<sheet name=")SOI("[^>]*\/>)/;
   if (!soiSheetRe.test(wbXml2)) throw new Error('could not find SOI sheet definition to rename to TB');
   wbXml2 = wbXml2.replace(soiSheetRe, '$1TB$2');
+  // Also repoint any defined-name references to the old sheet name (the template
+  // carries _xlnm.Print_Area and _xlnm.Print_Titles as "SOI!$A$1:$K$18" /
+  // "SOI!$2:$5"). Left unchanged, these reference a sheet that no longer exists
+  // and Excel flags the workbook as corrupt on open. The sheet name has no
+  // special characters, so references are the unquoted token "SOI!"; there is no
+  // quoted 'SOI'! form to worry about. Rewrite the token to "TB!".
+  wbXml2 = wbXml2.replace(/(?<![A-Za-z0-9_'])SOI!/g, 'TB!');
   zip.file('xl/workbook.xml', wbXml2);
   const bcvTotal = r2(Object.keys(BCV).reduce((a, c) => a + r2(gl.bcv[c]), 0));
 
