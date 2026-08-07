@@ -9,9 +9,12 @@
 // next quarter's run can find it.
 //
 // GL figures injected (all as of the target quarter-end):
-//   1. Book Carrying Value  -> SOI!J7/J9/J11/J13, from CLRF accounts
-//        121031 SRN, 121011 CLIP, 121041 Silsbee, 121021 Buna.
-//      (Summary!D12-15 reference these via =SOI!J*, and D16 sums them.)
+//   1. Trial balance -> the appraiser's SOI tab is replaced with the FULL CLRF
+//        trial balance (code | name | balance) and renamed "TB". Summary's Book
+//        Carrying Value column links directly to the four investment accounts'
+//        TB rows: D12=TB!C<121011 CLIP>, D13=TB!C<121041 Silsbee>,
+//        D14=TB!C<121021 Buna>, D15=TB!C<121031 SRN>, D16 sums them. Rows are
+//        resolved dynamically from where each account lands in the sorted TB.
 //   2. CLIP development cost -> a self-contained "CLIP GL Dev Costs" tab listing
 //        16 GL accounts from CLIP Property Owner (entity 54), footed to a total,
 //        which Summary!H12 references.
@@ -41,15 +44,15 @@ const CLIP_ENTITY_ID = 54;
 // broken requisition link).
 const CLIP_CONCLUDED_VALUATION = 149431786.26;
 
-// The four book-carrying-value accounts on CLRF -> their SOI rows. For each we
-// drive, from the trial balance: the account name into the Company column (A),
-// the GL account code into the repurposed "GL Account" column (E), and the
-// balance into the Cost column (J). Summary!D12-15 read the J* cells.
+// The four book-carrying-value (investment) accounts on CLRF. The TB tab now
+// carries the WHOLE CLRF trial balance; these four accounts are the ones the
+// Summary schedule pulls into its Book Carrying Value column (D) via direct
+// =TB!C<row> references. Summary rows: D12=CLIP, D13=Silsbee, D14=Buna, D15=SRN.
 const BCV = {
-  '121031': { label: 'SRN', row: 7, nameCell: 'A7', codeCell: 'E7', cost: 'J7' },
-  '121011': { label: 'CLIP', row: 9, nameCell: 'A9', codeCell: 'E9', cost: 'J9' },
-  '121041': { label: 'Silsbee', row: 11, nameCell: 'A11', codeCell: 'E11', cost: 'J11' },
-  '121021': { label: 'Buna', row: 13, nameCell: 'A13', codeCell: 'E13', cost: 'J13' },
+  '121031': { label: 'SRN', summaryRow: 15 },
+  '121011': { label: 'CLIP', summaryRow: 12 },
+  '121041': { label: 'Silsbee', summaryRow: 13 },
+  '121021': { label: 'Buna', summaryRow: 14 },
 };
 
 // CLIP development-cost account set (mirrors server/devcosts.js). Two groups.
@@ -220,6 +223,41 @@ function buildDevSheetXml(dev) {
     + '<sheetData>' + rowXml + '</sheetData></worksheet>';
 }
 
+// -- Build the "TB" worksheet XML (full CLRF trial balance) -------------------
+// Columns: A = GL account code, B = account name, C = balance. Rows are sorted
+// by account code. Returns { xml, rowByCode } where rowByCode maps each account
+// code to its 1-based worksheet row, so the Summary schedule can point its Book
+// Carrying Value cells at =TB!C<row> for the four investment accounts.
+function buildTbSheetXml(tb) {
+  const sC = (ref, txt) => '<c r="' + ref + '" t="inlineStr"><is><t xml:space="preserve">' + xmlEsc(txt) + '</t></is></c>';
+  const nC = (ref, v) => '<c r="' + ref + '"><v>' + v + '</v></c>';
+  const fC = (ref, f, v) => '<c r="' + ref + '"><f>' + xmlEsc(f) + '</f><v>' + v + '</v></c>';
+  const rows = [];
+  rows.push([1, [sC('A1', 'County Line Rail Fund I, LP (CLRF)')]]);
+  rows.push([2, [sC('A2', 'Trial Balance')]]);
+  rows.push([3, [sC('A3', 'As of ' + tb.as_of)]]);
+  rows.push([5, [sC('A5', 'GL Acct'), sC('B5', 'Account Name'), sC('C5', 'Balance')]]);
+  const rowByCode = {};
+  let r = 6; const dataStart = r; let total = 0;
+  for (const acct of tb.accounts) {
+    rowByCode[String(acct.code)] = r;
+    total = r2(total + r2(acct.balance));
+    rows.push([r, [sC('A' + r, String(acct.code)), sC('B' + r, String(acct.name || '')), nC('C' + r, r2(acct.balance))]]);
+    r++;
+  }
+  const dataEnd = r - 1;
+  r += 1;
+  rows.push([r, [sC('B' + r, 'Total (net)'), fC('C' + r, 'SUM(C' + dataStart + ':C' + dataEnd + ')', total)]]);
+  const rowXml = rows.map((pair) => '<row r="' + pair[0] + '">' + pair[1].join('') + '</row>').join('');
+  const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+    + 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+    + '<cols><col min="1" max="1" width="10" customWidth="1"/><col min="2" max="2" width="46" customWidth="1"/>'
+    + '<col min="3" max="3" width="20" customWidth="1"/></cols>'
+    + '<sheetData>' + rowXml + '</sheetData></worksheet>';
+  return { xml: xml, rowByCode: rowByCode, total: total };
+}
+
 // -- Core transform: template bytes + GL data + quarter -> new bytes ----------
 async function transform(templateBuf, gl, qtr) {
   const zip = await JSZip.loadAsync(templateBuf);
@@ -247,34 +285,21 @@ async function transform(templateBuf, gl, qtr) {
   };
   for (const k of Object.keys(P)) if (!P[k]) throw new Error('template missing sheet for ' + k);
 
-  // (1) Rebuild the SOI investment lines directly from the CLRF trial balance so
-  // the tab plainly shows where each figure comes from: TB account name in the
-  // Company column (A), the GL account code in column E (its header is relabeled
-  // "GL Account" below), and the balance in the Cost column (J). Summary!D12-15
-  // read the J cells, and J15/J17 total them.
-  let soi = await zip.file(P.soi).async('string');
-  // Preserve each cell's existing style so the sheet keeps its formatting.
-  const inlineStr = (ref, s, txt) => '<c r="' + ref + '"' + (s ? ' s="' + s + '"' : '')
-    + ' t="inlineStr"><is><t xml:space="preserve">' + xmlEsc(txt) + '</t></is></c>';
-  for (const code of Object.keys(BCV)) {
-    const meta = BCV[code];
-    const v = r2(gl.bcv[code]);
-    const nm = (gl.bcvName && gl.bcvName[code]) ? gl.bcvName[code] : meta.label;
-    // Company name (col A) from the TB account name.
-    soi = replaceCell(soi, meta.nameCell, inlineStr(meta.nameCell, styleOf(soi, meta.nameCell), nm));
-    // GL account code (col E), repurposed from the old "Date of Acquisition" cell.
-    soi = replaceCell(soi, meta.codeCell, inlineStr(meta.codeCell, styleOf(soi, meta.codeCell), code));
-    // Cost/book carrying value (col J).
-    soi = replaceCell(soi, meta.cost, numCell(meta.cost, styleOf(soi, meta.cost), v));
-  }
-  // Relabel the header (row 6): E6 was "Date of Acquisition" -> "GL Account", and
-  // blank the hidden "Number of Shares" header G6 so nothing misleading remains.
-  soi = replaceCell(soi, 'E6', inlineStr('E6', styleOf(soi, 'E6'), 'GL Account'));
-  { const s = styleOf(soi, 'G6'); soi = replaceCell(soi, 'G6', '<c r="G6"' + (s ? ' s="' + s + '"' : '') + '/>'); }
+  // (1) Replace the SOI tab with the full CLRF trial balance and rename it "TB".
+  // We overwrite the SOI sheet's XML part in place (keeping its rId/sheetId, so no
+  // relationship surgery is needed) with a freshly built trial-balance grid, then
+  // rename the sheet in workbook.xml from "SOI" to "TB". The four investment
+  // accounts' TB rows are captured so Summary D12-15 can reference them directly.
+  const tbBuilt = buildTbSheetXml(gl.tb);
+  zip.file(P.soi, tbBuilt.xml);
+  // Rename the sheet definition SOI -> TB in workbook.xml. wbXml2 becomes the
+  // working copy that all later workbook.xml edits build on (e.g. the dev sheet).
+  let wbXml2 = wbXml;
+  const soiSheetRe = /(<sheet name=")SOI("[^>]*\/>)/;
+  if (!soiSheetRe.test(wbXml2)) throw new Error('could not find SOI sheet definition to rename to TB');
+  wbXml2 = wbXml2.replace(soiSheetRe, '$1TB$2');
+  zip.file('xl/workbook.xml', wbXml2);
   const bcvTotal = r2(Object.keys(BCV).reduce((a, c) => a + r2(gl.bcv[c]), 0));
-  { const s = styleOf(soi, 'J15'); soi = replaceCell(soi, 'J15', fCell('J15', s, 'SUM(J7:J14)', bcvTotal)); }
-  { const s = styleOf(soi, 'J17'); soi = replaceCell(soi, 'J17', fCell('J17', s, 'J15', bcvTotal)); }
-  zip.file(P.soi, soi);
 
   // (2) CLIP GL Dev Costs tab (add or replace).
   const devTotal = r2(gl.dev.ltiTotal + gl.dev.oaTotal);
@@ -296,7 +321,9 @@ async function transform(templateBuf, gl, qtr) {
     const devSid = Math.max.apply(null, sids) + 1;
     const newPath = 'xl/worksheets/sheet' + devNum + '.xml';
     zip.file(newPath, devSheet);
-    zip.file('xl/workbook.xml', wbXml.replace('</sheets>',
+    // Build on wbXml2 (which already carries the SOI->TB rename) so we don't
+    // clobber it when appending the dev sheet.
+    zip.file('xl/workbook.xml', wbXml2.replace('</sheets>',
       '<sheet name="' + devSheetName + '" sheetId="' + devSid + '" r:id="' + devRid + '"/></sheets>'));
     zip.file('xl/_rels/workbook.xml.rels', relsXml.replace('</Relationships>',
       '<Relationship Id="' + devRid + '" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
@@ -327,17 +354,17 @@ async function transform(templateBuf, gl, qtr) {
   const targetJ12 = (rawJ12 !== null && isFinite(rawJ12) && rawJ12 > 0)
     ? r2(rawJ12) : CLIP_CONCLUDED_VALUATION;
 
-  // Book Carrying Value column D references SOI (D12=SOI!J9 CLIP, D13=SOI!J11
-  // Silsbee, D14=SOI!J13 Buna, D15=SOI!J7 SRN, D16=SUM). Refresh their caches so
-  // the displayed values match the updated SOI; formulas are left intact.
-  const bcvByLabel = {};
-  for (const c of Object.keys(BCV)) bcvByLabel[BCV[c].label] = r2(gl.bcv[c]);
-  const dMap = {
-    D12: ['SOI!J9', bcvByLabel.CLIP], D13: ['SOI!J11', bcvByLabel.Silsbee],
-    D14: ['SOI!J13', bcvByLabel.Buna], D15: ['SOI!J7', bcvByLabel.SRN],
-  };
-  for (const ref of Object.keys(dMap)) {
-    summary = replaceCell(summary, ref, fCell(ref, styleOf(summary, ref), dMap[ref][0], dMap[ref][1]));
+  // Book Carrying Value column D links directly to the TB tab: each investment
+  // account's balance cell (=TB!C<row>) feeds its Summary row (D12=CLIP,
+  // D13=Silsbee, D14=Buna, D15=SRN, D16=SUM). Rows come from the TB grid just
+  // built, so links track wherever accounts land in the sorted trial balance.
+  for (const code of Object.keys(BCV)) {
+    const meta = BCV[code];
+    const ref = 'D' + meta.summaryRow;
+    const tbRow = tbBuilt.rowByCode[code];
+    const val = r2(gl.bcv[code]);
+    if (!tbRow) throw new Error('investment account ' + code + ' (' + meta.label + ') not found in CLRF TB');
+    summary = replaceCell(summary, ref, fCell(ref, styleOf(summary, ref), 'TB!C' + tbRow, val));
   }
   summary = replaceCell(summary, 'D16', fCell('D16', styleOf(summary, 'D16'), 'SUM(D12:D15)', bcvTotal));
 
@@ -409,6 +436,18 @@ function gatherGl(ctx, qtr) {
     bcv[code] = row ? r2(row.balance) : 0;
     bcvName[code] = row && row.name ? String(row.name) : '';
   }
+  // Full CLRF trial balance for the TB tab, sorted by account code (numeric
+  // where possible, then lexical). Zero-balance accounts are dropped to keep the
+  // tab readable; the four investment accounts are always retained so their
+  // =TB!C<row> links resolve even if a balance nets to zero at a quarter-end.
+  const tbAccounts = clrfRows
+    .filter((x) => BCV[String(x.code)] || Math.abs(r2(x.balance)) >= 0.005)
+    .map((x) => ({ code: String(x.code), name: x.name || '', balance: r2(x.balance) }))
+    .sort((a, b) => {
+      const na = Number(a.code), nb = Number(b.code);
+      if (isFinite(na) && isFinite(nb) && na !== nb) return na - nb;
+      return a.code < b.code ? -1 : a.code > b.code ? 1 : 0;
+    });
   const clipRows = computeBalances(CLIP_ENTITY_ID, { as_of: qtr.end });
   const clipByCode = {};
   for (const x of clipRows) clipByCode[String(x.code)] = x;
@@ -422,7 +461,11 @@ function gatherGl(ctx, qtr) {
     const row = clipByCode[pair[0]]; const v = row ? r2(row.balance) : 0;
     balances[pair[0]] = v; oaTotal = r2(oaTotal + v); if (!row) missing.push(pair[0]);
   }
-  return { bcv: bcv, bcvName: bcvName, dev: { as_of: qtr.end, balances: balances, ltiTotal: ltiTotal, oaTotal: oaTotal, missing: missing } };
+  return {
+    bcv: bcv, bcvName: bcvName,
+    tb: { as_of: qtr.end, accounts: tbAccounts },
+    dev: { as_of: qtr.end, balances: balances, ltiTotal: ltiTotal, oaTotal: oaTotal, missing: missing },
+  };
 }
 
 // -- Route registration -------------------------------------------------------
@@ -471,6 +514,7 @@ module.exports = {
   resolveQuarter: resolveQuarter,
   gatherGl: gatherGl,
   buildDevSheetXml: buildDevSheetXml,
+  buildTbSheetXml: buildTbSheetXml,
   findTemplate: findTemplate,
   valFolder: valFolder,
   valFileName: valFileName,
