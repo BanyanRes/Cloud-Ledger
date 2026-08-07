@@ -4037,14 +4037,7 @@ function ValuationWorkpaper({entityId,entityName,canEdit=true}){
     {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
     <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Investment &amp; Valuation</div>
     <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:760,lineHeight:1.5}}>
-      Generates two workbooks in one run. The <strong>Investment</strong> workpaper rebuilds the four
-      portfolio-company trial balances from CloudLedger, derives net working capital and loan balances,
-      and solves the quarter valuations (CLIP exactly to book plus the frozen unrealized gain, with the
-      development component from the CLIP GL; Silsbee/Buna/SRN kept at prior valuation unless proceeds
-      fall below book, in which case the approach figures rise so proceeds clear book by $350k). The
-      <strong> Valuation</strong> workbook is then produced against those solved amounts so its Summary
-      matches the investment workpaper&rsquo;s Valuations tab exactly. Both files are saved under
-      Workpapers &rsaquo; Investment &amp; Valuation &rsaquo; the target quarter; re-running replaces them.
+      Run Report will generate two separate workpapers &mdash; Investment and Valuation.
     </div>
     <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
       <div><label style={S.label}>Quarter End Date</label>
