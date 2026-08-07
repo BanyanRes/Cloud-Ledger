@@ -3984,6 +3984,75 @@ function GpFeesWorkpaper({entityId,entityName,canEdit=true}){
     {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
     {result&&<div style={{...S.card,marginTop:18,padding:14,background:'#f3faf5'}}>
       <div style={{fontWeight:700,color:T.green,marginBottom:8}}>
+        {result.quarter} report downloaded{result.replaced>0?' · replaced the previous copy':''}</div>
+      {t&&<table style={{...S.table,minWidth:360,marginBottom:10}}><tbody>
+        <tr><td style={S.td}>Management fee</td><td style={S.tdR}>{fmt(t.management_fee)}</td></tr>
+        <tr><td style={S.td}>Employee compensation reimbursement</td><td style={S.tdR}>{fmt(t.comp_reimbursement)}</td></tr>
+        <tr><td style={S.td}>Development fee</td><td style={S.tdR}>{fmt(t.development_fee)}</td></tr>
+        <tr style={S.grandTotalRow}><td style={S.tdBold}>Total fees to GP/Affiliates</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(t.total)}</td></tr>
+      </tbody></table>}
+      {result.saved_to&&<div style={{fontSize:12,color:T.textMuted}}>Filed at <strong>{result.saved_to}</strong></div>}
+      {result.entities&&<div style={{fontSize:12,color:T.textMuted,marginTop:4}}>
+        Portfolio companies included: {result.entities.join(' · ')}</div>}
+    </div>}
+  </div></div>);
+}
+
+// ─── Workpapers › Investment & Valuation (CLRF, quarterly) ──────────────────
+// One run generates TWO workbooks under Workpapers › Investment & Valuation:
+// the Investment workpaper (portfolio TBs, NWC/loans, waterfall, solved
+// valuations under the frozen-unrealized-gain convention) and the Valuation
+// workbook produced against those solved amounts so its Summary matches the
+// investment workpaper's Valuations tab exactly.
+function ValuationWorkpaper({entityId,entityName,canEdit=true}){
+  const QUARTER_ENDS=['03-31','06-30','09-30','12-31'];
+  const isQuarterEnd=(d)=>/^\d{4}-\d{2}-\d{2}$/.test(d)&&QUARTER_ENDS.includes(d.slice(5));
+  const defaultQE=()=>{const t=today();const y=Number(t.slice(0,4));const cands=[];
+    for(const yy of [y,y-1])for(const mm of QUARTER_ENDS)cands.push(yy+'-'+mm);
+    const past=cands.filter(d=>d<=t).sort();return past.length?past[past.length-1]:(y-1)+'-12-31';};
+  const[qe,setQe]=useState(defaultQE());
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const[result,setResult]=useState(null);
+  const valid=isQuarterEnd(qe);
+  const run=async()=>{
+    if(!valid)return;
+    setBusy(true);setErr('');setResult(null);
+    try{
+      const r=await api.investmentValuationGenerate(entityId,qe);
+      if(!r)return;
+      setResult(r);
+    }catch(e){ setErr(e.message||String(e)); }
+    finally{ setBusy(false); }
+  };
+  const solve=result&&result.solve?result.solve:null;
+  const val=result&&result.valuation?result.valuation:null;
+  const inv=result&&result.investment?result.investment:null;
+  return(<div><div style={S.card}>
+    {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
+    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Investment &amp; Valuation</div>
+    <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:760,lineHeight:1.5}}>
+      Generates two workbooks in one run. The <strong>Investment</strong> workpaper rebuilds the four
+      portfolio-company trial balances from CloudLedger, derives net working capital and loan balances,
+      and solves the quarter valuations (CLIP exactly to book plus the frozen unrealized gain, with the
+      development component from the CLIP GL; Silsbee/Buna/SRN kept at prior valuation unless proceeds
+      fall below book, in which case the approach figures rise so proceeds clear book by $350k). The
+      <strong> Valuation</strong> workbook is then produced against those solved amounts so its Summary
+      matches the investment workpaper&rsquo;s Valuations tab exactly. Both files are saved under
+      Workpapers &rsaquo; Investment &amp; Valuation &rsaquo; the target quarter; re-running replaces them.
+    </div>
+    <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
+      <div><label style={S.label}>Quarter End Date</label>
+        <input style={S.inputSm} type="date" value={qe} onChange={e=>{setQe(e.target.value);setErr('');setResult(null);}}/></div>
+      <button style={{...S.btnP,opacity:(!valid||busy||!canEdit)?0.5:1}} disabled={!valid||busy||!canEdit} onClick={run}>
+        {busy?'Running…':'Run Report'}</button>
+    </div>
+    {!valid&&qe&&<div style={{fontSize:12,color:T.orange,marginTop:10}}>
+      Enter a quarter end date: March 31, June 30, September 30 or December 31.</div>}
+    {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
+    {result&&<div style={{...S.card,marginTop:18,padding:14,background:'#f3faf5'}}>
+      <div style={{fontWeight:700,color:T.green,marginBottom:8}}>
         {result.quarter} workpapers generated &middot; filed under {result.folder}</div>
       {solve&&<table style={{...S.table,minWidth:520,marginBottom:10}}><tbody>
         <tr><td style={S.tdBold}>Investment</td><td style={{...S.tdBold,textAlign:'right'}}>Solved Valuation</td>
