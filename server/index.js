@@ -6311,41 +6311,59 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
     for (const r of rows) { syncedEntryIds.add(r.cl_entry_id); billcomIdByEntry.set(r.cl_entry_id, String(r.billcom_id)); if (r.invoice_number) invNumByEntry.set(r.cl_entry_id, String(r.invoice_number)); }
   } catch (e) { /* sync log optional */ }
 
-  // ── 3. FIFO net: apply debits (payments/relief) against the oldest open
-  //    credits (bills), so what remains are the genuinely open items as of date.
-  //    A payment may post before its bill is imported (interleaving in the GL),
-  //    so any debit not fully absorbed by the current queue is CARRIED FORWARD
-  //    and relieves later credits. Without this carry-forward the netting
-  //    discards over-relief and overstates open AP — the open total must equal
-  //    the GL balance (credits − debits) exactly.
-  const openItems = []; // { line_id, entry_id, entry_num, date, memo, description, amount }
-  let creditQueue = []; // FIFO of open credit slices
-  let unappliedDebit = 0; // payment carried forward to relieve future bills
+  // ── 3. Net each payment against the SPECIFIC bill it settled (not FIFO
+  //    oldest-first), and treat the imported opening balance as a locked block.
+  //    A Bill.com payment JE names its bill ("relieve bill <billcomId>"); we net
+  //    it against that bill's own credit and never against the opening GL block.
+  //    Imported (non-Bill.com) debits still net FIFO within the imported block.
+  //    Anything unmatched is carried out as a reconciling line so the report
+  //    total still ties to the GL balance exactly.
+  const entryIdByBillcomId = new Map(); // billcom_id -> synced-bill cl_entry_id
+  for (const [eid, bcid] of billcomIdByEntry.entries()) entryIdByBillcomId.set(String(bcid), eid);
+  const billOpenByEntry = new Map(); // synced-bill entry_id -> { ...line, remaining }
+  let glCreditQueue = [];            // FIFO queue of imported/opening credits ONLY
+  let glUnappliedDebit = 0;          // imported over-relief carried within the GL block
+  let unmatchedPayment = 0;          // Bill.com payment debits not matched to a synced bill
   for (const l of glLines) {
     if ((l.credit || 0) > 0.005) {
-      let remaining = l.credit;
-      if (unappliedDebit > 0.005) {
-        const take = Math.min(remaining, unappliedDebit);
-        remaining -= take; unappliedDebit -= take;
+      if (syncedEntryIds.has(l.entry_id)) {
+        const prev = billOpenByEntry.get(l.entry_id);
+        billOpenByEntry.set(l.entry_id, { ...l, remaining: (prev ? prev.remaining : 0) + l.credit });
+      } else {
+        let remaining = l.credit;
+        if (glUnappliedDebit > 0.005) { const take = Math.min(remaining, glUnappliedDebit); remaining -= take; glUnappliedDebit -= take; }
+        if (remaining > 0.005) glCreditQueue.push({ ...l, remaining });
       }
-      if (remaining > 0.005) creditQueue.push({ ...l, remaining });
     }
     if ((l.debit || 0) > 0.005) {
-      let pay = l.debit;
-      while (pay > 0.005 && creditQueue.length) {
-        const head = creditQueue[0];
-        const take = Math.min(head.remaining, pay);
-        head.remaining -= take; pay -= take;
-        if (head.remaining <= 0.005) creditQueue.shift();
+      const mm = /relieve bill (\S+)/.exec(l.memo || '');
+      const billId = mm ? mm[1] : null;
+      const targetEntry = billId ? entryIdByBillcomId.get(String(billId)) : null;
+      if (targetEntry != null && billOpenByEntry.has(targetEntry)) {
+        const b = billOpenByEntry.get(targetEntry);
+        const take = Math.min(b.remaining, l.debit);
+        b.remaining -= take;
+        if (l.debit - take > 0.005) unmatchedPayment += (l.debit - take);
+      } else if (billId) {
+        unmatchedPayment += l.debit; // payment for a bill not in CL (e.g. pre-cutover) - never touch opening
+      } else {
+        let pay = l.debit; // imported/manual AP debit: FIFO within the imported block only
+        while (pay > 0.005 && glCreditQueue.length) {
+          const head = glCreditQueue[0];
+          const take = Math.min(head.remaining, pay);
+          head.remaining -= take; pay -= take;
+          if (head.remaining <= 0.005) glCreditQueue.shift();
+        }
+        if (pay > 0.005) glUnappliedDebit += pay;
       }
-      if (pay > 0.005) unappliedDebit += pay; // carry forward to later bills
     }
   }
-  for (const c of creditQueue) {
-    if (c.remaining > 0.005) openItems.push({
-      line_id: c.line_id, entry_id: c.entry_id, entry_num: c.entry_num,
-      date: c.date, memo: c.memo || '', description: c.description || '', vendor: c.vendor || '', amount: c.remaining,
-    });
+  const openItems = []; // { line_id, entry_id, entry_num, date, memo, description, vendor, amount }
+  for (const [eid, b] of billOpenByEntry.entries()) {
+    if (b.remaining > 0.005) openItems.push({ line_id: b.line_id, entry_id: eid, entry_num: b.entry_num, date: b.date, memo: b.memo || '', description: b.description || '', vendor: b.vendor || '', amount: b.remaining });
+  }
+  for (const c of glCreditQueue) {
+    if (c.remaining > 0.005) openItems.push({ line_id: c.line_id, entry_id: c.entry_id, entry_num: c.entry_num, date: c.date, memo: c.memo || '', description: c.description || '', vendor: c.vendor || '', amount: c.remaining });
   }
 
   // ── 4. Vendor + invoice number for Bill.com-synced items come from LOCAL data
@@ -6389,9 +6407,13 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   // Net overpayment: if payments exceeded all bills (202000 is net-debit at the
   // as-of date), the leftover unapplied debit is a prepaid/overpayment balance.
   // Surface it as a negative GL line so the report still ties to the GL balance.
-  if (unappliedDebit > 0.005) {
-    glRows.push({ date: asOf, entry_num: null, entry_id: null, memo: 'Net prepaid / overpayment (payments exceed open bills)', description: '', amount: -unappliedDebit });
-    grand.gl -= unappliedDebit; grand.total -= unappliedDebit;
+  if (glUnappliedDebit > 0.005) {
+    glRows.push({ date: asOf, entry_num: null, entry_id: null, memo: 'Net prepaid / overpayment (payments exceed open bills)', description: '', amount: -glUnappliedDebit });
+    grand.gl -= glUnappliedDebit; grand.total -= glUnappliedDebit;
+  }
+  if (unmatchedPayment > 0.005) {
+    glRows.push({ date: asOf, entry_num: null, entry_id: null, memo: 'Bill.com payment(s) not matched to a synced bill', description: '', amount: -unmatchedPayment });
+    grand.gl -= unmatchedPayment; grand.total -= unmatchedPayment;
   }
 
   const glTotal = glRows.reduce((s, r) => s + r.amount, 0);
