@@ -5499,6 +5499,68 @@ function matchApAgingLine(lines, bill) {
 // already present in the last uploaded A/P aging detail. No JEs are created. This
 // is what the "Check against A/P aging" button calls; the same matching runs
 // automatically (and auto-skips) inside the sync itself.
+// ── TEMP READ-ONLY DIAGNOSTIC: dump the raw fields Bill.com actually returns for
+// a few bills so we can confirm whether a GL posting date comes across the v3 API.
+// READ-ONLY: logs into Bill.com and reads bills only. Writes NOTHING (no journal
+// entries, no sync log, no config changes). Remove after use.
+app.get('/api/billcom/_fielddump/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
+  let session;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    const devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'Bill.com login failed: ' + e.message }); }
+  const listArgs = { sessionId: session.sessionId, devKey: billcomDecrypt(cfg.dev_key_enc), baseUrl: cfg.api_base_url };
+  const cutoffDate = String(cfg.sync_cutoff_date || '2026-01-01');
+  const windowFrom = (cutoffDate.slice(0, 7) + '-01');
+  const windowTo = (() => { const d = new Date(); d.setMonth(d.getMonth() + 1); return d.toISOString().slice(0, 10); })();
+  let bills;
+  try { bills = await billcomListBillsByUpdatedWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo }); }
+  catch (e) { return res.status(502).json({ error: 'Failed to fetch bills: ' + e.message }); }
+  const flattenKeys = (obj, prefix = '') => {
+    let out = [];
+    if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+      for (const k of Object.keys(obj)) {
+        out.push(prefix + k);
+        const v = obj[k];
+        if (v && typeof v === 'object' && !Array.isArray(v)) out = out.concat(flattenKeys(v, prefix + k + '.'));
+      }
+    }
+    return out;
+  };
+  const isPostingKey = (k) => /post/i.test(k) || /gl.*date/i.test(k) || /glposting/i.test(k) || /accounting.*date/i.test(k);
+  const sample = [];
+  const N = Math.min(3, bills.length);
+  for (let i = 0; i < N; i++) {
+    const billId = String(pick(bills[i], 'id') || '');
+    let detail = bills[i];
+    try { detail = await billcomGetById({ ...listArgs, resourcePath: '/bills', id: billId, extraParams: { billApprovals: 'true' } }); } catch (e) {}
+    const keys = flattenKeys(detail);
+    sample.push({
+      id: billId,
+      invoiceDate: pick(detail, 'invoiceDate') || pick(pick(detail, 'invoice') || {}, 'invoiceDate') || null,
+      dueDate: pick(detail, 'dueDate') || null,
+      date_related_keys: keys.filter(k => /date|time|post|gl/i.test(k)),
+      posting_date_keys: keys.filter(isPostingKey),
+      all_keys: keys,
+      raw: detail,
+    });
+  }
+  const listKeyUnion = Array.from(new Set(bills.flatMap(b => flattenKeys(b))));
+  res.json({
+    ok: true, entity_id: entityId, window: { from: windowFrom, to: windowTo }, bills_in_window: bills.length,
+    list_object_keys: listKeyUnion,
+    list_posting_date_keys: listKeyUnion.filter(isPostingKey),
+    detail_has_posting_date: sample.some(s => s.posting_date_keys.length > 0),
+    sample_detail_bills: sample,
+  });
+});
+
 app.post('/api/billcom/ap-aging-check/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
