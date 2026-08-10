@@ -5499,6 +5499,46 @@ function matchApAgingLine(lines, bill) {
 // already present in the last uploaded A/P aging detail. No JEs are created. This
 // is what the "Check against A/P aging" button calls; the same matching runs
 // automatically (and auto-skips) inside the sync itself.
+// ── TEMP READ-ONLY DIAGNOSTIC: probe Bill.com's legacy v2 API to confirm it
+// returns glPostingDate for this org's bills, using the same stored credentials.
+// READ-ONLY: logs into v2 and lists bills only. Writes NOTHING. Remove after use.
+app.get('/api/billcom/_v2probe/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+  const V2 = 'https://api.bill.com/api/v2';
+  const form = (obj) => Object.entries(obj).map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
+  let devKey, password;
+  try { devKey = billcomDecrypt(cfg.dev_key_enc); password = billcomDecrypt(cfg.password_enc); }
+  catch (e) { return res.status(500).json({ error: 'decrypt failed: ' + e.message }); }
+  let sessionId;
+  try {
+    const lr = await fetch(V2 + '/Login.json', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ userName: cfg.username, password, orgId: cfg.org_id, devKey }) });
+    const lj = await lr.json();
+    if (lj.response_status !== 0) return res.status(502).json({ stage: 'login', v2_response: lj });
+    sessionId = lj.response_data.sessionId;
+  } catch (e) { return res.status(502).json({ stage: 'login', error: e.message }); }
+  let bills;
+  try {
+    const data = JSON.stringify({ start: 0, max: 10 });
+    const br = await fetch(V2 + '/List/Bill.json', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ devKey, sessionId, data }) });
+    const bj = await br.json();
+    if (bj.response_status !== 0) return res.status(502).json({ stage: 'listBill', v2_response: bj });
+    bills = bj.response_data || [];
+  } catch (e) { return res.status(502).json({ stage: 'listBill', error: e.message }); }
+  const sample = bills.slice(0, 10).map(b => ({
+    id: b.id, invoiceNumber: b.invoiceNumber, invoiceDate: b.invoiceDate,
+    dueDate: b.dueDate, glPostingDate: b.glPostingDate, amount: b.amount, vendorId: b.vendorId,
+  }));
+  res.json({
+    ok: true, entity_id: entityId, v2_login: 'ok', bills_returned: bills.length,
+    bill_keys: bills[0] ? Object.keys(bills[0]) : [],
+    has_glPostingDate: !!(bills[0] && ('glPostingDate' in bills[0])),
+    sample,
+  });
+});
+
 app.post('/api/billcom/ap-aging-check/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
