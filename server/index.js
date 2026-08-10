@@ -5551,6 +5551,49 @@ function matchApAgingLine(lines, bill) {
 // already present in the last uploaded A/P aging detail. No JEs are created. This
 // is what the "Check against A/P aging" button calls; the same matching runs
 // automatically (and auto-skips) inside the sync itself.
+// ── TEMP READ-ONLY: inspect Bill.com approval data (overall approvalStatus + the
+// per-approver statuses) so the "one approval is enough" gate can be set correctly.
+// READ-ONLY. Remove after use.
+app.get('/api/billcom/_approvals/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
+  const cutoffDate = String(cfg.sync_cutoff_date || '2026-01-01');
+  const windowFrom = (cutoffDate.slice(0, 7) + '-01');
+  const windowTo = (() => { const d = new Date(); d.setMonth(d.getMonth() + 1); return d.toISOString().slice(0, 10); })();
+  let listArgs;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    const devKey = billcomDecrypt(cfg.dev_key_enc);
+    const session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+    listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+  } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
+  let bills;
+  try { bills = await billcomListBillsByUpdatedWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo }); }
+  catch (e) { return res.status(502).json({ error: 'bills fetch failed: ' + e.message }); }
+  const statusDist = {};
+  for (const b of bills) { const s = String(pick(b, 'approvalStatus', 'status') || 'null'); statusDist[s] = (statusDist[s] || 0) + 1; }
+  const sample = [];
+  const N = Math.min(20, bills.length);
+  for (let i = 0; i < N; i++) {
+    const billId = String(pick(bills[i], 'id') || '');
+    let detail = bills[i];
+    try { detail = await billcomGetById({ ...listArgs, resourcePath: '/bills', id: billId, extraParams: { billApprovals: 'true' } }); } catch (e) {}
+    const aps = Array.isArray(detail && detail.approvers) ? detail.approvers : [];
+    const statuses = aps.map(a => String((a && a.status) || '?').toUpperCase());
+    sample.push({
+      invoiceNumber: pick(detail, 'invoiceNumber') || pick(pick(detail, 'invoice') || {}, 'invoiceNumber'),
+      overall: String(pick(detail, 'approvalStatus') || ''),
+      approvers_total: aps.length,
+      approved_count: statuses.filter(s => s === 'APPROVED').length,
+      approver_statuses: statuses,
+    });
+  }
+  res.json({ ok: true, entity_id: entityId, bills_in_window: bills.length, overall_status_distribution: statusDist, sample });
+});
+
 app.post('/api/billcom/ap-aging-check/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
