@@ -5563,65 +5563,6 @@ function matchApAgingLine(lines, bill) {
 // already present in the last uploaded A/P aging detail. No JEs are created. This
 // is what the "Check against A/P aging" button calls; the same matching runs
 // automatically (and auto-skips) inside the sync itself.
-// ── TEMP READ-ONLY: audit Bill.com payment-relieve entries. Lists every JE that
-// debits AP with a "relieve bill" memo, resolves each settled bill's vendor +
-// invoice date from Bill.com, and flags those on/before the cutoff (relieving a
-// pre-transition opening-balance invoice). Writes NOTHING. Remove after use.
-app.get('/api/billcom/_relieve_audit/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
-  const apAccount = cfg.default_ap_account;
-  const cutoffDate = String(cfg.sync_cutoff_date || '2026-01-01');
-  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
-  const rows = db.prepare(
-    "SELECT je.entry_num, je.date, je.memo, jl.debit " +
-    "FROM journal_entries je JOIN journal_lines jl ON jl.entry_id = je.id " +
-    "WHERE je.entity_id = ? AND jl.account_code = ? AND jl.debit > 0 AND je.memo LIKE 'Bill.com payment%relieve bill %'"
-  ).all(entityId, apAccount);
-  const billSynced = db.prepare("SELECT 1 FROM billcom_sync_log WHERE entity_id=? AND sync_type='bill' AND billcom_id=? AND status='success' AND cl_entry_id IS NOT NULL LIMIT 1");
-  let listArgs = null;
-  try {
-    const password = billcomDecrypt(cfg.password_enc);
-    const devKey = billcomDecrypt(cfg.dev_key_enc);
-    const session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-    listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
-  } catch (e) { /* proceed without bill lookup */ }
-  const billMeta = new Map();
-  const distinctBillIds = Array.from(new Set(rows.map(r => { const m = /relieve bill (\S+)/.exec(r.memo || ''); return m ? m[1] : null; }).filter(Boolean)));
-  if (listArgs) {
-    const CONC = 6;
-    for (let i = 0; i < distinctBillIds.length; i += CONC) {
-      const slice = distinctBillIds.slice(i, i + CONC);
-      const settled = await Promise.all(slice.map(id => billcomGetById({ ...listArgs, resourcePath: '/bills', id }).then(d => ({ id, d })).catch(() => ({ id, d: null }))));
-      for (const s of settled) if (s.d) billMeta.set(s.id, {
-        vendor: pick(s.d, 'vendorName') || pick(pick(s.d, 'vendor') || {}, 'name') || null,
-        invoiceDate: pick(s.d, 'invoiceDate') || pick(pick(s.d, 'invoice') || {}, 'invoiceDate') || null,
-        invoiceNumber: pick(s.d, 'invoiceNumber') || pick(pick(s.d, 'invoice') || {}, 'invoiceNumber') || null,
-      });
-    }
-  }
-  const out = [];
-  let preTot = 0, postTot = 0, unkTot = 0;
-  for (const r of rows) {
-    const m = /relieve bill (\S+)/.exec(r.memo || '');
-    const billId = m ? m[1] : null;
-    const meta = billId ? (billMeta.get(billId) || {}) : {};
-    const invDay = meta.invoiceDate ? String(meta.invoiceDate).slice(0, 10) : null;
-    const preCutoff = invDay ? (invDay <= cutoffDate) : null;
-    if (preCutoff === true) preTot += r.debit; else if (preCutoff === false) postTot += r.debit; else unkTot += r.debit;
-    out.push({ je: 'JE-' + r.entry_num, date: r.date, amount: r.debit, billId, vendor: meta.vendor || null, invoiceNumber: meta.invoiceNumber || null, invoiceDate: invDay, pre_cutoff: preCutoff, bill_synced_in_cl: billId ? !!billSynced.get(entityId, billId) : false });
-  }
-  out.sort((a, b) => ((b.pre_cutoff === true ? 1 : 0) - (a.pre_cutoff === true ? 1 : 0)) || (b.amount - a.amount));
-  res.json({
-    ok: true, entity_id: entityId, ap_account: apAccount, cutoff: cutoffDate, relieve_entries: rows.length,
-    pre_cutoff_count: out.filter(o => o.pre_cutoff === true).length,
-    pre_cutoff_total: Math.round(preTot * 100) / 100, post_cutoff_total: Math.round(postTot * 100) / 100, unknown_total: Math.round(unkTot * 100) / 100,
-    entries: out,
-  });
-});
-
 app.post('/api/billcom/ap-aging-check/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
