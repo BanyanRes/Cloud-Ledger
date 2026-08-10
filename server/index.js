@@ -5312,53 +5312,6 @@ app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id
   res.json({ logs: rows });
 });
 
-// TEMP READ-ONLY DIAGNOSTIC: report the live approval state of Bill.com bills so
-// we can see exactly why a given bill did/didn't sync. No JEs are written. Logs
-// into Bill.com, pulls bills (billApprovals=true) updated in the window, and for
-// each returns its approvalStatus, the eligibility gate result, whether any/all
-// approvers approved, and the per-approver statuses. Remove after diagnosis.
-app.get('/api/billcom/_approval-audit/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
-  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
-  const cutoffDate = String((req.query.cutoff_date) || cfg.sync_cutoff_date || '2026-01-01');
-  const windowFrom = (cutoffDate.slice(0, 7) + '-01');
-  const windowTo = (() => { const d = new Date(); d.setMonth(d.getMonth() + 1); return d.toISOString().slice(0, 10); })();
-  let session;
-  try {
-    const password = billcomDecrypt(cfg.password_enc);
-    const devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-  } catch (e) { return res.status(502).json({ error: 'Bill.com login failed: ' + e.message }); }
-  const listArgs = { sessionId: session.sessionId, devKey: billcomDecrypt(cfg.dev_key_enc), baseUrl: cfg.api_base_url };
-  let bills;
-  try { bills = await billcomListBillsByUpdatedWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo }); }
-  catch (e) { return res.status(502).json({ error: 'Failed to fetch bills: ' + e.message }); }
-  const wantFilter = req.query.invoices ? String(req.query.invoices).split(',').map(s => s.trim()) : null;
-  const isEligible = (b) => ['APPROVED', 'APPROVING'].includes(String(pick(b, 'approvalStatus', 'status') || '').toUpperCase());
-  const rows = bills.map(b => {
-    const invNum = pick(b, 'invoiceNumber', 'invoice_number') || pick(pick(b, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || null;
-    const approvers = Array.isArray(b.approvers) ? b.approvers.map(a => ({ status: a.status, changed: a.statusChangedTime || null })) : [];
-    return {
-      id: b.id,
-      invoice_number: invNum,
-      amount: pick(b, 'amount'),
-      invoice_date: pick(b, 'invoiceDate', 'invoice_date'),
-      created_time: b.createdTime || null,
-      approval_status: pick(b, 'approvalStatus', 'status'),
-      isEligible_gate: isEligible(b),
-      anyApproverApproved_gate: anyApproverApproved(b),
-      allApproversApproved: allApproversApproved(b),
-      approver_count: approvers.length,
-      approvers,
-      would_sync: isEligible(b) && anyApproverApproved(b),
-    };
-  }).filter(r => !wantFilter || wantFilter.includes(String(r.invoice_number)));
-  res.json({ entity_id: entityId, cutoff_date: cutoffDate, window: [windowFrom, windowTo], total_bills_in_window: bills.length, returned: rows.length, bills: rows });
-});
-
 // Un-sync: remove every CloudLedger journal entry that a Bill.com sync created
 // for this entity, and clear the entity's sync log so a subsequent (corrected)
 // sync re-pulls from scratch. Scoped STRICTLY to entries recorded in
