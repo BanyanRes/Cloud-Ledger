@@ -6316,14 +6316,27 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   //    A Bill.com payment JE names its bill ("relieve bill <billcomId>"); we net
   //    it against that bill's own credit and never against the opening GL block.
   //    Imported (non-Bill.com) debits still net FIFO within the imported block.
+  //    AP debits paired with cash credits (from bank transaction uploads) reduce
+  //    the opening balance directly.
   //    Anything unmatched is carried out as a reconciling line so the report
   //    total still ties to the GL balance exactly.
   const entryIdByBillcomId = new Map(); // billcom_id -> synced-bill cl_entry_id
   for (const [eid, bcid] of billcomIdByEntry.entries()) entryIdByBillcomId.set(String(bcid), eid);
+  
+  // Identify entries with both AP debit and cash credit (opening balance relief via bank txns)
+  const entryHasCashCredit = new Map(); // entry_id -> boolean
+  for (const l of glLines) {
+    // Cash accounts typically start with 101 or 102
+    if ((String(l.account_code).startsWith('101') || String(l.account_code).startsWith('102')) && (l.credit || 0) > 0.005) {
+      entryHasCashCredit.set(l.entry_id, true);
+    }
+  }
+  
   const billOpenByEntry = new Map(); // synced-bill entry_id -> { ...line, remaining }
   let glCreditQueue = [];            // FIFO queue of imported/opening credits ONLY
   let glUnappliedDebit = 0;          // imported over-relief carried within the GL block
   let unmatchedPayment = 0;          // Bill.com payment debits not matched to a synced bill
+  let openingBalanceRelief = 0;      // AP debits paired with cash credits (opening balance relief)
   const matchedPayments = []; // { targetEntry, debit } - applied AFTER all bill credits are known
   for (const l of glLines) {
     if ((l.credit || 0) > 0.005) {
@@ -6344,6 +6357,9 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
         matchedPayments.push({ targetEntry, debit: l.debit }); // net after the pass (a payment can post before its bill's date)
       } else if (billId) {
         unmatchedPayment += l.debit; // payment for a bill not in CL (e.g. pre-cutover) - never touch opening
+      } else if (entryHasCashCredit.get(l.entry_id)) {
+        // AP debit paired with cash credit (opening balance relief from bank transactions)
+        openingBalanceRelief += l.debit;
       } else {
         let pay = l.debit; // imported/manual AP debit: FIFO within the imported block only
         while (pay > 0.005 && glCreditQueue.length) {
@@ -6422,6 +6438,11 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
     glRows.push({ date: asOf, entry_num: null, entry_id: null, memo: 'Bill.com payment(s) not matched to a synced bill', description: '', amount: -unmatchedPayment });
     grand.gl -= unmatchedPayment; grand.total -= unmatchedPayment;
   }
+  if (openingBalanceRelief > 0.005) {
+    glRows.push({ date: asOf, entry_num: null, entry_id: null, memo: 'Opening AP balance relief (bank transactions)', description: '', amount: -openingBalanceRelief });
+    grand.gl -= openingBalanceRelief; grand.total -= openingBalanceRelief;
+  }
+
 
   const glTotal = glRows.reduce((s, r) => s + r.amount, 0);
   // Once the GL-sourced A/P nets to zero (e.g. the legacy balance was cleared by a
