@@ -1270,7 +1270,15 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
     let count=0;
     try{ const dry=await api.unsyncBillcom(selectedEntity,true); count=dry.would_delete_entries||0; }
     catch(e){ setSyncErr('Un-sync check failed: '+e.message); return; }
-    if(count===0){ setSyncMsg('Nothing to un-sync — no Bill.com-created journal entries on this entity.'); return; }
+    if(count===0){
+      // No Bill.com-created journal entries to delete, but there may still be
+      // sync-log rows (e.g. skipped-bill records) that must be cleared so a
+      // re-sync re-evaluates every bill under the current rules. Clear the log.
+      setUnsyncing(true);setSyncMsg('');setSyncErr('');
+      try{ const r=await api.unsyncBillcom(selectedEntity,false); setSyncMsg('No Bill.com journal entries to delete; cleared the sync log'+(r.sync_log_cleared?'':' (nothing to clear)')+' so a re-sync will re-evaluate every bill from scratch.'); loadSyncLogs(); }
+      catch(e){ setSyncErr('Un-sync (clear log) failed: '+e.message); }
+      setUnsyncing(false); return;
+    }
     if(!window.confirm('Un-sync will DELETE '+count+' journal entr'+(count===1?'y':'ies')+' that Bill.com syncs created on this entity, and clear the sync log so a corrected sync can re-pull. It does NOT touch imported-GL or manual entries. Continue?')) return;
     setUnsyncing(true);setSyncMsg('');setSyncErr('');setSyncResult(null);
     try{
