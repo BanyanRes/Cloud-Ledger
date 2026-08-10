@@ -5551,99 +5551,6 @@ function matchApAgingLine(lines, bill) {
 // already present in the last uploaded A/P aging detail. No JEs are created. This
 // is what the "Check against A/P aging" button calls; the same matching runs
 // automatically (and auto-skips) inside the sync itself.
-// ── TEMP READ-ONLY DIAGNOSTIC: probe Bill.com's legacy v2 API to confirm it
-// returns glPostingDate for this org's bills, using the same stored credentials.
-// READ-ONLY: logs into v2 and lists bills only. Writes NOTHING. Remove after use.
-app.get('/api/billcom/_v2probe/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
-  const V2 = 'https://api.bill.com/api/v2';
-  const form = (obj) => Object.entries(obj).map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
-  let devKey, password;
-  try { devKey = billcomDecrypt(cfg.dev_key_enc); password = billcomDecrypt(cfg.password_enc); }
-  catch (e) { return res.status(500).json({ error: 'decrypt failed: ' + e.message }); }
-  let sessionId;
-  try {
-    const lr = await fetch(V2 + '/Login.json', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ userName: cfg.username, password, orgId: cfg.org_id, devKey }) });
-    const lj = await lr.json();
-    if (lj.response_status !== 0) return res.status(502).json({ stage: 'login', v2_response: lj });
-    sessionId = lj.response_data.sessionId;
-  } catch (e) { return res.status(502).json({ stage: 'login', error: e.message }); }
-  let bills;
-  try {
-    const data = JSON.stringify({ start: 0, max: 10 });
-    const br = await fetch(V2 + '/List/Bill.json', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form({ devKey, sessionId, data }) });
-    const bj = await br.json();
-    if (bj.response_status !== 0) return res.status(502).json({ stage: 'listBill', v2_response: bj });
-    bills = bj.response_data || [];
-  } catch (e) { return res.status(502).json({ stage: 'listBill', error: e.message }); }
-  const sample = bills.slice(0, 10).map(b => ({
-    id: b.id, invoiceNumber: b.invoiceNumber, invoiceDate: b.invoiceDate,
-    dueDate: b.dueDate, glPostingDate: b.glPostingDate, amount: b.amount, vendorId: b.vendorId,
-  }));
-  res.json({
-    ok: true, entity_id: entityId, v2_login: 'ok', bills_returned: bills.length,
-    bill_keys: bills[0] ? Object.keys(bills[0]) : [],
-    has_glPostingDate: !!(bills[0] && ('glPostingDate' in bills[0])),
-    sample,
-  });
-});
-
-// ── TEMP READ-ONLY: preview what posting date each bill WOULD get once the sync
-// reads glPostingDate from v2. Shows invoice date vs GL posting date and how each
-// matched. Writes NOTHING (no JEs, no sync log). Remove after verification.
-app.get('/api/billcom/_glpreview/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
-  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
-  const cutoffDate = String(cfg.sync_cutoff_date || '2026-01-01');
-  const windowFrom = (cutoffDate.slice(0, 7) + '-01');
-  const windowTo = (() => { const d = new Date(); d.setMonth(d.getMonth() + 1); return d.toISOString().slice(0, 10); })();
-  let listArgs;
-  try {
-    const password = billcomDecrypt(cfg.password_enc);
-    const devKey = billcomDecrypt(cfg.dev_key_enc);
-    const session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-    listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
-  } catch (e) { return res.status(502).json({ error: 'v3 login failed: ' + e.message }); }
-  let v3bills;
-  try { v3bills = await billcomListBillsByUpdatedWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo }); }
-  catch (e) { return res.status(502).json({ error: 'v3 bills fetch failed: ' + e.message }); }
-  let glMap = { byId: new Map(), byIdent: new Map(), identKey: (n, a) => String(n == null ? '' : n).trim() + '|' + (a == null ? '' : Number(a).toFixed(2)) };
-  let v2count = 0, v2err = null;
-  try {
-    const v2Session = await billcomV2Login({ username: cfg.username, password: billcomDecrypt(cfg.password_enc), orgId: cfg.org_id, devKey: billcomDecrypt(cfg.dev_key_enc) });
-    const v2bills = await billcomV2ListBillsByGlPosting({ sessionId: v2Session, devKey: billcomDecrypt(cfg.dev_key_enc), fromDate: windowFrom });
-    v2count = v2bills.length;
-    glMap = billcomBuildGlPostingMap(v2bills);
-  } catch (e) { v2err = e.message; }
-  const rows = [];
-  let matchedById = 0, matchedByIdent = 0, unmatched = 0;
-  for (const b of v3bills) {
-    const id = String(pick(b, 'id') || '');
-    const num = pick(b, 'invoiceNumber', 'invoice_number') || pick(pick(b, 'invoice') || {}, 'invoiceNumber', 'invoice_number');
-    const amt = pick(b, 'amount');
-    const invDate = pick(b, 'invoiceDate') || pick(pick(b, 'invoice') || {}, 'invoiceDate') || null;
-    let gp = null, how = 'none';
-    if (id && glMap.byId.has(id)) { gp = glMap.byId.get(id); how = 'id'; matchedById++; }
-    else { const k = glMap.identKey(num, amt); if (glMap.byIdent.has(k)) { gp = glMap.byIdent.get(k); how = 'ident'; matchedByIdent++; } else unmatched++; }
-    const oldDay = invDate ? String(invDate).slice(0, 10) : null;
-    const newDay = gp || oldDay;
-    rows.push({ invoiceNumber: num, amount: amt, invoice_date: oldDay, gl_posting_date: gp, matched_by: how, old_period: oldDay ? oldDay.slice(0, 7) : null, new_period: newDay ? newDay.slice(0, 7) : null, changes: !!(oldDay && newDay && oldDay.slice(0, 7) !== newDay.slice(0, 7)) });
-  }
-  res.json({
-    ok: true, entity_id: entityId, window: { from: windowFrom, to: windowTo }, cutoff: cutoffDate,
-    v3_bills: v3bills.length, v2_bills_with_glposting: v2count, v2_error: v2err,
-    matched_by_id: matchedById, matched_by_ident: matchedByIdent, unmatched,
-    period_changes: rows.filter(r => r.changes).length,
-    bills: rows.slice(0, 60),
-  });
-});
-
 app.post('/api/billcom/ap-aging-check/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
@@ -5803,6 +5710,27 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   const windowFrom = (cutoffDate.slice(0, 7) + '-01');
   const windowTo = (() => { const d = new Date(); d.setMonth(d.getMonth() + 1); return d.toISOString().slice(0, 10); })();
   console.log('[billcom sync] entity ' + entityId + ': cutoff ' + cutoffDate + ', fetching bills ' + windowFrom + '..' + windowTo);
+  // Resolve each bill's GL Posting Date from Bill.com's legacy v2 API (v3 does not
+  // expose it). Keyed back to v3 by id (v2 and v3 share bill ids), with an
+  // invoiceNumber|amount fallback. Best-effort: if v2 is unavailable, fall back to
+  // invoice date (prior behavior). Only glPostingDate >= windowFrom is fetched,
+  // which covers every bill that could pass the cutoff.
+  let glMap = { byId: new Map(), byIdent: new Map(), identKey: (n, a) => String(n == null ? '' : n).trim() + '|' + (a == null ? '' : Number(a).toFixed(2)) };
+  try {
+    const v2pw = billcomDecrypt(cfg.password_enc);
+    const v2dk = billcomDecrypt(cfg.dev_key_enc);
+    const v2Session = await billcomV2Login({ username: cfg.username, password: v2pw, orgId: cfg.org_id, devKey: v2dk });
+    const v2bills = await billcomV2ListBillsByGlPosting({ sessionId: v2Session, devKey: v2dk, fromDate: windowFrom });
+    glMap = billcomBuildGlPostingMap(v2bills);
+    console.log('[billcom sync] entity ' + entityId + ': v2 glPostingDate map built (' + v2bills.length + ' bills)');
+  } catch (e) { console.log('[billcom sync] entity ' + entityId + ': v2 glPostingDate unavailable, using invoice date: ' + e.message); }
+  const glPostingFor = (bill) => {
+    const id = String((bill && bill.id) || '');
+    if (id && glMap.byId.has(id)) return glMap.byId.get(id);
+    const num = (bill && bill.invoiceNumber) || (bill && bill.invoice && bill.invoice.invoiceNumber) || null;
+    const amt = bill && bill.amount;
+    return glMap.byIdent.get(glMap.identKey(num, amt)) || null;
+  };
   try {
     bills = await billcomListBillsByUpdatedWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo });
   } catch (e) {
@@ -5928,6 +5856,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       continue;
     }
     const invoiceDate = pick(detail, 'invoiceDate', 'invoice_date') || pick(pick(detail, 'invoice') || {}, 'invoiceDate', 'invoice_date') || pick(detail, 'dueDate');
+    const postingDate = glPostingFor(detail) || invoiceDate;
     const billNumber = pick(detail, 'invoiceNumber', 'invoice_number') || pick(pick(detail, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || billId;
     const lineItems = pick(detail, 'lineItems', 'line_items', 'billLineItems') || [];
 
@@ -5957,13 +5886,13 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     // e.g. a 06/30 bill approved 07/31 was in the GL import AND re-synced.)
     const approvedDate = billApprovalDate(detail);
     const approvedDay = approvedDate ? String(approvedDate).slice(0, 10) : null;
-    const invDay = invoiceDate ? String(invoiceDate).slice(0, 10) : null;
-    if (!invDay || invDay <= cutoffDate) {
+    const postDay = postingDate ? String(postingDate).slice(0, 10) : null;
+    if (!postDay || postDay <= cutoffDate) {
       result.bills.skipped++;
       // Persist so later batches skip this bill cheaply (before the budget gate
       // and detail fetch) instead of re-fetching it every run.
-      try { logSync.run(entityId, 'bill', billId, null, 'skip_cutoff', 'document date ' + (invDay || 'unknown') + ' on/before cutoff ' + cutoffDate + ' (already in GL)', now, billNumber); } catch (e) {}
-      result.bills.details.push({ id: billId, status: 'skip', reason: 'document date ' + (invDay || 'unknown') + ' on/before cutoff ' + cutoffDate + ' (already in GL)' });
+      try { logSync.run(entityId, 'bill', billId, null, 'skip_cutoff', 'GL posting date ' + (postDay || 'unknown') + ' on/before cutoff ' + cutoffDate + ' (already in GL)', now, billNumber); } catch (e) {}
+      result.bills.details.push({ id: billId, status: 'skip', reason: 'GL posting date ' + (postDay || 'unknown') + ' on/before cutoff ' + cutoffDate + ' (already in GL)' });
       continue;
     }
 
@@ -6060,7 +5989,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       const insertedId = db.transaction(() => {
         const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
         const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, vendor, created_by) VALUES (?,?,?,?,?,?)')
-          .run(entityId, num, invoiceDate, memo, billVendor, actor);
+          .run(entityId, num, postingDate, memo, billVendor, actor);
         for (const l of lines) {
           db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, class_id, location_id) VALUES (?,?,?,?,?,?)')
             .run(r.lastInsertRowid, l.account_code, l.debit, l.credit, l.class_id || null, l.location_id || null);
