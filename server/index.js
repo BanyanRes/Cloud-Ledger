@@ -5695,8 +5695,9 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // Bounded sync: process at most maxBills per invocation so the request always
   // returns well under Railway's gateway ceiling. Dedup via billcom_sync_log makes
   // repeated runs safe + incremental — re-run until processed === 0. Caller may
-  // override with body.max_bills (clamped 1..100).
-  const maxBills = Math.max(1, Math.min(100, parseInt((req.body && req.body.max_bills) || 25)));
+  // override with body.max_bills (clamped 1..1000; default 500 so a normal-size
+  // entity finishes in a single pass and the setup fetches run once, not per batch).
+  const maxBills = Math.max(1, Math.min(1000, parseInt((req.body && req.body.max_bills) || 500)));
   const deadline = Date.now() + 230000; // stop starting new work past ~3.8m, safely under the 300s gateway cap
 
   // Opening-balance cutoff: all balances before this date were booked via the
@@ -5771,9 +5772,10 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
   // Bills: ONE APPROVAL SUFFICES. A bill syncs once at least one approver has
   // approved (Banyan policy, 8/2026) - it need not clear every approver or layer.
-  // The pre-filter passes APPROVED/APPROVING/ASSIGNED bills to the per-approver
-  // check below; DENIED/unstarted are held. Period is by GL posting date.
-  const isBillEligible = (bill) => ['APPROVED', 'APPROVING', 'ASSIGNED'].includes(String(pick(bill, 'approvalStatus', 'status') || '').toUpperCase());
+  // Pre-filter passes only APPROVED/APPROVING (both mean >=1 approver has approved);
+  // ASSIGNED/UNASSIGNED (zero approvals) and DENIED are held here WITHOUT a detail
+  // fetch. The per-approver check below is the authoritative gate. Period = GL posting date.
+  const isBillEligible = (bill) => ['APPROVED', 'APPROVING'].includes(String(pick(bill, 'approvalStatus', 'status') || '').toUpperCase());
   // Payments: only process if actually disbursed (or scheduled to be).
   const isPaymentEligible = (pay) => {
     const s = String(pick(pay, 'paymentStatus', 'status') || '').toUpperCase();
@@ -5796,14 +5798,10 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     "SELECT 1 FROM billcom_sync_log WHERE entity_id = ? AND sync_type = ? AND billcom_id = ? AND status = 'success' LIMIT 1"
   );
 
-  // Resolve Bill.com vendor names once so each bill JE can store its vendor (and
-  // so we can backfill vendor on already-synced bills). Best-effort; non-fatal.
-  const vendorById = new Map();
-  try {
-    const vlist = await billcomListVendors({ ...listArgs, maxItems: 5000 });
-    for (const v of vlist) { const id = String(pick(v, 'id') || ''); const n = pick(v, 'name', 'vendorName', 'companyName'); if (id && n) vendorById.set(id, n); }
-  } catch (e) { /* vendor names are optional */ }
-  const vendorOf = (obj) => vendorById.get(String(pick(obj, 'vendorId', 'vendor_id') || (pick(obj, 'vendor') || {}).id || '')) || pick(pick(obj, 'vendor') || {}, 'name', 'vendorName') || null;
+  // Vendor name comes straight off the bill object — the v3 bill (both the list
+  // and the detail form) carries vendorName — so we no longer download the entire
+  // vendor list (up to 5,000) on every run just to resolve names.
+  const vendorOf = (obj) => pick(obj, 'vendorName', 'vendor_name') || pick(pick(obj, 'vendor') || {}, 'name', 'vendorName') || null;
   const backfillVendor = db.prepare("UPDATE journal_entries SET vendor = ? WHERE entity_id = ? AND memo = ? AND (vendor IS NULL OR vendor = '')");
 
   // Bills approved before the cutoff are a permanent skip. We persist that skip
@@ -5812,6 +5810,35 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // per-bill detail fetch. Without this, an entity whose window is all pre-cutoff
   // bills re-fetches and re-scans the same 25 bills every batch and never advances.
   const alreadyPreCutoff = db.prepare("SELECT 1 FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'bill' AND billcom_id = ? AND status = 'skip_cutoff' LIMIT 1");
+
+  // Front-load the per-bill detail fetches in parallel (bounded concurrency) so the
+  // posting loop below isn't blocked one network round-trip at a time. Best-effort
+  // CACHE only: the loop still applies every skip/gate and fetches inline on a miss,
+  // so this changes WHEN details are fetched, never WHICH bills post. Candidates are
+  // bills that pass the cheap read-only pre-checks, capped at the per-run budget.
+  const detailCache = new Map();
+  {
+    const candidateIds = [];
+    for (const b of bills) {
+      const id = String(pick(b, 'id') || '');
+      if (!id) continue;
+      if (!isBillEligible(b)) continue;
+      if (alreadySynced.get(entityId, 'bill', id)) continue;
+      if (alreadyPreCutoff.get(entityId, id)) continue;
+      candidateIds.push(id);
+      if (candidateIds.length >= maxBills) break;
+    }
+    const CONC = 6;
+    for (let i = 0; i < candidateIds.length && Date.now() < deadline; i += CONC) {
+      const slice = candidateIds.slice(i, i + CONC);
+      const settled = await Promise.all(slice.map(id =>
+        billcomGetById({ ...listArgs, resourcePath: '/bills', id, extraParams: { billApprovals: 'true' } })
+          .then(d => ({ id, d })).catch(() => ({ id, d: null }))
+      ));
+      for (const st of settled) if (st.d) detailCache.set(st.id, st.d);
+    }
+    if (candidateIds.length) console.log('[billcom sync] entity ' + entityId + ': prefetched ' + detailCache.size + '/' + candidateIds.length + ' bill details in parallel');
+  }
   let billsProcessed = 0;
   result.bills.budget_reached = false;
   for (const bill of bills) {
@@ -5870,7 +5897,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     // List endpoint omits some fields (notably chartOfAccountId on line items); hydrate from detail.
     let detail = bill;
     try {
-      detail = await billcomGetById({ ...listArgs, resourcePath: '/bills', id: billId, extraParams: { billApprovals: 'true' } });
+      detail = detailCache.get(billId) || await billcomGetById({ ...listArgs, resourcePath: '/bills', id: billId, extraParams: { billApprovals: 'true' } });
     } catch (e) {
       result.bills.errors++;
       logSync.run(entityId, 'bill', billId, null, 'error', 'detail fetch failed: ' + e.message, now, null);
