@@ -6374,6 +6374,7 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   let glCreditQueue = [];            // FIFO queue of imported/opening credits ONLY
   let glUnappliedDebit = 0;          // imported over-relief carried within the GL block
   let unmatchedPayment = 0;          // Bill.com payment debits not matched to a synced bill
+  const matchedPayments = []; // { targetEntry, debit } - applied AFTER all bill credits are known
   for (const l of glLines) {
     if ((l.credit || 0) > 0.005) {
       if (syncedEntryIds.has(l.entry_id)) {
@@ -6389,11 +6390,8 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
       const mm = /relieve bill (\S+)/.exec(l.memo || '');
       const billId = mm ? mm[1] : null;
       const targetEntry = billId ? entryIdByBillcomId.get(String(billId)) : null;
-      if (targetEntry != null && billOpenByEntry.has(targetEntry)) {
-        const b = billOpenByEntry.get(targetEntry);
-        const take = Math.min(b.remaining, l.debit);
-        b.remaining -= take;
-        if (l.debit - take > 0.005) unmatchedPayment += (l.debit - take);
+      if (targetEntry != null) {
+        matchedPayments.push({ targetEntry, debit: l.debit }); // net after the pass (a payment can post before its bill's date)
       } else if (billId) {
         unmatchedPayment += l.debit; // payment for a bill not in CL (e.g. pre-cutover) - never touch opening
       } else {
@@ -6407,6 +6405,15 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
         if (pay > 0.005) glUnappliedDebit += pay;
       }
     }
+  }
+  // Apply matched payments now that every synced bill credit is known - a payment
+  // can post before its bill's GL date, so this must run after the pass above.
+  for (const mp of matchedPayments) {
+    const b = billOpenByEntry.get(mp.targetEntry);
+    if (!b) { unmatchedPayment += mp.debit; continue; }
+    const take = Math.min(b.remaining, mp.debit);
+    b.remaining -= take;
+    if (mp.debit - take > 0.005) unmatchedPayment += (mp.debit - take);
   }
   const openItems = []; // { line_id, entry_id, entry_num, date, memo, description, vendor, amount }
   for (const [eid, b] of billOpenByEntry.entries()) {
