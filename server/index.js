@@ -1109,6 +1109,58 @@ async function billcomListPaymentsWindowed({ sessionId, devKey, baseUrl, fromDat
 }
 
 
+// ── Bill.com legacy v2 API: read GL Posting Date ──
+// The v3 Connect API does NOT return a bill's GL Posting Date, but the classic v2
+// API does. We use v2 (same stored credentials) purely to READ glPostingDate and
+// key it back to the v3 bills the sync processes. No v2 writes are ever made.
+const BILLCOM_V2_BASE = 'https://api.bill.com/api/v2';
+function billcomV2Form(obj) { return Object.entries(obj).map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&'); }
+async function billcomV2Login({ username, password, orgId, devKey }) {
+  const r = await billcomFetch(BILLCOM_V2_BASE + '/Login.json', {
+    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: billcomV2Form({ userName: username, password, orgId, devKey })
+  }, 20000);
+  const j = await r.json();
+  if (j.response_status !== 0) throw new Error('v2 login: ' + (j.response_message || JSON.stringify(j).slice(0, 200)));
+  return j.response_data.sessionId;
+}
+// Fetch bills from v2 whose glPostingDate is on/after fromDate, paginated. Each v2
+// bill carries id, invoiceNumber, amount, vendorId, invoiceDate, glPostingDate.
+async function billcomV2ListBillsByGlPosting({ sessionId, devKey, fromDate }) {
+  const out = [];
+  let start = 0; const max = 999; let guard = 0;
+  while (guard < 100) {
+    guard++;
+    const data = JSON.stringify({ start, max, filters: [{ field: 'glPostingDate', op: '>=', value: fromDate }] });
+    const r = await billcomFetch(BILLCOM_V2_BASE + '/List/Bill.json', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: billcomV2Form({ devKey, sessionId, data })
+    }, 25000);
+    const j = await r.json();
+    if (j.response_status !== 0) throw new Error('v2 List/Bill: ' + (j.response_message || JSON.stringify(j).slice(0, 200)));
+    const rows = Array.isArray(j.response_data) ? j.response_data : [];
+    for (const b of rows) out.push(b);
+    if (rows.length < max) break;
+    start += max;
+  }
+  return out;
+}
+// Build lookup maps so the sync can resolve a v3 bill's GL Posting Date. Keyed by
+// BOTH raw id (in case v2/v3 ids coincide) and a stable identity (invoiceNumber|amount).
+function billcomBuildGlPostingMap(v2bills) {
+  const byId = new Map();
+  const byIdent = new Map();
+  const identKey = (num, amt) => String(num == null ? '' : num).trim() + '|' + (amt == null ? '' : Number(amt).toFixed(2));
+  for (const b of (v2bills || [])) {
+    const gp = b && b.glPostingDate ? String(b.glPostingDate).slice(0, 10) : null;
+    if (!gp) continue;
+    if (b.id != null) byId.set(String(b.id), gp);
+    const k = identKey(b.invoiceNumber, b.amount);
+    if (!byIdent.has(k)) byIdent.set(k, gp);
+  }
+  return { byId, byIdent, identKey };
+}
+
 // One-time recovery: earlier versions of the replace endpoint accidentally saved files
 // to WORKPAPERS_DIR root (or to an "undefined" subdir) instead of WORKPAPERS_DIR/<entity_id>/.
 // Walk those locations, match files to DB rows by stored_filename, and move them home.
@@ -5536,6 +5588,59 @@ app.get('/api/billcom/_v2probe/:entity_id', auth, requireEntityAccess('entity_id
     bill_keys: bills[0] ? Object.keys(bills[0]) : [],
     has_glPostingDate: !!(bills[0] && ('glPostingDate' in bills[0])),
     sample,
+  });
+});
+
+// ── TEMP READ-ONLY: preview what posting date each bill WOULD get once the sync
+// reads glPostingDate from v2. Shows invoice date vs GL posting date and how each
+// matched. Writes NOTHING (no JEs, no sync log). Remove after verification.
+app.get('/api/billcom/_glpreview/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
+  const cutoffDate = String(cfg.sync_cutoff_date || '2026-01-01');
+  const windowFrom = (cutoffDate.slice(0, 7) + '-01');
+  const windowTo = (() => { const d = new Date(); d.setMonth(d.getMonth() + 1); return d.toISOString().slice(0, 10); })();
+  let listArgs;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    const devKey = billcomDecrypt(cfg.dev_key_enc);
+    const session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+    listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+  } catch (e) { return res.status(502).json({ error: 'v3 login failed: ' + e.message }); }
+  let v3bills;
+  try { v3bills = await billcomListBillsByUpdatedWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo }); }
+  catch (e) { return res.status(502).json({ error: 'v3 bills fetch failed: ' + e.message }); }
+  let glMap = { byId: new Map(), byIdent: new Map(), identKey: (n, a) => String(n == null ? '' : n).trim() + '|' + (a == null ? '' : Number(a).toFixed(2)) };
+  let v2count = 0, v2err = null;
+  try {
+    const v2Session = await billcomV2Login({ username: cfg.username, password: billcomDecrypt(cfg.password_enc), orgId: cfg.org_id, devKey: billcomDecrypt(cfg.dev_key_enc) });
+    const v2bills = await billcomV2ListBillsByGlPosting({ sessionId: v2Session, devKey: billcomDecrypt(cfg.dev_key_enc), fromDate: windowFrom });
+    v2count = v2bills.length;
+    glMap = billcomBuildGlPostingMap(v2bills);
+  } catch (e) { v2err = e.message; }
+  const rows = [];
+  let matchedById = 0, matchedByIdent = 0, unmatched = 0;
+  for (const b of v3bills) {
+    const id = String(pick(b, 'id') || '');
+    const num = pick(b, 'invoiceNumber', 'invoice_number') || pick(pick(b, 'invoice') || {}, 'invoiceNumber', 'invoice_number');
+    const amt = pick(b, 'amount');
+    const invDate = pick(b, 'invoiceDate') || pick(pick(b, 'invoice') || {}, 'invoiceDate') || null;
+    let gp = null, how = 'none';
+    if (id && glMap.byId.has(id)) { gp = glMap.byId.get(id); how = 'id'; matchedById++; }
+    else { const k = glMap.identKey(num, amt); if (glMap.byIdent.has(k)) { gp = glMap.byIdent.get(k); how = 'ident'; matchedByIdent++; } else unmatched++; }
+    const oldDay = invDate ? String(invDate).slice(0, 10) : null;
+    const newDay = gp || oldDay;
+    rows.push({ invoiceNumber: num, amount: amt, invoice_date: oldDay, gl_posting_date: gp, matched_by: how, old_period: oldDay ? oldDay.slice(0, 7) : null, new_period: newDay ? newDay.slice(0, 7) : null, changes: !!(oldDay && newDay && oldDay.slice(0, 7) !== newDay.slice(0, 7)) });
+  }
+  res.json({
+    ok: true, entity_id: entityId, window: { from: windowFrom, to: windowTo }, cutoff: cutoffDate,
+    v3_bills: v3bills.length, v2_bills_with_glposting: v2count, v2_error: v2err,
+    matched_by_id: matchedById, matched_by_ident: matchedByIdent, unmatched,
+    period_changes: rows.filter(r => r.changes).length,
+    bills: rows.slice(0, 60),
   });
 });
 
