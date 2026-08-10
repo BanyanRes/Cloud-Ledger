@@ -5563,56 +5563,6 @@ function matchApAgingLine(lines, bill) {
 // already present in the last uploaded A/P aging detail. No JEs are created. This
 // is what the "Check against A/P aging" button calls; the same matching runs
 // automatically (and auto-skips) inside the sync itself.
-// ── TEMP READ-ONLY: for each payment relieve whose billId is NOT a synced bill,
-// show the billId, whether it appears in the sync log at all, and any synced bill
-// with the same amount (to spot an id/linkage mismatch). Local DB only. Remove after.
-app.get('/api/billcom/_match_audit/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
-  const cfg = db.prepare('SELECT default_ap_account FROM billcom_config WHERE entity_id = ?').get(entityId);
-  const ap = cfg && cfg.default_ap_account;
-  if (!ap) return res.status(400).json({ error: 'No AP account configured' });
-  const synced = db.prepare(
-    "SELECT s.billcom_id, s.invoice_number, je.vendor, je.entry_num, je.date, " +
-    "(SELECT SUM(jl.credit) FROM journal_lines jl WHERE jl.entry_id = s.cl_entry_id AND jl.account_code = ?) AS amount " +
-    "FROM billcom_sync_log s JOIN journal_entries je ON je.id = s.cl_entry_id " +
-    "WHERE s.entity_id = ? AND s.sync_type = 'bill' AND s.status = 'success' AND s.cl_entry_id IS NOT NULL"
-  ).all(ap, entityId);
-  const syncedIds = new Set(synced.map(b => String(b.billcom_id)));
-  const relieves = db.prepare(
-    "SELECT je.entry_num, je.date, je.memo, jl.debit " +
-    "FROM journal_entries je JOIN journal_lines jl ON jl.entry_id = je.id " +
-    "WHERE je.entity_id = ? AND jl.account_code = ? AND jl.debit > 0 AND je.memo LIKE 'Bill.com payment%relieve bill %'"
-  ).all(entityId, ap);
-  const syncedById = new Map(synced.map(b => [String(b.billcom_id), b]));
-  const byBill = new Map(); // billId -> { total, count }
-  for (const r of relieves) {
-    const m = /relieve bill (\S+)/.exec(r.memo || '');
-    const billId = m ? m[1] : null;
-    if (!billId) continue;
-    const g = byBill.get(billId) || { total: 0, count: 0 };
-    g.total += r.debit; g.count++;
-    byBill.set(billId, g);
-  }
-  const recon = [];
-  for (const [billId, g] of byBill.entries()) {
-    const b = syncedById.get(String(billId));
-    const credit = b ? (b.amount || 0) : null;
-    recon.push({
-      billId, payments: g.count, payment_total: Math.round(g.total * 100) / 100,
-      bill_credit: credit == null ? null : Math.round(credit * 100) / 100,
-      diff: credit == null ? null : Math.round((g.total - credit) * 100) / 100,
-      vendor: b ? b.vendor : null, invoice: b ? b.invoice_number : null, bill_in_synclog: !!b,
-    });
-  }
-  recon.sort((a, b) => Math.abs(b.diff || 0) - Math.abs(a.diff || 0));
-  res.json({
-    ok: true, entity_id: entityId, ap_account: ap, synced_bill_count: synced.length, payment_relieves: relieves.length,
-    mismatched: recon.filter(x => x.diff === null || Math.abs(x.diff) > 0.01),
-    all_count: recon.length,
-  });
-});
-
 app.post('/api/billcom/ap-aging-check/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
