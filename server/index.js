@@ -5405,7 +5405,7 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
   const insertJE = (date, memo, lines) => {
     const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
     const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)')
-      .run(entityId, num, date, memo, actor);
+      .run(entityId, num, date, memo, 'Bill.com sync');
     for (const l of lines) {
       db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit) VALUES (?,?,?,?)')
         .run(r.lastInsertRowid, l.account_code, l.debit, l.credit);
@@ -6040,7 +6040,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       const insertedId = db.transaction(() => {
         const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
         const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, vendor, created_by) VALUES (?,?,?,?,?,?)')
-          .run(entityId, num, postingDate, memo, billVendor, actor);
+          .run(entityId, num, postingDate, memo, billVendor, 'Bill.com sync');
         for (const l of lines) {
           db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, class_id, location_id) VALUES (?,?,?,?,?,?)')
             .run(r.lastInsertRowid, l.account_code, l.debit, l.credit, l.class_id || null, l.location_id || null);
