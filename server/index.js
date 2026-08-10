@@ -5727,15 +5727,23 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // invoiceNumber|amount fallback. Best-effort: if v2 is unavailable, fall back to
   // invoice date (prior behavior). Only glPostingDate >= windowFrom is fetched,
   // which covers every bill that could pass the cutoff.
+  // EXCEPTION: CLRF (County Line Rail Fund, entity 40) posts by INVOICE DATE, not
+  // the GL posting date. Every other Bill.com entity uses the GL posting date.
+  const INVOICE_DATE_ENTITIES = new Set([40]);
+  const useGlPosting = !INVOICE_DATE_ENTITIES.has(entityId);
   let glMap = { byId: new Map(), byIdent: new Map(), identKey: (n, a) => String(n == null ? '' : n).trim() + '|' + (a == null ? '' : Number(a).toFixed(2)) };
-  try {
-    const v2pw = billcomDecrypt(cfg.password_enc);
-    const v2dk = billcomDecrypt(cfg.dev_key_enc);
-    const v2Session = await billcomV2Login({ username: cfg.username, password: v2pw, orgId: cfg.org_id, devKey: v2dk });
-    const v2bills = await billcomV2ListBillsByGlPosting({ sessionId: v2Session, devKey: v2dk, fromDate: windowFrom });
-    glMap = billcomBuildGlPostingMap(v2bills);
-    console.log('[billcom sync] entity ' + entityId + ': v2 glPostingDate map built (' + v2bills.length + ' bills)');
-  } catch (e) { console.log('[billcom sync] entity ' + entityId + ': v2 glPostingDate unavailable, using invoice date: ' + e.message); }
+  if (useGlPosting) {
+    try {
+      const v2pw = billcomDecrypt(cfg.password_enc);
+      const v2dk = billcomDecrypt(cfg.dev_key_enc);
+      const v2Session = await billcomV2Login({ username: cfg.username, password: v2pw, orgId: cfg.org_id, devKey: v2dk });
+      const v2bills = await billcomV2ListBillsByGlPosting({ sessionId: v2Session, devKey: v2dk, fromDate: windowFrom });
+      glMap = billcomBuildGlPostingMap(v2bills);
+      console.log('[billcom sync] entity ' + entityId + ': v2 glPostingDate map built (' + v2bills.length + ' bills)');
+    } catch (e) { console.log('[billcom sync] entity ' + entityId + ': v2 glPostingDate unavailable, using invoice date: ' + e.message); }
+  } else {
+    console.log('[billcom sync] entity ' + entityId + ': CLRF posts by invoice date (GL posting date not used)');
+  }
   const glPostingFor = (bill) => {
     const id = String((bill && bill.id) || '');
     if (id && glMap.byId.has(id)) return glMap.byId.get(id);
