@@ -5584,18 +5584,33 @@ app.get('/api/billcom/_match_audit/:entity_id', auth, requireEntityAccess('entit
     "FROM journal_entries je JOIN journal_lines jl ON jl.entry_id = je.id " +
     "WHERE je.entity_id = ? AND jl.account_code = ? AND jl.debit > 0 AND je.memo LIKE 'Bill.com payment%relieve bill %'"
   ).all(entityId, ap);
-  const anyLog = db.prepare("SELECT sync_type, status FROM billcom_sync_log WHERE entity_id = ? AND billcom_id = ? LIMIT 1");
-  const unmatched = [];
+  const syncedById = new Map(synced.map(b => [String(b.billcom_id), b]));
+  const byBill = new Map(); // billId -> { total, count }
   for (const r of relieves) {
     const m = /relieve bill (\S+)/.exec(r.memo || '');
     const billId = m ? m[1] : null;
-    if (!billId || syncedIds.has(String(billId))) continue;
-    const logHit = anyLog.get(entityId, billId);
-    const cands = synced.filter(b => Math.abs((b.amount || 0) - r.debit) < 0.01)
-      .map(b => ({ billcom_id: b.billcom_id, invoice_number: b.invoice_number, vendor: b.vendor, amount: b.amount, je: 'JE-' + b.entry_num }));
-    unmatched.push({ je: 'JE-' + r.entry_num, date: r.date, amount: r.debit, payment_billId: billId, billId_in_synclog: logHit ? (logHit.sync_type + '/' + logHit.status) : null, synced_bills_same_amount: cands });
+    if (!billId) continue;
+    const g = byBill.get(billId) || { total: 0, count: 0 };
+    g.total += r.debit; g.count++;
+    byBill.set(billId, g);
   }
-  res.json({ ok: true, entity_id: entityId, ap_account: ap, synced_bill_count: synced.length, unmatched_count: unmatched.length, unmatched });
+  const recon = [];
+  for (const [billId, g] of byBill.entries()) {
+    const b = syncedById.get(String(billId));
+    const credit = b ? (b.amount || 0) : null;
+    recon.push({
+      billId, payments: g.count, payment_total: Math.round(g.total * 100) / 100,
+      bill_credit: credit == null ? null : Math.round(credit * 100) / 100,
+      diff: credit == null ? null : Math.round((g.total - credit) * 100) / 100,
+      vendor: b ? b.vendor : null, invoice: b ? b.invoice_number : null, bill_in_synclog: !!b,
+    });
+  }
+  recon.sort((a, b) => Math.abs(b.diff || 0) - Math.abs(a.diff || 0));
+  res.json({
+    ok: true, entity_id: entityId, ap_account: ap, synced_bill_count: synced.length, payment_relieves: relieves.length,
+    mismatched: recon.filter(x => x.diff === null || Math.abs(x.diff) > 0.01),
+    all_count: recon.length,
+  });
 });
 
 app.post('/api/billcom/ap-aging-check/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
