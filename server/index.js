@@ -5878,7 +5878,9 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       continue;
     }
     const invoiceDate = pick(detail, 'invoiceDate', 'invoice_date') || pick(pick(detail, 'invoice') || {}, 'invoiceDate', 'invoice_date') || pick(detail, 'dueDate');
-    const postingDate = glPostingFor(detail) || invoiceDate;
+    const glPostDay = glPostingFor(detail);
+    const postingDate = glPostDay || invoiceDate;
+    const postingBasis = glPostDay ? 'GL posting date' : 'invoice date';
     const billNumber = pick(detail, 'invoiceNumber', 'invoice_number') || pick(pick(detail, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || billId;
     const lineItems = pick(detail, 'lineItems', 'line_items', 'billLineItems') || [];
 
@@ -6016,7 +6018,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
           db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, class_id, location_id) VALUES (?,?,?,?,?,?)')
             .run(r.lastInsertRowid, l.account_code, l.debit, l.credit, l.class_id || null, l.location_id || null);
         }
-        logSync.run(entityId, 'bill', billId, r.lastInsertRowid, 'success', 'created JE #' + num + ' (approved ' + approvedDay + ')', now, billNumber);
+        logSync.run(entityId, 'bill', billId, r.lastInsertRowid, 'success', 'created JE #' + num + ' (posted ' + String(postingDate).slice(0, 10) + ' by ' + postingBasis + ')', now, billNumber);
         return r.lastInsertRowid;
       })();
       result.bills.synced++;
