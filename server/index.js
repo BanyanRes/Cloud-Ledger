@@ -1074,6 +1074,18 @@ function allApproversApproved(bill) {
   return true;
 }
 
+// TRUE when AT LEAST ONE approver has APPROVED (Banyan policy, 8/2026: a single
+// approval is sufficient; a bill need not clear every approver or layer). Falls
+// back to the bill's overall approvalStatus === 'APPROVED' when no per-approver
+// list is present. DENIED bills are filtered earlier and never reach this check.
+function anyApproverApproved(bill) {
+  const aps = Array.isArray(bill && bill.approvers) ? bill.approvers : [];
+  for (const a of aps) {
+    if (String((a && a.status) || '').toUpperCase() === 'APPROVED') return true;
+  }
+  return String((bill && bill.approvalStatus) || '').toUpperCase() === 'APPROVED';
+}
+
 // Bill.com v3 /payments has the SAME broken offset pagination as /bills (nextPage
 // returns the same first 100 rows), so a plain paged fetch silently caps at the
 // first page and never sees newer payments. Mirror the bills approach: walk
@@ -5576,10 +5588,11 @@ app.get('/api/billcom/_approvals/:entity_id', auth, requireEntityAccess('entity_
   const statusDist = {};
   for (const b of bills) { const s = String(pick(b, 'approvalStatus', 'status') || 'null'); statusDist[s] = (statusDist[s] || 0) + 1; }
   const sample = [];
-  const N = Math.min(20, bills.length);
+  const ordered = [...bills].sort((a, b) => (String(pick(a, 'approvalStatus', 'status') || '').toUpperCase() === 'APPROVED' ? 1 : 0) - (String(pick(b, 'approvalStatus', 'status') || '').toUpperCase() === 'APPROVED' ? 1 : 0));
+  const N = Math.min(20, ordered.length);
   for (let i = 0; i < N; i++) {
-    const billId = String(pick(bills[i], 'id') || '');
-    let detail = bills[i];
+    const billId = String(pick(ordered[i], 'id') || '');
+    let detail = ordered[i];
     try { detail = await billcomGetById({ ...listArgs, resourcePath: '/bills', id: billId, extraParams: { billApprovals: 'true' } }); } catch (e) {}
     const aps = Array.isArray(detail && detail.approvers) ? detail.approvers : [];
     const statuses = aps.map(a => String((a && a.status) || '?').toUpperCase());
@@ -5790,11 +5803,11 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   console.log('[billcom sync] entity ' + entityId + ': ' + payments.length + ' payments fetched, processing (max ' + maxBills + ')');
 
   const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
-  // Bills: APPROVED-ONLY. AP is recorded on approval, so a bill syncs only once it
-  // is fully APPROVED — ASSIGNED/awaiting-approval bills are held until they clear,
-  // and DENIED bills never post. Supersedes the earlier "approvals not required"
-  // behavior (CLA, 7/2026). Approval DATE gating happens per-bill below.
-  const isBillEligible = (bill) => String(pick(bill, 'approvalStatus', 'status') || '').toUpperCase() === 'APPROVED';
+  // Bills: ONE APPROVAL SUFFICES. A bill syncs once at least one approver has
+  // approved (Banyan policy, 8/2026) - it need not clear every approver or layer.
+  // The pre-filter passes APPROVED/APPROVING/ASSIGNED bills to the per-approver
+  // check below; DENIED/unstarted are held. Period is by GL posting date.
+  const isBillEligible = (bill) => ['APPROVED', 'APPROVING', 'ASSIGNED'].includes(String(pick(bill, 'approvalStatus', 'status') || '').toUpperCase());
   // Payments: only process if actually disbursed (or scheduled to be).
   const isPaymentEligible = (pay) => {
     const s = String(pick(pay, 'paymentStatus', 'status') || '').toUpperCase();
@@ -5903,15 +5916,15 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     const billNumber = pick(detail, 'invoiceNumber', 'invoice_number') || pick(pick(detail, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || billId;
     const lineItems = pick(detail, 'lineItems', 'line_items', 'billLineItems') || [];
 
-    // Authoritative approval gate: every approver in EVERY layer must have approved
-    // (Banyan/CLA policy, 8/2026 — two approval layers). The list-level
-    // isBillEligible check above is a cheap pre-filter on the bill's overall status;
-    // this is the real gate, run on the detail object where the per-approver list is
-    // populated (billApprovals=true). Held bills are skipped, NOT errored, and are
-    // NOT persisted as a permanent skip — they should sync later once fully approved.
-    if (!allApproversApproved(detail)) {
+    // Authoritative approval gate: AT LEAST ONE approver must have approved (Banyan
+    // policy, 8/2026 - a single approval is sufficient; a bill need not clear every
+    // approver or layer). The list-level isBillEligible check above is a cheap
+    // pre-filter; this is the real gate, run on the detail object where the
+    // per-approver list is populated (billApprovals=true). Held bills are skipped,
+    // NOT errored, and NOT persisted - they should sync once an approval lands.
+    if (!anyApproverApproved(detail)) {
       result.bills.skipped++;
-      result.bills.details.push({ id: billId, status: 'skip', reason: 'awaiting approval (not all approvers approved)' });
+      result.bills.details.push({ id: billId, status: 'skip', reason: 'awaiting approval (no approver has approved yet)' });
       continue;
     }
 
