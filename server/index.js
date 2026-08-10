@@ -5727,9 +5727,11 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // invoiceNumber|amount fallback. Best-effort: if v2 is unavailable, fall back to
   // invoice date (prior behavior). Only glPostingDate >= windowFrom is fetched,
   // which covers every bill that could pass the cutoff.
-  // EXCEPTION: CLRF (County Line Rail Fund, entity 40) posts by INVOICE DATE, not
-  // the GL posting date. Every other Bill.com entity uses the GL posting date.
-  const INVOICE_DATE_ENTITIES = new Set([40]);
+  // EXCEPTION: these entities post by INVOICE DATE, not the GL posting date:
+  //   40 = CLRF (County Line Rail Fund); 36 = Turnkey Rail (on CloudLedger from
+  //   inception, no Intacct cutover, and GL posting date is only spottily set).
+  // Every other Bill.com entity uses the GL posting date.
+  const INVOICE_DATE_ENTITIES = new Set([40, 36]);
   const useGlPosting = !INVOICE_DATE_ENTITIES.has(entityId);
   let glMap = { byId: new Map(), byIdent: new Map(), identKey: (n, a) => String(n == null ? '' : n).trim() + '|' + (a == null ? '' : Number(a).toFixed(2)) };
   if (useGlPosting) {
@@ -5742,7 +5744,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       console.log('[billcom sync] entity ' + entityId + ': v2 glPostingDate map built (' + v2bills.length + ' bills)');
     } catch (e) { console.log('[billcom sync] entity ' + entityId + ': v2 glPostingDate unavailable, using invoice date: ' + e.message); }
   } else {
-    console.log('[billcom sync] entity ' + entityId + ': CLRF posts by invoice date (GL posting date not used)');
+    console.log('[billcom sync] entity ' + entityId + ': posts by invoice date (GL posting date not used)');
   }
   const glPostingFor = (bill) => {
     const id = String((bill && bill.id) || '');
