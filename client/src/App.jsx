@@ -3725,12 +3725,38 @@ function BalanceSheet({entityId,entityName,asOf,setAsOf,canEdit=true}){
     {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillAcct.from} to={drillAcct.to} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
     </div>);}
 
+// ── Income Statement date-range windows (period P&L), all anchored to the period-end ──
+//   ytd     = Jan 1 of the period-end's year → period end (default).
+//   month   = the full calendar month BEFORE the period-end's month (6/30 → May 2026).
+//   quarter = the full calendar quarter BEFORE the period-end's quarter (6/30 → Q1 2026).
+//   year    = the prior full calendar year (2026 → 2025).
+//   custom  = the user-entered [from,to] (to defaults to the period end).
+function isPnlWindow(filter,anchor,cf,ct){
+  const a=_mkDate(anchor),Y=a.getFullYear(),M=a.getMonth();
+  if(filter==='ytd')return{from:Y+'-01-01',to:anchor};
+  if(filter==='month')return{from:_ymd(new Date(Y,M-1,1)),to:_ymd(new Date(Y,M,0))};
+  if(filter==='quarter'){const ps=(Math.floor(M/3)-1)*3;return{from:_ymd(new Date(Y,ps,1)),to:_ymd(new Date(Y,ps+3,0))};}
+  if(filter==='year')return{from:(Y-1)+'-01-01',to:(Y-1)+'-12-31'};
+  if(filter==='custom')return{from:(/^\d{4}-\d{2}-\d{2}$/.test(cf)?cf:null),to:(/^\d{4}-\d{2}-\d{2}$/.test(ct)?ct:anchor)};
+  return{from:null,to:anchor};
+}
+// Prior comparative window: YTD compares to the SAME dates a year earlier (prior-year
+// YTD); everything else uses the previous equivalent calendar period.
+function isPnlPrior(filter,win,anchor){
+  if(!win||!win.from)return null;
+  if(filter==='ytd'){const a=_mkDate(anchor);return{label:'Prev',from:(a.getFullYear()-1)+'-01-01',to:_ymd(new Date(a.getFullYear()-1,a.getMonth(),a.getDate()))};}
+  return rptPriorWindow(win);
+}
+const IS_DATE_FILTERS=[['ytd','Year to Date'],['month','Last Month'],['quarter','Last Quarter'],['year','Last Year'],['custom','Custom']];
 function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true}){
   const[drillAcct,setDrillAcct]=useState(null);const[rk,setRk]=useState(0);
-  const[dateFilter,setDateFilter]=useState('all');const[colMode,setColMode]=useState('total');const[compare,setCompare]=useState(false);
+  const[dateFilter,setDateFilter]=useState('ytd');const[compare,setCompare]=useState(false);
+  const[customFrom,setCustomFrom]=useState('');const[customTo,setCustomTo]=useState('');
+  const colMode='total';// Income Statement is always a single period column (Columns option removed).
   const anchor=/^\d{4}-\d{2}-\d{2}$/.test(to)?to:today();
-  const periods=useMemo(()=>rptPeriods(dateFilter,colMode,anchor),[dateFilter,colMode,anchor]);
-  const prior=(compare&&colMode==='total'&&periods[0]&&periods[0].from)?rptPriorWindow(periods[0]):null;
+  const win=useMemo(()=>isPnlWindow(dateFilter,anchor,customFrom,customTo),[dateFilter,anchor,customFrom,customTo]);
+  const periods=useMemo(()=>[{label:'Total',from:win.from,to:win.to}],[win.from,win.to]);
+  const prior=compare?isPnlPrior(dateFilter,periods[0],anchor):null;
   const cols=useMemo(()=>prior?[prior,...periods]:periods,[JSON.stringify(prior),JSON.stringify(periods)]);
   // Column reorder (Liting #2): `colOrder` holds display order as original-column
   // indices into `cols`. Drag a period-column header to rearrange. Resets whenever
@@ -3768,7 +3794,11 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
   // dates ("For the Quarters Ended 6/30/26 and 3/31/26"); other column modes keep
   // the range + column-mode label.
   const dispCols=ord.map(oi=>cols[oi]);
-  const subtitle=colMode==='total'?endedHeading(dispCols,dateFilter,anchor):(rptRangeLabel(dateFilter,anchor)+' · '+RPT_COL_MODES.find(m=>m[0]===colMode)[1]);
+  const subtitle=(()=>{
+    if(dateFilter==='ytd')return 'Year to Date Ended '+fmtMDY(win.to)+(prior?' vs '+fmtMDY(prior.to):'');
+    if(dateFilter==='custom')return win.from?('For the Period '+fmtMDY(win.from)+' – '+fmtMDY(win.to)+(prior?' vs '+fmtMDY(prior.from)+' – '+fmtMDY(prior.to):'')):('Through '+fmtMDY(win.to));
+    return endedHeading(dispCols,dateFilter,anchor);
+  })();
   const doExport=()=>{
     // 0-based column index -> A1 letter (B, C, … AA, …).
     const colL=n=>{let s='';n=n+1;while(n>0){const m=(n-1)%26;s=String.fromCharCode(65+m)+s;n=Math.floor((n-1)/26);}return s;};
@@ -3806,9 +3836,12 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginBottom:16,flexWrap:'wrap',gap:10}}>
     <div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
       <div><label style={S.label}>Period end</label><input style={S.inputSm} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
-      <ReportControls dateFilter={dateFilter} setDateFilter={setDateFilter} colMode={colMode} setColMode={setColMode} compare={compare} setCompare={setCompare}/>
+      <div><label style={S.label}>Date range</label><select style={S.inputSm} value={dateFilter} onChange={e=>setDateFilter(e.target.value)}>{IS_DATE_FILTERS.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div>
+      {dateFilter==='custom'&&<><div><label style={S.label}>From</label><input style={S.inputSm} type="date" value={customFrom} onChange={e=>setCustomFrom(e.target.value)}/></div>
+      <div><label style={S.label}>To</label><input style={S.inputSm} type="date" value={customTo} onChange={e=>setCustomTo(e.target.value)}/></div></>}
+      <div><label style={S.label}>Compare</label><label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.textMuted,height:34}} title="Adds a prior-period column with $ and % change"><input type="checkbox" checked={compare} onChange={e=>setCompare(e.target.checked)}/> Prev period ($ / %)</label></div>
     </div>
-    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='is' currentConfig={{to,dateFilter,colMode,compare}} onApply={(c)=>{if(c.to)setTo(c.to);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExport}>Export Excel</button></div></div>
+    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='is' currentConfig={{to,dateFilter,compare,customFrom,customTo}} onApply={(c)=>{if(c.to)setTo(c.to);if(c.dateFilter)setDateFilter(c.dateFilter);if(typeof c.compare==='boolean')setCompare(c.compare);setCustomFrom(c.customFrom||'');setCustomTo(c.customTo||'');}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExport}>Export Excel</button></div></div>
     <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Income Statement</div><div style={{fontSize:13,color:T.textMuted}}>{subtitle}</div></div>
     <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520,margin:'0 auto'}}><thead><tr><th style={S.th}>Account</th>{ord.map((oi,pos)=><th key={oi} draggable onDragStart={()=>{dragFrom.current=pos;}} onDragOver={e=>e.preventDefault()} onDrop={()=>{if(dragFrom.current!=null&&dragFrom.current!==pos)moveCol(dragFrom.current,pos);dragFrom.current=null;}} style={{...S.thR,cursor:cols.length>1?'grab':'default',userSelect:'none'}} title={cols.length>1?'Drag to reorder columns':undefined}>{colHead(cols[oi],oi)}</th>)}{prior&&<><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}</tr></thead><tbody>
       <Sec title="Revenue" items={rev}/>
