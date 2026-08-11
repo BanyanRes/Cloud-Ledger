@@ -3774,10 +3774,21 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
     const colL=n=>{let s='';n=n+1;while(n>0){const m=(n-1)%26;s=String.fromCharCode(65+m)+s;n=Math.floor((n-1)/26);}return s;};
     const hdr=['Account',...ord.map(oi=>colHead(cols[oi],oi)),...(prior?['$ Change','% Change']:[])];
     const d=[[entityName||'Income Statement'],['Income Statement'],[subtitle],[],hdr];
-    // Formula cells (Liting #3): subtotal rows use live SUM(); Net Income references the
-    // section-total cells. Values are also written as cached fallbacks by exportToExcel.
+    // Formula cells (Liting #3): EVERY calculated cell is a live formula, not just
+    // subtotals — subtotal rows use SUM(); Net Income references the section totals;
+    // and the $ Change / % Change columns are formulas on every row (detail, subtotal,
+    // Net Income). Only the individual account amounts stay as values, since they are
+    // the source figures with nothing to compute from. Values are also written as
+    // cached fallbacks by exportToExcel so the sheet reads correctly before recalc.
     const formulas=[];
-    const push=(label,getter)=>{const row=[label,...ord.map(oi=>getter(oi))];if(prior)row.push(getter(curI)-getter(priI),rptPct(getter(curI),getter(priI)));d.push(row);return d.length-1;};
+    const push=(label,getter)=>{
+      const row=[label,...ord.map(oi=>getter(oi))];
+      if(prior)row.push(getter(curI)-getter(priI),rptPct(getter(curI),getter(priI)));
+      d.push(row);const r=d.length-1;
+      if(prior){const rr=r+1,curCol=colL(1+ord.indexOf(curI)),priCol=colL(1+ord.indexOf(priI)),chgC=1+ord.length,pctC=2+ord.length;
+        formulas.push({r,c:chgC,f:curCol+rr+'-'+priCol+rr});
+        formulas.push({r,c:pctC,f:'IF(ABS('+priCol+rr+')<0.005,"",('+curCol+rr+'-'+priCol+rr+')/ABS('+priCol+rr+')*100)'});}
+      return r;};
     const secRow={};
     const sections=[['Revenue',rev,1],['Cost of Goods Sold',cogs,-1],['Operating Expenses',opex,-1],['Other Expenses',other,-1]];
     sections.forEach(([t,items])=>{if(!items.length)return;
