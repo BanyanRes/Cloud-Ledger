@@ -1236,6 +1236,17 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   flattenSharedFormulas(priorWs);
   flattenSharedFormulas(curWs);
 
+  // 4a2. Braker-only report fixes (no-op on every other property). Braker's
+  //      Budget-to-Actual account names keep a trailing space that the current
+  //      log's derived budget codes don't, so its "payment this period" SUMIFs
+  //      miss the current invoices; and its manually-maintained "Braker Dev Fee"
+  //      tab pins the prior cumulative to a fixed Prior-Log cell that drifts as
+  //      the log grows. maintainBrakerReport makes the current-period match
+  //      space-tolerant and re-points the dev-fee prior cumulative at the
+  //      self-updating B2A dev-fee total. Detected by the tab's %-of-completion
+  //      layout, so it only ever touches the Braker workbook.
+  try { maintainBrakerReport({ workbook, b2a, priorWs, curWs }); } catch (e) { /* best-effort; never block the roll-forward */ }
+
   // 4b. Roll the B2A contingency columns forward: this period's "Current"
   //     (col F) folds into next period's "Previous" (col E), then F clears to 0.
   //     Subtotal/total rows are left to recompute from the updated data cells.
@@ -1817,7 +1828,148 @@ function repointAbsoluteRefs({ priorWs, curWs, b2a, devFee, landmarks }) {
   }
 }
 
+// ----------------------------------------------------------------------------
+// Braker-only report fixes. Two long-standing issues are specific to the Braker
+// workbook and are fixed here without affecting any other property:
+//
+//  1. "Payment this period" reads 0 for real invoices. Braker's Budget-to-Actual
+//     account names carry a trailing space ("Permits and Fees "), and so does its
+//     Prior Invoice Log, but the current period's Budget Code is derived and
+//     trimmed ("Permits and Fees"). SUMIF is exact, so the current-period column
+//     misses those invoices. Fix: wrap the current-period SUMIF criteria in
+//     TRIM() so it matches regardless of the trailing space. The prior-period
+//     column (SUMIF over the Prior Invoice Log) is left ALONE — its spaced label
+//     already matches the spaced Prior Log.
+//
+//  2. Development fee miscalculates. Braker's Dev Fee tab is maintained by hand
+//     and pins its "Less: Previous Cumulative Dev Fee" to a FIXED Prior-Log cell
+//     (e.g. 'Prior Invoice Log'!H857). As the log grows each month that cell no
+//     longer points at the dev-fee total, so the fee drifts. Fix: re-point it at
+//     the Budget-to-Actual dev-fee row's PRIOR column — a self-updating SUMIF —
+//     so the prior cumulative is always correct.
+//
+// Detected by the Dev Fee tab's %-of-completion layout (a bare reference to the
+// B2A "% complete" cell in column J) plus a "previous cumulative" label — a shape
+// unique to Braker — so this is a no-op on every other property. Idempotent: the
+// TRIM wrap and the re-point both skip cells already in the fixed form.
+
+// Split a call's argument list into top-level, comma-separated args (paren-aware).
+function splitTopLevelArgs(s) {
+  const out = []; let depth = 0, cur = '';
+  for (const ch of s) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    if (ch === ',' && depth === 0) { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+// If `formula` is a SUMIF over the Current Invoice Log whose criteria is a bare
+// cell reference, wrap that criteria in TRIM() and return the rewritten formula;
+// otherwise return null. Literal-string criteria (e.g. "Working Capital") and
+// already-TRIM'd criteria are left untouched (returns null).
+const _CRIT_CELLREF = /^[+-]?\s*('[^']+'!)?\$?[A-Za-z]{1,3}\$?\d+\s*$/;
+function trimCurrentSumifCriteria(formula) {
+  if (!formula) return null;
+  const i = formula.search(/SUMIF\s*\(/i);
+  if (i < 0) return null;
+  const open = formula.indexOf('(', i);
+  let depth = 0, end = -1;
+  for (let k = open; k < formula.length; k++) {
+    if (formula[k] === '(') depth++;
+    else if (formula[k] === ')') { depth--; if (depth === 0) { end = k; break; } }
+  }
+  if (end < 0) return null;
+  const args = splitTopLevelArgs(formula.slice(open + 1, end));
+  if (args.length < 3) return null;
+  if (!/current invoice log/i.test(args[0])) return null;   // only the this-period SUMIF (not the Prior-Log one)
+  const crit = args[1].trim();
+  if (/^TRIM\s*\(/i.test(crit)) return null;                // already wrapped -> idempotent
+  if (!_CRIT_CELLREF.test(crit)) return null;               // literal criteria -> leave as-is
+  args[1] = 'TRIM(' + crit + ')';
+  return formula.slice(0, open + 1) + args.join(',') + formula.slice(end);
+}
+
+// Locate Braker's Dev Fee tab by its %-of-completion layout: a Dev-Fee-named
+// sheet with a cell whose whole formula is a bare reference to a B2A column-J
+// cell (the "% complete"), and a "previous cumulative" label one column left of
+// that value column. Returns { ws, priorCell } or null.
+const _PCT_REF = /^[+=]?\s*'?budget to actual'?\s*!\s*\$?J\$?\d+\s*$/i;
+function findBrakerDevFeeTab(workbook) {
+  for (const w of workbook.worksheets) {
+    if (!/dev\s*fee/i.test(w.name)) continue;
+    let pctCell = null;
+    w.eachRow({ includeEmpty: false }, (row) => row.eachCell({ includeEmpty: false }, (c) => {
+      const f = cellFormula(c);
+      if (f && _PCT_REF.test(f.trim())) pctCell = c;
+    }));
+    if (!pctCell) continue;
+    const valCol = pctCell.col;                     // Dev-Fee values live in this column (D on Braker)
+    const last = Math.max(w.rowCount || 0, w.actualRowCount || 0);
+    let priorRow = null;
+    for (let r = 1; r <= last; r++) {
+      const label = cellStr(w.getCell(r, valCol - 1));
+      if (/(previous|prior).*(cumulative|total).*dev|less:\s*previous/i.test(label)) { priorRow = r; break; }
+    }
+    if (priorRow == null) continue;
+    return { ws: w, priorCell: w.getCell(priorRow, valCol) };
+  }
+  return null;
+}
+
+function maintainBrakerReport({ workbook, b2a, priorWs, curWs }) {
+  if (!b2a) return;
+  // Strict "Braker only" gate: the entity tags its tabs with the property name
+  // ("Braker Dev Fee", "Braker Land Closing JE", …). Never touch another
+  // property's workbook even if some tab coincidentally matched the layout probe.
+  if (!workbook.worksheets.some(w => /braker/i.test(w.name))) return;
+  const brk = findBrakerDevFeeTab(workbook);
+  if (!brk) return;                                 // not a Braker workbook -> no-op
+
+  // 1. Make the "payment this period" SUMIFs space-tolerant.
+  b2a.eachRow({ includeEmpty: false }, (row) => row.eachCell({ includeEmpty: false }, (c) => {
+    const nf = trimCurrentSumifCriteria(cellFormula(c));
+    if (nf) c.value = { formula: nf };              // drop the cached result -> recomputes on open
+  }));
+
+  // 2. Re-point the Dev Fee tab's prior cumulative at the B2A dev-fee row's
+  //    PRIOR column (a self-updating SUMIF over the Prior Invoice Log).
+  let devRow = null, priorCol = null, devLabel = null;
+  const bl = Math.max(b2a.rowCount || 0, b2a.actualRowCount || 0);
+  for (let r = 1; r <= bl && devRow == null; r++) {
+    const label = cellStr(b2a.getCell(r, 2)).trim();
+    if (!/dev\w*\s*(mgmt|management)?\s*fee/i.test(label)) continue;
+    for (let c = 1; c <= 26; c++) {
+      const f = cellFormula(b2a.getCell(r, c));
+      if (f && /SUMIF/i.test(f) && /prior invoice log/i.test(f)) { devRow = r; priorCol = c; devLabel = label; break; }
+    }
+  }
+  if (devRow == null) return;
+
+  const pf = cellFormula(brk.priorCell);
+  const barePrior = /^[+-]?\s*'?prior invoice log'?\s*!\s*\$?[A-Za-z]{1,3}\$?\d+\s*$/i;
+  if (!pf || !barePrior.test(pf)) return;           // already self-updating (or not the drifting kind) -> leave
+
+  // Seed the cached result = prior-log total of the dev-fee lines (matched by the
+  // Budget Code column against the B2A dev-fee account name) so the tab shows a
+  // value before Excel recalculates.
+  let seed = 0;
+  if (priorWs && COL.budgetcode != null && COL.amount != null && devLabel) {
+    const pl = Math.max(priorWs.rowCount || 0, priorWs.actualRowCount || 0);
+    for (let r = 1; r <= pl; r++) {
+      if (cellStr(priorWs.getCell(r, COL.budgetcode)).trim().toLowerCase() !== devLabel.toLowerCase()) continue;
+      const a = cellNum(priorWs.getCell(r, COL.amount));
+      if (a != null) seed += a;
+    }
+  }
+  const ref = `-'${b2a.name}'!${colLetter(priorCol)}${devRow}`;
+  brk.priorCell.value = seed ? { formula: ref, result: -Math.round(seed * 100) / 100 } : { formula: ref };
+}
+
 module.exports = {
   rollForward, parseLogGroups, currentRowsByCode, rebuildPriorLog,
   replaceCurrentLog, repointAbsoluteRefs, findRowByLabel, findSheet,
+  maintainBrakerReport, trimCurrentSumifCriteria, findBrakerDevFeeTab,
 };
