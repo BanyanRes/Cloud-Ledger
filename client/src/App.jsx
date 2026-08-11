@@ -98,6 +98,15 @@ let _activeEntityFileTag = '';
 const CLASS_DIM_LABELS = { TURNKEYR: 'Pay Application' };
 const classTerm = () => CLASS_DIM_LABELS[_activeEntityCode] || 'Class';
 function exportToExcel(data, fn, opts) { opts = opts || {}; const moneyFmt = opts.numFmt || '#,##0.00;(#,##0.00)'; const plain = new Set(opts.plainCols || []); const ws = XLSX.utils.aoa_to_sheet(data); const range = XLSX.utils.decode_range(ws['!ref']); for (let R = range.s.r; R <= range.e.r; R++) { for (let C = range.s.c; C <= range.e.c; C++) { if (plain.has(C)) continue; const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })]; if (cell && cell.t === 'n') cell.z = moneyFmt; } } const fmtLen = v => (typeof v === 'number' ? v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).length : String(v == null ? '' : v).length); const nCols = data.reduce((m, r) => Math.max(m, (r ? r.length : 0)), 0); const colW = []; for (let c = 0; c < nCols; c++) { let w = 8; for (const r of data) { if (r && r[c] != null && r[c] !== '') w = Math.max(w, fmtLen(r[c])); } colW.push({ wch: Math.min(w + 2, 60) }); } ws['!cols'] = colW; if (opts.formulas) { for (const g of (opts.formulas || [])) { if (!g || !g.f) continue; const addr = XLSX.utils.encode_cell({ r: g.r, c: g.c }); const prev = ws[addr]; const cell = { t: 'n', f: g.f, z: moneyFmt }; if (prev && prev.v != null && !isNaN(prev.v)) cell.v = prev.v; ws[addr] = cell; } } const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); const _pfx = String(_activeEntityFileTag || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, ''); const _out = (_pfx && fn.indexOf(_pfx + '_') !== 0) ? (_pfx + '_' + fn) : fn; XLSX.writeFile(wb, _out); }
+// ── Excel formula helpers (used by every report's Export Excel) ──
+// 0-based column index → A1 letter (0→A, 1→B, … 26→AA).
+const XLC = n => { let s = ''; n = n + 1; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+// Push SUM() formulas onto total row `tr` (0-based) for each 0-based column in
+// `dcols`, summing detail rows `first..last` (0-based, inclusive). No-op if empty.
+const sumCols = (F, tr, dcols, first, last) => { if (last < first || tr == null) return; for (const c of dcols) F.push({ r: tr, c, f: 'SUM(' + XLC(c) + (first + 1) + ':' + XLC(c) + (last + 1) + ')' }); };
+// Push SUM() formulas that add a specific, explicit set of rows (e.g. a grand total
+// that sums subtotal rows rather than a contiguous block). `rows` = 0-based row idxs.
+const sumRows = (F, tr, dcols, rows) => { if (!rows || !rows.length || tr == null) return; for (const c of dcols) { const L = XLC(c); F.push({ r: tr, c, f: rows.map(r => L + (r + 1)).join('+') }); } };
 const BLANK_JE = () => ({date:today(),memo:'',lines:[{account_code:'',debit:'',credit:'',description:''},{account_code:'',debit:'',credit:'',description:''}]});
 const SIDEBAR_KEY = 'cl_sidebar';
 
@@ -2666,21 +2675,27 @@ function ArAgingReport({entityId,entityName}){
     if(!data)return;
     const head=['Customer','Invoice #','Invoice date','Due date','Days past due','Current','1-30','31-60','61-90','90+','GL','Amount'];
     const d=[[entityName||'A/R Aging Detail'],['A/R Aging Detail — built from GL '+arLabel],['As of '+data.as_of],[],head];
+    const F=[];const custTotRows=[];
     data.rows.forEach(r=>{
+      const cFst=d.length;
       data.detail.filter(x=>x.customer===r.customer).forEach(x=>d.push([r.customer,x.invoice_num,x.invoice_date,x.due_date,x.days_past_due,
         x.bucket==='current'?x.open:'',x.bucket==='d1_30'?x.open:'',x.bucket==='d31_60'?x.open:'',x.bucket==='d61_90'?x.open:'',x.bucket==='d90_plus'?x.open:'','',x.open]));
-      d.push(['Total '+r.customer,'','','','',r.current,r.d1_30,r.d31_60,r.d61_90,r.d90_plus,'',r.total]);
+      const cLst=d.length-1;const cT=d.length;d.push(['Total '+r.customer,'','','','',r.current,r.d1_30,r.d31_60,r.d61_90,r.d90_plus,'',r.total]);
+      sumCols(F,cT,[5,6,7,8,9,11],cFst,cLst);custTotRows.push(cT);
     });
+    let glTotRow=null;
     if((data.gl_rows||[]).length){
       d.push([]);d.push(['GL ENTRIES (imported / manual — not aged)']);
-      data.gl_rows.forEach(r=>d.push([r.memo||'GL detail import',jeNum(r.entry_num),r.date,'','','','','','','',r.amount,r.amount]));
-      d.push(['Total GL Entries','','','','','','','','','',data.gl_total,data.gl_total]);
+      const gFst=d.length;data.gl_rows.forEach(r=>d.push([r.memo||'GL detail import',jeNum(r.entry_num),r.date,'','','','','','','',r.amount,r.amount]));const gLst=d.length-1;
+      glTotRow=d.length;d.push(['Total GL Entries','','','','','','','','','',data.gl_total,data.gl_total]);
+      sumCols(F,glTotRow,[10,11],gFst,gLst);
     }
     const t=data.totals;
-    d.push(['TOTAL','','','','',t.current,t.d1_30,t.d31_60,t.d61_90,t.d90_plus,t.gl,t.total]);
+    const totRow=d.length;d.push(['TOTAL','','','','',t.current,t.d1_30,t.d31_60,t.d61_90,t.d90_plus,t.gl,t.total]);
+    sumRows(F,totRow,[5,6,7,8,9,10,11],[...custTotRows,...(glTotRow!=null?[glTotRow]:[])]);
     d.push(['Reconciliation vs GL '+arLabel+' ('+fmt(data.gl_ar_balance)+')','','','','','','','','','','',data.recon_diff]);
     if(Number(data.opening_residual||0)>=0.005)d.push(['Of which not itemized on the subledger','','','','','','','','','','',data.opening_residual]);
-    exportToExcel(d,'AR_Aging_'+data.as_of+'.xlsx',{plainCols:[4]});
+    exportToExcel(d,'AR_Aging_'+data.as_of+'.xlsx',{plainCols:[4],formulas:F});
   };
   const hasGL=data&&data.gl_rows&&data.gl_rows.length>0;
   const hasAnything=data&&(data.rows.length>0||hasGL);
@@ -2811,7 +2826,7 @@ function GeneralLedger({entityId,entityName,dimsEnabled,from,setFrom,to,setTo,fi
   useEffect(()=>{api.getProjects(entityId).then(setProjects).catch(()=>setProjects([]));},[entityId]);
   const filtered=accounts.filter(a=>!filter||a.code===filter).sort((a,b)=>a.code.localeCompare(b.code));
   const entryAtts={};entries.forEach(e=>{if(e.attachments?.length>0)entryAtts[e.id]=e.attachments;});
-  const doExport=()=>{const rows=[[entityName||'General Ledger'],['General Ledger'],['Period: '+(from||'Begin')+' to '+(to||today())],[]];filtered.forEach(acct=>{const txns=[];entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code&&(!projFilter||Number(l.project_id)===Number(projFilter)))txns.push({date:e.date,je:'JE-'+String(e.entry_num).padStart(4,'0'),memo:e.memo,debit:l.debit,credit:l.credit});});});if(txns.length===0&&!filter)return;rows.push([acctLabel(acct.code,acct.name)]);rows.push(['Date','JE','Memo','Debit','Credit','Balance']);const isDr=acct.type==='Asset'||acct.type==='Expense';let run=from?(begBals[acct.code]||0):0;if(from)rows.push(['','','Beginning Balance','','',run]);txns.sort((a,b)=>a.date.localeCompare(b.date)).forEach(t=>{run+=isDr?(t.debit-t.credit):(t.credit-t.debit);rows.push([t.date,t.je,t.memo,t.debit||'',t.credit||'',run]);});rows.push([]);});exportToExcel(rows,'GL.xlsx');};
+  const doExport=()=>{const rows=[[entityName||'General Ledger'],['General Ledger'],['Period: '+(from||'Begin')+' to '+(to||today())],[]];const F=[];filtered.forEach(acct=>{const txns=[];entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code&&(!projFilter||Number(l.project_id)===Number(projFilter)))txns.push({date:e.date,je:'JE-'+String(e.entry_num).padStart(4,'0'),memo:e.memo,debit:l.debit,credit:l.credit});});});if(txns.length===0&&!filter)return;rows.push([acctLabel(acct.code,acct.name)]);rows.push(['Date','JE','Memo','Debit','Credit','Balance']);const isDr=acct.type==='Asset'||acct.type==='Expense';let run=from?(begBals[acct.code]||0):0;let prevRow=null;if(from){rows.push(['','','Beginning Balance','','',run]);prevRow=rows.length-1;}txns.sort((a,b)=>a.date.localeCompare(b.date)).forEach(t=>{run+=isDr?(t.debit-t.credit):(t.credit-t.debit);rows.push([t.date,t.je,t.memo,t.debit||'',t.credit||'',run]);const r=rows.length-1,rr=r+1;const delta=isDr?('D'+rr+'-E'+rr):('E'+rr+'-D'+rr);F.push({r,c:5,f:prevRow!=null?('F'+(prevRow+1)+'+'+delta):delta});prevRow=r;});rows.push([]);});exportToExcel(rows,'GL.xlsx',{formulas:F});};
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}><div><div style={S.h1}>General Ledger</div>{entityName&&<div style={{fontSize:13,color:T.textMuted}}>{entityName}</div>}</div><button style={S.btnExport} onClick={doExport}>Export Excel</button></div><div style={S.sub}/>
     <div style={S.filterBar}><div><label style={S.label}>From</label><input style={S.inputSm} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
       <div><label style={S.label}>To</label><input style={S.inputSm} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
@@ -3262,9 +3277,11 @@ function WipSchedule({entityName,asOf,setAsOf}){
   const doExport=()=>{
     const d=[[entityName||'WIP Schedule'],['Work-in-Progress Schedule'],['As of '+validAsOf],[],
       ['Job #','Job Name','Contract','Revised Contract','Costs to Date','Est Cost to Complete','Est Total Cost','Est Gross Profit','% Complete','Earned Revenue','Billed to Date','Over/(Under) Billing']];
+    const first=d.length;
     rows.forEach(r=>d.push([r.project_code||r.turnkey_project_id,r.project_name||'',r.contract_amount,r.revised_contract,r.costs_to_date,r.estimated_cost_to_complete,r.estimated_total_cost,r.estimated_gross_profit,(r.percent_complete||0)/100,r.earned_revenue,r.billed_to_date,r.over_under_billing]));
-    if(tot){d.push([]);d.push(['','Total',tot.contract_amount,tot.revised_contract,tot.costs_to_date,tot.estimated_cost_to_complete,tot.estimated_total_cost,tot.estimated_gross_profit,'',tot.earned_revenue,tot.billed_to_date,tot.over_under_billing]);}
-    exportToExcel(d,'WIP_'+validAsOf+'.xlsx');
+    const last=d.length-1;const F=[];
+    if(tot){d.push([]);const tr=d.length;d.push(['','Total',tot.contract_amount,tot.revised_contract,tot.costs_to_date,tot.estimated_cost_to_complete,tot.estimated_total_cost,tot.estimated_gross_profit,'',tot.earned_revenue,tot.billed_to_date,tot.over_under_billing]);sumCols(F,tr,[2,3,4,5,6,7,9,10,11],first,last);}
+    exportToExcel(d,'WIP_'+validAsOf+'.xlsx',{formulas:F});
   };
   const numCell=(n)=><td style={S.tdR}>{fmt(n)}</td>;
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
@@ -3515,13 +3532,19 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   const doExportActivity=()=>{const lbl=scopeLabel?(' — '+scopeLabel):'';
     const d=[[entityName||'Trial Balance'],['Trial Balance'+lbl],['Beginning '+validFrom+' through Ending '+validAsOf],[],
       ['Code','Account','Type','Beginning Balance (on '+validFrom+')','Period Debits','Period Credits','Ending Balance (on '+validAsOf+')']];
+    const first=d.length;
     actRows.forEach(r=>d.push([r.code,r.name,r.type,rnd(r.beg)||'',r.dr||'',r.cr||'',rnd(r.end)||'']));
-    d.push([]);d.push(['','','Totals',rnd(actTot.beg),actTot.dr,actTot.cr,rnd(actTot.end)]);
-    exportToExcel(d,'TB_Activity'+(fnameTag?'_'+fnameTag:'')+'_'+validFrom+'_'+validAsOf+'.xlsx');};
+    const last=d.length-1;
+    d.push([]);const tr=d.length;d.push(['','','Totals',rnd(actTot.beg),actTot.dr,actTot.cr,rnd(actTot.end)]);
+    const F=[];sumCols(F,tr,[3,4,5,6],first,last);
+    exportToExcel(d,'TB_Activity'+(fnameTag?'_'+fnameTag:'')+'_'+validFrom+'_'+validAsOf+'.xlsx',{formulas:F});};
   const doExport=()=>{const lbl=scopeLabel?(' — '+scopeLabel):'';const hdr=['Code','Account','Type'];cols.forEach((c,i)=>{const h=colHead(c,i);hdr.push((h?h+' ':'')+'Debit',(h?h+' ':'')+'Credit');});const d=[[entityName||'Trial Balance'],['Trial Balance'+lbl],['As of '+anchor],[],hdr];
+    const first=d.length;
     rows.forEach(r=>{const row=[r.code,r.name,r.type];cols.forEach((c,i)=>{const x=drcr(r.code,i);row.push(x.dr||'',x.cr||'');});d.push(row);});
-    const tot=['','','Total'];cols.forEach((c,i)=>{tot.push(totDr(i),totCr(i));});d.push([]);d.push(tot);
-    exportToExcel(d,'TB'+(fnameTag?'_'+fnameTag:'')+'_'+anchor+'.xlsx');};
+    const last=d.length-1;
+    const tot=['','','Total'];cols.forEach((c,i)=>{tot.push(totDr(i),totCr(i));});d.push([]);const tr=d.length;d.push(tot);
+    const F=[],dcols=[];cols.forEach((c,i)=>{dcols.push(3+2*i,4+2*i);});sumCols(F,tr,dcols,first,last);
+    exportToExcel(d,'TB'+(fnameTag?'_'+fnameTag:'')+'_'+anchor+'.xlsx',{formulas:F});};
   const amtStyle={...S.tdR,cursor:'pointer'};
   // GL detail export (optionally scoped to the selected location and/or investor).
   // Pulls flat lines with running balance from /gl-detail through the as-of date;
@@ -3531,10 +3554,13 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
       const r=await api.getGLDetail(entityId,{to:validAsOf,...(locId?{location_id:locId}:{}),...(classId?{class_id:classId}:{}),...(projId?{project_id:projId}:{})});
       const lbl=scopeLabel?(' — '+scopeLabel):'';
       const d=[[entityName||'General Ledger'],['GL Detail'+lbl],['Through '+asOf],[],['Date','Entry #','Account','Account Name','Memo / Description','Project','Location',classTerm(),'Debit','Credit','Running Bal']];
+      const first=d.length;
       (r.lines||[]).forEach(l=>d.push([l.date,l.entry_num,l.account_code,l.account_name,l.description||l.memo||'',l.project_code&&l.project_code!==l.project_name?l.project_code:(l.project_name||''),l.location_name,l.class_name,l.debit||'',l.credit||'',l.running_balance]));
+      const last=d.length-1;
       d.push([]);d.push(['','','','','','','','','Total Dr','Total Cr','']);
-      d.push(['','','','','','','','',r.total_debit,r.total_credit,'']);
-      exportToExcel(d,'GL'+(fnameTag?'_'+fnameTag:'')+'_'+asOf+'.xlsx');
+      const tr=d.length;d.push(['','','','','','','','',r.total_debit,r.total_credit,'']);
+      const F=[];sumCols(F,tr,[8,9],first,last);
+      exportToExcel(d,'GL'+(fnameTag?'_'+fnameTag:'')+'_'+asOf+'.xlsx',{formulas:F});
     }catch(e){alert('GL export failed: '+e.message);}
   };
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
@@ -3625,10 +3651,12 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
   const matchQ=(l)=>{if(!q)return true;const s=q.toLowerCase();return (l.memo||'').toLowerCase().includes(s)||(l.offset||'').toLowerCase().includes(s)||(l.vendor||'').toLowerCase().includes(s)||('je-'+String(l.entry_num).padStart(4,'0')).includes(s)||(l.date||'').includes(s)||String(l.debit).includes(s)||String(l.credit).includes(s);};
   const doExport=()=>{const acctLabel=acct.code+' - '+acct.name;
     const d=[[entityName||'Account Detail'],[acctLabel],['Period: '+from+' to '+to],[],['Date','JE','Account',classTerm(),'Location','Memo','Offset Account','Vendor/Payee','Debit','Credit','Balance']];
-    d.push(['','','','','','Beginning Balance','','','','',begBal]);
-    let r=begBal;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),acctLabel,l.class_name||'',l.location_name||'',l.memo,l.offset||'',l.vendor||'',l.debit||'',l.credit||'',r]);});
-    d.push(['','','','','','Totals','','',totalDr,totalCr,r]);
-    exportToExcel(d,'GL_'+acct.code+'_'+to+'.xlsx');};
+    const F=[];
+    d.push(['','','','','','Beginning Balance','','','','',begBal]);let prevRow=d.length-1;const begRow=prevRow;
+    let r=begBal;const first=d.length;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),acctLabel,l.class_name||'',l.location_name||'',l.memo,l.offset||'',l.vendor||'',l.debit||'',l.credit||'',r]);const cur=d.length-1,rr=cur+1;const delta=isDr?('I'+rr+'-J'+rr):('J'+rr+'-I'+rr);F.push({r:cur,c:10,f:'K'+(prevRow+1)+'+'+delta});prevRow=cur;});const last=d.length-1;
+    const tr=d.length;d.push(['','','','','','Totals','','',totalDr,totalCr,r]);
+    sumCols(F,tr,[8,9],first,last);F.push({r:tr,c:10,f:'K'+(begRow+1)+'+'+(isDr?('I'+(tr+1)+'-J'+(tr+1)):('J'+(tr+1)+'-I'+(tr+1)))});
+    exportToExcel(d,'GL_'+acct.code+'_'+to+'.xlsx',{formulas:F});};
   return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,width:'min(1100px,96vw)',maxWidth:'98vw',height:'88vh',maxHeight:'96vh',minWidth:'min(680px,96vw)',minHeight:420,resize:'both',overflow:'hidden',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14,gap:16}}>
@@ -3703,11 +3731,17 @@ function BalanceSheet({entityId,entityName,asOf,setAsOf,canEdit=true}){
   const colHead=(c,i)=>prior&&i===0?'Prev':(c.label==='Total'?('As of '+anchor):c.label);
   const doExport=()=>{const hdr=['',...cols.map((c,i)=>colHead(c,i)),...(prior?['$ Change','% Change']:[])];
     const d=[[entityName||'Balance Sheet'],['Balance Sheet'],[],hdr];
-    const push=(label,getter)=>{const row=[label,...cols.map((c,i)=>getter(i))];if(prior)row.push(getter(curI)-getter(priI),rptPct(getter(curI),getter(priI)));d.push(row);};
-    d.push(['Assets']);assets.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));push('Total Assets',tA);
-    d.push(['Liabilities']);liabs.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));push('Total Liabilities',ci=>sumC(liabs,ci));
-    d.push(['Equity']);eq.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));push('  Net Income (current period)',niCol);push('Total Equity',tE);
-    push('Total Liabilities + Equity',tLE);exportToExcel(d,'BS_'+anchor+'.xlsx');};
+    const F=[];const nP=cols.length;const chgC=nP+1,pctC=nP+2;const pcols=cols.map((c,i)=>1+i);
+    // Every total is a live SUM(); Total L+E sums the two subtotal rows; $/%
+    // change columns are formulas on every row.
+    const push=(label,getter)=>{const row=[label,...cols.map((c,i)=>getter(i))];if(prior)row.push(getter(curI)-getter(priI),rptPct(getter(curI),getter(priI)));d.push(row);const r=d.length-1;
+      if(prior){const rr=r+1,cc=XLC(1+curI),pc=XLC(1+priI);F.push({r,c:chgC,f:cc+rr+'-'+pc+rr});F.push({r,c:pctC,f:'IF(ABS('+pc+rr+')<0.005,"",('+cc+rr+'-'+pc+rr+')/ABS('+pc+rr+')*100)'});}
+      return r;};
+    d.push(['Assets']);const aF=d.length;assets.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));const aL=d.length-1;const aT=push('Total Assets',tA);sumCols(F,aT,pcols,aF,aL);
+    d.push(['Liabilities']);const lF=d.length;liabs.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));const lL=d.length-1;const lT=push('Total Liabilities',ci=>sumC(liabs,ci));sumCols(F,lT,pcols,lF,lL);
+    d.push(['Equity']);const eF=d.length;eq.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));push('  Net Income (current period)',niCol);const eL=d.length-1;const eT=push('Total Equity',tE);sumCols(F,eT,pcols,eF,eL);
+    const leT=push('Total Liabilities + Equity',tLE);sumRows(F,leT,pcols,[lT,eT]);
+    exportToExcel(d,'BS_'+anchor+'.xlsx',{formulas:F});};
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginBottom:16,flexWrap:'wrap',gap:10}}>
     <div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
       <div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
@@ -3939,29 +3973,38 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
     const _projObj=projFilter?projects.find(p=>String(p.id)===String(projFilter)):null;
     const _projLabel=_projObj?(_projObj.code?_projObj.code+' — '+_projObj.name:_projObj.name):'';
     const d=[[entityName||'Custom Detail Report'],['Custom Detail Report'],...(_projLabel?[['Project: '+_projLabel]]:[]),['Period: '+(from||'Begin')+' to '+(to||today())],[]];
+    const F=[];// account subtotals SUM detail rows; group totals SUM account subtotals; PERIOD ACTIVITY SUMs group totals.
     if(begRows.length>0){
       d.push(['Beginning Balances — Balance Sheet accounts as of '+from]);
       d.push(['','Account','','','','','Balance']);
-      begRows.forEach(b=>d.push(['',b.code+' '+b.name,'','','','',b.balance]));
-      d.push(['','','','','','Total Beginning Balance',begTotal]);d.push([]);
+      const bF=d.length;begRows.forEach(b=>d.push(['',b.code+' '+b.name,'','','','',b.balance]));const bL=d.length-1;
+      const bT=d.length;d.push(['','','','','','Total Beginning Balance',begTotal]);d.push([]);
+      sumCols(F,bT,[6],bF,bL);
     }
     const amtHdr=cols.map(c=>c.label);const cmpHdr=compare?['Prev Period','$ Change','% Change']:[];
     const pctN=(cur,pri)=>pri!==0?+(((cur-pri)/Math.abs(pri))*100).toFixed(1):'';
+    const pcols=[];for(let k=0;k<cols.length;k++)pcols.push(4+k);if(showTotal)pcols.push(4+cols.length);
+    const groupTotRows=[];
     groups.forEach(([g,lines])=>{
       if(groupBy!=='none')d.push([g]);
       d.push(['Account','Date','JE','Description',...amtHdr,...(showTotal?['Total']:[]),...cmpHdr]);
       const _byA=[];const _im=new Map();lines.forEach(l=>{const k=l.account_code;if(!_im.has(k)){_im.set(k,_byA.length);_byA.push([k,l.account_name,[]]);}_byA[_im.get(k)][2].push(l);});
+      const acctTotRows=[];
       _byA.forEach(([acode,aname,alines])=>{
+        const aF=d.length;
         alines.forEach(l=>{const a=amt(l);const ci=colIdxOf(l.date);const cells=cols.map((c,k)=>(colMode==='total'||k===ci)?a:'');d.push([l.account_code+' '+l.account_name,l.date,'JE-'+String(l.entry_num).padStart(4,'0'),l.description||l.memo||'',...cells,...(showTotal?[a]:[]),...(compare?['','','']:[])]);});
-        const as=sumByCol(alines);d.push(['Total '+acode+' '+aname,'','','',...as.arr,...(showTotal?[as.tot]:[]),...(compare?['','','']:[])]);
+        const aL=d.length-1;const as=sumByCol(alines);const aT=d.length;d.push(['Total '+acode+' '+aname,'','','',...as.arr,...(showTotal?[as.tot]:[]),...(compare?['','','']:[])]);
+        sumCols(F,aT,pcols,aF,aL);acctTotRows.push(aT);
       });
       const {arr,tot}=sumByCol(lines);const pri=priorGroupMap.get(g)||0;
-      d.push(['Total'+(groupBy!=='none'?' for '+g:''),'','','',...arr,...(showTotal?[tot]:[]),...(compare?[pri,tot-pri,pctN(tot,pri)]:[])]);d.push([]);
+      const gT=d.length;d.push(['Total'+(groupBy!=='none'?' for '+g:''),'','','',...arr,...(showTotal?[tot]:[]),...(compare?[pri,tot-pri,pctN(tot,pri)]:[])]);d.push([]);
+      sumRows(F,gT,pcols,acctTotRows);groupTotRows.push(gT);
     });
     const gg=sumByCol(rows||[]);
-    d.push(['PERIOD ACTIVITY','','','',...gg.arr,...(showTotal?[gg.tot]:[]),...(compare?[priorGrand,gg.tot-priorGrand,pctN(gg.tot,priorGrand)]:[])]);
+    const pa=d.length;d.push(['PERIOD ACTIVITY','','','',...gg.arr,...(showTotal?[gg.tot]:[]),...(compare?[priorGrand,gg.tot-priorGrand,pctN(gg.tot,priorGrand)]:[])]);
+    sumRows(F,pa,pcols,groupTotRows);
     if(begRows.length>0)d.push(['ENDING BALANCE (BS accts: beginning + activity)','','','',...(colMode==='total'?[begTotal+grand]:[...cols.map(()=>''),begTotal+grand]),...(compare?['','','']:[])]);
-    exportToExcel(d,'Custom_Detail_'+(to||today())+'.xlsx');
+    exportToExcel(d,'Custom_Detail_'+(to||today())+'.xlsx',{formulas:F});
   };
   useEffect(()=>{if(runToken>0)doExport();},[runToken]); // auto-export after each Run Report
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Custom Detail Report</div><div style={S.sub}>Pick accounts, optionally group by class or location</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='customdetail' currentConfig={{sel,from,to,groupBy,colMode,compare}} onApply={(c)=>{setSel(c.sel||[]);setFrom(c.from||'');setTo(c.to||'');if(c.groupBy)setGroupBy(c.groupBy);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/>{rows&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
@@ -4037,9 +4080,14 @@ function PivotReport({entityId,entityName,canEdit=true,pendingConfig,clearPendin
     if(!data)return;
     const head=[dim==='class'?(classTerm()==='Class'?'Class / Investor':classTerm()):dim==='location'?'Location':'Project',...data.columns.map(c=>c.code+' '+c.name),'Total'];
     const d=[[entityName||'Pivot Report'],['Pivot Summary by '+(dim==='class'?classTerm():dim)],['Period: '+(from||'Begin')+' to '+(to||today())],[],head];
+    const F=[];const nC=data.columns.length;const totC=1+nC;const dataCols=[];for(let k=1;k<=nC;k++)dataCols.push(k);
+    const first=d.length;
     data.rows.forEach(r=>d.push([r.name,...data.columns.map(c=>r.cells[c.code]||0),r.total]));
-    d.push(['Total',...data.columns.map(c=>data.column_totals[c.code]||0),data.grand_total]);
-    exportToExcel(d,'Pivot_'+dim+'_'+(to||today())+'.xlsx');
+    const last=d.length-1;
+    for(let r=first;r<=last;r++)F.push({r,c:totC,f:'SUM(B'+(r+1)+':'+XLC(nC)+(r+1)+')'});// row total = across its columns
+    const tr=d.length;d.push(['Total',...data.columns.map(c=>data.column_totals[c.code]||0),data.grand_total]);
+    sumCols(F,tr,dataCols,first,last);F.push({r:tr,c:totC,f:'SUM(B'+(tr+1)+':'+XLC(nC)+(tr+1)+')'});
+    exportToExcel(d,'Pivot_'+dim+'_'+(to||today())+'.xlsx',{formulas:F});
   };
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Pivot Summary</div><div style={S.sub}>Totals by class across selected accounts — for PCAP letters</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='pivot' currentConfig={{sel,dim,from,to}} onApply={(c)=>{setSel(c.sel||[]);setDim(c.dim||'class');setFrom(c.from||'');setTo(c.to||'');}} canEdit={canEdit}/>{data&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
     <div style={S.card}>
@@ -4189,20 +4237,26 @@ function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPend
     if(!data)return;
     const head=['Date','Type','Num','Vendor','Due Date','Past Due (days)','Current','1-30','31-60','61-90','91+','GL','Amount'];
     const d=[[entityName||'AP Aging Detail'],['A/P Aging Detail — built from GL '+(data.ap_account||'202000')],['As of '+data.as_of],[],head];
+    const F=[];const venTotRows=[];
     data.vendors.forEach(g=>{
+      const vF=d.length;
       g.rows.forEach(r=>d.push([r.date,r.type,r.num,r.vendor,r.due_date,r.past_due_days,
         r.bucket==='current'?r.amount:'',r.bucket==='d1_30'?r.amount:'',r.bucket==='d31_60'?r.amount:'',r.bucket==='d61_90'?r.amount:'',r.bucket==='d91_plus'?r.amount:'','',r.amount]));
-      d.push(['Total '+g.vendor,'','','','','',g.subtotal.current,g.subtotal.d1_30,g.subtotal.d31_60,g.subtotal.d61_90,g.subtotal.d91_plus,'',g.subtotal.total]);
+      const vL=d.length-1;const vT=d.length;d.push(['Total '+g.vendor,'','','','','',g.subtotal.current,g.subtotal.d1_30,g.subtotal.d31_60,g.subtotal.d61_90,g.subtotal.d91_plus,'',g.subtotal.total]);
+      sumCols(F,vT,[6,7,8,9,10,12],vF,vL);venTotRows.push(vT);
     });
+    let glTotRow=null;
     if((data.gl_rows||[]).length){
       d.push([]);d.push(['GL ENTRIES (imported / non-Bill.com — not aged)']);
-      data.gl_rows.forEach(r=>d.push([r.date,'GL','JE-'+String(r.entry_num).padStart(4,'0'),'',(r.memo||''),'','','','','','',r.amount,r.amount]));
-      d.push(['Total GL Entries','','','','','','','','','','',data.gl_total,data.gl_total]);
+      const gF=d.length;data.gl_rows.forEach(r=>d.push([r.date,'GL','JE-'+String(r.entry_num).padStart(4,'0'),'',(r.memo||''),'','','','','','',r.amount,r.amount]));const gL=d.length-1;
+      glTotRow=d.length;d.push(['Total GL Entries','','','','','','','','','','',data.gl_total,data.gl_total]);
+      sumCols(F,glTotRow,[11,12],gF,gL);
     }
     const gt=data.grand_total;
-    d.push(['TOTAL','','','','','',gt.current,gt.d1_30,gt.d31_60,gt.d61_90,gt.d91_plus,gt.gl,gt.total]);
+    const totRow=d.length;d.push(['TOTAL','','','','','',gt.current,gt.d1_30,gt.d31_60,gt.d61_90,gt.d91_plus,gt.gl,gt.total]);
+    sumRows(F,totRow,[6,7,8,9,10,11,12],[...venTotRows,...(glTotRow!=null?[glTotRow]:[])]);
     d.push(['Reconciliation vs GL '+(data.ap_account||'202000')+' ('+fmt(data.gl_balance)+')','','','','','','','','','','','',data.recon_diff]);
-    exportToExcel(d,'AP_Aging_'+data.as_of+'.xlsx',{plainCols:[5]});
+    exportToExcel(d,'AP_Aging_'+data.as_of+'.xlsx',{plainCols:[5],formulas:F});
   };
   const hasAnything=data&&(data.bill_count>0||(data.gl_rows&&data.gl_rows.length>0));
   return(<div>{showUpload&&<ApAgingCutoffModal entityId={entityId} entityName={entityName} onClose={()=>setShowUpload(false)} onDone={()=>{setShowUpload(false);}}/>}<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>A/P Aging Detail</div><div style={S.sub}>Built from GL account {data?data.ap_account:'202000'} &middot; ties to the book{data&&data.billcom_error?' · Bill.com enrich error: '+data.billcom_error:''}</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><button style={S.btnS} onClick={()=>setShowUpload(true)}>Upload aging detail</button><MemorizeBar entityId={entityId} reportType='apaging' currentConfig={{asOf}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);}} canEdit={canEdit}/>{hasAnything&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
@@ -4942,9 +4996,13 @@ function CommitmentsPage({entityId,entityName,canEdit=true}){
   const saveEdit=async()=>{try{await api.updateCommitment(entityId,editId,{commitment_amount:Number(editForm.commitment_amount||0),called_amount:Number(editForm.called_amount||0),commit_date:editForm.commit_date||null,notes:editForm.notes||null});setEditId(null);load();}catch(e){setErr(e.message);}};
   const del=async i=>{if(!confirm('Remove commitment for '+i.investor+'?'))return;try{await api.deleteCommitment(entityId,i.id);load();}catch(e){setErr(e.message);}};
   const doExport=()=>{if(!data)return;const d=[[entityName||'Investor Commitments'],['Investor Commitments'],[],['Investor','Code','Commitment','Called to Date','Uncalled','% Called','Ownership %','Commit Date','Notes']];
+    const F=[];const first=d.length;
     data.investors.forEach(i=>d.push([i.investor,i.investor_code||'',i.commitment_amount,i.called_amount,i.uncalled_amount,i.pct_called,i.ownership_pct,i.commit_date||'',i.notes||'']));
-    const t=data.totals;d.push(['Total','',t.commitment_amount,t.called_amount,t.uncalled_amount,'','','','']);
-    exportToExcel(d,'Investor_Commitments.xlsx');};
+    const last=d.length-1;
+    for(let r=first;r<=last;r++){const rr=r+1;F.push({r,c:4,f:'C'+rr+'-D'+rr});}// Uncalled = Commitment − Called
+    const t=data.totals;const tr=d.length;d.push(['Total','',t.commitment_amount,t.called_amount,t.uncalled_amount,'','','','']);
+    sumCols(F,tr,[2,3,4],first,last);
+    exportToExcel(d,'Investor_Commitments.xlsx',{formulas:F});};
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
     <div><div style={S.h1}>Investor Commitments</div><div style={S.sub}>Capital commitments by investor &middot; informational only (does not post to the GL)</div></div>
     <div style={{display:'flex',gap:8}}>{data&&data.investors.length>0&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}{canEdit&&<button style={S.btnP} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add Commitment'}</button>}</div></div>
