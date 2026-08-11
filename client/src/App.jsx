@@ -112,20 +112,12 @@ const SIDEBAR_KEY = 'cl_sidebar';
 
 // ─── Cloud Ledger Logo SVG ───
 function Logo({size=32}) {
-  const s = size/40;
   return (<svg width={size} height={size} viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <defs><linearGradient id="clg" x1="4" y1="8" x2="36" y2="36" gradientUnits="userSpaceOnUse">
-      <stop stopColor="#1d4ed8"/><stop offset="1" stopColor="#2563eb"/></linearGradient></defs>
-    {/* Cloud shape */}
-    <path d="M32 22a6 6 0 00-5.8-6 8 8 0 00-15.4-1A5 5 0 007 19.5 5 5 0 0010 24h0" fill="none" stroke="url(#clg)" strokeWidth="2.2" strokeLinecap="round"/>
-    <path d="M14 22a3.5 3.5 0 013-5.8 5.5 5.5 0 0110.6.8A4.2 4.2 0 0130 21a4.2 4.2 0 01-1 3" fill="none" stroke="url(#clg)" strokeWidth="1.8" strokeLinecap="round" opacity="0.5"/>
-    {/* Ledger lines */}
-    <line x1="11" y1="27" x2="29" y2="27" stroke="#2563eb" strokeWidth="1.6" strokeLinecap="round"/>
-    <line x1="11" y1="30.5" x2="25" y2="30.5" stroke="#2563eb" strokeWidth="1.6" strokeLinecap="round" opacity="0.6"/>
-    <line x1="11" y1="34" x2="27" y2="34" stroke="#2563eb" strokeWidth="1.6" strokeLinecap="round" opacity="0.35"/>
-    {/* Accent dots on ledger lines */}
-    <circle cx="14" cy="27" r="1.3" fill="#059669"/>
-    <circle cx="22" cy="30.5" r="1.3" fill="#2563eb" opacity="0.6"/>
+    {/* Cloud outline on stacked ledger layers */}
+    <path d="M7 30 L20 36 L33 30" fill="none" stroke="#0f172a" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+    <path d="M7 24.5 L20 30.5 L33 24.5" fill="none" stroke="#0f172a" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+    <path d="M7 19 L20 25 L33 19" fill="none" stroke="#2563eb" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+    <path d="M11.5 18.8 C7.8 18.8 7.3 13.6 11 13 C10.8 8 17.4 6.4 20 10.3 C22.4 7.6 27.3 9.1 26.9 13 C30.6 13.2 30.4 18.8 26.6 18.8" fill="none" stroke="#2563eb" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"/>
   </svg>);
 }
 
@@ -5368,23 +5360,23 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const updateCard=(id,field,val)=>setRfCards(cards=>cards.map(c=>{
     if(c._id!==id)return c;
     const next={...c,[field]:val};
-    // When the Cost Code changes, auto-fill the Cost Code Name. The uploaded
-    // prior workbook's Prior Invoice Log is the most authoritative source, so it
-    // wins; the server catalog is the fallback. Only overwrite the name if it's
-    // blank or still matches the previous code's auto value, so manual edits stick.
+    // Track when the user hand-edits the Name or Budget Code, so a later Cost
+    // Code change won't clobber a value they typed themselves.
+    if(field==='cost_code_name')next._nameEdited=true;
+    if(field==='budget_code')next._budgetEdited=true;
+    // When the Cost Code changes, follow it: fill the Cost Code Name and Budget
+    // Code from the catalog (uploaded report's map wins; server catalog is the
+    // fallback) WHENEVER the code resolves to a known value — unless the user
+    // manually edited that field. An empty lookup (e.g. mid-typing an
+    // incomplete code) never clears an existing value, so partial keystrokes
+    // don't wipe the field and don't block the final code from filling it in.
     if(field==='cost_code'){
-      const nameFor=code=>{const k=String(code).trim();if(wbCoaMap[k])return wbCoaMap[k];const h=coaMap[k];return h?(h.cost_code_name||''):'';};
-      const newName=nameFor(val);
-      const prevName=nameFor(c.cost_code);
-      const nameIsAuto=!c.cost_code_name||(prevName&&c.cost_code_name===prevName);
-      if(newName&&nameIsAuto)next.cost_code_name=newName;
-      // Refresh the Budget Code from the new cost code (Braker-only; the map is
-      // empty for templates without a Budget Code column, so this is a no-op there).
-      const budgetFor=code=>{const k=String(code).trim();const b=wbBudgetMap[k];return b?(b.budget||''):'';};
-      const newBudget=budgetFor(val);
-      const prevBudget=budgetFor(c.cost_code);
-      const budgetIsAuto=!c.budget_code||(prevBudget&&c.budget_code===prevBudget);
-      if(newBudget&&budgetIsAuto)next.budget_code=newBudget;
+      const k=String(val).trim();
+      const newName=wbCoaMap[k]||(coaMap[k]&&coaMap[k].cost_code_name)||'';
+      if(newName&&!next._nameEdited)next.cost_code_name=newName;
+      const b=wbBudgetMap[k];
+      const newBudget=b&&b.budget?b.budget:'';
+      if(newBudget&&!next._budgetEdited)next.budget_code=newBudget;
     }
     return next;
   }));
