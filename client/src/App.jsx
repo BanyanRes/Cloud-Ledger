@@ -5388,6 +5388,34 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     }
     return next;
   }));
+  // Back-fill coding on existing cards whenever the code catalog becomes
+  // available or changes — the uploaded report's map (wbCoaMap/wbBudgetMap) or
+  // the server catalog (coaMap). This covers coding an invoice BEFORE the prior
+  // report was loaded: as soon as the catalog arrives, any card with a cost code
+  // but a blank Cost Code Name (or blank Budget Code) is filled in. Only blanks
+  // are touched, so manual entries and existing codings are never overwritten.
+  // Universal — runs for every entity in the requisition module.
+  useEffect(()=>{
+    setRfCards(cards=>{
+      let changed=false;
+      const next=cards.map(c=>{
+        if(!c.cost_code)return c;
+        const k=String(c.cost_code).trim();
+        const patch={};
+        if(!c.cost_code_name){
+          const nm=wbCoaMap[k]||(coaMap[k]&&coaMap[k].cost_code_name)||'';
+          if(nm)patch.cost_code_name=nm;
+        }
+        if(!c.budget_code){
+          const b=wbBudgetMap[k];
+          if(b&&b.budget)patch.budget_code=b.budget;
+        }
+        if(Object.keys(patch).length){changed=true;return{...c,...patch};}
+        return c;
+      });
+      return changed?next:cards;
+    });
+  },[wbCoaMap,wbBudgetMap,coaMap]);
   const removeCard=id=>setRfCards(cards=>cards.filter(c=>c._id!==id));
 
   const runRollForward=async(force=false)=>{
