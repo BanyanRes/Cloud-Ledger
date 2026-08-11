@@ -3396,6 +3396,22 @@ function periodLabel(from,to){
   }
   return '';
 }
+// "6/30/26" style date (M/D/YY, no leading zeros) for report headings.
+const fmtMDY=iso=>{if(!iso)return '';const d=_mkDate(iso);return (d.getMonth()+1)+'/'+d.getDate()+'/'+String(d.getFullYear()).slice(2);};
+// Period noun for a window: Quarter / Month / Year / Period (generic).
+const periodNoun=(from,to)=>{const pl=periodLabel(from,to);if(/^Q/.test(pl))return 'Quarter';if(/^\d{4}$/.test(pl))return 'Year';if(pl)return 'Month';return 'Period';};
+// Total-Only report subtitle naming each displayed column by its period-end date,
+// e.g. "For the Quarters Ended 6/30/26 and 3/31/26" (most recent first). This avoids
+// mislabeling — it does not call any single column "Last Quarter"; it just states the
+// quarter-end dates the columns cover. Inception-to-date ("All") stays "Through <date>".
+function endedHeading(dispCols,dateFilter,anchor){
+  if(dateFilter==='all'||dispCols.some(c=>!c.from))return 'Through '+anchor;
+  const sorted=[...dispCols].sort((a,b)=>(a.to<b.to?1:a.to>b.to?-1:0));
+  const nouns=new Set(dispCols.map(c=>periodNoun(c.from,c.to)));const noun=nouns.size===1?[...nouns][0]:'Period';
+  const dates=sorted.map(c=>fmtMDY(c.to));
+  const list=dates.length<=1?(dates[0]||''):dates.slice(0,-1).join(', ')+' and '+dates[dates.length-1];
+  return 'For the '+(dates.length>1?noun+'s':noun)+' Ended '+list;
+}
 const rptPct=(cur,prev)=>Math.abs(prev)<0.005?null:(cur-prev)/Math.abs(prev)*100;
 const rptChgCell=(cur,prev)=>{const d=cur-prev;const p=rptPct(cur,prev);return{d,p};};
 function ReportControls({dateFilter,setDateFilter,colMode,setColMode,compare,setCompare,anchorLabel}){
@@ -3748,11 +3764,16 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
   // Falls back to the generic Prev/Amount labels when the window isn't a clean
   // single period (e.g. an inception-to-date "All" window).
   const colHead=(c,i)=>{if(colMode==='total'){const pl=periodLabel(c.from,c.to);if(pl)return pl;}return prior&&i===0?'Prev':(c.label==='Total'?'Amount':c.label);};
+  // Report subtitle. Total-Only names the displayed columns by their period-end
+  // dates ("For the Quarters Ended 6/30/26 and 3/31/26"); other column modes keep
+  // the range + column-mode label.
+  const dispCols=ord.map(oi=>cols[oi]);
+  const subtitle=colMode==='total'?endedHeading(dispCols,dateFilter,anchor):(rptRangeLabel(dateFilter,anchor)+' · '+RPT_COL_MODES.find(m=>m[0]===colMode)[1]);
   const doExport=()=>{
     // 0-based column index -> A1 letter (B, C, … AA, …).
     const colL=n=>{let s='';n=n+1;while(n>0){const m=(n-1)%26;s=String.fromCharCode(65+m)+s;n=Math.floor((n-1)/26);}return s;};
     const hdr=['Account',...ord.map(oi=>colHead(cols[oi],oi)),...(prior?['$ Change','% Change']:[])];
-    const d=[[entityName||'Income Statement'],['Income Statement'],[rptRangeLabel(dateFilter,anchor)+(colMode!=='total'?' · '+RPT_COL_MODES.find(m=>m[0]===colMode)[1]:'')],[],hdr];
+    const d=[[entityName||'Income Statement'],['Income Statement'],[subtitle],[],hdr];
     // Formula cells (Liting #3): subtotal rows use live SUM(); Net Income references the
     // section-total cells. Values are also written as cached fallbacks by exportToExcel.
     const formulas=[];
@@ -3777,7 +3798,7 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
       <ReportControls dateFilter={dateFilter} setDateFilter={setDateFilter} colMode={colMode} setColMode={setColMode} compare={compare} setCompare={setCompare}/>
     </div>
     <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='is' currentConfig={{to,dateFilter,colMode,compare}} onApply={(c)=>{if(c.to)setTo(c.to);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExport}>Export Excel</button></div></div>
-    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Income Statement</div><div style={{fontSize:13,color:T.textMuted}}>{rptRangeLabel(dateFilter,anchor)}{colMode!=='total'?(' · '+RPT_COL_MODES.find(m=>m[0]===colMode)[1]):''}</div>{cols.length>1&&<div style={{fontSize:11,color:T.textDim,marginTop:2}}>Tip: drag a column header to reorder columns.</div>}</div>
+    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Income Statement</div><div style={{fontSize:13,color:T.textMuted}}>{subtitle}</div></div>
     <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520,margin:'0 auto'}}><thead><tr><th style={S.th}>Account</th>{ord.map((oi,pos)=><th key={oi} draggable onDragStart={()=>{dragFrom.current=pos;}} onDragOver={e=>e.preventDefault()} onDrop={()=>{if(dragFrom.current!=null&&dragFrom.current!==pos)moveCol(dragFrom.current,pos);dragFrom.current=null;}} style={{...S.thR,cursor:cols.length>1?'grab':'default',userSelect:'none'}} title={cols.length>1?'Drag to reorder columns':undefined}>{colHead(cols[oi],oi)}</th>)}{prior&&<><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}</tr></thead><tbody>
       <Sec title="Revenue" items={rev}/>
       {cogs.length>0&&<><Sec title="Cost of Goods Sold" items={cogs}/><TotalRow label="Gross Profit" getter={ci=>sumC(rev,ci)-sumC(cogs,ci)}/></>}
