@@ -3686,6 +3686,67 @@ function parseUMB(pages, flatText) {
   return { rows, reconciled, ctrlInfo };
 }
 
+// ── UBS "Business Services Account" brokerage statement parser ──────────────
+// This is a sweep/brokerage account, not a checking register — its only monthly
+// cash activity is dividend & interest income. Per Jimmy's decision, record that
+// income as ONE credit transaction dated the statement-period end. Reads the
+// "Change in the value of your account" box, whose identity — Opening value +
+// Dividend/interest income + Change in market value = Closing value — is used to
+// reconcile the parse.
+function parseUBS(pages, flatText) {
+  const _num = s => parseFloat(String(s).replace(/[^0-9.]/g, '')) || 0;
+  const norm = flatText.replace(/\s+/g, ' ');
+  const MONTHS = { january:0,february:1,march:2,april:3,may:4,june:5,july:6,august:7,september:8,october:9,november:10,december:11 };
+  const pm = norm.match(/Business Services Account\s+([A-Za-z]+)\s+(\d{4})/i);
+  let year = pm ? +pm[2] : (new Date()).getFullYear();
+  let month = pm ? MONTHS[pm[1].toLowerCase()] : null;
+  const cd = norm.match(/on\s+([A-Za-z]+)\s+(\d{1,2})\s*\(\$\)/i);
+  let day = null;
+  if (cd && MONTHS[cd[1].toLowerCase()] === month) day = +cd[2];
+  if (month == null) month = 0;
+  if (day == null) day = new Date(year, month + 1, 0).getDate();
+  const date = new Date(year, month, day);
+  const dateStr = isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+
+  const moneyRx = /^\$?[\d,]+\.\d{2}$/;
+  let income = null, mv = null, opening = null, closing = null;
+  for (const lines of pages) {
+    const hdrIdx = lines.findIndex(words => {
+      const s = words.map(w => w.t).join(' ');
+      return /Dividend and\s*interest income/i.test(s) && /Change in\s*market value/i.test(s);
+    });
+    if (hdrIdx < 0) continue;
+    const hdr = lines[hdrIdx];
+    const incTok = hdr.find(w => /interest/i.test(w.t)) || hdr.find(w => /Dividend/i.test(w.t));
+    const mvTok = hdr.find(w => /market/i.test(w.t)) || hdr.find(w => /^value$/i.test(w.t));
+    const xInc = incTok ? (incTok.x + incTok.x1) / 2 : null;
+    const xMv = mvTok ? (mvTok.x + mvTok.x1) / 2 : null;
+    if (xInc == null || xMv == null) break;
+    const lo = Math.min(xInc, xMv) - 40, hi = Math.max(xInc, xMv) + 40;
+    const cand = [];
+    for (const words of lines) for (const w of words) {
+      const c = (w.x + w.x1) / 2;
+      if (moneyRx.test(w.t) && c >= lo && c <= hi) cand.push({ c, v: _num(w.t) });
+    }
+    const small = cand.filter(t => t.v < 100).sort((a, b) => a.c - b.c);
+    const large = cand.filter(t => t.v >= 100).sort((a, b) => a.c - b.c);
+    if (small.length >= 2) { income = small[0].v; mv = small[small.length - 1].v; }
+    else if (small.length === 1) { income = small[0].v; mv = 0; }
+    if (large.length >= 2) { opening = large[0].v; closing = large[large.length - 1].v; }
+    break;
+  }
+
+  const rows = [];
+  if (income != null && dateStr) rows.push({ date: dateStr, description: 'UBS dividend and interest income', amount: income });
+  const EPS = 0.02;
+  let reconciled = false;
+  if (opening != null && closing != null && income != null) reconciled = Math.abs((opening + income + (mv || 0)) - closing) < EPS;
+  if (!reconciled) rows.forEach(r => { r.needs_review = true; });
+  const ctrlInfo = { deposits: income, checks: 0, prev: opening, curr: closing, market_value_change: mv,
+    parsed_deposits: income, parsed_checks: 0 };
+  return { rows, reconciled, ctrlInfo };
+}
+
 // ═══ Bank Transaction Upload & Coding ═══
 
 // Find the best active coding note for a parsed statement row. Matching keys:
@@ -3779,6 +3840,11 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       // UMB Bank Commercial Checking: two-column (Deposits | Withdrawals) detail,
       // classified by column position via a coordinate-aware re-read below.
       const isUMB = /transaction detail/i.test(text) && /end of day\s*-?\s*current balance/i.test(text) && /deposits and credits/i.test(text);
+      // UBS brokerage statement — record the month's dividend/interest income as
+      // one credit. Detected on whitespace-normalized text (UBS statements
+      // linearize one word per line through pdf-parse).
+      const _norm = text.replace(/\s+/g, ' ');
+      const isUBS = /UBS Financial Services/i.test(_norm) && /Business Services Account/i.test(_norm) && /Dividend and\s*interest income/i.test(_norm);
       if (isBOT) {
         // Group each date -> description(s) -> amount block into one transaction;
         // section headers set the sign; stop before the DAILY ACCOUNT BALANCE
@@ -3919,6 +3985,9 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       } else if (isUMB) {
         const _umb = parseUMB(await extractPdfPositionedPages(req.file.buffer), text);
         rows = _umb.rows; reconciled = _umb.reconciled; ctrlInfo = _umb.ctrlInfo;
+      } else if (isUBS) {
+        const _ubs = parseUBS(await extractPdfPositionedPages(req.file.buffer), text);
+        rows = _ubs.rows; reconciled = _ubs.reconciled; ctrlInfo = _ubs.ctrlInfo;
       } else {
 
       // ── Control totals for post-parse reconciliation ──
