@@ -3836,7 +3836,14 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       const isICS = /intrafi|maplemark|\bICS\b/i.test(text) && /account\s*transaction\s*detail/i.test(text);
       // MapleMark "Platinum Money Market" operating-account statement (image PDF,
       // read via OCR above): two Deposits/Debits sections, not the ICS layout.
-      const isMMM = /maple\s*mark/i.test(text) && /deposits and other credits/i.test(text) && /debits and other withdrawals/i.test(text);
+      // Detect on the Money Market template markers, NOT on both section headers
+      // being present: a month with zero withdrawals has no "Debits and Other
+      // Withdrawals" section (and a zero-deposit month has no credits section),
+      // so require only MapleMark + the Money Market/Summary-of-Activity header
+      // and at least one of the two transaction sections.
+      const isMMM = /maple\s*mark/i.test(text)
+        && (/platinum money market/i.test(text) || /summary of activity since your last statement/i.test(text))
+        && (/deposits and other credits/i.test(text) || /debits and other withdrawals/i.test(text));
       // UMB Bank Commercial Checking: two-column (Deposits | Withdrawals) detail,
       // classified by column position via a coordinate-aware re-read below.
       const isUMB = /transaction detail/i.test(text) && /end of day\s*-?\s*current balance/i.test(text) && /deposits and credits/i.test(text);
