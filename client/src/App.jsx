@@ -97,7 +97,7 @@ let _activeEntityCode = null;
 let _activeEntityFileTag = '';
 const CLASS_DIM_LABELS = { TURNKEYR: 'Pay Application' };
 const classTerm = () => CLASS_DIM_LABELS[_activeEntityCode] || 'Class';
-function exportToExcel(data, fn, opts) { opts = opts || {}; const moneyFmt = opts.numFmt || '#,##0.00;(#,##0.00)'; const plain = new Set(opts.plainCols || []); const ws = XLSX.utils.aoa_to_sheet(data); const range = XLSX.utils.decode_range(ws['!ref']); for (let R = range.s.r; R <= range.e.r; R++) { for (let C = range.s.c; C <= range.e.c; C++) { if (plain.has(C)) continue; const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })]; if (cell && cell.t === 'n') cell.z = moneyFmt; } } const fmtLen = v => (typeof v === 'number' ? v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).length : String(v == null ? '' : v).length); const nCols = data.reduce((m, r) => Math.max(m, (r ? r.length : 0)), 0); const colW = []; for (let c = 0; c < nCols; c++) { let w = 8; for (const r of data) { if (r && r[c] != null && r[c] !== '') w = Math.max(w, fmtLen(r[c])); } colW.push({ wch: Math.min(w + 2, 60) }); } ws['!cols'] = colW; const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); const _pfx = String(_activeEntityFileTag || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, ''); const _out = (_pfx && fn.indexOf(_pfx + '_') !== 0) ? (_pfx + '_' + fn) : fn; XLSX.writeFile(wb, _out); }
+function exportToExcel(data, fn, opts) { opts = opts || {}; const moneyFmt = opts.numFmt || '#,##0.00;(#,##0.00)'; const plain = new Set(opts.plainCols || []); const ws = XLSX.utils.aoa_to_sheet(data); const range = XLSX.utils.decode_range(ws['!ref']); for (let R = range.s.r; R <= range.e.r; R++) { for (let C = range.s.c; C <= range.e.c; C++) { if (plain.has(C)) continue; const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })]; if (cell && cell.t === 'n') cell.z = moneyFmt; } } const fmtLen = v => (typeof v === 'number' ? v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).length : String(v == null ? '' : v).length); const nCols = data.reduce((m, r) => Math.max(m, (r ? r.length : 0)), 0); const colW = []; for (let c = 0; c < nCols; c++) { let w = 8; for (const r of data) { if (r && r[c] != null && r[c] !== '') w = Math.max(w, fmtLen(r[c])); } colW.push({ wch: Math.min(w + 2, 60) }); } ws['!cols'] = colW; if (opts.formulas) { for (const g of (opts.formulas || [])) { if (!g || !g.f) continue; const addr = XLSX.utils.encode_cell({ r: g.r, c: g.c }); const prev = ws[addr]; const cell = { t: 'n', f: g.f, z: moneyFmt }; if (prev && prev.v != null && !isNaN(prev.v)) cell.v = prev.v; ws[addr] = cell; } } const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); const _pfx = String(_activeEntityFileTag || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, ''); const _out = (_pfx && fn.indexOf(_pfx + '_') !== 0) ? (_pfx + '_' + fn) : fn; XLSX.writeFile(wb, _out); }
 const BLANK_JE = () => ({date:today(),memo:'',lines:[{account_code:'',debit:'',credit:'',description:''},{account_code:'',debit:'',credit:'',description:''}]});
 const SIDEBAR_KEY = 'cl_sidebar';
 
@@ -3310,13 +3310,33 @@ const RPT_COL_MODES=[['total','Total Only'],['monthly','Monthly'],['quarterly','
 const _ymd=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 const _mkDate=s=>new Date((/^\d{4}-\d{2}-\d{2}$/.test(s)?s:today())+'T00:00:00');
 // Overall [from,to] window for a date preset, anchored at `anchor` (YYYY-MM-DD).
+// A preset returns the PREVIOUS COMPLETE calendar period relative to the
+// period-end's own period (whole-period, calendar-aligned) — matching the
+// app's presetRange() convention. For a 06/30/2026 period end: Last Month =
+// May 2026, Last Quarter = Q1 2026 (Jan–Mar), Last Year = 2025.
+//   NOTE (bug fix, Liting #1): the old version returned a trailing window
+//   (anchor − N months + 1 day), e.g. Last Quarter → 2026-03-31…06-30. When
+//   split into quarterly columns that produced a bogus 1-day "Q1 '26" sliver
+//   column (only 3/31 activity) plus a "Q2 '26" column, so the displayed Q1
+//   never matched the true Q1. Whole-period alignment makes each column a
+//   full calendar period, so Last Quarter shows the correct full Q1.
 function rptWindow(filter,anchor){
   const a=_mkDate(anchor);const to=_ymd(a);
-  const back=(n,unit)=>{const s=new Date(a);if(unit==='m')s.setMonth(s.getMonth()-n);else s.setFullYear(s.getFullYear()-n);s.setDate(s.getDate()+1);return _ymd(s);};
-  if(filter==='month')return{from:back(1,'m'),to};
-  if(filter==='quarter')return{from:back(3,'m'),to};
-  if(filter==='year')return{from:back(1,'y'),to};
+  const Y=a.getFullYear(),M=a.getMonth();
+  // JS Date normalizes out-of-range month indexes (e.g. month -3 → prior year),
+  // so quarter/month arithmetic that crosses a year boundary is handled for free.
+  if(filter==='month')return{from:_ymd(new Date(Y,M-1,1)),to:_ymd(new Date(Y,M,0))};
+  if(filter==='quarter'){const ps=(Math.floor(M/3)-1)*3;return{from:_ymd(new Date(Y,ps,1)),to:_ymd(new Date(Y,ps+3,0))};}
+  if(filter==='year')return{from:_ymd(new Date(Y-1,0,1)),to:_ymd(new Date(Y-1,11,31))};
   return{from:null,to};// 'all' = inception → anchor
+}
+// Human label for a preset's actual window, e.g. "Last Quarter · 2026-01-01 → 2026-03-31".
+// Presets now resolve to a prior whole period whose end is NOT the anchor, so the header
+// must show the real range rather than the old (misleading) "… ending <anchor>".
+function rptRangeLabel(filter,anchor){
+  if(filter==='all')return 'Through '+anchor;
+  const w=rptWindow(filter,anchor);const nm=RPT_DATE_FILTERS.find(f=>f[0]===filter);
+  return (nm?nm[1]:filter)+' · '+w.from+' → '+w.to;
 }
 // Split a window into calendar-aligned sub-periods. Returns [{label,from,to}].
 function rptPeriods(filter,mode,anchor){
@@ -3670,6 +3690,14 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
   const periods=useMemo(()=>rptPeriods(dateFilter,colMode,anchor),[dateFilter,colMode,anchor]);
   const prior=(compare&&colMode==='total'&&periods[0]&&periods[0].from)?rptPriorWindow(periods[0]):null;
   const cols=useMemo(()=>prior?[prior,...periods]:periods,[JSON.stringify(prior),JSON.stringify(periods)]);
+  // Column reorder (Liting #2): `colOrder` holds display order as original-column
+  // indices into `cols`. Drag a period-column header to rearrange. Resets whenever
+  // the underlying set of columns changes (different filter/column mode).
+  const[colOrder,setColOrder]=useState(null);const dragFrom=useRef(null);
+  const colSig=cols.map(c=>c.label+'|'+(c.from||'')+'|'+c.to).join(',');
+  useEffect(()=>{setColOrder(null);},[colSig]);
+  const ord=(colOrder&&colOrder.length===cols.length)?colOrder:cols.map((_,i)=>i);
+  const moveCol=(fromPos,toPos)=>{setColOrder(prev=>{const base=(prev&&prev.length===cols.length)?[...prev]:cols.map((_,i)=>i);const[x]=base.splice(fromPos,1);base.splice(toPos,0,x);return base;});};
   const[data,setData]=useState([]);
   useEffect(()=>{let ok=true;Promise.all(cols.map(c=>api.getBalances(entityId,{from:c.from||undefined,to:c.to}).catch(()=>[]))).then(r=>{if(ok)setData(r);});return()=>{ok=false;};},[entityId,JSON.stringify(cols),rk]);
   const meta=useMemo(()=>{const m=new Map();data.forEach(bs=>(bs||[]).forEach(b=>{if(!m.has(b.code))m.set(b.code,{code:b.code,name:b.name,type:b.type,subtype:b.subtype});}));return m;},[data]);
@@ -3685,23 +3713,41 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
   const chgCells=(getter)=>{if(!prior)return null;const c=getter(curI),p=getter(priI),pc=rptPct(c,p);return[<td key="d" style={S.tdR}>{fmt(c-p)}</td>,<td key="p" style={{...S.tdR,color:(c-p)>=0?T.green:T.red}}>{pctTxt(pc)}</td>];};
   const nColSpan=1+nCols+(prior?2:0);
   const Sec=({title,items})=>(<><tr><td style={S.sectionHeader} colSpan={nColSpan}>{title}</td></tr>
-    {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,type:a.type,from:c.from,to:c.to})}>{fmt(val(a.code,i))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
-    <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(sumC(items,i))}</td>)}{chgCells(ci=>sumC(items,ci))}</tr></>);
-  const TotalRow=({label,getter,big})=>(<tr style={big?S.grandTotalRow:{background:T.bgElevated}}><td style={big?{...S.tdBold,fontSize:15}:{...S.td,fontWeight:700,color:T.textBright}}>{label}</td>{cols.map((c,i)=><td key={i} style={big?{...S.tdBold,textAlign:'right',fontSize:16,color:getter(i)>=0?T.green:T.red}:{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(getter(i))}</td>)}{chgCells(getter)}</tr>);
+    {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{ord.map(oi=><td key={oi} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,type:a.type,from:cols[oi].from,to:cols[oi].to})}>{fmt(val(a.code,oi))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
+    <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td>{ord.map(oi=><td key={oi} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(sumC(items,oi))}</td>)}{chgCells(ci=>sumC(items,ci))}</tr></>);
+  const TotalRow=({label,getter,big})=>(<tr style={big?S.grandTotalRow:{background:T.bgElevated}}><td style={big?{...S.tdBold,fontSize:15}:{...S.td,fontWeight:700,color:T.textBright}}>{label}</td>{ord.map(oi=><td key={oi} style={big?{...S.tdBold,textAlign:'right',fontSize:16,color:getter(oi)>=0?T.green:T.red}:{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(getter(oi))}</td>)}{chgCells(getter)}</tr>);
   const colHead=(c,i)=>prior&&i===0?'Prev':(c.label==='Total'?'Amount':c.label);
-  const doExport=()=>{const hdr=['Account',...cols.map((c,i)=>colHead(c,i)),...(prior?['$ Change','% Change']:[])];
-    const d=[[entityName||'Income Statement'],['Income Statement'],[(dateFilter==='all'?'Through '+anchor:RPT_DATE_FILTERS.find(f=>f[0]===dateFilter)[1]+' ending '+anchor)+(colMode!=='total'?' · '+RPT_COL_MODES.find(m=>m[0]===colMode)[1]:'')],[],hdr];
-    const push=(label,getter)=>{const row=[label,...cols.map((c,i)=>getter(i))];if(prior)row.push(getter(curI)-getter(priI),rptPct(getter(curI),getter(priI)));d.push(row);};
-    [['Revenue',rev],['Cost of Goods Sold',cogs],['Operating Expenses',opex],['Other Expenses',other]].forEach(([t,items])=>{if(!items.length)return;d.push([t]);items.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));push('Total '+t,ci=>sumC(items,ci));});
-    push('Net Income',ci=>ni(ci));exportToExcel(d,'IS_'+anchor+'.xlsx');};
+  const doExport=()=>{
+    // 0-based column index -> A1 letter (B, C, … AA, …).
+    const colL=n=>{let s='';n=n+1;while(n>0){const m=(n-1)%26;s=String.fromCharCode(65+m)+s;n=Math.floor((n-1)/26);}return s;};
+    const hdr=['Account',...ord.map(oi=>colHead(cols[oi],oi)),...(prior?['$ Change','% Change']:[])];
+    const d=[[entityName||'Income Statement'],['Income Statement'],[rptRangeLabel(dateFilter,anchor)+(colMode!=='total'?' · '+RPT_COL_MODES.find(m=>m[0]===colMode)[1]:'')],[],hdr];
+    // Formula cells (Liting #3): subtotal rows use live SUM(); Net Income references the
+    // section-total cells. Values are also written as cached fallbacks by exportToExcel.
+    const formulas=[];
+    const push=(label,getter)=>{const row=[label,...ord.map(oi=>getter(oi))];if(prior)row.push(getter(curI)-getter(priI),rptPct(getter(curI),getter(priI)));d.push(row);return d.length-1;};
+    const secRow={};
+    const sections=[['Revenue',rev,1],['Cost of Goods Sold',cogs,-1],['Operating Expenses',opex,-1],['Other Expenses',other,-1]];
+    sections.forEach(([t,items])=>{if(!items.length)return;
+      d.push([t]);
+      const firstIdx=d.length; // 0-based index of the first item row (next push)
+      items.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));
+      const lastIdx=d.length-1;
+      const totIdx=push('Total '+t,ci=>sumC(items,ci));secRow[t]=totIdx;
+      ord.forEach((oi,pos)=>{const c=1+pos;formulas.push({r:totIdx,c,f:'SUM('+colL(c)+(firstIdx+1)+':'+colL(c)+(lastIdx+1)+')'});});
+    });
+    const niIdx=push('Net Income',ci=>ni(ci));
+    const present=sections.filter(([t,items])=>items.length);
+    ord.forEach((oi,pos)=>{const c=1+pos;let f=present.map(([t,items,sign])=>(sign>0?'+':'-')+colL(c)+(secRow[t]+1)).join('');if(f[0]==='+')f=f.slice(1);if(f)formulas.push({r:niIdx,c,f});});
+    exportToExcel(d,'IS_'+anchor+'.xlsx',{formulas});};
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginBottom:16,flexWrap:'wrap',gap:10}}>
     <div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
       <div><label style={S.label}>Period end</label><input style={S.inputSm} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
       <ReportControls dateFilter={dateFilter} setDateFilter={setDateFilter} colMode={colMode} setColMode={setColMode} compare={compare} setCompare={setCompare}/>
     </div>
     <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='is' currentConfig={{to,dateFilter,colMode,compare}} onApply={(c)=>{if(c.to)setTo(c.to);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExport}>Export Excel</button></div></div>
-    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Income Statement</div><div style={{fontSize:13,color:T.textMuted}}>{dateFilter==='all'?('Through '+anchor):(RPT_DATE_FILTERS.find(f=>f[0]===dateFilter)[1]+' ending '+anchor)}{colMode!=='total'?(' · '+RPT_COL_MODES.find(m=>m[0]===colMode)[1]):''}</div></div>
-    <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520,margin:'0 auto'}}><thead><tr><th style={S.th}>Account</th>{cols.map((c,i)=><th key={i} style={S.thR}>{colHead(c,i)}</th>)}{prior&&<><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}</tr></thead><tbody>
+    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Income Statement</div><div style={{fontSize:13,color:T.textMuted}}>{rptRangeLabel(dateFilter,anchor)}{colMode!=='total'?(' · '+RPT_COL_MODES.find(m=>m[0]===colMode)[1]):''}</div>{cols.length>1&&<div style={{fontSize:11,color:T.textDim,marginTop:2}}>Tip: drag a column header to reorder columns.</div>}</div>
+    <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520,margin:'0 auto'}}><thead><tr><th style={S.th}>Account</th>{ord.map((oi,pos)=><th key={oi} draggable onDragStart={()=>{dragFrom.current=pos;}} onDragOver={e=>e.preventDefault()} onDrop={()=>{if(dragFrom.current!=null&&dragFrom.current!==pos)moveCol(dragFrom.current,pos);dragFrom.current=null;}} style={{...S.thR,cursor:cols.length>1?'grab':'default',userSelect:'none'}} title={cols.length>1?'Drag to reorder columns':undefined}>{colHead(cols[oi],oi)}</th>)}{prior&&<><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}</tr></thead><tbody>
       <Sec title="Revenue" items={rev}/>
       {cogs.length>0&&<><Sec title="Cost of Goods Sold" items={cogs}/><TotalRow label="Gross Profit" getter={ci=>sumC(rev,ci)-sumC(cogs,ci)}/></>}
       <Sec title="Operating Expenses" items={opex}/>
