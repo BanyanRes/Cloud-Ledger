@@ -626,6 +626,18 @@ const dcCols = db.prepare("PRAGMA table_info(dim_classes)").all().map(c => c.nam
 if (!dcCols.includes('code')) { db.exec("ALTER TABLE dim_classes ADD COLUMN code TEXT"); console.log('[db migrate] dim_classes.code added'); }
 const dlCols = db.prepare("PRAGMA table_info(dim_locations)").all().map(c => c.name);
 if (!dlCols.includes('code')) { db.exec("ALTER TABLE dim_locations ADD COLUMN code TEXT"); console.log('[db migrate] dim_locations.code added'); }
+// Per-entity switch to hide dimension tagging (Location/Class/Project) across the
+// UI — the Dimensions manager, report dimension filters, and the Bank Transactions
+// coding column. Added because a bulk project catalog was fanned out (apply_all)
+// to every accounting/development entity, surfacing an unwanted Dimensions
+// selector on entities that don't use dimensions (e.g. SRN, CLR Silsbee). Seeded
+// ON for those two on first run; toggle in the DB (hide_dims 0/1) to change later.
+const entHideDimCols = db.prepare("PRAGMA table_info(entities)").all().map(c => c.name);
+if (!entHideDimCols.includes('hide_dims')) {
+  db.exec("ALTER TABLE entities ADD COLUMN hide_dims INTEGER NOT NULL DEFAULT 0");
+  const seeded = db.prepare("UPDATE entities SET hide_dims=1 WHERE code IN ('SABINERI','CLRSILSB2')").run();
+  console.log('[db migrate] entities.hide_dims added; seeded hidden for ' + seeded.changes + ' entity(ies) (SABINERI, CLRSILSB2)');
+}
 const bslCols = db.prepare("PRAGMA table_info(billcom_sync_log)").all().map(c => c.name);
 if (!bslCols.includes('invoice_number')) { db.exec("ALTER TABLE billcom_sync_log ADD COLUMN invoice_number TEXT"); console.log('[db migrate] billcom_sync_log.invoice_number added'); }
 // ── Fund reporting (CLRF, entity 40) ────────────────────────────────────────

@@ -719,7 +719,7 @@ export default function App(){
   // County Line Rail Fund — the only entity with the Management Fee workpaper for now.
   const isCLRF = !!(_activeEnt && (_activeEnt.code==='CLRF' || /county\s*line\s*rail\s*fund/i.test(_activeEnt.name||'')));
   const isShellEntity = !!(_activeEnt && _activeEnt.entity_type==='shell');
-  const dimsEnabled = !!_activeEnt && !isShellEntity;// location/class dimensions available on every entity EXCEPT shell
+  const dimsEnabled = !!_activeEnt && !isShellEntity && !_activeEnt.hide_dims;// dimensions on every entity EXCEPT shell, unless the entity is flagged hide_dims (e.g. SRN, CLR Silsbee)
   // AR module scope is per-entity by code. Full AR (customers/invoices/recurring
   // + aging) for these six; A/R Aging only for Turnkey (invoices sync in from
   // Turnkey Rail, not created here); no AR anywhere else.
@@ -838,7 +838,7 @@ export default function App(){
         {page==='ar_recurring'&&activeEntity&&arFull&&<ArRecurring entityId={activeEntity} entityName={entityName} canEdit={canEdit} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
         {page==='ar_aging'&&activeEntity&&arAgingEnabled&&<ArAgingReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
-        {page==='banktxn'&&activeEntity&&<BankTransactions entityId={activeEntity} canEdit={canEdit} bankSelAcct={bankSelAcct} setBankSelAcct={setBankSelAcct} bankTxns={bankTxns} setBankTxns={setBankTxns} bankUploading={bankUploading} setBankUploading={setBankUploading} bankStatusFilter={bankStatusFilter} setBankStatusFilter={setBankStatusFilter}/>}
+        {page==='banktxn'&&activeEntity&&<BankTransactions entityId={activeEntity} canEdit={canEdit} dimsEnabled={dimsEnabled} bankSelAcct={bankSelAcct} setBankSelAcct={setBankSelAcct} bankTxns={bankTxns} setBankTxns={setBankTxns} bankUploading={bankUploading} setBankUploading={setBankUploading} bankStatusFilter={bankStatusFilter} setBankStatusFilter={setBankStatusFilter}/>}
         {page==='bankrec'&&activeEntity&&<BankReconciliation entityId={activeEntity} user={user} canEdit={canEdit}/>}
         {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} isClrf={_activeEnt?.code==='COUNTYLI1'} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf} canEdit={canEdit}/>}
         {page==='bs'&&activeEntity&&<BalanceSheet entityId={activeEntity} entityName={entityName} asOf={bsAsOf} setAsOf={setBsAsOf} canEdit={canEdit}/>}
@@ -2832,7 +2832,7 @@ function GeneralLedger({entityId,entityName,dimsEnabled,from,setFrom,to,setTo,fi
 // next statement upload, a row whose amount (within tolerance) and exact date
 // match the note is auto-populated with the note's GL coding + dimension and
 // arrives 'coded' for review. The note is kept for reference after it fires.
-function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBankAccts,locations=[],classes=[],dimProjects=[],canEdit=true,onClose}){
+function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBankAccts,locations=[],classes=[],dimProjects=[],dimsEnabled=true,canEdit=true,onClose}){
   const[notes,setNotes]=useState([]);const[err,setErr]=useState('');const[msg,setMsg]=useState('');const[showAddAcct,setShowAddAcct]=useState(false);
   const blank={bank_account_code:selAcct||'',note:'',match_amount:'',amount_tolerance:'0',match_date:'',desc_keyword:'',account_code:'',memo:'',dim:'',one_shot:true};
   const[form,setForm]=useState(blank);const[editId,setEditId]=useState(null);
@@ -2852,7 +2852,7 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
   const projOpts=dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}));
   const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
   const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
-  const dimOpts=[...projOpts,...locOpts,...clsOpts];const showDims=dimOpts.length>0;
+  const dimOpts=[...projOpts,...locOpts,...clsOpts];const showDims=dimsEnabled&&dimOpts.length>0;
   const dimFromNote=n=>n.project_id?'project:'+n.project_id:n.location_id?'location:'+n.location_id:n.class_id?'class:'+n.class_id:'';
   const dimLabel=n=>{const v=dimFromNote(n);const o=dimOpts.find(x=>x.v===v);return o?o.label:'';};
   const startEdit=n=>{setEditId(n.id);setStagedFiles([]);setForm({bank_account_code:n.bank_account_code||'',note:n.note||'',match_amount:String(n.match_amount),amount_tolerance:String(n.amount_tolerance||0),match_date:n.date_from||n.date_to||'',desc_keyword:n.desc_keyword||'',account_code:n.account_code||'',memo:n.memo||'',dim:dimFromNote(n),one_shot:!!n.one_shot});};
@@ -3010,7 +3010,7 @@ function BankMatchModal({txn, entityId, onClose, onMatched}){
   </div></div>);
 }
 
-function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClose, onSaved}){
+function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, dimsEnabled=true, onClose, onSaved}){
   const target = Math.abs(txn.amount);
   const initialLines = (txn.splits && txn.splits.length > 0)
     ? txn.splits.map(s => ({ account_code: s.account_code, amount: String(s.amount), memo: s.memo || '', project_id: s.project_id||null, class_id: s.class_id||null, location_id: s.location_id||null, invoice_id: s.invoice_id||null }))
@@ -3041,7 +3041,7 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClos
     ...locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name})),
     ...classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name})),
   ];
-  const showDims = dimOpts.length > 0;
+  const showDims = dimsEnabled && dimOpts.length > 0;
   const lineDimValue = l => l.project_id?'project:'+l.project_id:l.location_id?'location:'+l.location_id:l.class_id?'class:'+l.class_id:'';
   const setLineDim = (i, val) => { const [kind,id] = val?val.split(':'):['','']; setLines(prev=>prev.map((l,idx)=>idx===i?{...l,project_id:kind==='project'?id:null,class_id:kind==='class'?id:null,location_id:kind==='location'?id:null}:l)); };
 
@@ -3111,7 +3111,7 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, onClos
   </div></div>);
 }
 
-function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelAcct:setSelAcct,bankTxns:txns,setBankTxns:setTxns,bankUploading:uploading,setBankUploading:setUploading,bankStatusFilter:statusFilter,setBankStatusFilter:setStatusFilter}){
+function BankTransactions({entityId,canEdit=true,dimsEnabled=true,bankSelAcct:selAcct,setBankSelAcct:setSelAcct,bankTxns:txns,setBankTxns:setTxns,bankUploading:uploading,setBankUploading:setUploading,bankStatusFilter:statusFilter,setBankStatusFilter:setStatusFilter}){
   const[accounts,setAccounts]=useState([]);const[bankAccts,setBankAccts]=useState([]);
   const[err,setErr]=useState('');const[msg,setMsg]=useState('');const[showAddAcct,setShowAddAcct]=useState(false);
   const[uploadProgress,setUploadProgress]=useState('');const[discarding,setDiscarding]=useState(false);
@@ -3158,7 +3158,7 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
   const projOpts=dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}));
   const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
   const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
-  const dimOpts=[...projOpts,...locOpts,...clsOpts];const showDims=dimOpts.length>0;
+  const dimOpts=[...projOpts,...locOpts,...clsOpts];const showDims=dimsEnabled&&dimOpts.length>0;
   const txnDimValue=t=>t.project_id?'project:'+t.project_id:t.location_id?'location:'+t.location_id:t.class_id?'class:'+t.class_id:'';
   const setTxnDim=(t,val)=>{const[kind,id]=val?val.split(':'):['',''];codeTransaction(t.id,t.account_code||null,t.memo,{project_id:kind==='project'?id:null,class_id:kind==='class'?id:null,location_id:kind==='location'?id:null});};
   const postCoded=async()=>{const ids=txns.filter(t=>t.status==='coded').map(t=>t.id);if(!ids.length){setErr('Nothing coded');return;}try{const r=await api.postBankTransactions(entityId,ids);setMsg(r.posted+' JEs created');loadTxns(selAcct,statusFilter);}catch(ex){setErr(ex.message);}};
@@ -3183,7 +3183,7 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
             <input type="file" accept=".csv,.xlsx,.xls,.pdf" style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:'pointer'}} onChange={onFileSelected}/></div>}
         <button style={{...S.btnS,color:T.orange,borderColor:T.orange+'40'}} onClick={()=>setShowNotes(true)} title="Leave a note during the month so a wire is auto-coded when the statement is uploaded">Wire Notes</button>
       </div>}
-    {showNotes&&<WireNotesModal entityId={entityId} selAcct={selAcct} bankAccts={bankAccts} accounts={accounts} setAccounts={setAccounts} setBankAccts={setBankAccts} locations={locations} classes={classes} dimProjects={dimProjects} canEdit={canEdit} onClose={()=>setShowNotes(false)}/>}
+    {showNotes&&<WireNotesModal entityId={entityId} selAcct={selAcct} bankAccts={bankAccts} accounts={accounts} setAccounts={setAccounts} setBankAccts={setBankAccts} locations={locations} classes={classes} dimProjects={dimProjects} dimsEnabled={dimsEnabled} canEdit={canEdit} onClose={()=>setShowNotes(false)}/>}
     </div>
     {err&&<div style={S.err}>{err}</div>}{msg&&<div style={S.success}>{msg}</div>}
     </div>
@@ -3244,7 +3244,7 @@ function BankTransactions({entityId,canEdit=true,bankSelAcct:selAcct,setBankSelA
         </tr>)}</tbody></table></div></div>}
     {selAcct&&filteredTxns.length===0&&!uploading&&<div style={{...S.card,textAlign:'center',padding:60,color:T.textDim}}>No transactions yet. Upload a bank statement above.</div>}
     {showAddAcct&&<QuickAddAccountModal entityId={entityId} onClose={()=>setShowAddAcct(false)} onCreated={a=>{setAccounts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)));if(a.bank_acct)setBankAccts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)));}}/>}
-    {splitTxn&&<SplitBankTransactionModal txn={splitTxn} accounts={accounts} excludeCode={selAcct} entityId={entityId} onClose={()=>setSplitTxn(null)} onSaved={()=>{setSplitTxn(null);loadTxns(selAcct,statusFilter);}}/>}
+    {splitTxn&&<SplitBankTransactionModal txn={splitTxn} accounts={accounts} excludeCode={selAcct} entityId={entityId} dimsEnabled={dimsEnabled} onClose={()=>setSplitTxn(null)} onSaved={()=>{setSplitTxn(null);loadTxns(selAcct,statusFilter);}}/>}
     {matchTxn&&<BankMatchModal txn={matchTxn} entityId={entityId} onClose={()=>setMatchTxn(null)} onMatched={()=>{setMatchTxn(null);loadTxns(selAcct,statusFilter);}}/>}
   </div>);}
 
