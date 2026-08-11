@@ -3766,21 +3766,22 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
   const colMode='total';// Income Statement is always a single period column (Columns option removed).
   const anchor=/^\d{4}-\d{2}-\d{2}$/.test(to)?to:today();
   const win=useMemo(()=>isPnlWindow(dateFilter,anchor,customFrom,customTo),[dateFilter,anchor,customFrom,customTo]);
-  // Columns. Compare off → the single selected window. Compare on → two columns
-  // ordered [older, newer], with the change measured newer − older:
-  //   • Last Month/Quarter/Year → the selected "last" period PLUS the CURRENT period
-  //     (the period-end's own month/quarter/year through the period end). So Last
-  //     Quarter @ 6/30 compares Q1 (last) vs Q2 (current); Last Month → May vs June.
-  //   • Year to Date → prior-year YTD vs current YTD.
-  //   • Custom → the immediately preceding equal-length window vs the custom window.
+  // Columns. Compare off → the single selected window. Compare on → the CURRENT
+  // (most recent) period FIRST, then the comparison period; $ / % change is
+  // measured current − comparison:
+  //   • Last Month/Quarter/Year → CURRENT period (the period-end's own month/quarter/
+  //     year through the period end) then the selected "last" period. So Last Quarter
+  //     @ 6/30 → Q2 (current), Q1 (last); Last Month → June, May.
+  //   • Year to Date → current YTD, then prior-year YTD.
+  //   • Custom → the custom window, then the immediately preceding equal-length window.
   const cols=useMemo(()=>{
     const sel={label:'Total',from:win.from,to:win.to};
     if(!compare)return[sel];
-    if(dateFilter==='ytd'||dateFilter==='custom'){const p=isPnlPrior(dateFilter,win,anchor);return p?[p,sel]:[sel];}
+    if(dateFilter==='ytd'||dateFilter==='custom'){const p=isPnlPrior(dateFilter,win,anchor);return p?[sel,p]:[sel];}
     const cur=isCurrentPeriodWindow(dateFilter,anchor);
-    return[sel,{label:'Total',from:cur.from,to:cur.to}];
+    return[{label:'Total',from:cur.from,to:cur.to},sel];
   },[compare,dateFilter,win.from,win.to,anchor]);
-  const prior=(compare&&cols.length>1)?cols[0]:null;
+  const prior=(compare&&cols.length>1)?cols[cols.length-1]:null;
   // Column reorder (Liting #2): `colOrder` holds display order as original-column
   // indices into `cols`. Drag a period-column header to rearrange. Resets whenever
   // the underlying set of columns changes (different filter/column mode).
@@ -3799,7 +3800,7 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
   const opex=grp(a=>a.type==='Expense'&&a.subtype==='Operating Expense');const other=grp(a=>a.type==='Expense'&&a.subtype!=='COGS'&&a.subtype!=='Operating Expense');
   const sumC=(items,ci)=>items.reduce((s,a)=>s+val(a.code,ci),0);
   const ni=ci=>sumC(rev,ci)-sumC(cogs,ci)-sumC(opex,ci)-sumC(other,ci);
-  const nCols=cols.length;const curI=nCols-1;const priI=prior?0:-1;
+  const nCols=cols.length;const curI=0;const priI=(compare&&nCols>1)?nCols-1:-1;// current column is first
   const pctTxt=p=>p==null?'—':(p>=0?'+':'')+p.toFixed(1)+'%';
   const chgCells=(getter)=>{if(!prior)return null;const c=getter(curI),p=getter(priI),pc=rptPct(c,p);return[<td key="d" style={S.tdR}>{fmt(c-p)}</td>,<td key="p" style={{...S.tdR,color:(c-p)>=0?T.green:T.red}}>{pctTxt(pc)}</td>];};
   const nColSpan=1+nCols+(prior?2:0);
@@ -3807,12 +3808,11 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
     {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{ord.map(oi=><td key={oi} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,type:a.type,from:cols[oi].from,to:cols[oi].to})}>{fmt(val(a.code,oi))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
     <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td>{ord.map(oi=><td key={oi} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(sumC(items,oi))}</td>)}{chgCells(ci=>sumC(items,ci))}</tr></>);
   const TotalRow=({label,getter,big})=>(<tr style={big?S.grandTotalRow:{background:T.bgElevated}}><td style={big?{...S.tdBold,fontSize:15}:{...S.td,fontWeight:700,color:T.textBright}}>{label}</td>{ord.map(oi=><td key={oi} style={big?{...S.tdBold,textAlign:'right',fontSize:16,color:getter(oi)>=0?T.green:T.red}:{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(getter(oi))}</td>)}{chgCells(getter)}</tr>);
-  // Column heading: in Total-Only mode, name the column by the actual calendar
-  // period its data covers (e.g. "Q2 2026" current, "Q1 2026" prior) so readers
-  // know which quarter is which — updates automatically as the selection changes.
-  // Falls back to the generic Prev/Amount labels when the window isn't a clean
-  // single period (e.g. an inception-to-date "All" window).
-  const colHead=(c,i)=>{if(colMode==='total'){const pl=periodLabel(c.from,c.to);if(pl)return pl;}return prior&&i===0?'Prev':(c.label==='Total'?'Amount':c.label);};
+  // Column heading names the calendar period the column's data covers — a clean
+  // "Q2 2026" / "May 2026" / "2025" when it's a whole month/quarter/year, otherwise
+  // the period-end date (e.g. "6/30/26" for a year-to-date or partial window). Never
+  // shows a bare "Amount" — every column states its period. Updates with the selection.
+  const colHead=(c)=>periodLabel(c.from,c.to)||(c.from?fmtMDY(c.to):'Amount');
   // Report subtitle. Total-Only names the displayed columns by their period-end
   // dates ("For the Quarters Ended 6/30/26 and 3/31/26"); other column modes keep
   // the range + column-mode label.
