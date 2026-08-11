@@ -3511,6 +3511,77 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       const text = data.text || '';
       let lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
 
+      // Bank of Texas (BOKF) statements linearize through pdf-parse with the
+      // date, the description, and the amount each on their OWN line, grouped
+      // under DEPOSITS / WITHDRAWALS / CHECKS section headers. The generic
+      // single-line parser below can't read that shape (it lands on the bare
+      // amount line and takes the amount string as the description, and the
+      // MM-DD row dates carry no year). Route Bank of Texas statements to a
+      // dedicated block parser, detected by the bank's own branding in the text.
+      const isBOT = /bank of texas|bankoftexas\.com|\bBOKF\b/i.test(text);
+      if (isBOT) {
+        // Group each date -> description(s) -> amount block into one transaction;
+        // section headers set the sign; stop before the DAILY ACCOUNT BALANCE
+        // table and the balancing worksheet; then verify the parse against the
+        // statement's own "N Deposits" / "N Checks & Withdrawals" control totals
+        // (both the item COUNT and the dollar amount).
+        const _y4 = y => { y = String(y); return y.length === 2 ? (+y > 50 ? '19' : '20') + y : y; };
+        const _perM = text.match(/statement period[^0-9]*?(\d{1,2})-(\d{1,2})-(\d{2,4})\s*(?:to|through|-)\s*(\d{1,2})-(\d{1,2})-(\d{2,4})/i);
+        let _startY = null, _startMo = null, _endY = null;
+        if (_perM) { _startMo = +_perM[1]; _startY = +_y4(_perM[3]); _endY = +_y4(_perM[6]); }
+        // MM-DD rows get their year from the statement period. If the period
+        // straddles a year boundary (Dec->Jan), split by month.
+        const _yearFor = mo => { if (_startY == null) return (new Date()).getFullYear(); if (_startY === _endY) return _startY; return mo >= _startMo ? _startY : _endY; };
+        const _mkDate = (dd, mo) => { const y = _yearFor(mo); const d = new Date(y, mo - 1, dd); return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10); };
+        const _toNum = s => parseFloat(String(s).replace(/[,$]/g, '')) || 0;
+        const _depM = text.match(/\+?\s*(\d+)\s*Deposits\D{0,4}(\d[\d,]*\.\d{2})/i);
+        const _chkM = text.match(/-?\s*(\d+)\s*Checks?\s*&\s*Withdrawals\D{0,4}(\d[\d,]*\.\d{2})/i);
+        const _ctrlDep = _depM ? _toNum(_depM[2]) : null, _ctrlDepN = _depM ? +_depM[1] : null;
+        const _ctrlChk = _chkM ? _toNum(_chkM[2]) : null, _ctrlChkN = _chkM ? +_chkM[1] : null;
+        const _dateRx = /^(\d{1,2})[-\/](\d{1,2})$/;               // "07-01" (whole line, no year)
+        const _amtRx = /^\$?\(?-?[\d,]*\.\d{2}-?\)?$/;             // "128,901.87", "239.50", ".01"
+        const _isAmt = l => _amtRx.test(l) && /\d/.test(l);
+        const _parseAmt = l => { const neg = /^\(.*\)$/.test(l) || /-$/.test(l); const v = Math.abs(parseFloat(l.replace(/[^0-9.]/g, '')) || 0); return neg ? -v : v; };
+        let _section = 0, _cur = null; // section: +1 deposits, -1 withdrawals/checks, 0 none/stop
+        const _flush = amt => {
+          if (!_cur || amt === 0) { _cur = null; return; } // no amount -> discard incomplete block
+          const date = _mkDate(_cur.dd, _cur.mo);
+          if (!date) { _cur = null; return; }
+          let desc = _cur.desc.join(' ').replace(/\s+/g, ' ').trim();
+          if (!desc) desc = '(no description)';
+          const amount = _section === -1 ? -Math.abs(amt) : Math.abs(amt);
+          rows.push({ date, description: desc.substring(0, 500), amount });
+          _cur = null;
+        };
+        for (const line of lines) {
+          if (/^deposits$/i.test(line)) { _flush(0); _section = 1; continue; }
+          if (/^withdrawals$/i.test(line)) { _flush(0); _section = -1; continue; }
+          if (/^checks\s*(\(|paid|$)/i.test(line)) { _flush(0); _section = -1; continue; } // paper checks paid = outflow
+          if (/^(daily\s+account\s+balance|daily\s+balance|service\s+fee\s+balance|balancing\s+your\s+account|average\s+ledger|electronic\s+transfer)/i.test(line)) { _flush(0); _section = 0; continue; }
+          if (_section === 0) continue;                            // ignore summary / headers / disclosures
+          if (/^date\s*amount$/i.test(line) || /^dateamount$/i.test(line) || /^date\s*balance$/i.test(line) || /^datebalance$/i.test(line)) continue; // column header
+          if (/no checks/i.test(line)) continue;
+          const dm = line.match(_dateRx);
+          if (dm) { _flush(0); _cur = { mo: +dm[1], dd: +dm[2], desc: [] }; continue; }
+          if (_isAmt(line)) { if (_cur) _flush(_parseAmt(line)); continue; } // stray amount w/o a date block -> ignore
+          if (_cur) _cur.desc.push(line);                          // description line
+        }
+        _flush(0);
+        const _depTot = rows.filter(r => r.amount > 0).reduce((a, r) => a + r.amount, 0);
+        const _chkTot = rows.filter(r => r.amount < 0).reduce((a, r) => a + Math.abs(r.amount), 0);
+        const _depN = rows.filter(r => r.amount > 0).length, _chkN = rows.filter(r => r.amount < 0).length;
+        const _EPS = 0.02;
+        const _depOK = _ctrlDep == null || (Math.abs(_depTot - _ctrlDep) < _EPS && (_ctrlDepN == null || _depN === _ctrlDepN));
+        const _chkOK = _ctrlChk == null || (Math.abs(_chkTot - _ctrlChk) < _EPS && (_ctrlChkN == null || _chkN === _ctrlChkN));
+        reconciled = (_ctrlDep != null || _ctrlChk != null) && _depOK && _chkOK;
+        ctrlInfo = { deposits: _ctrlDep, checks: _ctrlChk, prev: null, curr: null,
+          parsed_deposits: +_depTot.toFixed(2), parsed_checks: +_chkTot.toFixed(2),
+          deposit_count: _ctrlDepN, check_count: _ctrlChkN, parsed_deposit_count: _depN, parsed_check_count: _chkN };
+        // If the parse doesn't tie to the statement's own totals, flag every row
+        // for manual review rather than importing possibly-wrong figures silently.
+        if (!reconciled && (_ctrlDep != null || _ctrlChk != null)) rows.forEach(r => { r.needs_review = true; });
+      } else {
+
       // ── Control totals for post-parse reconciliation ──
       // Most statements print summary control totals we can check the parse
       // against: "Deposits/Credits 3 3,030,021.64 +" and "Checks/Debits 4
@@ -3749,6 +3820,8 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       ctrlInfo = { deposits: ctrlDeposits, checks: ctrlChecks, prev: ctrlPrev, curr: ctrlCurr,
         parsed_deposits: +depTotal().toFixed(2), parsed_checks: +chkTotal().toFixed(2) };
       if (reconciled) rows.forEach(r => { r.needs_review = false; });
+
+      } // end generic (non-Bank-of-Texas) PDF parser
 
       if (rows.length === 0) {
         return res.status(400).json({
