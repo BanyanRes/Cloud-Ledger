@@ -3740,6 +3740,17 @@ function isPnlWindow(filter,anchor,cf,ct){
   if(filter==='custom')return{from:(/^\d{4}-\d{2}-\d{2}$/.test(cf)?cf:null),to:(/^\d{4}-\d{2}-\d{2}$/.test(ct)?ct:anchor)};
   return{from:null,to:anchor};
 }
+// The period-end's OWN period through the period end (the "current" period for
+// Compare): month → 1st of that month, quarter → 1st of that quarter, year → Jan 1;
+// each ending at the period end. For 6/30/26: month=Jun 1–30, quarter=Apr 1–Jun 30
+// (Q2), year=Jan 1–Jun 30.
+function isCurrentPeriodWindow(filter,anchor){
+  const a=_mkDate(anchor),Y=a.getFullYear(),M=a.getMonth();
+  if(filter==='month')return{from:_ymd(new Date(Y,M,1)),to:anchor};
+  if(filter==='quarter')return{from:_ymd(new Date(Y,Math.floor(M/3)*3,1)),to:anchor};
+  if(filter==='year')return{from:Y+'-01-01',to:anchor};
+  return{from:null,to:anchor};
+}
 // Prior comparative window: YTD compares to the SAME dates a year earlier (prior-year
 // YTD); everything else uses the previous equivalent calendar period.
 function isPnlPrior(filter,win,anchor){
@@ -3755,9 +3766,21 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
   const colMode='total';// Income Statement is always a single period column (Columns option removed).
   const anchor=/^\d{4}-\d{2}-\d{2}$/.test(to)?to:today();
   const win=useMemo(()=>isPnlWindow(dateFilter,anchor,customFrom,customTo),[dateFilter,anchor,customFrom,customTo]);
-  const periods=useMemo(()=>[{label:'Total',from:win.from,to:win.to}],[win.from,win.to]);
-  const prior=compare?isPnlPrior(dateFilter,periods[0],anchor):null;
-  const cols=useMemo(()=>prior?[prior,...periods]:periods,[JSON.stringify(prior),JSON.stringify(periods)]);
+  // Columns. Compare off → the single selected window. Compare on → two columns
+  // ordered [older, newer], with the change measured newer − older:
+  //   • Last Month/Quarter/Year → the selected "last" period PLUS the CURRENT period
+  //     (the period-end's own month/quarter/year through the period end). So Last
+  //     Quarter @ 6/30 compares Q1 (last) vs Q2 (current); Last Month → May vs June.
+  //   • Year to Date → prior-year YTD vs current YTD.
+  //   • Custom → the immediately preceding equal-length window vs the custom window.
+  const cols=useMemo(()=>{
+    const sel={label:'Total',from:win.from,to:win.to};
+    if(!compare)return[sel];
+    if(dateFilter==='ytd'||dateFilter==='custom'){const p=isPnlPrior(dateFilter,win,anchor);return p?[p,sel]:[sel];}
+    const cur=isCurrentPeriodWindow(dateFilter,anchor);
+    return[sel,{label:'Total',from:cur.from,to:cur.to}];
+  },[compare,dateFilter,win.from,win.to,anchor]);
+  const prior=(compare&&cols.length>1)?cols[0]:null;
   // Column reorder (Liting #2): `colOrder` holds display order as original-column
   // indices into `cols`. Drag a period-column header to rearrange. Resets whenever
   // the underlying set of columns changes (different filter/column mode).
