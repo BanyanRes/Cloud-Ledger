@@ -3371,6 +3371,12 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   const[classId,setClassId]=useState('');// '' = all investors; otherwise a class_id (investor)
   const[projects,setProjects]=useState([]);
   const[projId,setProjId]=useState('');// '' = all; otherwise a project_id
+  // Report format: 'balances' = classic single-date Debit/Credit snapshot (unchanged default);
+  // 'activity' = Sage-style Beginning Balance / Period Debits / Period Credits / Ending Balance
+  // over a From→To window. Retained Earnings closes annually (P&L rolls at Jan 1, not per period).
+  const[format,setFormat]=useState('balances');
+  const[fromDate,setFromDate]=useState(()=>{const y=(/^\d{4}/.test(asOf||'')?asOf:today()).slice(0,4);return y+'-01-01';});
+  const[actData,setActData]=useState(null);
   // Filter rule: only County Line Rail Fund uses Location/Investor dimensions.
   // Every other entity filters by Project instead.
   const showLocInv=dimsEnabled&&isClrf;
@@ -3379,6 +3385,10 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   // Avoid crashing the page on Invalid Date — fall back to today() until a complete YYYY-MM-DD is entered.
   const validAsOf=/^\d{4}-\d{2}-\d{2}$/.test(asOf)&&!isNaN(new Date(asOf+'T00:00:00').getTime())?asOf:today();
   const fyS=validAsOf.slice(0,4)+'-01-01';
+  const validFrom=/^\d{4}-\d{2}-\d{2}$/.test(fromDate)&&!isNaN(new Date(fromDate+'T00:00:00').getTime())?fromDate:(validAsOf.slice(0,4)+'-01-01');
+  const isActivity=format==='activity';
+  const yStart=d=>d.slice(0,4)+'-01-01';
+  const prevDayTB=d=>{const x=new Date(d+'T00:00:00');x.setDate(x.getDate()-1);return _ymd(x);};
   const locName=locId?(locations.find(l=>String(l.id)===String(locId))?.name||''):'';
   const className=classId?(classes.find(c=>String(c.id)===String(classId))?.name||''):'';
   const projName=projId?(()=>{const p=projects.find(p=>String(p.id)===String(projId));return p?(p.code&&p.code!==p.name?p.code:p.name):'';})():'';
@@ -3411,6 +3421,41 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   const oneYrBefore=d=>{const x=new Date(d+'T00:00:00');x.setFullYear(x.getFullYear()-1);x.setDate(x.getDate()+1);return _ymd(x);};
   const colHead=(c,i)=>prior&&i===0?'Prev':(c.label==='Total'?'':c.label);
   const fnameTag=[locName,className,projName].filter(Boolean).map(s=>s.replace(/[^A-Za-z0-9]+/g,'_')).join('_');
+  // ── Activity (Sage-style) data ──
+  // Beginning balances = balances as of the day before the From date, with P&L closed at that
+  // year's Jan 1 (annual close). Ending balances = balances as of the To date, P&L closed at Jan 1.
+  // Period debits/credits = gross debit/credit activity strictly between From and To.
+  // Balances are shown signed debit-positive (liabilities/equity/revenue negative), matching Sage.
+  useEffect(()=>{let ok=true;
+    if(!isActivity){return;}
+    const from=validFrom,to=validAsOf,pd=prevDayTB(validFrom);
+    const begArgs=dimmed?{as_of:pd,...dimArgs}:{as_of:pd,close_pl_before:yStart(from)};
+    const endArgs=dimmed?{as_of:to,...dimArgs}:{as_of:to,close_pl_before:yStart(to)};
+    const actArgs={from,to,...(dimmed?dimArgs:{})};
+    Promise.all([api.getBalances(entityId,begArgs).catch(()=>[]),api.getBalances(entityId,actArgs).catch(()=>[]),api.getBalances(entityId,endArgs).catch(()=>[])])
+      .then(([beg,act,end])=>{if(ok)setActData({beg:beg||[],act:act||[],end:end||[]});});
+    return()=>{ok=false;};
+  },[entityId,isActivity,validFrom,validAsOf,JSON.stringify(dimArgs),dimmed,rk]);
+  const signOf=(type,bal)=>(type==='Asset'||type==='Expense')?bal:-bal; // debit-positive signed balance
+  const actRows=useMemo(()=>{
+    if(!actData)return[];
+    const m=new Map();
+    const put=arr=>(arr||[]).forEach(b=>{if(!m.has(b.code))m.set(b.code,{code:b.code,name:b.name,type:b.type,beg:0,dr:0,cr:0,end:0});});
+    put(actData.beg);put(actData.act);put(actData.end);
+    (actData.beg||[]).forEach(b=>{const r=m.get(b.code);if(r)r.beg=signOf(b.type,b.balance||0);});
+    (actData.end||[]).forEach(b=>{const r=m.get(b.code);if(r)r.end=signOf(b.type,b.balance||0);});
+    (actData.act||[]).forEach(b=>{const r=m.get(b.code);if(r){r.dr=b.total_debit||0;r.cr=b.total_credit||0;}});
+    return[...m.values()].filter(r=>Math.abs(r.beg)>0.005||Math.abs(r.end)>0.005||Math.abs(r.dr)>0.005||Math.abs(r.cr)>0.005).sort((a,b)=>String(a.code).localeCompare(String(b.code)));
+  },[actData]);
+  const actTot=useMemo(()=>actRows.reduce((t,r)=>({beg:t.beg+r.beg,dr:t.dr+r.dr,cr:t.cr+r.cr,end:t.end+r.end}),{beg:0,dr:0,cr:0,end:0}),[actRows]);
+  const rnd=n=>{const v=Math.round((n||0)*100)/100;return Math.abs(v)<0.005?0:v;};
+  const sfmt=n=>Math.abs(n||0)<0.005?'':fmt(n); // signed money, blank at zero, negatives in ()
+  const doExportActivity=()=>{const lbl=scopeLabel?(' — '+scopeLabel):'';
+    const d=[[entityName||'Trial Balance'],['Trial Balance'+lbl],['Beginning '+validFrom+' through Ending '+validAsOf],[],
+      ['Code','Account','Type','Beginning Balance (on '+validFrom+')','Period Debits','Period Credits','Ending Balance (on '+validAsOf+')']];
+    actRows.forEach(r=>d.push([r.code,r.name,r.type,rnd(r.beg)||'',r.dr||'',r.cr||'',rnd(r.end)||'']));
+    d.push([]);d.push(['','','Totals',rnd(actTot.beg),actTot.dr,actTot.cr,rnd(actTot.end)]);
+    exportToExcel(d,'TB_Activity'+(fnameTag?'_'+fnameTag:'')+'_'+validFrom+'_'+validAsOf+'.xlsx');};
   const doExport=()=>{const lbl=scopeLabel?(' — '+scopeLabel):'';const hdr=['Code','Account','Type'];cols.forEach((c,i)=>{const h=colHead(c,i);hdr.push((h?h+' ':'')+'Debit',(h?h+' ':'')+'Credit');});const d=[[entityName||'Trial Balance'],['Trial Balance'+lbl],['As of '+anchor],[],hdr];
     rows.forEach(r=>{const row=[r.code,r.name,r.type];cols.forEach((c,i)=>{const x=drcr(r.code,i);row.push(x.dr||'',x.cr||'');});d.push(row);});
     const tot=['','','Total'];cols.forEach((c,i)=>{tot.push(totDr(i),totCr(i));});d.push([]);d.push(tot);
@@ -3431,22 +3476,31 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
     }catch(e){alert('GL export failed: '+e.message);}
   };
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-    <div style={S.filterBar}><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
-      <ReportControls dateFilter={dateFilter} setDateFilter={setDateFilter} colMode={colMode} setColMode={setColMode} compare={compare} setCompare={setCompare}/>
+    <div style={S.filterBar}><div><label style={S.label}>Format</label><select style={S.inputSm} value={format} onChange={e=>setFormat(e.target.value)}><option value="balances">Balances (Debit / Credit)</option><option value="activity">Activity (Beginning → Ending)</option></select></div>
+      {isActivity?<><div><label style={S.label}>From date</label><input style={S.inputSm} type="date" value={fromDate} onChange={e=>setFromDate(e.target.value)}/></div><div><label style={S.label}>To date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div></>:<><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div><ReportControls dateFilter={dateFilter} setDateFilter={setDateFilter} colMode={colMode} setColMode={setColMode} compare={compare} setCompare={setCompare}/></>}
       {showProj&&<div><label style={S.label}>Project</label><select style={S.inputSm} value={projId} onChange={e=>setProjId(e.target.value)}><option value="">All (whole entity)</option>{projects.map(p=><option key={p.id} value={p.id}>{p.code&&p.code!==p.name?p.code+' — '+p.name:p.name}{p.line_count!=null?(' ('+p.line_count+')'):''}</option>)}</select></div>}
       {showLocInv&&<div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>}
       {showLocInv&&<div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div>}</div>
-    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='trial' currentConfig={{asOf,dateFilter,colMode,compare}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={doExport}>Export TB</button></div></div>
-    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Trial Balance{scopeLabel?(' — '+scopeLabel):''}</div><div style={{fontSize:13,color:T.textMuted}}>As of {asOf}{dimmed?' · dimension-tagged activity only':''}</div></div>
-    <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520}}>
+    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='trial' currentConfig={{asOf,dateFilter,colMode,compare,format,fromDate}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);if(c.format)setFormat(c.format);if(c.fromDate)setFromDate(c.fromDate);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={isActivity?doExportActivity:doExport}>Export TB</button></div></div>
+    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Trial Balance{scopeLabel?(' — '+scopeLabel):''}</div><div style={{fontSize:13,color:T.textMuted}}>{isActivity?('Beginning '+validFrom+' → Ending '+asOf):('As of '+asOf)}{dimmed?' · dimension-tagged activity only':''}</div></div>
+    {isActivity&&<div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:640}}>
+      <thead><tr><th style={S.th}>Code</th><th style={S.th}>Account</th><th style={S.th}>Type</th>
+        <th style={S.thR}>Beginning Balance<div style={{fontSize:9,fontWeight:400,textTransform:'none',letterSpacing:0}}>on {validFrom}</div></th>
+        <th style={S.thR}>Period Debits</th><th style={S.thR}>Period Credits</th>
+        <th style={S.thR}>Ending Balance<div style={{fontSize:9,fontWeight:400,textTransform:'none',letterSpacing:0}}>on {validAsOf}</div></th></tr></thead>
+      <tbody>{actRows.map(r=><tr key={r.code}><td style={{...S.td,color:T.textBright}}>{r.code}</td><td style={S.td} title={r.name}>{r.name}</td><td style={S.td}><span style={S.tag(r.type)}>{r.type}</span></td>
+        <td style={{...S.tdR,color:r.beg<0?T.red:undefined}}>{sfmt(r.beg)}</td><td style={S.tdR}>{sfmt(r.dr)}</td><td style={S.tdR}>{sfmt(r.cr)}</td><td style={{...S.tdR,color:r.end<0?T.red:undefined}}>{sfmt(r.end)}</td></tr>)}
+        <tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={3}>Totals</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(rnd(actTot.beg))}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(actTot.dr)}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(actTot.cr)}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(rnd(actTot.end))}</td></tr></tbody></table></div>}
+    {!isActivity&&<div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520}}>
       <thead><tr><th style={S.th}>Code</th><th style={S.th}>Account</th><th style={S.th}>Type</th>
         {cols.map((c,i)=>{const h=colHead(c,i);return[<th key={'hd'+i} style={S.thR}>{(h?h+' ':'')}Debit</th>,<th key={'hc'+i} style={S.thR}>{(h?h+' ':'')}Credit</th>];})}
         {prior&&<><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}</tr></thead>
       <tbody>{rows.map(r=><tr key={r.code}><td style={{...S.td,color:T.textBright}}>{r.code}</td><td style={S.td} title={r.name}>{r.name}</td><td style={S.td}><span style={S.tag(r.type)}>{r.type}</span></td>
         {cols.map((c,i)=>{const x=drcr(r.code,i);const clk=()=>setDrillAcct({...r,from:oneYrBefore(c.to),to:c.to});return[<td key={'d'+i} style={{...S.tdR,cursor:x.dr>0?'pointer':'default',color:x.dr>0?T.accent:undefined}} onClick={()=>x.dr>0&&clk()}>{x.dr>0?fmt(x.dr):''}</td>,<td key={'c'+i} style={{...S.tdR,cursor:x.cr>0?'pointer':'default',color:x.cr>0?T.accent:undefined}} onClick={()=>x.cr>0&&clk()}>{x.cr>0?fmt(x.cr):''}</td>];})}
         {prior&&(()=>{const cN=balAt(r.code,curI),pN=balAt(r.code,priI);return[<td key="dc" style={S.tdR}>{fmt(cN-pN)}</td>,<td key="pc" style={{...S.tdR,color:(cN-pN)>=0?T.green:T.red}}>{pctTxt(rptPct(cN,pN))}</td>];})()}</tr>)}
-        <tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={3}>Total</td>{cols.map((c,i)=>[<td key={'d'+i} style={{...S.tdBold,textAlign:'right'}}>${fmt(totDr(i))}</td>,<td key={'c'+i} style={{...S.tdBold,textAlign:'right'}}>${fmt(totCr(i))}</td>])}{prior&&<><td style={S.tdBold}/><td style={S.tdBold}/></>}</tr></tbody></table></div>
-    <div style={{textAlign:'center',marginTop:14,fontSize:13,fontWeight:600,color:Math.abs(totDr(curI)-totCr(curI))<0.005?T.green:T.red}}>{Math.abs(totDr(curI)-totCr(curI))<0.005?'In balance':'Off by $'+fmt(totDr(curI)-totCr(curI))}</div></div>
+        <tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={3}>Total</td>{cols.map((c,i)=>[<td key={'d'+i} style={{...S.tdBold,textAlign:'right'}}>${fmt(totDr(i))}</td>,<td key={'c'+i} style={{...S.tdBold,textAlign:'right'}}>${fmt(totCr(i))}</td>])}{prior&&<><td style={S.tdBold}/><td style={S.tdBold}/></>}</tr></tbody></table></div>}
+    {!isActivity&&<div style={{textAlign:'center',marginTop:14,fontSize:13,fontWeight:600,color:Math.abs(totDr(curI)-totCr(curI))<0.005?T.green:T.red}}>{Math.abs(totDr(curI)-totCr(curI))<0.005?'In balance':'Off by $'+fmt(totDr(curI)-totCr(curI))}</div>}
+    {isActivity&&<div style={{textAlign:'center',marginTop:14,fontSize:13,fontWeight:600,color:Math.abs(actTot.dr-actTot.cr)<0.005?T.green:T.red}}>{Math.abs(actTot.dr-actTot.cr)<0.005?'In balance':'Off by $'+fmt(actTot.dr-actTot.cr)}</div>}</div>
     {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillAcct.from||drillFrom} to={drillAcct.to||asOf} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
   </div>);
 }
