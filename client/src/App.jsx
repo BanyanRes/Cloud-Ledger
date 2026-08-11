@@ -3756,6 +3756,9 @@ function isCurrentPeriodWindow(filter,anchor){
 function isPnlPrior(filter,win,anchor){
   if(!win||!win.from)return null;
   if(filter==='ytd'){const a=_mkDate(anchor);return{label:'Prev',from:(a.getFullYear()-1)+'-01-01',to:_ymd(new Date(a.getFullYear()-1,a.getMonth(),a.getDate()))};}
+  // Custom → the SAME calendar dates one year earlier (prior-year same period), e.g.
+  // 1/1/26–2/28/26 → 1/1/25–2/28/25.
+  if(filter==='custom'){const f=_mkDate(win.from),t=_mkDate(win.to);return{label:'Prev',from:_ymd(new Date(f.getFullYear()-1,f.getMonth(),f.getDate())),to:_ymd(new Date(t.getFullYear()-1,t.getMonth(),t.getDate()))};}
   return rptPriorWindow(win);
 }
 const IS_DATE_FILTERS=[['ytd','Year to Date'],['month','Last Month'],['quarter','Last Quarter'],['year','Last Year'],['custom','Custom']];
