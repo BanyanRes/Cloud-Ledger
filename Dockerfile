@@ -1,5 +1,13 @@
 FROM node:20-slim
 
+# OCR tooling for image-only bank statement PDFs (scanned copies, or bank
+# portals like MapleMark that export statements as page images with no text
+# layer): poppler-utils provides pdftoppm to rasterize pages, tesseract-ocr
+# reads the text back out.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends tesseract-ocr poppler-utils \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Install root dependencies

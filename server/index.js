@@ -3461,6 +3461,127 @@ app.delete('/api/attachments/:id', auth, requireRole('Admin','Accountant'), (req
   res.json({ success: true });
 });
 
+// ── OCR fallback for image-only bank statement PDFs ─────────────────────────
+// Some statements have NO embedded text layer — scanned copies, or bank portals
+// (like MapleMark) that export the operating-account statement as a page image.
+// pdf-parse returns almost nothing for those. Rasterize each page with pdftoppm
+// and OCR it with tesseract (both baked into the Docker image), then rebuild
+// text lines from the word bounding boxes so a row like "7/02 7,408.05 Bill.com
+// ..." comes back on ONE line and downstream parsing sees normal transactions.
+function ocrPdfToLines(buffer) {
+  const cp = require('child_process');
+  const osMod = require('os');
+  const dir = fs.mkdtempSync(path.join(osMod.tmpdir(), 'clocr-'));
+  try {
+    const pdfPath = path.join(dir, 'in.pdf');
+    fs.writeFileSync(pdfPath, buffer);
+    cp.execFileSync('pdftoppm', ['-r', '300', '-png', pdfPath, path.join(dir, 'pg')], { stdio: 'ignore', timeout: 180000 });
+    const pngs = fs.readdirSync(dir).filter(f => /^pg.*\.png$/.test(f)).sort();
+    const allLines = [];
+    for (const png of pngs) {
+      const base = path.join(dir, png.replace(/\.png$/, ''));
+      cp.execFileSync('tesseract', [path.join(dir, png), base, 'tsv'], { stdio: 'ignore', timeout: 180000 });
+      const tsv = fs.readFileSync(base + '.tsv', 'utf8');
+      const words = [];
+      for (const row of tsv.split(/\r?\n/).slice(1)) {
+        const c = row.split('\t');
+        if (c.length < 12) continue;
+        const conf = parseFloat(c[10]); const txt = (c[11] || '').trim();
+        if (!txt || !(conf > 0)) continue;
+        words.push({ left: +c[6], top: +c[7], text: txt });
+      }
+      words.sort((a, b) => a.top - b.top || a.left - b.left);
+      // Group words into visual rows by y-position (tolerance ~ half a line at 300 DPI).
+      const YTOL = 14; let cur = [], cy = null;
+      const flush = () => { if (cur.length) { cur.sort((a, b) => a.left - b.left); allLines.push(cur.map(w => w.text).join(' ')); } cur = []; };
+      for (const w of words) {
+        if (cy === null || Math.abs(w.top - cy) <= YTOL) { cur.push(w); if (cy === null) cy = w.top; }
+        else { flush(); cur = [w]; cy = w.top; }
+      }
+      flush();
+    }
+    return { lines: allLines, text: allLines.join('\n') };
+  } finally {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
+  }
+}
+
+// ── MapleMark "Platinum Money Market" operating-account statement parser ─────
+// Runs on OCR-recovered lines. Two sections: "Deposits and Other Credits"
+// (inflow) and "Debits and Other Withdrawals" (outflow); each transaction row
+// starts with an M/D date and an amount, and its description can continue on the
+// following lines. Stop at the "Daily Balance Summary" table. Reconcile against
+// the Summary-of-Activity control totals ("Deposits / Misc Credits <count>
+// <total>", "Withdrawals / Misc Debits <count> <total>") plus the beginning/
+// ending balance identity; if it doesn't tie out, flag every row for review.
+function parseMapleMarkMoneyMarket(lines, text) {
+  const rows = [];
+  const _toNum = s => parseFloat(String(s).replace(/[^0-9.]/g, '')) || 0;
+  // Statement year from a full M/D/YY date in the Summary of Activity block.
+  const ym = text.match(/(?:Beginning|Ending)\s*Balance\s*\d{1,2}\/\d{1,2}\/(\d{2})/i);
+  const year = ym ? 2000 + (+ym[1]) : (new Date()).getFullYear();
+  // Control totals.
+  const _cd = text.match(/Deposits\s*\/\s*Misc\s*Credits\s+(\d+)\s+([\d,]+\.\d{2})/i);
+  const _cw = text.match(/Withdrawals\s*\/\s*Misc\s*Debits\s+(\d+)\s+([\d,]+\.\d{2})/i);
+  const _cb = text.match(/Beginning\s*Balance\s*\d{1,2}\/\d{1,2}\/\d{2}\s+([\d,]+\.\d{2})/i);
+  const _ce = text.match(/Ending\s*Balance\s*\d{1,2}\/\d{1,2}\/\d{2}\s+([\d,]+\.\d{2})/i);
+  const ctrlDepN = _cd ? +_cd[1] : null, ctrlDepTot = _cd ? _toNum(_cd[2]) : null;
+  const ctrlDebN = _cw ? +_cw[1] : null, ctrlDebTot = _cw ? _toNum(_cw[2]) : null;
+  const ctrlBeg = _cb ? _toNum(_cb[1]) : null, ctrlEnd = _ce ? _toNum(_ce[1]) : null;
+
+  const dateRx = /^(\d{1,2})\/(\d{1,2})\b/;
+  const moneyRx = /^\$?[\d,]+\.\d{2}$/;
+  // Page header/footer furniture that repeats at every page break — must never
+  // be folded into a transaction's description as a continuation line.
+  const noiseRx = /^m?\s*maple\b|^mark$|^bank$|banyan residential llc|rosecrans|el segundo|^page\b|page\s+\d+\s+of\s+\d+|account number|^date\b|platinum money market|contains confidential|member\s*fdic|service mark|intrafi|^\*{2,}\d+|^\d+\s+of\s+\d+$|activity description/i;
+  let section = 0; // +1 deposits, -1 debits, 0 none
+  let cur = null;
+  const push = () => { if (cur && cur.amount !== 0) rows.push(cur); cur = null; };
+
+  for (const raw of lines) {
+    const line = raw.replace(/\s+/g, ' ').trim();
+    if (/deposits and other credits/i.test(line)) { push(); section = 1; continue; }
+    if (/debits and other withdrawals/i.test(line)) { push(); section = -1; continue; }
+    if (/daily balance summary|summary of activity/i.test(line)) { push(); section = 0; continue; }
+    if (section === 0) continue;
+    if (/^date\s+amount\b/i.test(line) || /^amount\b/i.test(line)) continue; // column header
+    const dm = line.match(dateRx);
+    if (dm) {
+      const toks = line.split(' ');
+      let amtIdx = -1;
+      for (let i = 1; i < toks.length; i++) { if (moneyRx.test(toks[i])) { amtIdx = i; break; } }
+      if (amtIdx < 0) continue; // date line without an amount — skip
+      push();
+      const mag = _toNum(toks[amtIdx]);
+      const desc = toks.slice(amtIdx + 1).join(' ').trim();
+      const d = new Date(year, +dm[1] - 1, +dm[2]);
+      cur = { date: isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10),
+        description: desc, amount: section === -1 ? -mag : mag };
+      if (!cur.date) cur = null;
+    } else if (cur && !noiseRx.test(line)) {
+      cur.description = (cur.description + ' ' + line).replace(/\s+/g, ' ').trim();
+    }
+  }
+  push();
+  rows.forEach(r => { if (!r.description) r.description = r.amount < 0 ? 'Withdrawal' : 'Deposit'; r.description = r.description.substring(0, 500); });
+
+  const EPS = 0.02;
+  const depRows = rows.filter(r => r.amount > 0), debRows = rows.filter(r => r.amount < 0);
+  const depTot = depRows.reduce((a, r) => a + r.amount, 0);
+  const debTot = debRows.reduce((a, r) => a + Math.abs(r.amount), 0);
+  const depOK = ctrlDepTot == null || (Math.abs(depTot - ctrlDepTot) < EPS && (ctrlDepN == null || depRows.length === ctrlDepN));
+  const debOK = ctrlDebTot == null || (Math.abs(debTot - ctrlDebTot) < EPS && (ctrlDebN == null || debRows.length === ctrlDebN));
+  let idOK = true;
+  if (ctrlBeg != null && ctrlEnd != null) idOK = Math.abs((ctrlBeg + depTot - debTot) - ctrlEnd) < EPS;
+  const haveCtrl = ctrlDepTot != null || ctrlDebTot != null;
+  const reconciled = haveCtrl && depOK && debOK && idOK;
+  const ctrlInfo = { deposits: ctrlDepTot, checks: ctrlDebTot, prev: ctrlBeg, curr: ctrlEnd,
+    deposit_count: ctrlDepN, check_count: ctrlDebN, parsed_deposits: +depTot.toFixed(2), parsed_checks: +debTot.toFixed(2),
+    parsed_deposit_count: depRows.length, parsed_check_count: debRows.length };
+  if (!reconciled && haveCtrl) rows.forEach(r => { r.needs_review = true; });
+  return { rows, reconciled, ctrlInfo };
+}
+
 // ═══ Bank Transaction Upload & Coding ═══
 
 // Find the best active coding note for a parsed statement row. Matching keys:
@@ -3520,8 +3641,16 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
     if (isPdf) {
       // ── PDF bank statement parsing ──
       const data = await pdfParse(req.file.buffer);
-      const text = data.text || '';
+      let text = data.text || '';
       let lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
+      // Image-only PDF (no text layer): pdf-parse yields (almost) nothing. Fall
+      // back to OCR to recover the text and per-row line layout.
+      if (lines.length < 5) {
+        try {
+          const ocr = ocrPdfToLines(req.file.buffer);
+          if (ocr.lines.length > lines.length) { lines = ocr.lines; text = ocr.text; }
+        } catch (e) { console.error('[bank upload] OCR fallback failed:', e.message); }
+      }
 
       // Bank of Texas (BOKF) statements linearize through pdf-parse with the
       // date, the description, and the amount each on their OWN line, grouped
@@ -3540,6 +3669,9 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       // amount and would also mis-read the Account Summary and per-bank "Summary
       // of Balances" figures as transactions — so ICS gets its own parser.
       const isICS = /intrafi|maplemark|\bICS\b/i.test(text) && /account\s*transaction\s*detail/i.test(text);
+      // MapleMark "Platinum Money Market" operating-account statement (image PDF,
+      // read via OCR above): two Deposits/Debits sections, not the ICS layout.
+      const isMMM = /maple\s*mark/i.test(text) && /deposits and other credits/i.test(text) && /debits and other withdrawals/i.test(text);
       if (isBOT) {
         // Group each date -> description(s) -> amount block into one transaction;
         // section headers set the sign; stop before the DAILY ACCOUNT BALANCE
@@ -3674,6 +3806,9 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
         // If the parse doesn't tie out, flag every row for manual review rather
         // than importing possibly-wrong figures silently.
         if (!reconciled && _haveCtrl) rows.forEach(r => { r.needs_review = true; });
+      } else if (isMMM) {
+        const _mmm = parseMapleMarkMoneyMarket(lines, text);
+        rows = _mmm.rows; reconciled = _mmm.reconciled; ctrlInfo = _mmm.ctrlInfo;
       } else {
 
       // ── Control totals for post-parse reconciliation ──
