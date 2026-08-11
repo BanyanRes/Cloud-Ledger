@@ -5286,6 +5286,32 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
           if(vendor){const vk=normVend(vendor);if(vk)bumpV(vk,code,name,budget);}  // tally codings per vendor
         }
       }
+      // Also fold in the full Chart of Accounts (the "COA - Intacct" tab):
+      // Account no. -> Title. Scanned AFTER the invoice logs so a code already
+      // used in the logs keeps its report label; this only FILLS IN codes not yet
+      // invoiced. That's what lets you CORRECT a coding to a brand-new (but valid)
+      // cost code and still have the Cost Code Name auto-fill.
+      for(const coaSheet of Object.keys(wb.Sheets)){
+        if(!/coa|chart of accounts/i.test(coaSheet))continue;
+        const ws=wb.Sheets[coaSheet];if(!ws)continue;
+        const rows=XLSX.utils.sheet_to_json(ws,{header:1,blankrows:false});
+        let acctIdx=0,titleIdx=1,hdr=-1;
+        for(let i=0;i<Math.min(rows.length,12);i++){
+          const cells=(rows[i]||[]).map(c=>String(c==null?'':c).toLowerCase().replace(/\s+/g,' ').trim());
+          const ai=cells.findIndex(t=>/account\s*(no|number|#)|^acct\b/.test(t));
+          const ti=cells.findIndex(t=>/^title$|account\s*name|description/.test(t));
+          if(ai>=0&&ti>=0){acctIdx=ai;titleIdx=ti;hdr=i;break;}
+        }
+        for(let i=(hdr>=0?hdr+1:0);i<rows.length;i++){
+          const row=rows[i];if(!row)continue;
+          const code=row[acctIdx]!=null?String(row[acctIdx]).trim():'';
+          const name=row[titleIdx]!=null?String(row[titleIdx]).trim():'';
+          if(!code||!/^\d+$/.test(code)||!name)continue;   // account numbers only
+          sawAny=true;
+          if(!m[code])m[code]=name;                        // logs win; COA fills the gaps
+          if(!bName[code])bName[code]=name;
+        }
+      }
       if(!sawAny){setWbCoaMap({});setWbVendorMap({});setWbBudgetMap({});return;}
       // Finalize: pick the modal budget per code, and the modal coding per vendor.
       const pickMode=(t)=>{let best=null;for(const[k,e]of t){if(!best||e.count>best.count||(e.count===best.count&&e.order<best.order))best={key:k,...e};}return best;};
