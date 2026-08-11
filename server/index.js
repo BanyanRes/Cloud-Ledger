@@ -3582,6 +3582,110 @@ function parseMapleMarkMoneyMarket(lines, text) {
   return { rows, reconciled, ctrlInfo };
 }
 
+// ── Coordinate-aware text extraction for column-based statements ────────────
+// pdf-parse flattens a PDF to plain text and loses the horizontal position of
+// each number, so on a statement with separate Deposits and Withdrawals columns
+// you can't tell which column an amount sits in. pdfjs exposes each text item's
+// x-position, so we rebuild per-page visual lines whose words keep their x —
+// enough to classify an amount by column. Returns pages[] of lines[] of
+// { x, x1, t }. Lazy-required so a pdfjs issue never blocks server startup.
+async function extractPdfPositionedPages(buffer) {
+  const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer), isEvalSupported: false, verbosity: 0 }).promise;
+  const pages = [];
+  for (let pg = 1; pg <= doc.numPages; pg++) {
+    const page = await doc.getPage(pg);
+    const tc = await page.getTextContent();
+    const items = tc.items.map(it => ({ x: it.transform[4], y: it.transform[5], w: it.width || 0, t: (it.str || '').trim() })).filter(i => i.t);
+    items.sort((a, b) => b.y - a.y || a.x - b.x);
+    const lines = []; let cur = [], cy = null;
+    for (const it of items) {
+      if (cy === null || Math.abs(it.y - cy) <= 3) { cur.push(it); cy = cy === null ? it.y : cy; }
+      else { lines.push(cur); cur = [it]; cy = it.y; }
+    }
+    if (cur.length) lines.push(cur);
+    pages.push(lines.map(l => l.sort((a, b) => a.x - b.x).map(w => ({ x: w.x, x1: w.x + w.w, t: w.t }))));
+  }
+  return pages;
+}
+
+// ── UMB Bank "Commercial Checking" statement parser ─────────────────────────
+// A two-column statement (Deposits | Withdrawals). Each Transaction Detail row
+// linearizes to a bare amount, so we classify it by which column its x-position
+// falls under (from the Deposits/Withdrawals header centers). Reconcile against
+// the Account Summary (Deposits and Credits, Withdrawals and Debits, Service
+// Charges and Fees) and the beginning/ending balance identity.
+function parseUMB(pages, flatText) {
+  const rows = [];
+  const _toNum = s => parseFloat(String(s).replace(/[^0-9.]/g, '')) || 0;
+  const moneyRx = /^\$?[\d,]+\.\d{2}$/;
+  const MONTHS = { jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11 };
+  const ym = flatText.match(/Ending Balance as of\s*\d{1,2}\/\d{1,2}\/(\d{4})/i);
+  const year = ym ? +ym[1] : (new Date()).getFullYear();
+  const g = rx => { const m = flatText.match(rx); return m ? _toNum(m[1]) : null; };
+  const ctrlBeg = g(/Beginning Balance as of\s*\d{1,2}\/\d{1,2}\/\d{4}\s*\$?([\d,]+\.\d{2})/i);
+  const ctrlEnd = g(/Ending Balance as of\s*\d{1,2}\/\d{1,2}\/\d{4}\s*\$?([\d,]+\.\d{2})/i);
+  const _dm = flatText.match(/Deposits and Credits\s*\((\d+)\)\s*\$?([\d,]+\.\d{2})/i);
+  const _wm = flatText.match(/Withdrawals and Debits\s*\((\d+)\)\s*\$?([\d,]+\.\d{2})/i);
+  const ctrlDepN = _dm ? +_dm[1] : null, ctrlDep = _dm ? _toNum(_dm[2]) : null;
+  const ctrlWd = _wm ? _toNum(_wm[2]) : null;
+  const ctrlFees = g(/Service Charges and Fees\s*\$?([\d,]+\.\d{2})/i);
+  const expOut = (ctrlWd || 0) + (ctrlFees || 0);
+  const expIn = ctrlDep || 0;
+
+  let inDetail = false, depC = null, wdC = null, cur = null;
+  const noiseRx = /^(hp property owner|e 64th|aurora|statement (ending|period)|page \d|return service|account (number|title|summary)|commercial|mailstop|p\.o\. box|kansas city|terms and conditions|go paperless|contact information|in case of|beginning balance|ending balance|deposits and|withdrawals and|service charges|total days)/i;
+  const push = () => { if (cur && cur.amount !== 0) rows.push(cur); cur = null; };
+
+  for (const lines of pages) {
+    for (const words of lines) {
+      const joined = words.map(w => w.t).join(' ').replace(/\s+/g, ' ').trim();
+      if (/^Transaction Detail/i.test(joined)) { push(); inDetail = true; depC = wdC = null; continue; }
+      if (/End of Day|Current Balance|^Totals\b/i.test(joined)) { push(); inDetail = false; continue; }
+      if (!inDetail) continue;
+      const dh = words.find(w => /^Deposits$/i.test(w.t)); const wh = words.find(w => /^Withdrawals$/i.test(w.t));
+      if (dh || wh) { if (dh) depC = (dh.x + dh.x1) / 2; if (wh) wdC = (wh.x + wh.x1) / 2; continue; }
+      if (/^Date\b/i.test(joined) || /^Description/i.test(joined)) continue;
+      const dtMatch = joined.match(/^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\b/i);
+      if (dtMatch) {
+        const amtWord = [...words].reverse().find(w => moneyRx.test(w.t));
+        if (!amtWord) continue;
+        push();
+        const mag = _toNum(amtWord.t);
+        const center = (amtWord.x + amtWord.x1) / 2;
+        let sign;
+        if (depC != null && wdC != null) sign = Math.abs(center - wdC) <= Math.abs(center - depC) ? -1 : 1;
+        else if (wdC != null) sign = center >= wdC - 30 ? -1 : 1;
+        else sign = -1;
+        const d = new Date(year, MONTHS[dtMatch[1].toLowerCase()], +dtMatch[2]);
+        let desc = joined.slice(dtMatch[0].length).replace(amtWord.t, '').replace(/\s+/g, ' ').trim();
+        cur = { date: isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10), description: desc, amount: sign * mag };
+        if (!cur.date) cur = null;
+      } else if (cur && !noiseRx.test(joined) && !/^[\d,]+\.\d{2}$/.test(joined)) {
+        cur.description = (cur.description + ' ' + joined).replace(/\s+/g, ' ').trim();
+      }
+    }
+  }
+  push();
+  rows.forEach(r => { if (!r.description) r.description = r.amount < 0 ? 'Withdrawal' : 'Deposit'; r.description = r.description.substring(0, 500); });
+
+  const EPS = 0.02;
+  const depRows = rows.filter(r => r.amount > 0), wdRows = rows.filter(r => r.amount < 0);
+  const depTot = depRows.reduce((a, r) => a + r.amount, 0);
+  const wdTot = wdRows.reduce((a, r) => a + Math.abs(r.amount), 0);
+  const depOK = ctrlDep == null || Math.abs(depTot - expIn) < EPS;
+  const wdOK = (ctrlWd == null && ctrlFees == null) || Math.abs(wdTot - expOut) < EPS;
+  let idOK = true;
+  if (ctrlBeg != null && ctrlEnd != null) idOK = Math.abs((ctrlBeg + depTot - wdTot) - ctrlEnd) < EPS;
+  const haveCtrl = ctrlDep != null || ctrlWd != null || ctrlFees != null;
+  const reconciled = haveCtrl && depOK && wdOK && idOK;
+  const ctrlInfo = { deposits: expIn, checks: expOut, prev: ctrlBeg, curr: ctrlEnd,
+    deposit_count: ctrlDepN, parsed_deposits: +depTot.toFixed(2), parsed_checks: +wdTot.toFixed(2),
+    parsed_deposit_count: depRows.length, parsed_check_count: wdRows.length };
+  if (!reconciled && haveCtrl) rows.forEach(r => { r.needs_review = true; });
+  return { rows, reconciled, ctrlInfo };
+}
+
 // ═══ Bank Transaction Upload & Coding ═══
 
 // Find the best active coding note for a parsed statement row. Matching keys:
@@ -3672,6 +3776,9 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       // MapleMark "Platinum Money Market" operating-account statement (image PDF,
       // read via OCR above): two Deposits/Debits sections, not the ICS layout.
       const isMMM = /maple\s*mark/i.test(text) && /deposits and other credits/i.test(text) && /debits and other withdrawals/i.test(text);
+      // UMB Bank Commercial Checking: two-column (Deposits | Withdrawals) detail,
+      // classified by column position via a coordinate-aware re-read below.
+      const isUMB = /transaction detail/i.test(text) && /end of day\s*-?\s*current balance/i.test(text) && /deposits and credits/i.test(text);
       if (isBOT) {
         // Group each date -> description(s) -> amount block into one transaction;
         // section headers set the sign; stop before the DAILY ACCOUNT BALANCE
@@ -3809,6 +3916,9 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       } else if (isMMM) {
         const _mmm = parseMapleMarkMoneyMarket(lines, text);
         rows = _mmm.rows; reconciled = _mmm.reconciled; ctrlInfo = _mmm.ctrlInfo;
+      } else if (isUMB) {
+        const _umb = parseUMB(await extractPdfPositionedPages(req.file.buffer), text);
+        rows = _umb.rows; reconciled = _umb.reconciled; ctrlInfo = _umb.ctrlInfo;
       } else {
 
       // ── Control totals for post-parse reconciliation ──
