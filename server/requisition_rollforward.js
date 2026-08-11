@@ -2051,19 +2051,51 @@ function maintainBrakerReport({ workbook, b2a, priorWs, curWs }) {
     }
   }
 
-  // 3. Link the Current Invoice Log's Development Fee line (posted by
-  //    deriveBrakerDevFee during the roll-forward) to the tab's period total, so
-  //    the posted amount always equals the calculated fee. Matched by Budget Code.
-  if (curWs && brk.totalCell && devLabel && COL.budgetcode != null && COL.amount != null) {
-    const totalRef = `ROUND('${brk.ws.name}'!${brk.totalCell.address},2)`;
-    const cl = Math.max(curWs.rowCount || 0, curWs.actualRowCount || 0);
-    for (let r = logDataStart(curWs); r <= cl; r++) {
-      const af = cellFormula(curWs.getCell(r, COL.amount));
-      if (af && /SUBTOTAL/i.test(af)) continue;     // skip subtotal/grand-total rows
-      if (cellStr(curWs.getCell(r, COL.budgetcode)).trim().toLowerCase() !== devLabel.toLowerCase()) continue;
-      const seed = cellNum(curWs.getCell(r, COL.amount));
-      curWs.getCell(r, COL.amount).value = (seed != null) ? { formula: totalRef, result: seed } : { formula: totalRef };
-      break;
+  // 3. Post the Development Fee as a STATIC value — never a live formula. A live
+  //    link to the tab creates a CIRCULAR REFERENCE: the tab's % complete is
+  //    derived from the invoice log, which now holds this very line. The report
+  //    is designed to avoid that by excluding the dev fee from % complete, which
+  //    only holds if the posted line is a plain number (the way it was keyed in by
+  //    hand). Compute the fee exactly as the tab does — basis x %complete - prior
+  //    cumulative, where %complete = (costs ex dev-fee & land) / (budget ex
+  //    dev-fee & land) — so the posted number equals what the tab recomputes.
+  if (curWs && priorWs && devLabel && COL.budgetcode != null && COL.amount != null) {
+    const devKey = devLabel.toLowerCase();
+    const pctF = cellFormula(brk.pctCell) || '';
+    const pm = pctF.match(/!\s*\$?J\$?(\d+)/i);                       // the B2A "% complete" row (J-cell the tab points at)
+    const F114 = pm ? cellNum(b2a.getCell('F' + pm[1])) : null;      // budget ex dev-fee & land (stable)
+    const basis = brk.basisCell ? cellNum(brk.basisCell) : null;
+    // Sum a log's detail amounts, splitting out dev-fee and the Land purchase
+    // (Budget Code "Land") — both are excluded from % complete.
+    const sumLog = (ws) => {
+      let ex = 0, dev = 0; const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
+      for (let r = logDataStart(ws); r <= last; r++) {
+        const af = cellFormula(ws.getCell(r, COL.amount));
+        if (af && /SUBTOTAL/i.test(af)) continue;
+        const amt = cellNum(ws.getCell(r, COL.amount));
+        if (amt == null) continue;
+        const bc = cellStr(ws.getCell(r, COL.budgetcode)).trim().toLowerCase();
+        if (bc === devKey) { dev += amt; continue; }
+        if (bc === 'land') continue;
+        ex += amt;
+      }
+      return { ex, dev };
+    };
+    let fee = null;
+    if (basis != null && F114 && F114 !== 0) {
+      const P = sumLog(priorWs), C = sumLog(curWs);
+      const pct = (P.ex + C.ex) / F114;
+      fee = Math.round((basis * pct - P.dev) * 100) / 100;           // = tab D13 (same % complete)
+    }
+    if (fee != null) {
+      const cl = Math.max(curWs.rowCount || 0, curWs.actualRowCount || 0);
+      for (let r = logDataStart(curWs); r <= cl; r++) {
+        const af = cellFormula(curWs.getCell(r, COL.amount));
+        if (af && /SUBTOTAL/i.test(af)) continue;
+        if (cellStr(curWs.getCell(r, COL.budgetcode)).trim().toLowerCase() !== devKey) continue;
+        curWs.getCell(r, COL.amount).value = fee;                    // STATIC number -> no circular reference
+        break;
+      }
     }
   }
 }
