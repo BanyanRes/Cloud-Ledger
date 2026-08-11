@@ -3310,24 +3310,25 @@ const RPT_COL_MODES=[['total','Total Only'],['monthly','Monthly'],['quarterly','
 const _ymd=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
 const _mkDate=s=>new Date((/^\d{4}-\d{2}-\d{2}$/.test(s)?s:today())+'T00:00:00');
 // Overall [from,to] window for a date preset, anchored at `anchor` (YYYY-MM-DD).
-// A preset returns the PREVIOUS COMPLETE calendar period relative to the
-// period-end's own period (whole-period, calendar-aligned) — matching the
-// app's presetRange() convention. For a 06/30/2026 period end: Last Month =
-// May 2026, Last Quarter = Q1 2026 (Jan–Mar), Last Year = 2025.
+// A preset returns the most recent COMPLETE calendar period whose end falls ON OR
+// BEFORE the period-end (whole-period, calendar-aligned). For a 06/30/2026 period
+// end (which is itself a month/quarter end): Last Month = June 2026, Last Quarter =
+// Q2 2026 (Apr–Jun), Last Year = 2025. A mid-period period-end steps back to the
+// last completed period (e.g. 05/15 → Last Quarter = Q1, Last Month = April).
 //   NOTE (bug fix, Liting #1): the old version returned a trailing window
-//   (anchor − N months + 1 day), e.g. Last Quarter → 2026-03-31…06-30. When
-//   split into quarterly columns that produced a bogus 1-day "Q1 '26" sliver
-//   column (only 3/31 activity) plus a "Q2 '26" column, so the displayed Q1
-//   never matched the true Q1. Whole-period alignment makes each column a
-//   full calendar period, so Last Quarter shows the correct full Q1.
+//   (anchor − N months + 1 day), e.g. Last Quarter → 2026-03-31…06-30. Split into
+//   quarterly columns that produced a bogus 1-day "Q1 '26" sliver column (only 3/31
+//   activity) plus a "Q2 '26" column, so the displayed quarter never matched. Whole-
+//   period alignment makes each column a full calendar period. With Compare (prior
+//   period) on, Last Quarter now shows Q2 vs its prior quarter Q1.
+// JS Date normalizes out-of-range month indexes (month -1 → prior Dec), so periods
+// that cross a year boundary are handled for free.
 function rptWindow(filter,anchor){
-  const a=_mkDate(anchor);const to=_ymd(a);
+  const a=_mkDate(anchor);const to=_ymd(a);const ay=_ymd(a);
   const Y=a.getFullYear(),M=a.getMonth();
-  // JS Date normalizes out-of-range month indexes (e.g. month -3 → prior year),
-  // so quarter/month arithmetic that crosses a year boundary is handled for free.
-  if(filter==='month')return{from:_ymd(new Date(Y,M-1,1)),to:_ymd(new Date(Y,M,0))};
-  if(filter==='quarter'){const ps=(Math.floor(M/3)-1)*3;return{from:_ymd(new Date(Y,ps,1)),to:_ymd(new Date(Y,ps+3,0))};}
-  if(filter==='year')return{from:_ymd(new Date(Y-1,0,1)),to:_ymd(new Date(Y-1,11,31))};
+  if(filter==='month'){const b=(ay>=_ymd(new Date(Y,M+1,0)))?M:M-1;return{from:_ymd(new Date(Y,b,1)),to:_ymd(new Date(Y,b+1,0))};}
+  if(filter==='quarter'){const q=Math.floor(M/3);const b=(ay>=_ymd(new Date(Y,q*3+3,0)))?q:q-1;return{from:_ymd(new Date(Y,b*3,1)),to:_ymd(new Date(Y,b*3+3,0))};}
+  if(filter==='year'){const b=(ay>=_ymd(new Date(Y,11,31)))?Y:Y-1;return{from:_ymd(new Date(b,0,1)),to:_ymd(new Date(b,11,31))};}
   return{from:null,to};// 'all' = inception → anchor
 }
 // Human label for a preset's actual window, e.g. "Last Quarter · 2026-01-01 → 2026-03-31".
@@ -3365,10 +3366,35 @@ function rptPeriods(filter,mode,anchor){
 function rptPriorWindow(p){
   if(!p||!p.from)return null; // inception-based windows have no prior
   const from=_mkDate(p.from),to=_mkDate(p.to);
+  // Whole-month windows (month/quarter/year) → the previous equivalent CALENDAR
+  // period, so a Q2 (Apr–Jun) window compares against Q1 (Jan–Mar), not a ragged
+  // day-count window. Otherwise fall back to the equal-length window right before.
+  const monthStart=from.getDate()===1;
+  const monthEnd=(()=>{const n=new Date(to);n.setDate(n.getDate()+1);return n.getDate()===1;})();
+  if(monthStart&&monthEnd){
+    const months=(to.getFullYear()-from.getFullYear())*12+(to.getMonth()-from.getMonth())+1;
+    return{label:'Prev',from:_ymd(new Date(from.getFullYear(),from.getMonth()-months,1)),to:_ymd(new Date(from.getFullYear(),from.getMonth(),0))};
+  }
   const days=Math.round((to-from)/86400000)+1;
   const pTo=new Date(from);pTo.setDate(pTo.getDate()-1);
   const pFrom=new Date(pTo);pFrom.setDate(pFrom.getDate()-days+1);
   return{label:'Prev',from:_ymd(pFrom),to:_ymd(pTo)};
+}
+// Concise label for a whole-period window: "Q2 2026", "Jun 2026", or "2026".
+// Returns '' when the window is not exactly one calendar month/quarter/year, so
+// callers can fall back to a generic heading.
+function periodLabel(from,to){
+  if(!from||!to)return '';
+  const s=_mkDate(from),e=_mkDate(to);
+  const monthStart=s.getDate()===1;
+  const monthEnd=(()=>{const n=new Date(e);n.setDate(n.getDate()+1);return n.getDate()===1;})();
+  if(monthStart&&monthEnd){
+    const months=(e.getFullYear()-s.getFullYear())*12+(e.getMonth()-s.getMonth())+1;
+    if(months===1)return s.toLocaleString('en-US',{month:'short'})+' '+s.getFullYear();
+    if(months===3&&s.getMonth()%3===0)return 'Q'+(Math.floor(s.getMonth()/3)+1)+' '+s.getFullYear();
+    if(months===12&&s.getMonth()===0)return String(s.getFullYear());
+  }
+  return '';
 }
 const rptPct=(cur,prev)=>Math.abs(prev)<0.005?null:(cur-prev)/Math.abs(prev)*100;
 const rptChgCell=(cur,prev)=>{const d=cur-prev;const p=rptPct(cur,prev);return{d,p};};
@@ -3716,7 +3742,12 @@ function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true
     {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{ord.map(oi=><td key={oi} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,type:a.type,from:cols[oi].from,to:cols[oi].to})}>{fmt(val(a.code,oi))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
     <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td>{ord.map(oi=><td key={oi} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(sumC(items,oi))}</td>)}{chgCells(ci=>sumC(items,ci))}</tr></>);
   const TotalRow=({label,getter,big})=>(<tr style={big?S.grandTotalRow:{background:T.bgElevated}}><td style={big?{...S.tdBold,fontSize:15}:{...S.td,fontWeight:700,color:T.textBright}}>{label}</td>{ord.map(oi=><td key={oi} style={big?{...S.tdBold,textAlign:'right',fontSize:16,color:getter(oi)>=0?T.green:T.red}:{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(getter(oi))}</td>)}{chgCells(getter)}</tr>);
-  const colHead=(c,i)=>prior&&i===0?'Prev':(c.label==='Total'?'Amount':c.label);
+  // Column heading: in Total-Only mode, name the column by the actual calendar
+  // period its data covers (e.g. "Q2 2026" current, "Q1 2026" prior) so readers
+  // know which quarter is which — updates automatically as the selection changes.
+  // Falls back to the generic Prev/Amount labels when the window isn't a clean
+  // single period (e.g. an inception-to-date "All" window).
+  const colHead=(c,i)=>{if(colMode==='total'){const pl=periodLabel(c.from,c.to);if(pl)return pl;}return prior&&i===0?'Prev':(c.label==='Total'?'Amount':c.label);};
   const doExport=()=>{
     // 0-based column index -> A1 letter (B, C, … AA, …).
     const colL=n=>{let s='';n=n+1;while(n>0){const m=(n-1)%26;s=String.fromCharCode(65+m)+s;n=Math.floor((n-1)/26);}return s;};
