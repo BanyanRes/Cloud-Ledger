@@ -1049,6 +1049,22 @@ async function rollForward(workbook, newCurrent, meta = {}) {
     }
   } catch (e) { /* best-effort; never block the roll-forward */ }
 
+  // 1d. Braker-style %-of-completion dev-fee tab. Its fee is a formula on the tab
+  //     (basis x % complete - prior cumulative), not a rate x base the engine can
+  //     precompute, so no fee was posted above. Post a Current-Log line — WITH its
+  //     Budget Code, so the Budget-to-Actual "this period" SUMIF picks it up — and
+  //     link its amount to the tab in maintainBrakerReport. Only when a dev-fee
+  //     line isn't already present for that code (avoids double-count). Braker-only.
+  try {
+    if (!effectiveCurrent.some(inv => devFeeInfo && String(inv.code) === String(devFeeInfo.code))) {
+      const bd = deriveBrakerDevFee(workbook, priorWs, meta);
+      if (bd && bd.row && !effectiveCurrent.some(inv => String(inv.code) === String(bd.code))) {
+        effectiveCurrent.push(bd.row);
+        devFeeInfo = { amount: bd.amount, code: bd.code, source: 'braker-devfee', needsReview: false, row: bd.row };
+      }
+    }
+  } catch (e) { /* best-effort; never block the roll-forward */ }
+
   // 2. Rebuild Prior Log = prior groups + folded current rows.
   const landmarks = rebuildPriorLog(priorWs, priorGroups, curByCode);
 
@@ -1908,15 +1924,84 @@ function findBrakerDevFeeTab(workbook) {
     if (!pctCell) continue;
     const valCol = pctCell.col;                     // Dev-Fee values live in this column (D on Braker)
     const last = Math.max(w.rowCount || 0, w.actualRowCount || 0);
-    let priorRow = null;
+    const valColL = colLetter(valCol);
+    let priorRow = null, basisRow = null;
     for (let r = 1; r <= last; r++) {
       const label = cellStr(w.getCell(r, valCol - 1));
-      if (/(previous|prior).*(cumulative|total).*dev|less:\s*previous/i.test(label)) { priorRow = r; break; }
+      if (priorRow == null && /(previous|prior).*(cumulative|total).*dev|less:\s*previous/i.test(label)) priorRow = r;
+      if (basisRow == null && /dev\s*fee\s*basis|(^|\W)basis(\W|$)/i.test(label)) basisRow = r;
     }
-    if (priorRow == null) continue;
-    return { ws: w, priorCell: w.getCell(priorRow, valCol) };
+    if (priorRow == null) continue;                 // the drifting "prior cumulative" cell is the anchor
+    // Period total = the value cell that ADDS the prior-cumulative cell (e.g.
+    // D13 = D9+D11), found by a formula referencing the prior-cumulative row —
+    // NOT the "Total Dev Fee per Lender Budget" cell, which also reads "total dev
+    // fee". Fall back to a "total dev fee" label that isn't the lender-budget one.
+    let totalRow = null;
+    const priorRef = new RegExp('(^|[^A-Za-z0-9$])\\$?' + valColL + '\\$?' + priorRow + '($|[^0-9])');
+    for (let r = 1; r <= last; r++) {
+      if (r === priorRow) continue;
+      const f = cellFormula(w.getCell(r, valCol));
+      if (f && priorRef.test(f)) { totalRow = r; break; }
+    }
+    if (totalRow == null) {
+      for (let r = 1; r <= last; r++) {
+        const label = cellStr(w.getCell(r, valCol - 1));
+        if (/total\s+dev\w*.*fee/i.test(label) && !/budget|lender/i.test(label)) { totalRow = r; break; }
+      }
+    }
+    return {
+      ws: w, valCol, pctCell,
+      priorCell: w.getCell(priorRow, valCol),
+      totalCell: totalRow != null ? w.getCell(totalRow, valCol) : null,
+      basisCell: basisRow != null ? w.getCell(basisRow, valCol) : null,
+    };
   }
   return null;
+}
+
+// Build this period's Development Fee line for a Braker-style %-of-completion
+// dev-fee tab. The fee is a FORMULA on the tab (basis x % complete - prior
+// cumulative), not a rate x base the engine can precompute, so we seed a best-
+// effort amount here and later link the Current-Log cell to the tab
+// (maintainBrakerReport step 3). Coding — cost code, Budget Code (so the
+// Budget-to-Actual "this period" SUMIF picks it up), cost category, name and
+// vendor — is copied from the most recent dev-fee line already in the Prior
+// Invoice Log. Returns { row, code, amount } or null.
+function deriveBrakerDevFee(workbook, priorWs, meta = {}) {
+  if (!priorWs || COL.budgetcode == null) return null;   // needs the Budget Code column (Braker has it)
+  const brk = findBrakerDevFeeTab(workbook);
+  if (!brk) return null;
+  const pl = Math.max(priorWs.rowCount || 0, priorWs.actualRowCount || 0);
+  let tmpl = null, priorCum = 0;
+  for (let r = 1; r <= pl; r++) {
+    const bc = cellStr(priorWs.getCell(r, COL.budgetcode)).trim();
+    if (!/dev\w*\s*(mgmt|management)?\s*fee/i.test(bc)) continue;   // dev-fee lines only
+    const amt = cellNum(priorWs.getCell(r, COL.amount));
+    if (amt != null) priorCum += amt;                              // running prior cumulative
+    tmpl = {                                                       // keep the LAST (most recent) coding
+      cat: priorWs.getCell(r, COL.cat).value,
+      budgetcode: bc,
+      code: cellCode(priorWs.getCell(r, COL.code)),
+      name: cellStr(priorWs.getCell(r, COL.name)).trim() || 'Development Fee',
+      vendor: cellStr(priorWs.getCell(r, COL.vendor)).trim() || 'Banyan Residential',
+    };
+  }
+  if (!tmpl || tmpl.code == null) return null;
+  // Best-effort seed = basis x %complete - prior cumulative (the tab's own math),
+  // clamped >= 0. Excel recomputes the exact figure on open via the linked formula.
+  const basis = brk.basisCell ? cellNum(brk.basisCell) : null;
+  const pct = cellNum(brk.pctCell);
+  const seed = (basis != null && pct != null) ? Math.max(0, Math.round((basis * pct - priorCum) * 100) / 100) : 0;
+  const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const md = meta && meta.asOfDate ? String(meta.asOfDate).match(/^(\d{4})-(\d{1,2})/) : null;
+  const bill = md ? `${MONTHS[Number(md[2]) - 1]} ${md[1]} Dev Fee` : 'Dev Fee';
+  const row = {
+    cat: tmpl.cat, code: tmpl.code, budgetcode: tmpl.budgetcode,
+    name: tmpl.name, vendor: tmpl.vendor, bill, amount: seed,
+    req: meta && meta.reqNumber ? 'Req#' + meta.reqNumber : undefined,
+    date: (meta && meta.asOfDate) || null,
+  };
+  return { row, code: tmpl.code, amount: seed };
 }
 
 function maintainBrakerReport({ workbook, b2a, priorWs, curWs }) {
@@ -1934,8 +2019,7 @@ function maintainBrakerReport({ workbook, b2a, priorWs, curWs }) {
     if (nf) c.value = { formula: nf };              // drop the cached result -> recomputes on open
   }));
 
-  // 2. Re-point the Dev Fee tab's prior cumulative at the B2A dev-fee row's
-  //    PRIOR column (a self-updating SUMIF over the Prior Invoice Log).
+  // Locate the B2A dev-fee row + its PRIOR column (the SUMIF over the Prior Log).
   let devRow = null, priorCol = null, devLabel = null;
   const bl = Math.max(b2a.rowCount || 0, b2a.actualRowCount || 0);
   for (let r = 1; r <= bl && devRow == null; r++) {
@@ -1946,30 +2030,46 @@ function maintainBrakerReport({ workbook, b2a, priorWs, curWs }) {
       if (f && /SUMIF/i.test(f) && /prior invoice log/i.test(f)) { devRow = r; priorCol = c; devLabel = label; break; }
     }
   }
-  if (devRow == null) return;
 
-  const pf = cellFormula(brk.priorCell);
-  const barePrior = /^[+-]?\s*'?prior invoice log'?\s*!\s*\$?[A-Za-z]{1,3}\$?\d+\s*$/i;
-  if (!pf || !barePrior.test(pf)) return;           // already self-updating (or not the drifting kind) -> leave
-
-  // Seed the cached result = prior-log total of the dev-fee lines (matched by the
-  // Budget Code column against the B2A dev-fee account name) so the tab shows a
-  // value before Excel recalculates.
-  let seed = 0;
-  if (priorWs && COL.budgetcode != null && COL.amount != null && devLabel) {
-    const pl = Math.max(priorWs.rowCount || 0, priorWs.actualRowCount || 0);
-    for (let r = 1; r <= pl; r++) {
-      if (cellStr(priorWs.getCell(r, COL.budgetcode)).trim().toLowerCase() !== devLabel.toLowerCase()) continue;
-      const a = cellNum(priorWs.getCell(r, COL.amount));
-      if (a != null) seed += a;
+  // 2. Re-point the Dev Fee tab's prior cumulative at that B2A prior column (a
+  //    self-updating SUMIF), replacing the fixed Prior-Log cell that drifts.
+  if (devRow != null) {
+    const pf = cellFormula(brk.priorCell);
+    const barePrior = /^[+-]?\s*'?prior invoice log'?\s*!\s*\$?[A-Za-z]{1,3}\$?\d+\s*$/i;
+    if (pf && barePrior.test(pf)) {
+      let seed = 0;
+      if (priorWs && COL.budgetcode != null && COL.amount != null && devLabel) {
+        const pl = Math.max(priorWs.rowCount || 0, priorWs.actualRowCount || 0);
+        for (let r = 1; r <= pl; r++) {
+          if (cellStr(priorWs.getCell(r, COL.budgetcode)).trim().toLowerCase() !== devLabel.toLowerCase()) continue;
+          const a = cellNum(priorWs.getCell(r, COL.amount));
+          if (a != null) seed += a;
+        }
+      }
+      const ref = `-'${b2a.name}'!${colLetter(priorCol)}${devRow}`;
+      brk.priorCell.value = seed ? { formula: ref, result: -Math.round(seed * 100) / 100 } : { formula: ref };
     }
   }
-  const ref = `-'${b2a.name}'!${colLetter(priorCol)}${devRow}`;
-  brk.priorCell.value = seed ? { formula: ref, result: -Math.round(seed * 100) / 100 } : { formula: ref };
+
+  // 3. Link the Current Invoice Log's Development Fee line (posted by
+  //    deriveBrakerDevFee during the roll-forward) to the tab's period total, so
+  //    the posted amount always equals the calculated fee. Matched by Budget Code.
+  if (curWs && brk.totalCell && devLabel && COL.budgetcode != null && COL.amount != null) {
+    const totalRef = `ROUND('${brk.ws.name}'!${brk.totalCell.address},2)`;
+    const cl = Math.max(curWs.rowCount || 0, curWs.actualRowCount || 0);
+    for (let r = logDataStart(curWs); r <= cl; r++) {
+      const af = cellFormula(curWs.getCell(r, COL.amount));
+      if (af && /SUBTOTAL/i.test(af)) continue;     // skip subtotal/grand-total rows
+      if (cellStr(curWs.getCell(r, COL.budgetcode)).trim().toLowerCase() !== devLabel.toLowerCase()) continue;
+      const seed = cellNum(curWs.getCell(r, COL.amount));
+      curWs.getCell(r, COL.amount).value = (seed != null) ? { formula: totalRef, result: seed } : { formula: totalRef };
+      break;
+    }
+  }
 }
 
 module.exports = {
   rollForward, parseLogGroups, currentRowsByCode, rebuildPriorLog,
   replaceCurrentLog, repointAbsoluteRefs, findRowByLabel, findSheet,
-  maintainBrakerReport, trimCurrentSumifCriteria, findBrakerDevFeeTab,
+  maintainBrakerReport, trimCurrentSumifCriteria, findBrakerDevFeeTab, deriveBrakerDevFee,
 };
