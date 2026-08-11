@@ -3531,6 +3531,15 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
       // MM-DD row dates carry no year). Route Bank of Texas statements to a
       // dedicated block parser, detected by the bank's own branding in the text.
       const isBOT = /bank of texas|bankoftexas\.com|\bBOKF\b/i.test(text);
+      // MapleMark Bank's IntraFi Cash Service (ICS) statement has a different
+      // shape than a normal operating-account statement: a single "Account
+      // Transaction Detail" table where every row carries the activity Amount AND
+      // a running Balance (two money tokens per row), withdrawals are shown in
+      // parentheses, and there are no Deposits/Withdrawals section headers. The
+      // generic parser below would grab the balance (the LAST token) as the
+      // amount and would also mis-read the Account Summary and per-bank "Summary
+      // of Balances" figures as transactions — so ICS gets its own parser.
+      const isICS = /intrafi|maplemark|\bICS\b/i.test(text) && /account\s*transaction\s*detail/i.test(text);
       if (isBOT) {
         // Group each date -> description(s) -> amount block into one transaction;
         // section headers set the sign; stop before the DAILY ACCOUNT BALANCE
@@ -3592,6 +3601,79 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
         // If the parse doesn't tie to the statement's own totals, flag every row
         // for manual review rather than importing possibly-wrong figures silently.
         if (!reconciled && (_ctrlDep != null || _ctrlChk != null)) rows.forEach(r => { r.needs_review = true; });
+      } else if (isICS) {
+        // ── IntraFi Cash Service (ICS) / MapleMark Bank statement ──
+        // pdf-parse linearizes each transaction onto its own line, with the
+        // inter-word spaces stripped, e.g.:
+        //   "07/03/2026Withdrawal($125,107.61)$1,337,507.65"
+        //   "07/31/2026Interest Capitalization4,042.821,134,730.68"
+        // Every row carries TWO money tokens — the activity Amount THEN the
+        // running Balance (which can be glued directly to the amount) — so we
+        // take the FIRST money token as the amount and ignore the balance.
+        // Withdrawals are parenthesized (outflow); deposits / interest
+        // capitalization are bare (inflow). Only rows inside the "Account
+        // Transaction Detail" table are transactions: the Account Summary block
+        // above it and the per-bank "Summary of Balances" table below it also
+        // put money on their lines and must be excluded.
+        const _toNum = s => {
+          const t = String(s).trim();
+          const neg = /^\(.*\)$/.test(t) || /-$/.test(t);
+          const v = Math.abs(parseFloat(t.replace(/[^0-9.]/g, '')) || 0);
+          return neg ? -v : v;
+        };
+        // Control totals from the Account Summary block, for reconciliation.
+        // pdf-parse strips the spaces, so the value is glued to the label
+        // ("Total Program Deposits0.00"); [^\n\d(-]* skips any separator chars
+        // (like a "$") without crossing into the next line or into the number.
+        const _grab = rx => { const m = text.match(rx); return m ? _toNum(m[1]) : null; };
+        const ctrlDeposits    = _grab(/Total\s*Program\s*Deposits[^\n\d(-]*([\d,]+\.\d{2})/i);
+        const ctrlWithdrawals = _grab(/Total\s*Program\s*Withdrawals[^\n\d(-]*\(?([\d,]+\.\d{2})\)?/i);
+        const ctrlInterest    = _grab(/Interest\s*Capitali[sz]ed[^\n\d(-]*([\d,]+\.\d{2})/i);
+        const ctrlPrev        = _grab(/Previous\s*Period\s*Ending\s*Balance[^\n\d(-]*\$?([\d,]+\.\d{2})/i);
+        const ctrlCurr        = _grab(/Current\s*Period\s*Ending\s*Balance[^\n\d(-]*\$?([\d,]+\.\d{2})/i);
+
+        // Restrict scanning to the Account Transaction Detail table.
+        const _startIdx = lines.findIndex(l => /account\s*transaction\s*detail/i.test(l));
+        const _endIdx   = lines.findIndex(l => /summary\s*of\s*balances/i.test(l));
+        const _slice = lines.slice(_startIdx >= 0 ? _startIdx + 1 : 0, _endIdx >= 0 ? _endIdx : lines.length);
+
+        const _dateRx  = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/;        // MM/DD/YYYY at line start (no boundary; text is glued)
+        const _moneyRx = /\(?\$?-?[\d,]+\.\d{2}-?\)?/g;
+        for (const line of _slice) {
+          const dm = line.match(_dateRx);
+          if (!dm) continue;                                     // only date-led rows are transactions
+          const money = line.match(_moneyRx);
+          if (!money || !money.length) continue;
+          const amount = _toNum(money[0]);                       // FIRST token = amount; the last token is the balance
+          if (amount === 0) continue;
+          const d = new Date(+dm[3], +dm[1] - 1, +dm[2]);
+          if (isNaN(d.getTime())) continue;
+          const date = d.toISOString().slice(0, 10);
+          // Description = the activity type between the date and the amount.
+          let desc = line.slice(dm[0].length, line.indexOf(money[0])).replace(/\s+/g, ' ').trim();
+          if (!desc) desc = amount < 0 ? 'Withdrawal' : 'Deposit';
+          rows.push({ date, description: desc.substring(0, 500), amount });
+        }
+
+        // Reconcile the parse against the statement's own control totals and the
+        // balance identity (previous + inflows - outflows = current). ICS treats
+        // interest capitalization separately from program deposits, so expected
+        // inflow = Total Program Deposits + Interest Capitalized.
+        const _EPS = 0.02;
+        const _inflow  = rows.filter(r => r.amount > 0).reduce((a, r) => a + r.amount, 0);
+        const _outflow = rows.filter(r => r.amount < 0).reduce((a, r) => a + Math.abs(r.amount), 0);
+        const _expIn   = (ctrlDeposits || 0) + (ctrlInterest || 0);
+        const _haveCtrl = ctrlWithdrawals != null || ctrlDeposits != null || ctrlInterest != null;
+        const _inOK  = (ctrlDeposits == null && ctrlInterest == null) || Math.abs(_inflow - _expIn) < _EPS;
+        const _outOK = ctrlWithdrawals == null || Math.abs(_outflow - (ctrlWithdrawals || 0)) < _EPS;
+        let _idOK = true;
+        if (ctrlPrev != null && ctrlCurr != null) _idOK = Math.abs((ctrlPrev + _inflow - _outflow) - ctrlCurr) < _EPS;
+        reconciled = _haveCtrl && _inOK && _outOK && _idOK;
+        ctrlInfo = { deposits: ctrlDeposits, checks: ctrlWithdrawals, prev: ctrlPrev, curr: ctrlCurr,
+          interest: ctrlInterest, parsed_deposits: +_inflow.toFixed(2), parsed_checks: +_outflow.toFixed(2) };
+        // If the parse doesn't tie out, flag every row for manual review rather
+        // than importing possibly-wrong figures silently.
+        if (!reconciled && _haveCtrl) rows.forEach(r => { r.needs_review = true; });
       } else {
 
       // ── Control totals for post-parse reconciliation ──
