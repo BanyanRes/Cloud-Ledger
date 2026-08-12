@@ -238,8 +238,17 @@ async function buildAllocationWorkbook(result, opts = {}) {
   const styleHead = row => row.eachCell(c => { c.font = { bold: true, size: 10, color: { argb: GREY } }; c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: HEAD } }; });
   const money = cell => { cell.numFmt = MONEY; cell.alignment = { horizontal: 'right' }; };
 
-  // ---- Source tab: Invoice (membership detail) ----
+  // Create tabs in display order: Allocation, Member Detail, Invoice, Eligibility,
+  // Consolidated Billing. They are populated below in dependency order (sources →
+  // detail → pivot → allocation); cross-sheet formulas are strings, so build order
+  // and tab order are independent.
+  const al = wb.addWorksheet('Allocation', { views: [{ showGridLines: false }] });
+  const md = wb.addWorksheet('Member Detail', { views: [{ showGridLines: false }] });
   const inv = wb.addWorksheet('Invoice', { views: [{ showGridLines: false }] });
+  const el = wb.addWorksheet('Eligibility', { views: [{ showGridLines: false }] });
+  const con = wb.addWorksheet('Consolidated Billing', { views: [{ showGridLines: false }] });
+
+  // ---- Source tab: Invoice (membership detail) ----
   inv.columns = [{ width: 14 }, { width: 26 }, { width: 12 }, { width: 13 }, { width: 11 }, { width: 15 }, { width: 15 }, { width: 15 }];
   inv.addRow(['Carrier Billing Invoice — Membership Detail']).font = { bold: true, size: 14, color: { argb: NAVY } };
   const im = []; if (result.invoice) im.push('Invoice #: ' + result.invoice); if (result.period) im.push('Billing Period: ' + result.period);
@@ -257,7 +266,6 @@ async function buildAllocationWorkbook(result, opts = {}) {
   invSub.font = bold; money(invSub.getCell(8)); invSub.getCell(8).border = { top: { style: 'thin' } };
 
   // ---- Source tab: Eligibility ----
-  const el = wb.addWorksheet('Eligibility', { views: [{ showGridLines: false }] });
   el.columns = [{ width: 14 }, { width: 26 }, { width: 12 }, { width: 13 }, { width: 13 }, { width: 15 }, { width: 8 }];
   el.addRow(['Eligibility Changes']).font = { bold: true, size: 14, color: { argb: NAVY } };
   el.addRow([]);
@@ -272,7 +280,6 @@ async function buildAllocationWorkbook(result, opts = {}) {
   const hasElig = result.eligibility.length > 0;
 
   // ---- Source tab: Consolidated Billing ----
-  const con = wb.addWorksheet('Consolidated Billing', { views: [{ showGridLines: false }] });
   con.columns = [{ width: 16 }, { width: 14 }, { width: 30 }, { width: 8 }, { width: 20 }, { width: 12 }, { width: 16 }, { width: 14 }, { width: 24 }];
   con.addRow(['Consolidated Billing — Employee Deductions']).font = { bold: true, size: 14, color: { argb: NAVY } };
   con.addRow(['Monthly EE = Employee Cost Per Pay Period × Pay Periods ÷ 12']).font = { color: { argb: GREY }, size: 10 };
@@ -288,7 +295,6 @@ async function buildAllocationWorkbook(result, opts = {}) {
   const conEnd = conStart + result.consolidated.length - 1;
 
   // ---- Member Detail (formula-linked) + by-entity pivot ----
-  const md = wb.addWorksheet('Member Detail', { views: [{ showGridLines: false }] });
   md.columns = [{ width: 26 }, { width: 8 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 24 }, { width: 18 },
                 { width: 3 }, { width: 10 }, { width: 14 }, { width: 14 }, { width: 14 }, { width: 14 }];
   md.addRow(['Member Detail']).font = { bold: true, size: 14, color: { argb: NAVY } };
@@ -333,7 +339,6 @@ async function buildAllocationWorkbook(result, opts = {}) {
   [10, 11, 12, 13].forEach(c => { const L = String.fromCharCode(64 + c); pvTot.getCell(c).value = { formula: `SUM(${L}${pvStart}:${L}${pvEnd})` }; money(pvTot.getCell(c)); pvTot.getCell(c).font = bold; });
 
   // ---- Allocation (references the pivot) ----
-  const al = wb.addWorksheet('Allocation', { views: [{ showGridLines: false }] });
   al.columns = [{ width: 34 }, { width: 16 }, { width: 16 }, { width: 16 }];
   al.addRow([opts.title || 'Health Insurance Allocation']).font = { bold: true, size: 15, color: { argb: NAVY } };
   const am = []; if (opts.entityName) am.push('Entity: ' + opts.entityName); if (result.period) am.push('Billing Period: ' + result.period);
