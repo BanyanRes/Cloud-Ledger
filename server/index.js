@@ -4441,7 +4441,11 @@ app.put('/api/entities/:eid/bank-transactions/:id', auth, requireEntityAccess(),
 });
 
 // Set multiple splits for a single bank transaction.
-// Splits: [{ account_code, amount, memo }]. Amounts are positive numbers, must sum to abs(txn.amount).
+// Splits: [{ account_code, amount, memo }]. Amounts are stored as MAGNITUDES relative
+// to the transaction's own direction: a positive split moves money the same way as the
+// transaction (a deposit's invoice line, a payment's expense line); a NEGATIVE split
+// offsets it (a credit memo applied against a receipt, a refund netted against a
+// payment). The signed net of the splits must equal abs(txn.amount).
 app.put('/api/entities/:eid/bank-transactions/:id/splits', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { splits } = req.body;
   const txn = db.prepare('SELECT * FROM bank_transactions WHERE id=? AND entity_id=?').get(req.params.id, req.params.eid);
@@ -4450,10 +4454,15 @@ app.put('/api/entities/:eid/bank-transactions/:id/splits', auth, requireEntityAc
   if (!Array.isArray(splits) || splits.length === 0) return res.status(400).json({ error: 'At least one split required' });
   for (const s of splits) {
     if (!s.account_code) return res.status(400).json({ error: 'Each split needs an account' });
-    if (!(Number(s.amount) > 0)) return res.status(400).json({ error: 'Each split amount must be greater than zero' });
+    if (!Number.isFinite(Number(s.amount)) || Number(s.amount) === 0) return res.status(400).json({ error: 'Each split amount must be a non-zero number' });
   }
+  // Validate on the NET of the split magnitudes vs the transaction magnitude, so a
+  // receipt applied net of a credit memo (34,934.16 - 4,993.96 = 29,940.20) ties out
+  // instead of being rejected for dropping the negative line. Require a positive net
+  // so the direction still matches the transaction (a deposit stays a deposit).
   const total = splits.reduce((sum, s) => sum + Number(s.amount), 0);
   const target = Math.abs(txn.amount);
+  if (!(total > 0)) return res.status(400).json({ error: 'Splits must net to a positive amount matching the transaction (currently ' + total.toFixed(2) + ')' });
   if (Math.abs(total - target) > 0.005) return res.status(400).json({ error: 'Splits total ' + total.toFixed(2) + ' does not match transaction amount ' + target.toFixed(2) });
 
   db.transaction(() => {
@@ -4522,14 +4531,23 @@ app.post('/api/entities/:eid/bank-transactions/post', auth, requireEntityAccess(
       const tDims = [t.project_id || null, t.class_id || null, t.location_id || null];
       const sDims = s => [s.project_id || null, s.class_id || null, s.location_id || null];
 
+      // A split amount is a magnitude in the transaction's direction. Its natural
+      // side is credit for a deposit, debit for a payment. A NEGATIVE split (a credit
+      // memo / offset) posts to the OPPOSITE side as a positive amount, rather than a
+      // negative entry on the natural side, so the JE reads cleanly and stays balanced.
+      const postSplit = (s, naturalDebit) => {
+        const amt = Math.abs(Number(s.amount));
+        const onDebit = Number(s.amount) < 0 ? !naturalDebit : naturalDebit;
+        insLine.run(jeId, s.account_code, onDebit ? amt : 0, onDebit ? 0 : amt, ...sDims(s));
+      };
       if (t.amount > 0) {
-        // Deposit: debit bank once, credit each coded account
+        // Deposit: debit bank once, credit each coded account (negative split => debit)
         insLine.run(jeId, t.bank_account_code, abs, 0, null, null, null);
-        if (hasSplits) { for (const s of splits) insLine.run(jeId, s.account_code, 0, s.amount, ...sDims(s)); }
+        if (hasSplits) { for (const s of splits) postSplit(s, false); }
         else { insLine.run(jeId, t.account_code, 0, abs, ...tDims); }
       } else {
-        // Payment: debit each coded account, credit bank once
-        if (hasSplits) { for (const s of splits) insLine.run(jeId, s.account_code, s.amount, 0, ...sDims(s)); }
+        // Payment: debit each coded account, credit bank once (negative split => credit)
+        if (hasSplits) { for (const s of splits) postSplit(s, true); }
         else { insLine.run(jeId, t.account_code, abs, 0, ...tDims); }
         insLine.run(jeId, t.bank_account_code, 0, abs, null, null, null);
       }
@@ -4541,6 +4559,7 @@ app.post('/api/entities/:eid/bank-transactions/post', auth, requireEntityAccess(
       if (hasSplits && t.amount > 0) {
         for (const s of splits) {
           if (!s.invoice_id) continue;
+          if (!(Number(s.amount) > 0)) continue; // negative (credit-memo/offset) line is a GL reclass, not a cash receipt
           arMod.recordArReceipt(db, { entity_id: +req.params.eid, invoice_id: s.invoice_id, date: t.date,
             amount: s.amount, bank_account_code: t.bank_account_code, memo: s.memo || t.memo || null,
             je_id: jeId, created_by: req.user.name });

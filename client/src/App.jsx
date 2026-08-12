@@ -3070,8 +3070,12 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, dimsEn
 
   const save = async () => {
     setErr('');
-    const valid = lines.filter(l => l.account_code && parseAmt(l.amount) > 0);
+    // Keep any line with an account and a non-zero amount. A negative amount is a
+    // credit-memo / offset line (e.g. a receipt applied net of a credit memo); the
+    // signed total still has to net to the transaction amount.
+    const valid = lines.filter(l => l.account_code && parseAmt(l.amount) !== 0);
     if (valid.length === 0) { setErr('Add at least one account with an amount'); return; }
+    if (valid.reduce((s, l) => s + parseAmt(l.amount), 0) <= 0) { setErr('Splits must net to a positive amount matching the transaction'); return; }
     if (!balanced) { setErr('Splits must total ' + fmt(target) + ' (currently off by ' + fmt(remaining) + ')'); return; }
     setSaving(true);
     try {
@@ -3109,6 +3113,7 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, dimsEn
         <td style={{...S.td,padding:'4px 6px',textAlign:'center'}}>{lines.length > 1 && <button style={S.btnGhost} onClick={() => removeLine(i)}>x</button>}</td>
       </tr>)}</tbody>
     </table>
+    <div style={{fontSize:11,color:T.textMuted,marginBottom:8}}>Enter a negative amount for a credit memo or offset line; splits net to the transaction amount.</div>
     <div style={{display:'flex',gap:8,marginBottom:14}}>
       <button style={{...S.btnS,fontSize:11,padding:'6px 12px'}} onClick={addLine}>+ Add line</button>
       {!balanced && lines.length > 0 && <button style={{...S.btnS,fontSize:11,padding:'6px 12px',color:T.accent,borderColor:T.accent+'40'}} onClick={autoFillLast}>Auto-fill remaining to last line</button>}
