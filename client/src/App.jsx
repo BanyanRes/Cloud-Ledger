@@ -719,6 +719,10 @@ export default function App(){
   const isDevEntity = !!(_activeEnt && _activeEnt.entity_type==='development');
   // County Line Rail Fund — the only entity with the Management Fee workpaper for now.
   const isCLRF = !!(_activeEnt && (_activeEnt.code==='CLRF' || /county\s*line\s*rail\s*fund/i.test(_activeEnt.name||'')));
+  // Banyan Residential — pays the health-insurance premium and prepares the
+  // monthly Insurance Allocation workpaper. Not a development entity, so it has
+  // no Requisitions; the allocation is its only workpaper.
+  const isBanyanRes = !!(_activeEnt && (_activeEnt.code==='BANYANRE1' || /^banyan\s*residential$/i.test((_activeEnt.name||'').trim())));
   const isShellEntity = !!(_activeEnt && _activeEnt.entity_type==='shell');
   const dimsEnabled = !!_activeEnt && !isShellEntity && !_activeEnt.hide_dims;// dimensions on every entity EXCEPT shell, unless the entity is flagged hide_dims (e.g. SRN, CLR Silsbee)
   // AR module scope is per-entity by code. Full AR (customers/invoices/recurring
@@ -732,7 +736,7 @@ export default function App(){
   // flyout to its right listing that category's pages. Entity-conditional pages
   // live inside a permanent category so switching entities never reshuffles the
   // rail, and a category with nothing visible to this user is dropped entirely.
-  const hasWorkpapers = isDevEntity || isCLRF;
+  const hasWorkpapers = isDevEntity || isCLRF || isBanyanRes;
   const navTree=[
     {key:'ACCOUNTING',label:'Accounting',icon:'📘',items:[
       {id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
@@ -774,6 +778,7 @@ export default function App(){
       ...(isCLRF?[{id:'wp_mgmtfee',label:'Management Fee',icon:'📄',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_gpfees',label:'GP Fees & Expenses',icon:'🤝',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_valuation',label:'Investment & Valuation',icon:'🏦',section:'workpapers'}]:[]),
+      ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
@@ -858,6 +863,7 @@ export default function App(){
         {page==='wp_mgmtfee'&&activeEntity&&isCLRF&&<MgmtFeeWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_gpfees'&&activeEntity&&isCLRF&&<GpFeesWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_valuation'&&activeEntity&&isCLRF&&<ValuationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='fundrep'&&activeEntity&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
@@ -5186,6 +5192,80 @@ function BankReconciliation({entityId,user,canEdit=true}){const[accounts,setAcco
     </div>);}
 
 // ═══ Entity Management ═══
+// ═══ Workpapers › Insurance Allocation (Banyan Residential) ═══
+// Upload the carrier billing invoice + the consolidated billing report; the
+// server computes each entity's employer/employee split, files the workpaper
+// under Workpapers, and returns the .xlsx (auto-downloaded) plus a summary.
+function InsuranceAllocationWorkpaper({entityId,entityName,canEdit=true}){
+  const[invoice,setInvoice]=useState(null);
+  const[consolidated,setConsolidated]=useState(null);
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const[result,setResult]=useState(null);
+  const run=async()=>{
+    if(!invoice||!consolidated)return;
+    setBusy(true);setErr('');setResult(null);
+    try{
+      const r=await api.insuranceAllocationGenerate(entityId,invoice,consolidated);
+      if(!r)return;
+      const url=URL.createObjectURL(r.blob);
+      const a=document.createElement('a');a.href=url;a.download=r.filename;
+      document.body.appendChild(a);a.click();document.body.removeChild(a);
+      setTimeout(()=>URL.revokeObjectURL(url),4000);
+      setResult(r.summary||{});
+    }catch(e){ setErr(e.message||String(e)); }
+    finally{ setBusy(false); }
+  };
+  const s=result;
+  return(<div><div style={S.card}>
+    {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
+    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Insurance Allocation</div>
+    <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:780,lineHeight:1.5}}>
+      Allocates the monthly health-insurance premium across the four commonly-owned entities
+      (County Line Rail Operations, Banyan Residential, Sabine River &amp; Northern, TurnKey Rail).
+      Upload the carrier billing invoice and the consolidated billing report; a copy is filed under
+      Workpapers &rsaquo; Insurance Allocation by year, and the workbook downloads to your computer.
+    </div>
+    <div style={{display:'flex',gap:18,alignItems:'flex-end',flexWrap:'wrap'}}>
+      <div><label style={S.label}>Health insurance billing invoice (.xlsx)</label>
+        <input style={S.inputSm} type="file" accept=".xlsx,.xls" onChange={e=>{setInvoice(e.target.files[0]||null);setErr('');setResult(null);}}/></div>
+      <div><label style={S.label}>Consolidated billing report (.xlsx)</label>
+        <input style={S.inputSm} type="file" accept=".xlsx,.xls" onChange={e=>{setConsolidated(e.target.files[0]||null);setErr('');setResult(null);}}/></div>
+      <button style={{...S.btnP,opacity:(!invoice||!consolidated||busy||!canEdit)?0.5:1}} disabled={!invoice||!consolidated||busy||!canEdit} onClick={run}>
+        {busy?'Running…':'Generate Allocation'}</button>
+    </div>
+    {!canEdit&&<div style={{fontSize:12,color:T.textMuted,marginTop:10}}>This workpaper is read-only for your account.</div>}
+    {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
+    {s&&<div style={{...S.card,marginTop:18,padding:16,background:'#f3faf5'}}>
+      <div style={{fontWeight:700,color:s.reconciled?T.green:T.orange,marginBottom:10}}>
+        Allocation generated{s.period?(' · '+s.period):''}{s.reconciled?' · balanced':' · review unmatched subscribers'}</div>
+      <table style={{...S.table,minWidth:520,marginBottom:12}}><tbody>
+        <tr><td style={S.tdBold}>Entity</td><td style={{...S.tdBold,textAlign:'right'}}>Premium</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>Employer</td><td style={{...S.tdBold,textAlign:'right'}}>Employee</td></tr>
+        {(s.entities||[]).map(e=>(<tr key={e.code}><td style={S.td}>{e.name} &middot; {e.code}</td>
+          <td style={S.tdR}>{fmt(e.premium)}</td><td style={S.tdR}>{fmt(e.employer)}</td><td style={S.tdR}>{fmt(e.employee)}</td></tr>))}
+        {s.subtotal&&<tr><td style={S.tdBold}>Subtotal</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.subtotal.premium)}</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.subtotal.employer)}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.subtotal.employee)}</td></tr>}
+        {s.eligibilityTotal?<tr><td style={S.td}>Eligibility change (100% employer)</td><td style={S.tdR}>{fmt(s.eligibilityTotal)}</td>
+          <td style={S.tdR}>{fmt(s.eligibilityTotal)}</td><td style={S.tdR}>&mdash;</td></tr>:null}
+        <tr style={S.grandTotalRow}><td style={S.tdBold}>Total billed</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.totalBilled)}</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.employerTotal)}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.employeeTotal)}</td></tr>
+      </tbody></table>
+      {(s.flags||[]).length>0&&<div style={{marginBottom:8}}>
+        <div style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:4}}>Review flags</div>
+        {(s.flags||[]).map((f,i)=>(<div key={i} style={{fontSize:12,color:T.textMuted,marginBottom:2}}>
+          {f.type==='reclass'?('Entity reclassified — '+f.name+': billed '+f.from+', allocated to '+f.to+'.'):
+           f.type==='employerPaid'?('Employer-paid in full — '+f.name+': employee share $0.00 ('+f.entity+').'):
+           f.type==='eligibility'?('Eligibility change — '+f.name+': '+fmt(f.amount)+' booked 100% employer → '+(f.entity||'unmatched')+'.'):''}
+        </div>))}
+      </div>}
+      {(s.unmatched||[]).length>0&&<div style={{fontSize:12,color:T.orange,marginBottom:6}}>
+        Unmatched (no entity — review): {(s.unmatched||[]).join(', ')}</div>}
+      {s.savedFolder&&<div style={{fontSize:12,color:T.textMuted}}>Filed at <strong>{s.savedFolder}/{s.savedName}</strong> &middot; also downloaded to your computer.</div>}
+    </div>}
+  </div></div>);
+}
+
 // ═══ Requisitions (development-project coding engine) ═══
 function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const[err,setErr]=useState('');

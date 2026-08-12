@@ -18,7 +18,8 @@ const { rollForward, findSheet: findReqSheet } = require('./requisition_rollforw
 const { verifyRollforward } = require('./requisition_rollforward_verify');
 const { finalizeRequisitionWorkbook } = require('./requisition_preserve');
 const { makeDevFeeClaudeCaller } = require('./requisition_devfee');
-const { saveRequisitionOutputs } = require('./requisition_workpaper_save');
+const { saveRequisitionOutputs, saveBufferToWorkpapers: saveWpBuffer, ensureFolders: ensureWpFolders } = require('./requisition_workpaper_save');
+const { computeAllocation, buildAllocationWorkbook } = require('./insurance_allocation');
 const financials = require('./financials');
 const ExcelJS = require('exceljs');
 const JSZip = require('jszip');
@@ -2949,6 +2950,60 @@ require('./ar').registerArRoutes(app, {
   getResendKey: () => RESEND_API_KEY,
   getFromEmail: () => (process.env.AR_FROM_EMAIL || RESET_FROM_EMAIL),
 });
+
+// ── Workpapers › Insurance Allocation ───────────────────────────────────────
+// Banyan Residential pays the monthly health-insurance premium and allocates it
+// across the four commonly-owned entities. The accountant uploads the carrier
+// billing invoice + the consolidated billing report; we compute each entity's
+// employer/employee split, build the workpaper, file it under Workpapers, and
+// return it for download with a summary header for the on-screen view.
+app.post('/api/entities/:eid/insurance-allocation',
+  auth, requireEntityAccess(), requireRole('Admin', 'Accountant'),
+  memUpload.fields([{ name: 'invoice', maxCount: 1 }, { name: 'consolidated', maxCount: 1 }]),
+  async (req, res) => {
+    try {
+      const inv = req.files && req.files.invoice && req.files.invoice[0];
+      const con = req.files && req.files.consolidated && req.files.consolidated[0];
+      if (!inv || !con) return res.status(400).json({ error: 'Upload both the health-insurance billing invoice and the consolidated billing report.' });
+
+      const result = computeAllocation({ invoiceBuf: inv.buffer, consolidatedBuf: con.buffer });
+
+      // Period folder + filename from the invoice's billing period start date.
+      const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      let year = null, monthLabel = 'Current';
+      const md = String(result.period || '').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+      if (md) { year = md[3]; monthLabel = MONTHS[(parseInt(md[1], 10) || 1) - 1] + ' ' + md[3]; }
+      const folderPath = `${year || new Date().getFullYear()}/Insurance Allocation`;
+      const fname = `Insurance Allocation ${monthLabel}.xlsx`;
+
+      const entRow = db.prepare('SELECT name FROM entities WHERE id=?').get(req.params.eid);
+      const wbBuf = Buffer.from(await buildAllocationWorkbook(result, { entityName: (entRow && entRow.name) || '', title: 'Health Insurance Allocation' }));
+
+      // File the workpaper under the entity's Workpapers tree (best-effort).
+      let saved = null;
+      try {
+        const who = (req.user && (req.user.email || req.user.name)) || 'system';
+        ensureWpFolders(db, req.params.eid, folderPath, who);
+        saved = saveWpBuffer(db, WORKPAPERS_DIR, req.params.eid, folderPath, fname,
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', wbBuf, who, { overwrite: true });
+      } catch (e) { console.error('[insurance-allocation] save failed:', e.message); }
+
+      const summary = {
+        period: result.period, invoice: result.invoice, subscriberCount: result.subscriberCount,
+        entities: result.entities, subtotal: result.subtotal, eligibilityTotal: result.eligibilityTotal,
+        employerTotal: result.employerTotal, employeeTotal: result.employeeTotal, totalBilled: result.totalBilled,
+        flags: result.flags, unmatched: result.unmatched, reconciled: result.reconciled,
+        savedFolder: saved ? folderPath : null, savedName: saved ? saved.original_name : null,
+      };
+      res.setHeader('X-Alloc-Summary', encodeURIComponent(JSON.stringify(summary)));
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
+      return res.send(wbBuf);
+    } catch (e) {
+      console.error('[insurance-allocation] error:', e.message);
+      return res.status(400).json({ error: 'Could not build the allocation: ' + e.message });
+    }
+  });
 
 // Dimension balance report: net (debit-credit) per dimension value, optionally
 // restricted to a set of account codes and/or as-of date. Used for

@@ -529,5 +529,30 @@ export const api = {
     return { blob, filename, summary };
   },
 
+  // Workpapers › Insurance Allocation: upload the carrier billing invoice + the
+  // consolidated billing report; the server computes the entity allocation,
+  // files the workpaper under Workpapers, and returns the .xlsx + a summary.
+  insuranceAllocationGenerate: async (eid, invoiceFile, consolidatedFile) => {
+    const fd = new FormData();
+    fd.append('invoice', invoiceFile);
+    fd.append('consolidated', consolidatedFile);
+    const token = getToken();
+    const res = await fetch(API_BASE + '/entities/' + eid + '/insurance-allocation', {
+      method: 'POST', headers: token ? { Authorization: 'Bearer ' + token } : {}, body: fd,
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) {
+      let data = {}; try { data = await res.json(); } catch {}
+      throw new Error(data.error || 'Allocation failed');
+    }
+    let summary = {}; try { summary = JSON.parse(decodeURIComponent(res.headers.get('x-alloc-summary') || '')); } catch {}
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename=\"?([^\"]+)\"?/);
+    const filename = m ? m[1] : 'Insurance Allocation.xlsx';
+    const blob = await res.blob();
+    return { blob, filename, summary };
+  },
+
   setToken, getToken, clearToken,
 };

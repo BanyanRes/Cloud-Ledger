@@ -316,4 +316,4 @@ async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfD
   return result;
 }
 
-module.exports = { saveRequisitionOutputs, requisitionFolderPath, buildInvoicePacket, buildDevFeePdf };
+module.exports = { saveRequisitionOutputs, requisitionFolderPath, buildInvoicePacket, buildDevFeePdf, saveBufferToWorkpapers, ensureFolders };
