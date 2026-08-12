@@ -241,6 +241,10 @@ export const api = {
   deleteArReceipt: (eid, id, rid) => request('/entities/' + eid + '/ar/invoices/' + id + '/receipts/' + rid, { method: 'DELETE' }),
   getArAging: (eid, asOf) => request('/entities/' + eid + '/ar/aging' + (asOf ? '?as_of=' + asOf : '')),
   getArOpenInvoices: (eid, amount) => request('/entities/' + eid + '/ar/open-invoices' + (amount != null ? '?amount=' + amount : '')),
+  createCreditMemo: (eid, data) => request('/entities/' + eid + '/ar/credit-memos', { method: 'POST', body: data }),
+  getCreditMemos: (eid, openOnly) => request('/entities/' + eid + '/ar/credit-memos' + (openOnly ? '?open=1' : '')),
+  applyCreditMemo: (eid, id, data) => request('/entities/' + eid + '/ar/credit-memos/' + id + '/apply', { method: 'POST', body: data }),
+  deleteCreditApplication: (eid, rid) => request('/entities/' + eid + '/ar/credit-applications/' + rid, { method: 'DELETE' }),
   arOpeningImport: (eid, items, force, opts = {}) => request('/entities/' + eid + '/ar/opening-import', { method: 'POST', body: { items, force: !!force, as_of: opts.as_of || null, allow_over_gl: !!opts.allow_over_gl } }),
   getDimensionBalances: (eid, opts = {}) => {
     const p = [];

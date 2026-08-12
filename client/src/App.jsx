@@ -2265,8 +2265,9 @@ const AR_ST={draft:'#94a3b8',sent:'#2563eb',paid:'#16a34a',void:'#ef4444'};
 function ArBadge({inv}){
   const st=inv.status||'draft';
   const late=st!=='paid'&&st!=='void'&&inv.due_date&&inv.due_date<today()&&(inv.open_amount==null||inv.open_amount>0.005);
-  const label=st==='void'?'Void':st==='paid'?'Paid':late?'Overdue':st==='sent'?'Sent':'Draft';
-  const color=late?T.orange:(AR_ST[st]||T.textMuted);
+  const isCm=inv.doc_type==='credit_memo';
+  const label=st==='void'?'Void':isCm?(st==='paid'?'Credit · applied':'Credit memo'):st==='paid'?'Paid':late?'Overdue':st==='sent'?'Sent':'Draft';
+  const color=isCm?T.orange:late?T.orange:(AR_ST[st]||T.textMuted);
   return <span style={{fontSize:11,fontWeight:600,color,border:'1px solid '+color+'55',borderRadius:10,padding:'2px 8px',whiteSpace:'nowrap'}}>{label}</span>;
 }
 
@@ -2350,10 +2351,13 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
   const[invoices,setInvoices]=useState([]);const[loading,setLoading]=useState(true);
   const[statusF,setStatusF]=useState('');const[err,setErr]=useState('');
   const[showNew,setShowNew]=useState(false);const[showSettings,setShowSettings]=useState(false);
+  const[showCM,setShowCM]=useState(false);
   const[detail,setDetail]=useState(null);const[busy,setBusy]=useState('');
   const blankLine={description:'',qty:1,rate:'',revenue_account_code:'',class_id:'',location_id:''};
   const[form,setForm]=useState({customer_id:'',invoice_date:today(),due_date:'',memo:''});
   const[lines,setLines]=useState([{...blankLine}]);
+  const[cmForm,setCmForm]=useState({customer_id:'',invoice_date:today(),memo:''});
+  const[cmLines,setCmLines]=useState([{...blankLine}]);
   // Revenue first (the usual choice for an invoice line), then Expense, then
   // balance-sheet accounts, so any GL account can be chosen (e.g. a contra-
   // revenue or a balance-sheet clearing account) while the common case stays on top.
@@ -2370,6 +2374,18 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
   useEffect(()=>{loadRefs();},[loadRefs]);
   useEffect(()=>{load();},[load]);
   const resetForm=()=>{setForm({customer_id:'',invoice_date:today(),due_date:'',memo:''});setLines([{...blankLine}]);};
+  const resetCm=()=>{setCmForm({customer_id:'',invoice_date:today(),memo:''});setCmLines([{...blankLine}]);};
+  const createCm=async()=>{
+    setErr('');
+    if(!cmForm.customer_id){setErr('Pick a customer for the credit memo');return;}
+    setBusy('createcm');
+    try{
+      const cm=await api.createCreditMemo(entityId,{customer_id:+cmForm.customer_id,invoice_date:cmForm.invoice_date,memo:cmForm.memo,
+        lines:cmLines.map(l=>({description:l.description,qty:Number(l.qty),rate:Number(l.rate),
+          revenue_account_code:l.revenue_account_code,class_id:l.class_id?+l.class_id:null,location_id:l.location_id?+l.location_id:null}))});
+      resetCm();setShowCM(false);await load();setDetail(cm);
+    }catch(e){setErr(e.message);}finally{setBusy('');}
+  };
   const create=async()=>{
     setErr('');
     if(!form.customer_id){setErr('Pick a customer');return;}
@@ -2390,7 +2406,8 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
       <div><div style={S.h1}>Invoices</div><div style={S.sub}>{entityName} — each invoice posts Dr A/R / Cr Revenue when created, then you review and send.</div></div>
       <div style={{display:'flex',gap:8}}>
         {canEdit&&<button style={S.btnS} onClick={()=>setShowSettings(s=>!s)}>Settings</button>}
-        {canEdit&&<button style={S.btnP} onClick={()=>{setShowNew(n=>!n);setErr('');}}>{showNew?'Cancel':'+ New Invoice'}</button>}</div></div>
+        {canEdit&&<button style={S.btnP} onClick={()=>{setShowNew(n=>!n);setShowCM(false);setErr('');}}>{showNew?'Cancel':'+ New Invoice'}</button>}
+        {canEdit&&<button style={S.btnS} onClick={()=>{setShowCM(n=>!n);setShowNew(false);setErr('');}}>{showCM?'Cancel':'+ New Credit Memo'}</button>}</div></div>
     {showSettings&&<ArSettingsPanel entityId={entityId} accounts={accounts} onClose={()=>setShowSettings(false)} onSaved={load}/>}
     {showNew&&<div style={{...S.card,borderColor:T.green+'40',marginBottom:16}}>
       <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
@@ -2405,6 +2422,20 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
       {err&&<div style={{...S.err,marginTop:10}}>{err}</div>}
       {revAccts.length===0&&<div style={{marginTop:10,fontSize:12,color:T.orange}}>This entity has no Revenue accounts yet — add one in the Chart of Accounts first.</div>}
       <div style={{display:'flex',justifyContent:'flex-end',marginTop:12}}><button style={S.btnP} onClick={create} disabled={busy==='create'}>{busy==='create'?'Posting…':'Create Invoice (posts JE)'}</button></div>
+    </div>}
+    {showCM&&<div style={{...S.card,borderColor:T.orange+'55',marginBottom:16}}>
+      <div style={{fontSize:13,fontWeight:700,color:T.textBright,marginBottom:4}}>New Credit Memo</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>A credit memo posts the reverse of an invoice (Dr Revenue / Cr A/R). Enter amounts as positive numbers; it is recorded as a credit. Apply it to an open invoice from that invoice's detail view.</div>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+        <div style={{flex:'1 1 240px'}}><label style={S.label}>Customer</label>
+          <select style={S.select} value={cmForm.customer_id} onChange={e=>setCmForm(f=>({...f,customer_id:e.target.value}))}>
+            <option value="">— select —</option>{customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+        <div style={{flex:'0 0 160px'}}><label style={S.label}>Credit memo date</label><input style={S.input} type="date" value={cmForm.invoice_date} onChange={e=>setCmForm(f=>({...f,invoice_date:e.target.value}))}/></div>
+        <div style={{flex:'1 1 240px'}}><label style={S.label}>Memo / reason</label><input style={S.input} value={cmForm.memo} onChange={e=>setCmForm(f=>({...f,memo:e.target.value}))} placeholder="Credit for overbilling on INV-2026-0001"/></div>
+      </div>
+      <div style={{marginTop:14}}><ArLines lines={cmLines} setLines={setCmLines} revAccts={revAccts} classes={classes} locations={locations} dimsEnabled={dimsEnabled}/></div>
+      {err&&<div style={{...S.err,marginTop:10}}>{err}</div>}
+      <div style={{display:'flex',justifyContent:'flex-end',marginTop:12}}><button style={S.btnP} onClick={createCm} disabled={busy==='createcm'}>{busy==='createcm'?'Posting…':'Create Credit Memo (posts JE)'}</button></div>
     </div>}
     <div style={{...S.card,display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap',marginBottom:0}}>
       <div style={{flex:'0 0 170px'}}><label style={S.label}>Status</label>
@@ -2437,7 +2468,17 @@ function ArInvoiceDetail({entityId,invoice,bankAccts,canEdit,busy,act,onClose}){
   const inv=invoice;
   const[sendTo,setSendTo]=useState(inv.customer_email||'');
   const[pay,setPay]=useState({date:today(),amount:'',bank_account_code:bankAccts[0]?bankAccts[0].code:'',memo:''});
-  useEffect(()=>{setSendTo(inv.customer_email||'');setPay(p=>({...p,amount:'',date:today()}));},[inv.id]);
+  const isCm=inv.doc_type==='credit_memo';
+  // Open credit memos for THIS invoice's customer, offered for application
+  // when the invoice still has an open balance. Not loaded for a credit memo.
+  const[credits,setCredits]=useState([]);
+  const[applyCm,setApplyCm]=useState({credit_memo_id:'',amount:'',date:today()});
+  const loadCredits=useCallback(async()=>{
+    if(isCm||inv.open_amount<=0.005){setCredits([]);return;}
+    try{const all=await api.getCreditMemos(entityId,true);
+      setCredits((all||[]).filter(c=>c.customer_id===inv.customer_id&&c.remaining>0.005));}catch(_){setCredits([]);}
+  },[entityId,inv.id,inv.customer_id,inv.open_amount,isCm]);
+  useEffect(()=>{setSendTo(inv.customer_email||'');setPay(p=>({...p,amount:'',date:today()}));setApplyCm({credit_memo_id:'',amount:'',date:today()});loadCredits();},[inv.id,loadCredits]);
   const isDraft=inv.status==='draft';const isVoid=inv.status==='void';
   return(<div style={{position:'fixed',inset:0,background:'rgba(15,23,42,0.55)',display:'flex',justifyContent:'center',alignItems:'flex-start',zIndex:60,overflowY:'auto',padding:'40px 16px'}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
     <div style={{background:'#fff',borderRadius:12,maxWidth:820,width:'100%',padding:22,boxShadow:'0 20px 60px rgba(0,0,0,0.3)'}}>
@@ -2462,12 +2503,12 @@ function ArInvoiceDetail({entityId,invoice,bankAccts,canEdit,busy,act,onClose}){
           <td style={{...S.td,textAlign:'right'}}>{l.qty}</td><td style={{...S.td,textAlign:'right'}}>{fmt(l.rate)}</td>
           <td style={{...S.td,textAlign:'right'}}>{fmt(l.amount)}</td></tr>)}</tbody></table>
       {(inv.receipts||[]).length>0&&<div style={{marginBottom:16}}>
-        <div style={{fontSize:12,fontWeight:600,color:T.textMuted,marginBottom:6}}>PAYMENTS RECEIVED</div>
-        <table style={S.table}><tbody>{inv.receipts.map(r=><tr key={r.id}>
-          <td style={S.td}>{r.date}</td><td style={S.td}>{r.bank_account_code}</td><td style={{...S.td,color:T.textMuted}}>{r.memo||''}</td>
+        <div style={{fontSize:12,fontWeight:600,color:T.textMuted,marginBottom:6}}>{isCm?'APPLIED TO INVOICES':'PAYMENTS & CREDITS APPLIED'}</div>
+        <table style={S.table}><tbody>{inv.receipts.map(r=>{const ca=r.kind==='credit_application';return <tr key={r.id}>
+          <td style={S.td}>{r.date}</td><td style={S.td}>{ca?<span style={{color:T.orange}}>Credit applied</span>:r.bank_account_code}</td><td style={{...S.td,color:T.textMuted}}>{r.memo||''}</td>
           <td style={{...S.td,textAlign:'right'}}>{fmt(r.amount)}</td>
           {canEdit&&<td style={{...S.td,width:60}}><button style={{...S.btnGhost,color:T.red,fontSize:11}} disabled={!!busy}
-            onClick={()=>{if(confirm('Delete this payment and its journal entry?'))act(()=>api.deleteArReceipt(entityId,inv.id,r.id),'rmrec');}}>x</button></td>}</tr>)}</tbody></table></div>}
+            onClick={()=>{if(ca){if(confirm('Remove this credit application? The credit returns to the memo and the invoice reopens.'))act(()=>api.deleteCreditApplication(entityId,r.id),'rmca');}else{if(confirm('Delete this payment and its journal entry?'))act(()=>api.deleteArReceipt(entityId,inv.id,r.id),'rmrec');}}}>x</button></td>}</tr>;})}</tbody></table></div>}
       <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
         <button style={S.btnS} onClick={()=>window.open(api.arInvoicePdfUrl(entityId,inv.id),'_blank')}>View PDF</button>
         {canEdit&&!isVoid&&<button style={S.btnS} disabled={!!busy} onClick={()=>act(()=>api.saveArInvoicePdf(entityId,inv.id),'savepdf')}>{busy==='savepdf'?'Filing…':'File to Workpapers'}</button>}
@@ -2483,6 +2524,17 @@ function ArInvoiceDetail({entityId,invoice,bankAccts,canEdit,busy,act,onClose}){
           <div style={{flex:'1 1 260px'}}><label style={S.label}>Recipient email</label><input style={S.input} type="email" value={sendTo} onChange={e=>setSendTo(e.target.value)} placeholder="ar@customer.com"/></div>
           <button style={S.btnP} disabled={!!busy||!sendTo.trim()} onClick={()=>act(()=>api.sendArInvoice(entityId,inv.id,{to:sendTo.trim()}),'send')}>{busy==='send'?'Sending…':'Email Invoice'}</button></div>
         <div style={{fontSize:11,color:T.textMuted,marginTop:8}}>Attaches the PDF, files a copy under Workpapers &gt; Invoices/{String(inv.invoice_date).slice(0,4)}, and marks the invoice sent.</div>
+      </div>}
+      {canEdit&&!isVoid&&!isCm&&inv.open_amount>0.005&&credits.length>0&&<div style={{...S.card,marginBottom:12,borderColor:T.orange+'55'}}>
+        <div style={{fontSize:13,fontWeight:600,color:T.textBright,marginBottom:8}}>Apply a credit memo</div>
+        <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
+          <div style={{flex:'1 1 260px'}}><label style={S.label}>Credit memo</label>
+            <select style={S.select} value={applyCm.credit_memo_id} onChange={e=>{const id=e.target.value;const c=credits.find(x=>String(x.id)===String(id));setApplyCm(a=>({...a,credit_memo_id:id,amount:c?String(Math.min(c.remaining,inv.open_amount)):''}));}}>
+              <option value="">— select —</option>{credits.map(c=><option key={c.id} value={c.id}>{c.invoice_num} · {fmt(c.remaining)} available</option>)}</select></div>
+          <div style={{flex:'0 0 140px'}}><label style={S.label}>Amount</label><input style={{...S.input,textAlign:'right'}} value={applyCm.amount} onChange={e=>setApplyCm(a=>({...a,amount:e.target.value}))} placeholder={String(inv.open_amount)}/></div>
+          <div style={{flex:'0 0 150px'}}><label style={S.label}>Date</label><input style={S.input} type="date" value={applyCm.date} onChange={e=>setApplyCm(a=>({...a,date:e.target.value}))}/></div>
+          <button style={S.btnP} disabled={!!busy||!applyCm.credit_memo_id} onClick={()=>act(()=>api.applyCreditMemo(entityId,applyCm.credit_memo_id,{invoice_id:inv.id,amount:applyCm.amount===''?undefined:Number(applyCm.amount),date:applyCm.date}),'applycm').then(loadCredits)}>{busy==='applycm'?'Applying…':'Apply Credit'}</button></div>
+        <div style={{fontSize:11,color:T.textMuted,marginTop:8}}>Applies the credit to this invoice's open balance. No journal entry — the credit memo already posted Dr Revenue / Cr A/R when it was created.</div>
       </div>}
       {canEdit&&!isVoid&&inv.open_amount>0.005&&<div style={S.card}>
         <div style={{fontSize:13,fontWeight:600,color:T.textBright,marginBottom:8}}>Record payment</div>

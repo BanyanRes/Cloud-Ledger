@@ -88,6 +88,20 @@ function ensureSchema(db) {
   // (they age by due date, unchanged). Opening items set it to the legacy GL
   // posting date so the report matches the prior system's posting-date aging.
   if (!cols.includes('aging_date')) db.exec('ALTER TABLE ar_invoices ADD COLUMN aging_date TEXT');
+  // doc_type: 'invoice' (default) or 'credit_memo'. A credit memo is a negative
+  // document that reduces the receivable (JE Dr Revenue / Cr A/R) and can be
+  // applied to an open invoice via a credit_application row in ar_receipts.
+  if (!cols.includes('doc_type')) db.exec("ALTER TABLE ar_invoices ADD COLUMN doc_type TEXT DEFAULT 'invoice'");
+  // ar_receipts.kind distinguishes a real cash receipt ('cash', the default and
+  // all legacy rows) from a non-cash 'credit_application' that links a credit
+  // memo to an invoice. For a credit_application there is no bank line and no
+  // cash JE — the accounting already posted when the CM and the invoice were
+  // created; the application is pure subledger linkage. applied_doc_id points a
+  // credit_application on the INVOICE at the credit memo it consumed (and the
+  // mirror row on the CREDIT MEMO at the invoice), so either side can be traced.
+  const rcols = db.prepare('PRAGMA table_info(ar_receipts)').all().map(c => c.name);
+  if (!rcols.includes('kind')) db.exec("ALTER TABLE ar_receipts ADD COLUMN kind TEXT DEFAULT 'cash'");
+  if (!rcols.includes('applied_doc_id')) db.exec('ALTER TABLE ar_receipts ADD COLUMN applied_doc_id INTEGER');
   console.log('[db] AR invoicing schema ready');
 }
 
@@ -637,6 +651,108 @@ function recordArReceipt(db, o) {
   return { invoice_num: inv.invoice_num, paid, open: r2(Number(inv.total || 0) - paid) };
 }
 
+// Next CM-<year>-#### number for a credit memo (its own series, independent of
+// the invoice prefix so credit memos read distinctly on the register).
+function nextCreditMemoNum(db, eid, dateStr) {
+  const yr = String(dateStr).slice(0, 4);
+  const rows = db.prepare('SELECT invoice_num FROM ar_invoices WHERE entity_id = ? AND invoice_num LIKE ?').all(eid, 'CM-' + yr + '-%');
+  let max = 0;
+  for (const r of rows) { const m = /-(\d+)$/.exec(r.invoice_num || ''); if (m) max = Math.max(max, +m[1]); }
+  return 'CM-' + yr + '-' + String(max + 1).padStart(4, '0');
+}
+
+// Open balance of any AR document = signed total minus everything applied to it
+// (cash receipts and credit applications, both live in ar_receipts). For an
+// invoice this is >= 0; for a credit memo the total is negative, so its open is
+// <= 0 and moves toward 0 as it is applied.
+function docOpen(db, id) {
+  const inv = db.prepare('SELECT total FROM ar_invoices WHERE id = ?').get(id);
+  if (!inv) return 0;
+  const applied = r2(db.prepare('SELECT COALESCE(SUM(amount),0) AS p FROM ar_receipts WHERE invoice_id = ?').get(id).p);
+  return r2(Number(inv.total || 0) - applied);
+}
+
+// Create a credit memo: a negative document that reduces the receivable. The
+// accrual JE is the mirror of an invoice — Dr Revenue / Cr A/R — so issuing a
+// credit memo lowers the A/R control balance immediately, exactly like a real
+// credit note. Lines are entered as positive magnitudes; the document total is
+// stored negative and the JE flips debit/credit versus an invoice.
+function createCreditMemo(db, eid, body, whoName) {
+  const cust = db.prepare('SELECT * FROM ar_customers WHERE id = ? AND entity_id = ?').get(body.customer_id, eid);
+  if (!cust) throw new Error('Customer not found for this entity');
+  const memoDate = isDate(body.invoice_date) ? body.invoice_date : todayStr();
+  const arCode = String(body.ar_account_code || defaultArAccount(db, eid) || '').trim();
+  if (!arCode) throw new Error('No Accounts Receivable account found in this entity\'s chart of accounts.');
+  // Reuse the line validator; magnitudes must be positive there. The document
+  // total is then negated to represent a credit.
+  const lines = normalizeLines(db, eid, body.lines);
+  if (lines.some(l => l.amount < 0)) throw new Error('Enter credit-memo amounts as positive numbers; the memo is recorded as a credit automatically.');
+  const gross = r2(lines.reduce((s, l) => s + l.amount, 0));
+  const total = r2(-gross);
+  const note = String(body.memo || '').trim() || null;
+
+  return db.transaction(() => {
+    const num = nextCreditMemoNum(db, eid, memoDate);
+    const ins = db.prepare('INSERT INTO ar_invoices '
+      + '(entity_id, customer_id, invoice_num, invoice_date, due_date, doc_type, '
+      + 'customer_name, customer_email, customer_address, memo, subtotal, total, '
+      + "ar_account_code, status, created_by) VALUES (?,?,?,?,?, 'credit_memo', ?,?,?,?,?,?,?,'draft',?)")
+      .run(eid, cust.id, num, memoDate, memoDate,
+        cust.name, cust.email || null, cust.address || null, note, total, total, arCode, whoName || null);
+    const cmId = ins.lastInsertRowid;
+    // Store the line amounts NEGATIVE so the document's own line total equals its
+    // negative total and the PDF/detail read as a credit.
+    const insL = db.prepare('INSERT INTO ar_invoice_lines (invoice_id, description, qty, rate, amount, revenue_account_code, class_id, location_id, sort) VALUES (?,?,?,?,?,?,?,?,?)');
+    for (const l of lines) insL.run(cmId, l.description, l.qty, r2(-l.rate), r2(-l.amount), l.revenue_account_code, l.class_id, l.location_id, l.sort);
+
+    // JE mirrors an invoice: Cr A/R for the total, Dr each revenue/other account.
+    const jeLines = [{ account_code: arCode, debit: 0, credit: gross, description: 'Credit memo ' + num + ' - ' + cust.name }];
+    for (const l of lines) jeLines.push({ account_code: l.revenue_account_code, debit: l.amount, credit: 0, description: l.description, class_id: l.class_id, location_id: l.location_id });
+    const je = postJE(db, eid, memoDate, 'AR Credit Memo ' + num + ' - ' + cust.name + (note ? ' - ' + note : ''), jeLines, whoName);
+    db.prepare('UPDATE ar_invoices SET je_id = ? WHERE id = ?').run(je.id, cmId);
+    return cmId;
+  })();
+}
+
+// Apply a credit memo to an open invoice. Pure subledger linkage — no JE, since
+// both documents already posted their accruals. Inserts two mirrored rows in
+// ar_receipts (kind='credit_application'): +amt against the INVOICE (reduces its
+// open toward 0) and −amt against the CREDIT MEMO (reduces its negative open
+// toward 0). Amount defaults to the largest that fits both sides.
+function applyCreditMemo(db, eid, creditMemoId, invoiceId, rawAmount, dateStr, whoName) {
+  const cm = db.prepare("SELECT * FROM ar_invoices WHERE id = ? AND entity_id = ? AND doc_type = 'credit_memo'").get(creditMemoId, eid);
+  if (!cm) throw new Error('Credit memo not found for this entity');
+  if (cm.status === 'void') throw new Error('That credit memo is void');
+  const inv = db.prepare("SELECT * FROM ar_invoices WHERE id = ? AND entity_id = ?").get(invoiceId, eid);
+  if (!inv) throw new Error('Invoice not found for this entity');
+  if (inv.doc_type === 'credit_memo') throw new Error('Choose a regular invoice to apply the credit to, not another credit memo');
+  if (inv.status === 'void') throw new Error('That invoice is void');
+  if (inv.customer_id !== cm.customer_id) throw new Error('The credit memo and the invoice are for different customers');
+
+  const invOpen = docOpen(db, inv.id);          // >= 0
+  const cmRemaining = r2(-docOpen(db, cm.id));   // positive amount of credit still available
+  if (cmRemaining <= 0.005) throw new Error('This credit memo is already fully applied');
+  if (invOpen <= 0.005) throw new Error('That invoice has no open balance to apply a credit to');
+  const want = rawAmount != null ? r2(rawAmount) : Math.min(invOpen, cmRemaining);
+  if (!(want > 0.005)) throw new Error('Application amount must be positive');
+  if (want - invOpen > 0.005) throw new Error('Application of ' + MONEY(want) + ' exceeds the invoice open balance of ' + MONEY(invOpen));
+  if (want - cmRemaining > 0.005) throw new Error('Application of ' + MONEY(want) + ' exceeds the credit remaining of ' + MONEY(cmRemaining));
+  const date = isDate(dateStr) ? dateStr : todayStr();
+
+  return db.transaction(() => {
+    const insR = db.prepare('INSERT INTO ar_receipts (invoice_id, entity_id, date, amount, bank_account_code, memo, je_id, created_by, kind, applied_doc_id) VALUES (?,?,?,?,?,?,?,?,?,?)');
+    // +want against the invoice, pointing at the credit memo it consumed.
+    insR.run(inv.id, eid, date, want, '', 'Credit memo ' + cm.invoice_num + ' applied', null, whoName || null, 'credit_application', cm.id);
+    // −want against the credit memo, pointing back at the invoice.
+    insR.run(cm.id, eid, date, r2(-want), '', 'Applied to invoice ' + inv.invoice_num, null, whoName || null, 'credit_application', inv.id);
+    // Flip statuses when either side is fully consumed.
+    if (docOpen(db, inv.id) <= 0.005) db.prepare("UPDATE ar_invoices SET status='paid', paid_at=? WHERE id=?").run(date, inv.id);
+    if (Math.abs(docOpen(db, cm.id)) <= 0.005) db.prepare("UPDATE ar_invoices SET status='paid', paid_at=? WHERE id=?").run(date, cm.id);
+    return { credit_memo: cm.invoice_num, invoice: inv.invoice_num, applied: want,
+      invoice_open: docOpen(db, inv.id), credit_remaining: r2(-docOpen(db, cm.id)) };
+  })();
+}
+
 // ═══ route registration ════════════════════════════════════════════════════
 function registerArRoutes(app, ctx) {
   const db = ctx.db;
@@ -780,6 +896,66 @@ function registerArRoutes(app, ctx) {
     try {
       const id = createInvoice(db, req.params.eid, req.body || {}, who(req));
       res.json(invoiceWithLines(db, req.params.eid, id));
+    } catch (e) { fail(res, e); }
+  });
+
+  // ── credit memos ──
+  // Create a credit memo (a negative document; JE Dr Revenue / Cr A/R).
+  app.post('/api/entities/:eid/ar/credit-memos', ...writers, (req, res) => {
+    try {
+      const id = createCreditMemo(db, req.params.eid, req.body || {}, who(req));
+      res.json(invoiceWithLines(db, req.params.eid, id));
+    } catch (e) { fail(res, e); }
+  });
+
+  // Credit memos that still have credit remaining, for the "apply credit" picker.
+  app.get('/api/entities/:eid/ar/credit-memos', ...readers, (req, res) => {
+    const eid = req.params.eid;
+    const cms = db.prepare("SELECT * FROM ar_invoices WHERE entity_id = ? AND doc_type = 'credit_memo' AND status != 'void' ORDER BY invoice_date DESC, id DESC").all(eid);
+    const applied = new Map(db.prepare("SELECT invoice_id, SUM(amount) AS p FROM ar_receipts WHERE entity_id = ? GROUP BY invoice_id").all(eid).map(r => [r.invoice_id, Number(r.p || 0)]));
+    const out = [];
+    for (const cm of cms) {
+      const remaining = r2(-(Number(cm.total || 0) - (applied.get(cm.id) || 0))); // positive credit still available
+      out.push({ id: cm.id, invoice_num: cm.invoice_num, customer: cm.customer_name, customer_id: cm.customer_id,
+        invoice_date: cm.invoice_date, total: r2(cm.total), remaining, status: cm.status,
+        fully_applied: remaining <= 0.005 });
+    }
+    if (req.query.open === '1') return res.json(out.filter(c => !c.fully_applied));
+    res.json(out);
+  });
+
+  // Apply a credit memo to an open invoice (subledger linkage; no JE).
+  app.post('/api/entities/:eid/ar/credit-memos/:id/apply', ...writers, (req, res) => {
+    try {
+      const b = req.body || {};
+      const r = applyCreditMemo(db, req.params.eid, req.params.id, b.invoice_id, b.amount != null ? b.amount : null, b.date, who(req));
+      res.json(r);
+    } catch (e) { fail(res, e); }
+  });
+
+  // Remove a credit-memo application (deletes BOTH mirrored rows), reopening the
+  // invoice and returning the credit. Pass either side's ar_receipts row id.
+  app.delete('/api/entities/:eid/ar/credit-applications/:rid', ...writers, (req, res) => {
+    try {
+      const eid = req.params.eid;
+      const rec = db.prepare("SELECT * FROM ar_receipts WHERE id = ? AND entity_id = ? AND kind = 'credit_application'").get(req.params.rid, eid);
+      if (!rec) return res.status(404).json({ error: 'Credit application not found' });
+      // The mirror row is the credit_application on the counterpart doc with the
+      // opposite amount, whose applied_doc_id points back at this row's invoice_id.
+      const mirror = db.prepare("SELECT * FROM ar_receipts WHERE entity_id = ? AND kind = 'credit_application' AND invoice_id = ? AND applied_doc_id = ? AND ABS(amount + ?) < 0.005")
+        .get(eid, rec.applied_doc_id, rec.invoice_id, rec.amount);
+      db.transaction(() => {
+        db.prepare('DELETE FROM ar_receipts WHERE id = ?').run(rec.id);
+        if (mirror) db.prepare('DELETE FROM ar_receipts WHERE id = ?').run(mirror.id);
+        // Reopen either side that is no longer fully settled.
+        for (const id of [rec.invoice_id, rec.applied_doc_id]) {
+          const d = db.prepare('SELECT * FROM ar_invoices WHERE id = ?').get(id);
+          if (d && d.status === 'paid' && Math.abs(docOpen(db, id)) > 0.005) {
+            db.prepare("UPDATE ar_invoices SET status = CASE WHEN sent_at IS NULL THEN 'draft' ELSE 'sent' END, paid_at = NULL WHERE id = ?").run(id);
+          }
+        }
+      })();
+      res.json({ success: true });
     } catch (e) { fail(res, e); }
   });
 
@@ -1002,7 +1178,10 @@ function registerArRoutes(app, ctx) {
   app.get('/api/entities/:eid/ar/open-invoices', ...readers, (req, res) => {
     const eid = req.params.eid;
     const amount = req.query.amount != null && req.query.amount !== '' ? r2(req.query.amount) : null;
-    const invs = db.prepare("SELECT * FROM ar_invoices WHERE entity_id = ? AND status != 'void' ORDER BY customer_name, invoice_date, invoice_num").all(eid);
+    // Cash-receipt picker: real invoices only. Credit memos carry a negative open
+    // and are not something a cash deposit is applied to (they are applied TO an
+    // invoice via the credit-memo apply flow), so exclude them here.
+    const invs = db.prepare("SELECT * FROM ar_invoices WHERE entity_id = ? AND status != 'void' AND COALESCE(doc_type,'invoice') != 'credit_memo' ORDER BY customer_name, invoice_date, invoice_num").all(eid);
     const paidBy = new Map();
     for (const r of db.prepare('SELECT invoice_id, SUM(amount) AS paid FROM ar_receipts WHERE entity_id = ? GROUP BY invoice_id').all(eid)) paidBy.set(r.invoice_id, Number(r.paid || 0));
     const today = todayStr(); const open = [];
@@ -1031,4 +1210,5 @@ module.exports = {
   importOpeningItems, recordArReceipt,
   // exported for tests
   createInvoice, nextInvoiceNum, advanceNextRun, postJE, invoiceWithLines,
+  createCreditMemo, applyCreditMemo, docOpen, nextCreditMemoNum,
 };
