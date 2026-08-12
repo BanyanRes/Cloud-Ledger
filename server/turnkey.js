@@ -616,3 +616,59 @@ module.exports.getCompanyEntityId = getCompanyEntityId;
 module.exports.seedPOCAccountsIfMissing = seedPOCAccountsIfMissing;
 module.exports.computeWipRow = computeWipRow;
 module.exports.computeWipSchedule = computeWipSchedule;
+
+// =====================================================================
+// Direct (non-commitment) project costs, grouped by cost code (= GL account).
+// ---------------------------------------------------------------------
+// The Turnkey Rail portal's Cost Report pulls this for its "Direct Costs"
+// column. Commitment billings (sub pay apps) post to CIP — a balance-sheet
+// control account — and the month-end POC recognition posts to Cost of
+// Construction; both are EXCLUDED here so we don't double-count commitments.
+// What remains, of type Expense and tagged to this project's dimension, is the
+// direct cost by cost code. Per Turnkey/Irvin, cost codes ARE the CL GL account
+// codes, so journal_lines.account_code is the cost code the portal keys on.
+//
+//   returns { project_id, as_of, lines: [{cost_code, account_name, amount}], total }
+//
+// Scoping mirrors computeWipRow: entity + project dimension + date, net
+// (debits - credits) so credit memos / reclasses net correctly.
+// =====================================================================
+function getDirectCosts(db, params) {
+  const turnkey_project_id = params.turnkey_project_id;
+  const asOf = params.as_of || new Date().toISOString().slice(0, 10);
+  const map = db.prepare('SELECT * FROM turnkey_project_map WHERE turnkey_project_id = ?').get(turnkey_project_id);
+  if (!map) throw new Error('Project ' + turnkey_project_id + ' not linked');
+  const pid = String(map.cl_project_id || map.turnkey_project_id);
+
+  // Exclude the POC cost-recognition control account (Cost of Construction).
+  // CIP and every other POC control account is a non-Expense type, so the
+  // type = 'Expense' filter already drops those (commitments live in CIP).
+  const cocCode = map.cost_of_construction_code || '55000';
+
+  const rows = db.prepare(
+    'SELECT l.account_code AS cost_code, a.name AS account_name, ' +
+    '       ROUND(COALESCE(SUM(l.debit), 0) - COALESCE(SUM(l.credit), 0), 2) AS amount ' +
+    'FROM journal_lines l ' +
+    'JOIN journal_entries e ON e.id = l.entry_id ' +
+    'JOIN accounts a ON a.entity_id = e.entity_id AND a.code = l.account_code ' +
+    'WHERE e.entity_id = ? AND l.project_id = ? AND e.date <= ? ' +
+    "  AND a.type = 'Expense' AND l.account_code <> ? " +
+    'GROUP BY l.account_code, a.name ' +
+    'HAVING ABS(COALESCE(SUM(l.debit), 0) - COALESCE(SUM(l.credit), 0)) > 0.005 ' +
+    'ORDER BY l.account_code'
+  ).all(map.cl_entity_id, pid, asOf, cocCode);
+
+  var total = 0;
+  const lines = rows.map(function (r) {
+    total += Number(r.amount || 0);
+    return { cost_code: r.cost_code, account_name: r.account_name, amount: Number(r.amount || 0) };
+  });
+  return {
+    project_id: Number(turnkey_project_id),
+    as_of: asOf,
+    lines: lines,
+    total: Math.round(total * 100) / 100,
+  };
+}
+
+module.exports.getDirectCosts = getDirectCosts;

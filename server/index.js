@@ -5361,6 +5361,20 @@ app.get('/api/turnkey/projects/:id', turnkeyAuth, turnkey.requireScope('turnkey:
   res.json(map);
 });
 
+// Direct (non-commitment) costs by cost code, for the Turnkey portal's Cost
+// Report "Direct Costs" column. Sums the project's expense-account postings
+// (= cost codes) excluding CIP commitments and the POC recognition account.
+// GET /api/turnkey/projects/:id/direct-costs[?as_of=YYYY-MM-DD]
+app.get('/api/turnkey/projects/:id/direct-costs', turnkeyAuth, turnkey.requireScope('turnkey:sync'), (req, res) => {
+  try {
+    const data = turnkey.getDirectCosts(db, { turnkey_project_id: req.params.id, as_of: req.query.as_of });
+    res.json(data);
+  } catch (e) {
+    const code = /not linked/.test(e.message) ? 404 : 500;
+    res.status(code).json({ error: e.message });
+  }
+});
+
 // === Sync event endpoints ===
 // All accept JSON payload; all return { ok, cl_entry_id, idempotent } on success.
 
@@ -8916,7 +8930,16 @@ app.get('/api/admin/backup', backupAuth, async (req, res) => {
   }
 });
 
+// Any unmatched /api/* request (any method) returns a JSON 404 rather than
+// falling through to the SPA shell (GET) or Express's default HTML 404 (POST/PUT/
+// DELETE) — both of which make the client's res.json() throw "Unexpected token '<'".
+app.use('/api', (req, res) => res.status(404).json({ error: 'Not found: ' + req.method + ' ' + req.originalUrl }));
+
 if (process.env.NODE_ENV === 'production') app.get('*', (req, res) => {
+  // Never serve the SPA shell for an unmatched API route — returning index.html
+  // with a 200 makes the client's res.json() throw "Unexpected token '<'". An
+  // unknown/API path must return a JSON 404 so the caller sees a real error.
+  if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'Not found: ' + req.method + ' ' + req.path });
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Expires', '0');
