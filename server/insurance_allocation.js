@@ -264,6 +264,12 @@ async function buildAllocationWorkbook(result, opts = {}) {
   const invEnd = invStart + result.members.length - 1;
   const invSub = inv.addRow(['', 'Subtotal', '', '', '', '', '', { formula: `SUM(H${invStart}:H${invEnd})` }]);
   invSub.font = bold; money(invSub.getCell(8)); invSub.getCell(8).border = { top: { style: 'thin' } };
+  if (result.eligibility.length) {
+    const invElig = inv.addRow(['', 'Eligibility changes', '', '', '', '', '', { formula: `SUM(Eligibility!$F:$F)` }]);
+    money(invElig.getCell(8)); invElig.getCell(8).font = { color: { argb: GREY } }; invElig.getCell(2).font = { color: { argb: GREY } };
+    const invTot = inv.addRow(['', 'Total invoice amount', '', '', '', '', '', { formula: `H${invSub.number}+H${invElig.number}` }]);
+    invTot.font = bold; money(invTot.getCell(8)); invTot.getCell(8).border = { top: { style: 'thin' }, bottom: { style: 'double' } };
+  }
 
   // ---- Source tab: Eligibility ----
   el.columns = [{ width: 14 }, { width: 26 }, { width: 12 }, { width: 13 }, { width: 13 }, { width: 15 }, { width: 8 }];
