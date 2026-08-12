@@ -3532,15 +3532,24 @@ function ocrPdfToLines(buffer) {
   const cp = require('child_process');
   const osMod = require('os');
   const dir = fs.mkdtempSync(path.join(osMod.tmpdir(), 'clocr-'));
+  // Total wall-clock budget for the whole OCR pass. Railway hard-kills a request
+  // at ~300s (returning its own HTML 502, which the client can't parse as JSON);
+  // stay well under that so we return a clean JSON error instead of timing out.
+  const OCR_BUDGET_MS = 200000;
+  const startedAt = Date.now();
+  const remaining = () => OCR_BUDGET_MS - (Date.now() - startedAt);
   try {
     const pdfPath = path.join(dir, 'in.pdf');
     fs.writeFileSync(pdfPath, buffer);
-    cp.execFileSync('pdftoppm', ['-r', '300', '-png', pdfPath, path.join(dir, 'pg')], { stdio: 'ignore', timeout: 180000 });
+    // 200 DPI is enough for statement text and uses ~40% less time/memory than
+    // 300 DPI, reducing the risk of an OOM/timeout on a multi-page scanned PDF.
+    cp.execFileSync('pdftoppm', ['-r', '200', '-png', pdfPath, path.join(dir, 'pg')], { stdio: 'ignore', timeout: Math.max(15000, remaining()), maxBuffer: 64 * 1024 * 1024 });
     const pngs = fs.readdirSync(dir).filter(f => /^pg.*\.png$/.test(f)).sort();
     const allLines = [];
     for (const png of pngs) {
+      if (remaining() < 10000) throw new Error('OCR exceeded time budget after ' + allLines.length + ' rows across ' + pngs.length + ' page(s); the scanned PDF is too large/slow to process in time.');
       const base = path.join(dir, png.replace(/\.png$/, ''));
-      cp.execFileSync('tesseract', [path.join(dir, png), base, 'tsv'], { stdio: 'ignore', timeout: 180000 });
+      cp.execFileSync('tesseract', [path.join(dir, png), base, 'tsv'], { stdio: 'ignore', timeout: Math.max(10000, remaining()), maxBuffer: 64 * 1024 * 1024 });
       const tsv = fs.readFileSync(base + '.tsv', 'utf8');
       const words = [];
       for (const row of tsv.split(/\r?\n/).slice(1)) {
@@ -3874,7 +3883,12 @@ app.post('/api/entities/:eid/bank-transactions/upload', auth, requireEntityAcces
         try {
           const ocr = ocrPdfToLines(req.file.buffer);
           if (ocr.lines.length > lines.length) { lines = ocr.lines; text = ocr.text; }
-        } catch (e) { console.error('[bank upload] OCR fallback failed:', e.message); }
+        } catch (e) {
+          console.error('[bank upload] OCR fallback failed:', e.message);
+          // Surface a clear, actionable JSON error rather than falling through to
+          // a generic "no transaction rows" message for a scanned/image PDF.
+          return res.status(422).json({ error: 'This looks like a scanned (image-only) PDF and it could not be read in time: ' + e.message + ' Try uploading a text-based PDF export from the bank portal, or a CSV/Excel file if available.' });
+        }
       }
 
       // Bank of Texas (BOKF) statements linearize through pdf-parse with the
@@ -8945,4 +8959,23 @@ if (process.env.NODE_ENV === 'production') app.get('*', (req, res) => {
   res.setHeader('Expires', '0');
   res.sendFile(path.join(__dirname, '..', 'client', 'dist', 'index.html'));
 });
+
+// Global error handler (must be LAST). Without it, any error thrown in middleware
+// or a route — e.g. multer rejecting an upload (file too large / bad multipart),
+// or a synchronous throw — falls through to Express's DEFAULT handler, which
+// renders an HTML error page. For an /api/* request that HTML reaches the client's
+// res.json() and throws "Unexpected token '<', '<!DOCTYPE ...". Return JSON instead.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  console.error('[error handler]', req.method, req.originalUrl, '-', err && err.message ? err.message : err);
+  // Map common upload errors to sensible statuses.
+  let status = err && err.status ? err.status : 500;
+  let message = (err && err.message) ? err.message : 'Internal server error';
+  if (err && err.code === 'LIMIT_FILE_SIZE') { status = 413; message = 'File is too large. Please upload a smaller file.'; }
+  else if (err && err.name === 'MulterError') { status = 400; message = 'Upload error: ' + message; }
+  if (req.path && req.path.startsWith('/api/')) return res.status(status).json({ error: message });
+  // Non-API request: keep it simple, plain text (never the SPA shell for an error).
+  res.status(status).type('text/plain').send(message);
+});
+
 app.listen(PORT, '0.0.0.0', () => console.log(`CloudLedger on port ${PORT}`));
