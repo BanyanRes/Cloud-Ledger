@@ -12,6 +12,17 @@ async function request(path, options = {}) {
     body: options.body instanceof FormData ? options.body : (options.body ? JSON.stringify(options.body) : undefined),
   });
   if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+  // Parse JSON only when the response actually is JSON. A non-JSON body (an HTML
+  // error page, an SPA shell served by mistake, a proxy 502) would otherwise make
+  // res.json() throw "Unexpected token '<'" and hide the real status. Surface a
+  // readable error with the HTTP status instead.
+  const ctype = res.headers.get('content-type') || '';
+  if (!ctype.includes('application/json')) {
+    const text = await res.text().catch(() => '');
+    if (res.ok) { const err = new Error('Unexpected non-JSON response from server (HTTP ' + res.status + ')'); err.detail = { status: res.status, body: text.slice(0, 500) }; throw err; }
+    const err = new Error('Server error (HTTP ' + res.status + ')' + (res.status === 502 || res.status === 504 ? ' — the request may have timed out. For large scanned PDFs, try again.' : ''));
+    err.detail = { status: res.status, body: text.slice(0, 500) }; throw err;
+  }
   const data = await res.json();
   if (!res.ok) { const err = new Error(data.error || 'Request failed'); err.detail = data; throw err; }
   return data;
