@@ -2270,6 +2270,19 @@ function ArBadge({inv}){
   return <span style={{fontSize:11,fontWeight:600,color,border:'1px solid '+color+'55',borderRadius:10,padding:'2px 8px',whiteSpace:'nowrap'}}>{label}</span>;
 }
 
+// Accounts offered for an A/R invoice/credit-memo line. Revenue first (the usual
+// case), then Expense, then balance-sheet accounts (Asset/Liability/Equity), so
+// any GL account is selectable while the common choice stays at the top. Within
+// each group, sort by code for a predictable order.
+function arLineAccounts(accounts){
+  const order={Revenue:0,Income:0,Expense:1,Asset:2,Liability:3,Equity:4};
+  const rank=a=>(order[a.type]!==undefined?order[a.type]:5);
+  return (accounts||[]).slice().sort((a,b)=>{
+    const r=rank(a)-rank(b); if(r!==0) return r;
+    return String(a.code).localeCompare(String(b.code),undefined,{numeric:true});
+  });
+}
+
 // Shared line-item editor for both one-off invoices and recurring templates.
 function ArLines({lines,setLines,revAccts,classes,locations,dimsEnabled}){
   const upd=(i,k,v)=>setLines(ls=>ls.map((l,ix)=>ix===i?{...l,[k]:v}:l));
@@ -2341,7 +2354,10 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
   const blankLine={description:'',qty:1,rate:'',revenue_account_code:'',class_id:'',location_id:''};
   const[form,setForm]=useState({customer_id:'',invoice_date:today(),due_date:'',memo:''});
   const[lines,setLines]=useState([{...blankLine}]);
-  const revAccts=accounts.filter(a=>a.type==='Revenue');
+  // Revenue first (the usual choice for an invoice line), then Expense, then
+  // balance-sheet accounts, so any GL account can be chosen (e.g. a contra-
+  // revenue or a balance-sheet clearing account) while the common case stays on top.
+  const revAccts=arLineAccounts(accounts);
   const bankAccts=accounts.filter(a=>a.bank_acct);
   const loadRefs=useCallback(async()=>{
     const[c,a,cl,lo]=await Promise.all([api.getArCustomers(entityId),api.getAccounts(entityId),
@@ -2492,7 +2508,7 @@ function ArRecurring({entityId,entityName,canEdit,dimsEnabled}){
   const blankLine={description:'',qty:1,rate:'',revenue_account_code:'',class_id:'',location_id:''};
   const[form,setForm]=useState({customer_id:'',memo:'',frequency:'monthly',day_of_month:1,next_run:''});
   const[lines,setLines]=useState([{...blankLine}]);
-  const revAccts=accounts.filter(a=>a.type==='Revenue');
+  const revAccts=arLineAccounts(accounts);
   const load=useCallback(async()=>{setLoading(true);setErr('');
     try{const[t,c,a,cl,lo]=await Promise.all([api.getArTemplates(entityId),api.getArCustomers(entityId),api.getAccounts(entityId),
       api.getClasses(entityId).catch(()=>[]),api.getLocations(entityId).catch(()=>[])]);
