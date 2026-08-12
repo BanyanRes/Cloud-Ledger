@@ -344,42 +344,34 @@ async function buildAllocationWorkbook(result, opts = {}) {
   pvTot.getCell(9).value = 'Total'; pvTot.getCell(9).font = bold;
   [10, 11, 12, 13].forEach(c => { const L = String.fromCharCode(64 + c); pvTot.getCell(c).value = { formula: `SUM(${L}${pvStart}:${L}${pvEnd})` }; money(pvTot.getCell(c)); pvTot.getCell(c).font = bold; });
 
-  // ---- Allocation (references the pivot) ----
-  al.columns = [{ width: 34 }, { width: 16 }, { width: 16 }, { width: 16 }];
+  // ---- Allocation (references the pivot; each entity's eligibility is charged to
+  //      that entity's employer and folded into its Premium/Employer). ----
+  const ELIGFMT = '#,##0.00;(#,##0.00);"—"';
+  const eligCell = cell => { cell.numFmt = ELIGFMT; cell.alignment = { horizontal: 'right' }; };
+  al.columns = [{ width: 34 }, { width: 16 }, { width: 16 }, { width: 16 }, { width: 17 }];
   al.addRow([opts.title || 'Health Insurance Allocation']).font = { bold: true, size: 15, color: { argb: NAVY } };
   const am = []; if (opts.entityName) am.push('Entity: ' + opts.entityName); if (result.period) am.push('Billing Period: ' + result.period);
   if (result.invoice) am.push('Invoice #: ' + result.invoice); am.push('Subscribers: ' + result.subscriberCount);
   al.addRow([am.join('     ')]).font = { color: { argb: GREY }, size: 10 };
   al.addRow([]);
-  const alHdr = al.addRow(['Entity', 'Premium', 'Employer', 'Employee']); styleHead(alHdr); alHdr.getCell(1).alignment = { horizontal: 'left' };
+  const alHdr = al.addRow(['Entity', 'Premium', 'Employer', 'Employee', 'Eligibility (incl.)']); styleHead(alHdr); alHdr.getCell(1).alignment = { horizontal: 'left' };
   const entRowStart = alHdr.number + 1;
   result.entities.forEach((e) => {
     const pr = pivotRowByCode[e.code];
-    const r = al.addRow([`${e.name}  ·  ${e.code}`, null, null, null]);
-    r.getCell(2).value = { formula: `'Member Detail'!J${pr}` };
-    r.getCell(3).value = { formula: `'Member Detail'!K${pr}` };
-    r.getCell(4).value = { formula: `'Member Detail'!L${pr}` };
-    [2, 3, 4].forEach(i => money(r.getCell(i)));
+    const r = al.addRow([`${e.name}  ·  ${e.code}`, null, null, null, null]);
+    r.getCell(2).value = { formula: `'Member Detail'!J${pr}+'Member Detail'!M${pr}` }; // Premium incl. eligibility
+    r.getCell(3).value = { formula: `'Member Detail'!K${pr}+'Member Detail'!M${pr}` }; // Employer incl. eligibility
+    r.getCell(4).value = { formula: `'Member Detail'!L${pr}` };                          // Employee
+    r.getCell(5).value = { formula: `'Member Detail'!M${pr}` };                          // Eligibility (already in employer)
+    [2, 3, 4].forEach(i => money(r.getCell(i))); eligCell(r.getCell(5)); r.getCell(5).font = { color: { argb: GREY } };
   });
   const entRowEnd = entRowStart + result.entities.length - 1;
-  const sub = al.addRow(['Subtotal', { formula: `SUM(B${entRowStart}:B${entRowEnd})` }, { formula: `SUM(C${entRowStart}:C${entRowEnd})` }, { formula: `SUM(D${entRowStart}:D${entRowEnd})` }]);
-  sub.font = bold; [2, 3, 4].forEach(i => money(sub.getCell(i))); sub.eachCell(c => { c.border = { top: { style: 'thin' }, bottom: { style: 'thin' } }; });
-  const subRn = sub.number;
-  let totRn;
-  if (hasElig) {
-    const eRow = al.addRow(['Eligibility change (100% employer)',
-      { formula: `'Member Detail'!M${pvTotRn}` }, { formula: `'Member Detail'!M${pvTotRn}` }, null]);
-    eRow.font = { color: { argb: GREY } }; [2, 3].forEach(i => money(eRow.getCell(i)));
-    const eRn = eRow.number;
-    const tot = al.addRow(['Total billed', { formula: `B${subRn}+B${eRn}` }, { formula: `C${subRn}+C${eRn}` }, { formula: `D${subRn}` }]);
-    totRn = tot.number;
-  } else {
-    const tot = al.addRow(['Total billed', { formula: `B${subRn}` }, { formula: `C${subRn}` }, { formula: `D${subRn}` }]);
-    totRn = tot.number;
-  }
-  const tot = al.getRow(totRn);
-  [2, 3, 4].forEach(i => money(tot.getCell(i)));
+  const tot = al.addRow(['Total billed',
+    { formula: `SUM(B${entRowStart}:B${entRowEnd})` }, { formula: `SUM(C${entRowStart}:C${entRowEnd})` },
+    { formula: `SUM(D${entRowStart}:D${entRowEnd})` }, { formula: `SUM(E${entRowStart}:E${entRowEnd})` }]);
+  [2, 3, 4].forEach(i => money(tot.getCell(i))); eligCell(tot.getCell(5));
   tot.eachCell(c => { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NAVY } }; c.font = { bold: true, color: { argb: 'FFFFFFFF' } }; });
+  if (hasElig) al.addRow(['Eligibility charges are billed 100% to each entity’s employer and are included in the Premium and Employer columns.']).font = { size: 10, color: { argb: GREY }, italic: true };
 
   // Review flags + unmatched, below the table.
   if (result.flags.length) {

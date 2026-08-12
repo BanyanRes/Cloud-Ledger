@@ -5239,18 +5239,20 @@ function InsuranceAllocationWorkpaper({entityId,entityName,canEdit=true}){
     {s&&<div style={{...S.card,marginTop:18,padding:16,background:'#f3faf5'}}>
       <div style={{fontWeight:700,color:s.reconciled?T.green:T.orange,marginBottom:10}}>
         Allocation generated{s.period?(' · '+s.period):''}{s.reconciled?' · balanced':' · review unmatched subscribers'}</div>
-      <table style={{...S.table,minWidth:520,marginBottom:12}}><tbody>
+      <table style={{...S.table,minWidth:580,marginBottom:8}}><tbody>
         <tr><td style={S.tdBold}>Entity</td><td style={{...S.tdBold,textAlign:'right'}}>Premium</td>
-          <td style={{...S.tdBold,textAlign:'right'}}>Employer</td><td style={{...S.tdBold,textAlign:'right'}}>Employee</td></tr>
+          <td style={{...S.tdBold,textAlign:'right'}}>Employer</td><td style={{...S.tdBold,textAlign:'right'}}>Employee</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>Eligibility</td></tr>
         {(s.entities||[]).map(e=>(<tr key={e.code}><td style={S.td}>{e.name} &middot; {e.code}</td>
-          <td style={S.tdR}>{fmt(e.premium)}</td><td style={S.tdR}>{fmt(e.employer)}</td><td style={S.tdR}>{fmt(e.employee)}</td></tr>))}
-        {s.subtotal&&<tr><td style={S.tdBold}>Subtotal</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.subtotal.premium)}</td>
-          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.subtotal.employer)}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.subtotal.employee)}</td></tr>}
-        {s.eligibilityTotal?<tr><td style={S.td}>Eligibility change (100% employer)</td><td style={S.tdR}>{fmt(s.eligibilityTotal)}</td>
-          <td style={S.tdR}>{fmt(s.eligibilityTotal)}</td><td style={S.tdR}>&mdash;</td></tr>:null}
+          <td style={S.tdR}>{fmt((e.premium||0)+(e.eligibility||0))}</td>
+          <td style={S.tdR}>{fmt((e.employer||0)+(e.eligibility||0))}</td>
+          <td style={S.tdR}>{fmt(e.employee)}</td>
+          <td style={S.tdR}>{e.eligibility?fmt(e.eligibility):'—'}</td></tr>))}
         <tr style={S.grandTotalRow}><td style={S.tdBold}>Total billed</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.totalBilled)}</td>
-          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.employerTotal)}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.employeeTotal)}</td></tr>
+          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.employerTotal)}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.employeeTotal)}</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>{s.eligibilityTotal?fmt(s.eligibilityTotal):'—'}</td></tr>
       </tbody></table>
+      {s.eligibilityTotal?<div style={{fontSize:11,color:T.textMuted,marginBottom:10}}>Eligibility charges are billed 100% to each entity&rsquo;s employer and are included in the Premium and Employer columns above.</div>:null}
       {(s.flags||[]).length>0&&<div style={{marginBottom:8}}>
         <div style={{fontSize:12,fontWeight:700,color:T.textMuted,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:4}}>Review flags</div>
         {(s.flags||[]).map((f,i)=>(<div key={i} style={{fontSize:12,color:T.textMuted,marginBottom:2}}>
