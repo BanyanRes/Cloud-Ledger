@@ -2984,8 +2984,13 @@ app.post('/api/entities/:eid/insurance-allocation',
       try {
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         ensureWpFolders(db, req.params.eid, folderPath, who);
-        saved = saveWpBuffer(db, WORKPAPERS_DIR, req.params.eid, folderPath, fname,
-          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', wbBuf, who, { overwrite: true });
+        const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        saved = saveWpBuffer(db, WORKPAPERS_DIR, req.params.eid, folderPath, fname, XLSX_MIME, wbBuf, who, { overwrite: true });
+        // Retain the two original uploads alongside the workpaper for audit.
+        const srcFolder = folderPath + '/Source Documents';
+        ensureWpFolders(db, req.params.eid, srcFolder, who);
+        saveWpBuffer(db, WORKPAPERS_DIR, req.params.eid, srcFolder, inv.originalname || 'Billing Invoice.xlsx', inv.mimetype || XLSX_MIME, inv.buffer, who, { overwrite: true });
+        saveWpBuffer(db, WORKPAPERS_DIR, req.params.eid, srcFolder, con.originalname || 'Consolidated Billing.xlsx', con.mimetype || XLSX_MIME, con.buffer, who, { overwrite: true });
       } catch (e) { console.error('[insurance-allocation] save failed:', e.message); }
 
       const summary = {
