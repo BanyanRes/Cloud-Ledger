@@ -1881,7 +1881,7 @@ function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSum
   </div>);}
 
 // ═══ Edit JE Modal ═══
-function EditJEModal({entityId,dimsEnabled=true,entry,accounts:initAccounts,onClose,onSaved}){
+function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,accounts:initAccounts,onClose,onSaved}){
   // dimsEnabled defaults to true: report drilldowns (AccountDrillDownModal, ApAgingReport,
   // FundReporting) open this modal without the prop and only ever do so for real
   // accounting/fund entities, so the full Location/Class/Project dimension list must show —
@@ -1890,8 +1890,17 @@ function EditJEModal({entityId,dimsEnabled=true,entry,accounts:initAccounts,onCl
   const[accounts,setAccounts]=useState(initAccounts||[]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[saving,setSaving]=useState(false);
   const[projects,setProjects]=useState([]);const[dimProjects,setDimProjects]=useState([]);
   useEffect(()=>{api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>setDimProjects([]));},[entityId]);
-  // Turnkey projects take precedence; otherwise use the project dimension (always shown for non-Turnkey when dims are on).
-  const isTurnkeyHere=projects.length>0;
+  // Whether THIS entity is Turnkey Rail is decided by the entity (passed from the
+  // parent when known), NOT by whether any Turnkey projects exist globally.
+  // getTurnkeyProjects() returns a GLOBAL list, so keying off its length made every
+  // entity look like a Turnkey entity whenever a single Turnkey project existed —
+  // which suppressed the project-dimension list on ordinary accounting entities
+  // (e.g. Banyan Residential, whose Dimension dropdown then showed only the lone
+  // global Turnkey project). Fallback for callers that don't pass the flag: an entity
+  // that has its OWN dimension projects uses them; only an entity with none falls back
+  // to the global Turnkey project list. Turnkey Rail has no dimension projects, so it
+  // still gets the Turnkey list; Banyan (278 dimension projects) gets its projects.
+  const isTurnkeyHere=isTurnkeyEntity||(projects.length>0&&dimProjects.length===0);
   const useDimProjects=!isTurnkeyHere&&dimsEnabled;
   const showProject=isTurnkeyHere||useDimProjects||(entry.lines||[]).some(l=>l.project_id);
   const addProjectInline=async(i)=>{
@@ -2114,7 +2123,7 @@ function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry,op
             <td style={{...S.tdR,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{l.debit>0?fmt(l.debit):''}</td><td style={{...S.tdR,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{l.credit>0?fmt(l.credit):''}</td></tr>)}</tbody></table></div>
         {e.attachments?.length>0&&<div style={{marginTop:10,display:'flex',flexWrap:'wrap',gap:4}}>{e.attachments.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>)}</div>}
       </div>)}</div>}
-    {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={load}/>}
+    {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} isTurnkeyEntity={/turnkey\s*rail/i.test(entityName||'')} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={load}/>}
     {showBulk&&<BulkJEModal entityId={entityId} onClose={()=>setShowBulk(false)} onPosted={()=>{setShowBulk(false);load();}}/>}
   </div>);}
 
@@ -2915,7 +2924,7 @@ function GeneralLedger({entityId,entityName,dimsEnabled,from,setFrom,to,setTo,fi
         <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:900}}><thead><tr><th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Memo</th><th style={S.thR}>Debit</th><th style={S.thR}>Credit</th><th style={S.thR}>Balance</th><th style={{...S.th,width:100}}>Docs</th></tr></thead>
           <tbody>{from&&<tr><td style={{...S.td,color:T.textMuted}}>{from}</td><td style={S.td}></td><td style={{...S.td,fontStyle:'italic',color:T.textMuted}}>Beginning Balance</td><td style={S.tdR}></td><td style={S.tdR}></td><td style={{...S.tdR,fontWeight:600,color:T.textMuted}}>{fmt(beg)}</td><td style={S.td}></td></tr>}{txns.map((t,i)=>{run+=dr?(t.debit-t.credit):(t.credit-t.debit);const atts=entryAtts[t.jeId];return<tr key={i}><td style={{...S.td,color:T.textMuted}}>{t.date}</td><td style={S.td}><button style={{background:'none',border:0,padding:0,color:T.accent,fontWeight:600,cursor:'pointer',fontSize:'inherit',fontFamily:'inherit'}} onClick={()=>{const e=entries.find(x=>x.id===t.jeId);if(e)setEditEntry(e);}}>JE-{String(t.jeNum).padStart(4,'0')}</button></td><td style={S.td} title={t.description||t.memo}>{t.description||t.memo}</td><td style={S.tdR}>{t.debit>0?fmt(t.debit):''}</td><td style={S.tdR}>{t.credit>0?fmt(t.credit):''}</td><td style={{...S.tdR,fontWeight:600,color:T.textBright}}>{fmt(run)}</td>
             <td style={S.td}>{atts?atts.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>):''}</td></tr>;})}</tbody></table></div>}</div>);})}
-    {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={()=>{setEditEntry(null);reload();}}/>}
+    {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} isTurnkeyEntity={/turnkey\s*rail/i.test(entityName||'')} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={()=>{setEditEntry(null);reload();}}/>}
     </div>);}
 
 // ═══ Wire Coding Notes Modal ═══
