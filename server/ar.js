@@ -1178,22 +1178,51 @@ function registerArRoutes(app, ctx) {
   app.get('/api/entities/:eid/ar/open-invoices', ...readers, (req, res) => {
     const eid = req.params.eid;
     const amount = req.query.amount != null && req.query.amount !== '' ? r2(req.query.amount) : null;
+    // When the picker is open on a specific bank transaction, that transaction's own
+    // splits must NOT count against the invoice's remaining (you're editing them).
+    const excludeTxn = req.query.exclude_txn != null && req.query.exclude_txn !== '' ? +req.query.exclude_txn : null;
     // Cash-receipt picker: real invoices only. Credit memos carry a negative open
     // and are not something a cash deposit is applied to (they are applied TO an
     // invoice via the credit-memo apply flow), so exclude them here.
     const invs = db.prepare("SELECT * FROM ar_invoices WHERE entity_id = ? AND status != 'void' AND COALESCE(doc_type,'invoice') != 'credit_memo' ORDER BY customer_name, invoice_date, invoice_num").all(eid);
     const paidBy = new Map();
     for (const r of db.prepare('SELECT invoice_id, SUM(amount) AS paid FROM ar_receipts WHERE entity_id = ? GROUP BY invoice_id').all(eid)) paidBy.set(r.invoice_id, Number(r.paid || 0));
+    // Pending (coded-but-unposted) allocations: A/R deposit splits on OTHER bank
+    // transactions already spoken for a given invoice, even though no receipt has
+    // posted yet. The open-invoices feed historically only knew about POSTED receipts,
+    // so a second deposit could grab an invoice that a first unposted deposit had
+    // already claimed — the double-apply that only failed at post time. Surface those
+    // pending amounts here so the picker can show a true effective-remaining and hide
+    // fully-spoken-for invoices. Keyed by invoice_id; each entry lists the holding txn.
+    const pendingBy = new Map();
+    const pendRows = db.prepare(
+      "SELECT s.invoice_id, s.amount, s.txn_id, bt.date, bt.description FROM bank_transaction_splits s "
+      + "JOIN bank_transactions bt ON bt.id = s.txn_id "
+      + "WHERE bt.entity_id = ? AND bt.status = 'coded' AND bt.amount > 0 AND s.invoice_id IS NOT NULL AND s.amount > 0"
+    ).all(eid);
+    for (const r of pendRows) {
+      if (excludeTxn != null && r.txn_id === excludeTxn) continue;
+      if (!pendingBy.has(r.invoice_id)) pendingBy.set(r.invoice_id, { amount: 0, txns: [] });
+      const e = pendingBy.get(r.invoice_id); e.amount += Number(r.amount || 0);
+      e.txns.push({ txn_id: r.txn_id, date: r.date, description: r.description, amount: Number(r.amount || 0) });
+    }
     const today = todayStr(); const open = [];
     for (const inv of invs) {
       const openAmt = r2(Number(inv.total || 0) - (paidBy.get(inv.id) || 0));
       if (Math.abs(openAmt) < 0.005) continue;
+      const pend = pendingBy.get(inv.id) || { amount: 0, txns: [] };
+      const pendingApplied = r2(pend.amount);
+      const effectiveOpen = r2(openAmt - pendingApplied);
       const agingRef = inv.aging_date || inv.due_date;
       const past = agingRef ? daysBetween(agingRef, today) : 0;
       const bucket = past <= 0 ? 'current' : past <= 30 ? 'd1_30' : past <= 60 ? 'd31_60' : past <= 90 ? 'd61_90' : 'd90_plus';
       open.push({ id: inv.id, invoice_num: inv.invoice_num, customer: inv.customer_name, invoice_date: inv.invoice_date,
-        due_date: inv.due_date, open: openAmt, bucket, days_past_due: Math.max(past, 0),
-        exact_match: amount != null && Math.abs(openAmt - amount) < 0.005 });
+        due_date: inv.due_date, open: openAmt,
+        pending_applied: pendingApplied, effective_open: effectiveOpen, pending_txns: pend.txns,
+        bucket, days_past_due: Math.max(past, 0),
+        // "exact_match" now compares against the EFFECTIVE remaining so a fully
+        // spoken-for invoice never looks like a clean match.
+        exact_match: amount != null && Math.abs(effectiveOpen - amount) < 0.005 });
     }
     res.json({ amount, invoices: open, exact_matches: amount != null ? open.filter(o => o.exact_match) : [] });
   });

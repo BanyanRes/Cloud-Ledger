@@ -240,7 +240,7 @@ export const api = {
   addArReceipt: (eid, id, data) => request('/entities/' + eid + '/ar/invoices/' + id + '/receipts', { method: 'POST', body: data }),
   deleteArReceipt: (eid, id, rid) => request('/entities/' + eid + '/ar/invoices/' + id + '/receipts/' + rid, { method: 'DELETE' }),
   getArAging: (eid, asOf) => request('/entities/' + eid + '/ar/aging' + (asOf ? '?as_of=' + asOf : '')),
-  getArOpenInvoices: (eid, amount) => request('/entities/' + eid + '/ar/open-invoices' + (amount != null ? '?amount=' + amount : '')),
+  getArOpenInvoices: (eid, amount, excludeTxn) => { const q = []; if (amount != null) q.push('amount=' + amount); if (excludeTxn != null) q.push('exclude_txn=' + excludeTxn); return request('/entities/' + eid + '/ar/open-invoices' + (q.length ? '?' + q.join('&') : '')); },
   createCreditMemo: (eid, data) => request('/entities/' + eid + '/ar/credit-memos', { method: 'POST', body: data }),
   getCreditMemos: (eid, openOnly) => request('/entities/' + eid + '/ar/credit-memos' + (openOnly ? '?open=1' : '')),
   applyCreditMemo: (eid, id, data) => request('/entities/' + eid + '/ar/credit-memos/' + id + '/apply', { method: 'POST', body: data }),

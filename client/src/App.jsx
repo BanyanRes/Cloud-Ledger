@@ -3107,13 +3107,21 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, dimsEn
   const arCodes = (accounts||[]).filter(a => /accounts?\s*receivable/i.test(a.name||'') && !/other|note|interest/i.test(a.name||'')).map(a => String(a.code));
   const isDeposit = txn.amount > 0;
   const [openInvoices, setOpenInvoices] = useState([]);
-  useEffect(() => { if (isDeposit && arCodes.length) api.getArOpenInvoices(entityId).then(d => setOpenInvoices((d && d.invoices) || [])).catch(() => {}); }, [entityId]);
+  // Exclude THIS transaction's own splits from the pending-allocation math, so
+  // re-opening the modal on a deposit that already applied to an invoice doesn't
+  // count that application against itself (which would show 0 remaining on its
+  // own invoice). effective_open then = invoice open − OTHER unposted deposits.
+  useEffect(() => { if (isDeposit && arCodes.length) api.getArOpenInvoices(entityId, null, txn.id).then(d => setOpenInvoices((d && d.invoices) || [])).catch(() => {}); }, [entityId]);
   const isArLine = l => arCodes.includes(String(l.account_code));
+  // Effective remaining: prefer the server's effective_open (invoice open minus
+  // amounts already spoken for by other coded-but-unposted deposits); fall back
+  // to plain open for older server responses.
+  const effOpen = o => (o.effective_open != null ? o.effective_open : o.open);
   const pickInvoice = (i, invId) => setLines(prev => prev.map((l, idx) => {
     if (idx !== i) return l;
     if (!invId) return { ...l, invoice_id: null };
     const inv = openInvoices.find(o => String(o.id) === String(invId));
-    return inv ? { ...l, invoice_id: inv.id, amount: String(inv.open), memo: l.memo || inv.invoice_num } : l;
+    return inv ? { ...l, invoice_id: inv.id, amount: String(effOpen(inv) > 0.005 ? effOpen(inv) : inv.open), memo: l.memo || inv.invoice_num } : l;
   }));
   const [locations, setLocations] = useState([]); const [classes, setClasses] = useState([]); const [dimProjects, setDimProjects] = useState([]);
   useEffect(() => { api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>{}); api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>{}); api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>{}); }, [entityId]);
@@ -3176,7 +3184,25 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, dimsEn
         {showDims&&<td style={{...S.td,padding:'4px 6px'}}><select style={{...S.inputSm,width:'100%'}} value={lineDimValue(l)} onChange={e=>setLineDim(i,e.target.value)}><option value="">No dimension</option>{dimOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</select></td>}
         <td style={{...S.td,padding:'4px 6px'}}><input style={{...S.inputSm,textAlign:'right',fontFamily:'monospace'}} value={l.amount} onChange={e => updateLine(i, 'amount', e.target.value)} placeholder="0.00"/></td>
         <td style={{...S.td,padding:'4px 6px'}}>{isDeposit && isArLine(l)
-          ? <select style={{...S.inputSm,width:'100%'}} value={l.invoice_id||''} onChange={e => pickInvoice(i, e.target.value)}><option value="">Apply to invoice&hellip; (on account)</option>{openInvoices.slice().sort((a,b)=>(Math.abs(b.open-target)<0.005)-(Math.abs(a.open-target)<0.005)).map(o => <option key={o.id} value={o.id}>{Math.abs(o.open-target)<0.005?'\u2713 ':''}{o.invoice_num} {'\u2014'} {o.customer} {'\u2014'} ${fmt(o.open)} ({o.bucket==='current'?'current':o.days_past_due+'d'})</option>)}</select>
+          ? (()=>{ const selInv=openInvoices.find(o=>String(o.id)===String(l.invoice_id));
+              const spokenFor=selInv&&selInv.pending_applied>0.005;
+              return <div>
+                <select style={{...S.inputSm,width:'100%'}} value={l.invoice_id||''} onChange={e => pickInvoice(i, e.target.value)}>
+                  <option value="">Apply to invoice&hellip; (on account)</option>
+                  {openInvoices.slice()
+                    .sort((a,b)=>(Math.abs(effOpen(b)-target)<0.005)-(Math.abs(effOpen(a)-target)<0.005))
+                    .map(o => { const rem=effOpen(o); const full=rem<0.005;
+                      // Fully spoken-for invoices are disabled — unless it's the one already
+                      // selected on THIS line (so an existing choice always stays visible/selectable).
+                      const isSelected=String(o.id)===String(l.invoice_id);
+                      return <option key={o.id} value={o.id} disabled={full && !isSelected}>
+                        {Math.abs(rem-target)<0.005?'\u2713 ':''}{o.invoice_num} {'\u2014'} {o.customer} {'\u2014'} ${fmt(rem)}{o.pending_applied>0.005?' left (of $'+fmt(o.open)+')':''} ({o.bucket==='current'?'current':o.days_past_due+'d'}){full?' \u2014 fully applied':''}
+                      </option>; })}
+                </select>
+                {spokenFor && <div style={{fontSize:10,color:T.orange,marginTop:2,lineHeight:1.3}}>
+                  ${fmt(selInv.pending_applied)} already applied by unposted {selInv.pending_txns&&selInv.pending_txns.length?('txn '+selInv.pending_txns.map(t=>'#'+t.txn_id).join(', ')):'deposit(s)'} &mdash; ${fmt(effOpen(selInv))} remaining
+                </div>}
+              </div>; })()
           : <input style={S.inputSm} value={l.memo} onChange={e => updateLine(i, 'memo', e.target.value)} placeholder="Memo"/>}</td>
         <td style={{...S.td,padding:'4px 6px',textAlign:'center'}}>{lines.length > 1 && <button style={S.btnGhost} onClick={() => removeLine(i)}>x</button>}</td>
       </tr>)}</tbody>
@@ -3229,9 +3255,15 @@ function BankTransactions({entityId,canEdit=true,dimsEnabled=true,bankSelAcct:se
       for(const t of imported){if(!t.account_code){const sg=suggestAccount(t.description,accounts,selAcct);if(sg){await api.codeBankTransaction(entityId,t.id,sg.code,t.memo||t.description);auto++;}}}
       setMsg(r.count+' imported'+(r.auto_coded>0?', '+r.auto_coded+' auto-coded from wire notes':'')+(auto>0?', '+auto+' auto-categorized':''));loadTxns(selAcct,statusFilter);}catch(ex){setErr(ex.message);}finally{setUploading(false);setUploadProgress('');}};
   const cancelUpload=()=>{setUploading(false);setUploadProgress('');setMsg('Upload cancelled');};
-  const discardAllUnposted=async()=>{const unposted=txns.filter(t=>t.status!=='posted');if(!unposted.length){setErr('Nothing to discard');return;}
-    const batchIds=[...new Set(unposted.map(t=>t.batch_id).filter(Boolean))];
-    if(!confirm('Discard all '+unposted.length+' unposted transaction(s) from this account? This cannot be undone. Posted transactions will be kept.'))return;
+  // Only genuinely un-worked rows are discardable. "Matched" (linked to an existing
+  // JE) and "posted" (has its own JE) are finished states — discarding a matched row
+  // would break its reconciliation link to an already-booked entry, and a posted row
+  // has a live GL entry. "Coded" rows have a chosen account but aren't booked yet, so
+  // they're still safe to discard. Discardable = pending OR coded, never matched/posted.
+  const discardable=t=>t.status==='pending'||t.status==='coded';
+  const discardAllUnposted=async()=>{const drop=txns.filter(discardable);if(!drop.length){setErr('Nothing to discard');return;}
+    const batchIds=[...new Set(drop.map(t=>t.batch_id).filter(Boolean))];
+    if(!confirm('Discard all '+drop.length+' un-posted transaction(s) from this account? This cannot be undone. Matched and posted transactions will be kept.'))return;
     setErr('');setMsg('');setDiscarding(true);
     try{let total=0;for(const bid of batchIds){const r=await api.deleteBankBatch(entityId,bid);total+=(r.deleted||0);}
       setMsg(total+' transaction(s) discarded');loadTxns(selAcct,statusFilter);}
@@ -3253,6 +3285,8 @@ function BankTransactions({entityId,canEdit=true,dimsEnabled=true,bankSelAcct:se
 
   const filteredTxns=txns;
   const totalIn=filteredTxns.filter(t=>t.amount>0).reduce((s,t)=>s+t.amount,0);const totalOut=filteredTxns.filter(t=>t.amount<0).reduce((s,t)=>s+Math.abs(t.amount),0);const uncat=filteredTxns.filter(t=>t.status==='pending').length;
+  const nPosted=filteredTxns.filter(t=>t.status==='posted').length;const nMatched=filteredTxns.filter(t=>t.status==='matched').length;const nCoded=filteredTxns.filter(t=>t.status==='coded').length;const nPending=filteredTxns.filter(t=>t.status==='pending').length;
+  const statusBits=[nPosted&&nPosted+' posted',nMatched&&nMatched+' matched',nCoded&&nCoded+' coded',nPending&&nPending+' pending'].filter(Boolean);
 
   return(<div><div style={S.h1}>Bank Transactions</div><div style={S.sub}>Upload, categorize, and post bank activity to the general ledger</div>
     <div style={S.card}><div style={S.row}>
@@ -3282,10 +3316,10 @@ function BankTransactions({entityId,canEdit=true,dimsEnabled=true,bankSelAcct:se
       <div style={S.summaryItem}><div style={{...S.statVal,fontSize:20,color:T.textBright}}>${fmt(totalIn-totalOut)}</div><div style={S.statLabel}>Net</div></div></div>}
     {selAcct&&filteredTxns.length>0&&<div style={S.cardFlush}>
       <div style={{padding:'16px 20px',display:'flex',justifyContent:'space-between',alignItems:'center',borderBottom:'1px solid '+T.border}}>
-        <div style={S.h2}>{filteredTxns.length} Transactions</div>
+        <div><div style={S.h2}>{filteredTxns.length} Transactions</div>{statusBits.length>0&&<div style={{fontSize:11,color:T.textMuted,marginTop:2}}>{statusBits.join(' \u00b7 ')}</div>}</div>
         <div style={{display:'flex',gap:10}}>
           {canEdit&&<button style={{...S.btnS,color:T.teal,borderColor:T.teal+'40'}} onClick={()=>setShowAddAcct(true)}>+ New Account</button>}
-          {canEdit&&filteredTxns.some(t=>t.status!=='posted')&&<button style={{...S.btnD,padding:'8px 14px',fontSize:12}} disabled={discarding} onClick={discardAllUnposted}>{discarding?'Discarding...':'Discard '+filteredTxns.filter(t=>t.status!=='posted').length+' unposted'}</button>}
+          {canEdit&&filteredTxns.some(discardable)&&<button style={{...S.btnD,padding:'8px 14px',fontSize:12}} disabled={discarding} onClick={discardAllUnposted}>{discarding?'Discarding...':'Discard '+filteredTxns.filter(discardable).length+' un-posted'}</button>}
           {canEdit&&filteredTxns.some(t=>t.status==='coded')&&<button style={S.btnP} onClick={postCoded}>Post {filteredTxns.filter(t=>t.status==='coded').length} to GL</button>}</div></div>
       <div style={{overflowX:'auto',width:'100%'}}>
       <table style={{...S.table,tableLayout:'fixed',width:colW.date+colW.desc+colW.amount+colW.gl+colW.memo+colW.status+36,minWidth:'100%'}}>
@@ -3298,7 +3332,7 @@ function BankTransactions({entityId,canEdit=true,dimsEnabled=true,bankSelAcct:se
           <th style={{...S.th,position:'relative',borderRight:'1px solid '+T.borderLight}}>Memo{resizeHandle('memo')}</th>
           <th style={{...S.th,position:'relative',borderRight:'1px solid '+T.borderLight}}>Status{resizeHandle('status')}</th>
           <th style={{...S.th,width:36}}></th></tr></thead>
-        <tbody>{filteredTxns.map(t=><tr key={t.id} style={t.status==='posted'?{opacity:0.45}:{}}>
+        <tbody>{filteredTxns.map(t=><tr key={t.id} style={(t.status==='posted'||t.status==='matched')?{opacity:0.5}:{}}>
           <td style={{...S.td,color:T.textMuted,fontSize:12,borderRight:'1px solid '+T.borderLight}} title={t.date}>{t.date}</td>
           <td style={{...S.td,fontWeight:500,borderRight:'1px solid '+T.borderLight}} title={t.description}>{t.description}</td>
           <td style={{...S.tdR,fontSize:15,fontWeight:700,color:t.amount>=0?T.green:T.red,borderRight:'1px solid '+T.borderLight}}>{t.amount>=0?'+':''}{fmt(t.amount)}</td>

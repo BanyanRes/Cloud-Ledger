@@ -4524,7 +4524,91 @@ app.post('/api/entities/:eid/bank-transactions/post', auth, requireEntityAccess(
     });
   }
 
+  // Guard: a DEPOSIT line coded to an A/R (Accounts Receivable) control account must
+  // name the invoice it's clearing. Without an invoice_id the post would credit the
+  // A/R control account without applying to any document, so the GL control drifts
+  // away from the aging subledger. A/R accounts are detected by name the same way the
+  // aging report does (Accounts Receivable, excluding "- Other"/note/interest variants),
+  // not by a hard-coded 12000, so other entities' A/R codes are covered too.
+  // Scope: deposits (positive amount) only. Whole batch is all-or-nothing.
+  const arCodeSet = new Set(
+    db.prepare('SELECT code, name FROM accounts WHERE entity_id=?').all(req.params.eid)
+      .filter(a => /accounts?\s*receivable/i.test(a.name || '') && !/other|note|interest/i.test(a.name || ''))
+      .map(a => String(a.code))
+  );
+  if (arCodeSet.size > 0) {
+    const arNoInvoice = [];
+    for (const t of txns) {
+      if (!(Number(t.amount) > 0)) continue; // deposits only
+      const splits = db.prepare('SELECT * FROM bank_transaction_splits WHERE txn_id=? ORDER BY id').all(t.id);
+      if (splits.length > 0) {
+        splits.forEach((s, i) => {
+          // Only positive (natural-direction) A/R lines clear an invoice; a negative
+          // A/R line is a GL reclass/offset, not a cash receipt, so it needs no invoice.
+          if (arCodeSet.has(String(s.account_code)) && Number(s.amount) > 0 && !s.invoice_id) {
+            arNoInvoice.push({ id: t.id, date: t.date, description: t.description, amount: t.amount, line: i + 1, account_code: s.account_code, split_amount: s.amount });
+          }
+        });
+      } else if (arCodeSet.has(String(t.account_code))) {
+        // A single-account A/R deposit has no way to attach an invoice — always block.
+        arNoInvoice.push({ id: t.id, date: t.date, description: t.description, amount: t.amount, line: null, account_code: t.account_code, split_amount: t.amount });
+      }
+    }
+    if (arNoInvoice.length > 0) {
+      const first = arNoInvoice[0];
+      return res.status(400).json({
+        error: 'Cannot post: ' + arNoInvoice.length + ' deposit line' + (arNoInvoice.length === 1 ? '' : 's') + ' coded to Accounts Receivable ' + (arNoInvoice.length === 1 ? 'has' : 'have') + ' no invoice attached. '
+          + 'Open the deposit (' + first.date + ', $' + Math.abs(Number(first.amount)).toFixed(2) + (first.line ? ', line ' + first.line : '') + ') and apply it to the invoice it pays before posting. '
+          + 'An A/R deposit must clear a specific invoice, otherwise the aging report and the GL control account drift apart.',
+        transactions_ar_missing_invoice: arNoInvoice,
+      });
+    }
+  }
+
+  // Guard: never over-apply an invoice across the batch. recordArReceipt already
+  // rejects a receipt that exceeds an invoice's open balance versus ALREADY-POSTED
+  // receipts — but two unposted deposits in the same batch could each try to clear
+  // the same invoice (the classic double-apply). Sum every A/R application in this
+  // batch by invoice, add what's already been received (posted) on that invoice, and
+  // reject before writing anything if the combined total exceeds the invoice total.
+  // This is the server backstop behind the split-modal picker's effective-remaining.
+  {
+    const applyByInvoice = new Map(); // invoice_id -> [{txn_id, date, amount}]
+    for (const t of txns) {
+      if (!(Number(t.amount) > 0)) continue;
+      const splits = db.prepare('SELECT * FROM bank_transaction_splits WHERE txn_id=? ORDER BY id').all(t.id);
+      for (const s of splits) {
+        if (!s.invoice_id || !(Number(s.amount) > 0)) continue;
+        if (!applyByInvoice.has(s.invoice_id)) applyByInvoice.set(s.invoice_id, []);
+        applyByInvoice.get(s.invoice_id).push({ txn_id: t.id, date: t.date, amount: Number(s.amount) });
+      }
+    }
+    for (const [invId, apps] of applyByInvoice) {
+      const inv = db.prepare('SELECT invoice_num, total, status FROM ar_invoices WHERE id=? AND entity_id=?').get(invId, req.params.eid);
+      if (!inv) return res.status(400).json({ error: 'Cannot post: an A/R deposit line references invoice #' + invId + ', which is not an invoice for this entity.' });
+      if (inv.status === 'void') return res.status(400).json({ error: 'Cannot post: a deposit line is applied to voided invoice ' + inv.invoice_num + '.' });
+      const posted = Number(db.prepare('SELECT COALESCE(SUM(amount),0) AS p FROM ar_receipts WHERE invoice_id=?').get(invId).p);
+      const batchApply = apps.reduce((s, a) => s + a.amount, 0);
+      const invTotal = Number(inv.total || 0);
+      if (invTotal >= 0 && (posted + batchApply) - invTotal > 0.005) {
+        const openBefore = +(invTotal - posted).toFixed(2);
+        const detail = apps.length > 1
+          ? apps.length + ' deposits in this batch together apply $' + batchApply.toFixed(2)
+          : 'this deposit applies $' + batchApply.toFixed(2);
+        return res.status(400).json({
+          error: 'Cannot post: invoice ' + inv.invoice_num + ' has only $' + openBefore.toFixed(2) + ' open'
+            + (posted > 0.005 ? ' (after $' + posted.toFixed(2) + ' already received)' : '')
+            + ', but ' + detail + ' to it. Two deposits can\'t both clear the same invoice — '
+            + 'apply one of them to the correct invoice (or reduce the amount) before posting.',
+          invoice: { id: invId, invoice_num: inv.invoice_num, total: invTotal, already_received: +posted.toFixed(2), open: openBefore, batch_applied: +batchApply.toFixed(2) },
+          applications: apps,
+        });
+      }
+    }
+  }
+
   const results = [];
+  try {
   db.transaction(() => {
     for (const t of txns) {
       const splits = db.prepare('SELECT * FROM bank_transaction_splits WHERE txn_id=? ORDER BY id').all(t.id);
@@ -4582,6 +4666,12 @@ app.post('/api/entities/:eid/bank-transactions/post', auth, requireEntityAccess(
       results.push({ txn_id: t.id, je_id: jeId, entry_num: num });
     }
   })();
+  } catch (e) {
+    // The whole batch runs in one db.transaction, so any throw here (e.g. a
+    // recordArReceipt over-application backstop) rolls back every JE — nothing
+    // half-posts. Surface it as a readable 400 instead of a raw 500.
+    return res.status(400).json({ error: 'Post failed, nothing was posted: ' + e.message });
+  }
   res.json({ posted: results.length, results });
 });
 
@@ -4650,7 +4740,11 @@ app.delete('/api/entities/:eid/bank-transactions/:id', auth, requireEntityAccess
 });
 
 app.delete('/api/entities/:eid/bank-transactions/batch/:batchId', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
-  const r = db.prepare('DELETE FROM bank_transactions WHERE entity_id=? AND batch_id=? AND status != ?').run(req.params.eid, req.params.batchId, 'posted');
+  // Only discard rows that aren't yet tied to a journal entry. A 'posted' row has
+  // its own JE; a 'matched' row is linked (reconciled) to an existing JE — deleting
+  // either would orphan/break that GL link. Both are protected here so a batch
+  // discard can never remove a finished row, even if the client miscounts.
+  const r = db.prepare("DELETE FROM bank_transactions WHERE entity_id=? AND batch_id=? AND status NOT IN ('posted','matched')").run(req.params.eid, req.params.batchId);
   res.json({ deleted: r.changes });
 });
 
