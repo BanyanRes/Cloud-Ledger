@@ -2354,7 +2354,7 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
   const[showCM,setShowCM]=useState(false);
   const[detail,setDetail]=useState(null);const[busy,setBusy]=useState('');
   const blankLine={description:'',qty:1,rate:'',revenue_account_code:'',class_id:'',location_id:''};
-  const[form,setForm]=useState({customer_id:'',invoice_date:today(),due_date:'',memo:''});
+  const[form,setForm]=useState({customer_id:'',invoice_num:'',invoice_date:today(),due_date:'',memo:''});
   const[lines,setLines]=useState([{...blankLine}]);
   const[cmForm,setCmForm]=useState({customer_id:'',invoice_date:today(),memo:''});
   const[cmLines,setCmLines]=useState([{...blankLine}]);
@@ -2373,7 +2373,7 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
     catch(e){setErr(e.message);}finally{setLoading(false);}},[entityId,statusF]);
   useEffect(()=>{loadRefs();},[loadRefs]);
   useEffect(()=>{load();},[load]);
-  const resetForm=()=>{setForm({customer_id:'',invoice_date:today(),due_date:'',memo:''});setLines([{...blankLine}]);};
+  const resetForm=()=>{setForm({customer_id:'',invoice_num:'',invoice_date:today(),due_date:'',memo:''});setLines([{...blankLine}]);};
   const resetCm=()=>{setCmForm({customer_id:'',invoice_date:today(),memo:''});setCmLines([{...blankLine}]);};
   const createCm=async()=>{
     setErr('');
@@ -2391,7 +2391,7 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
     if(!form.customer_id){setErr('Pick a customer');return;}
     setBusy('create');
     try{
-      const inv=await api.createArInvoice(entityId,{customer_id:+form.customer_id,invoice_date:form.invoice_date,
+      const inv=await api.createArInvoice(entityId,{customer_id:+form.customer_id,invoice_num:form.invoice_num.trim()||undefined,invoice_date:form.invoice_date,
         due_date:form.due_date||undefined,memo:form.memo,
         lines:lines.map(l=>({description:l.description,qty:Number(l.qty),rate:Number(l.rate),
           revenue_account_code:l.revenue_account_code,class_id:l.class_id?+l.class_id:null,location_id:l.location_id?+l.location_id:null}))});
@@ -2414,6 +2414,7 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
         <div style={{flex:'1 1 240px'}}><label style={S.label}>Customer</label>
           <select style={S.select} value={form.customer_id} onChange={e=>setForm(f=>({...f,customer_id:e.target.value}))}>
             <option value="">— select —</option>{customers.map(c=><option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+        <div style={{flex:'0 0 180px'}}><label style={S.label}>Invoice # (blank = auto)</label><input style={S.input} value={form.invoice_num} onChange={e=>setForm(f=>({...f,invoice_num:e.target.value}))} placeholder="Auto-generated"/></div>
         <div style={{flex:'0 0 160px'}}><label style={S.label}>Invoice date</label><input style={S.input} type="date" value={form.invoice_date} onChange={e=>setForm(f=>({...f,invoice_date:e.target.value}))}/></div>
         <div style={{flex:'0 0 160px'}}><label style={S.label}>Due date (blank = terms)</label><input style={S.input} type="date" value={form.due_date} onChange={e=>setForm(f=>({...f,due_date:e.target.value}))}/></div>
         <div style={{flex:'1 1 240px'}}><label style={S.label}>Memo / "Re:" line</label><input style={S.input} value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))} placeholder="April 2026 services"/></div>

@@ -200,7 +200,16 @@ function createInvoice(db, eid, body, who) {
   const memo = String(body.memo || '').trim() || null;
 
   return db.transaction(() => {
-    const num = nextInvoiceNum(db, eid, invoice_date);
+    // Invoice number: use a user-supplied one if given (trimmed), else auto-generate
+    // the next INV-<year>-#### in sequence. A manual number must be unique within the
+    // entity so two invoices never collide on the register / in the aging subledger.
+    let num = String(body.invoice_num || '').trim();
+    if (num) {
+      const clash = db.prepare('SELECT 1 FROM ar_invoices WHERE entity_id = ? AND invoice_num = ?').get(eid, num);
+      if (clash) throw new Error('Invoice number ' + num + ' is already used for this entity. Choose a different number or leave it blank to auto-generate.');
+    } else {
+      num = nextInvoiceNum(db, eid, invoice_date);
+    }
     const ins = db.prepare('INSERT INTO ar_invoices '
       + '(entity_id, customer_id, template_id, invoice_num, invoice_date, due_date, '
       + 'customer_name, customer_email, customer_address, memo, subtotal, total, '
