@@ -102,6 +102,11 @@ function ensureSchema(db) {
   const rcols = db.prepare('PRAGMA table_info(ar_receipts)').all().map(c => c.name);
   if (!rcols.includes('kind')) db.exec("ALTER TABLE ar_receipts ADD COLUMN kind TEXT DEFAULT 'cash'");
   if (!rcols.includes('applied_doc_id')) db.exec('ALTER TABLE ar_receipts ADD COLUMN applied_doc_id INTEGER');
+  // Invoice lines can carry a Project dimension (alongside class_id/location_id),
+  // so the accrual JE posts each revenue line tagged to its project code. Banyan
+  // Residential uses this as its only dimension (its whole COA is project-coded).
+  const licols = db.prepare('PRAGMA table_info(ar_invoice_lines)').all().map(c => c.name);
+  if (!licols.includes('project_id')) db.exec('ALTER TABLE ar_invoice_lines ADD COLUMN project_id INTEGER');
   console.log('[db] AR invoicing schema ready');
 }
 
@@ -181,7 +186,7 @@ function normalizeLines(db, eid, raw) {
     if (!Number.isFinite(qty) || !Number.isFinite(rate)) throw new Error('Line ' + (i + 1) + ': qty and rate must be numbers');
     const amount = r2(qty * rate);
     if (Math.abs(amount) < 0.005) throw new Error('Line ' + (i + 1) + ': amount is zero');
-    out.push({ description: desc, qty, rate, amount, revenue_account_code: code, class_id: l.class_id || null, location_id: l.location_id || null, sort: i });
+    out.push({ description: desc, qty, rate, amount, revenue_account_code: code, project_id: l.project_id || null, class_id: l.class_id || null, location_id: l.location_id || null, sort: i });
   });
   return out;
 }
@@ -217,11 +222,11 @@ function createInvoice(db, eid, body, who) {
       .run(eid, cust.id, body.template_id || null, num, invoice_date, due_date,
         cust.name, cust.email || null, cust.address || null, memo, total, total, arCode, who || null);
     const invId = ins.lastInsertRowid;
-    const insL = db.prepare('INSERT INTO ar_invoice_lines (invoice_id, description, qty, rate, amount, revenue_account_code, class_id, location_id, sort) VALUES (?,?,?,?,?,?,?,?,?)');
-    for (const l of lines) insL.run(invId, l.description, l.qty, l.rate, l.amount, l.revenue_account_code, l.class_id, l.location_id, l.sort);
+    const insL = db.prepare('INSERT INTO ar_invoice_lines (invoice_id, description, qty, rate, amount, revenue_account_code, class_id, location_id, project_id, sort) VALUES (?,?,?,?,?,?,?,?,?,?)');
+    for (const l of lines) insL.run(invId, l.description, l.qty, l.rate, l.amount, l.revenue_account_code, l.class_id, l.location_id, l.project_id, l.sort);
 
     const jeLines = [{ account_code: arCode, debit: total, credit: 0, description: 'Invoice ' + num + ' - ' + cust.name }];
-    for (const l of lines) jeLines.push({ account_code: l.revenue_account_code, debit: 0, credit: l.amount, description: l.description, class_id: l.class_id, location_id: l.location_id });
+    for (const l of lines) jeLines.push({ account_code: l.revenue_account_code, debit: 0, credit: l.amount, description: l.description, project_id: l.project_id, class_id: l.class_id, location_id: l.location_id });
     const je = postJE(db, eid, invoice_date, 'AR Invoice ' + num + ' - ' + cust.name + (memo ? ' - ' + memo : ''), jeLines, who);
     db.prepare('UPDATE ar_invoices SET je_id = ? WHERE id = ?').run(je.id, invId);
     return invId;
@@ -987,13 +992,13 @@ function registerArRoutes(app, ctx) {
           .run(invoice_date, due_date, memo, arCode, total, total, inv.id);
         if (Array.isArray(b.lines)) {
           db.prepare('DELETE FROM ar_invoice_lines WHERE invoice_id = ?').run(inv.id);
-          const insL = db.prepare('INSERT INTO ar_invoice_lines (invoice_id, description, qty, rate, amount, revenue_account_code, class_id, location_id, sort) VALUES (?,?,?,?,?,?,?,?,?)');
-          for (const l of lines) insL.run(inv.id, l.description, l.qty, l.rate, l.amount, l.revenue_account_code, l.class_id, l.location_id, l.sort);
+          const insL = db.prepare('INSERT INTO ar_invoice_lines (invoice_id, description, qty, rate, amount, revenue_account_code, class_id, location_id, project_id, sort) VALUES (?,?,?,?,?,?,?,?,?,?)');
+          for (const l of lines) insL.run(inv.id, l.description, l.qty, l.rate, l.amount, l.revenue_account_code, l.class_id, l.location_id, l.project_id, l.sort);
         }
         // Rebuild the accrual JE so the GL always matches the invoice.
         deleteJE(db, inv.je_id);
         const jeLines = [{ account_code: arCode, debit: total, credit: 0, description: 'Invoice ' + inv.invoice_num + ' - ' + inv.customer_name }];
-        for (const l of lines) jeLines.push({ account_code: l.revenue_account_code, debit: 0, credit: r2(l.amount != null ? l.amount : Number(l.qty) * Number(l.rate)), description: l.description, class_id: l.class_id, location_id: l.location_id });
+        for (const l of lines) jeLines.push({ account_code: l.revenue_account_code, debit: 0, credit: r2(l.amount != null ? l.amount : Number(l.qty) * Number(l.rate)), description: l.description, project_id: l.project_id, class_id: l.class_id, location_id: l.location_id });
         const je = postJE(db, eid, invoice_date, 'AR Invoice ' + inv.invoice_num + ' - ' + inv.customer_name + (memo ? ' - ' + memo : ''), jeLines, who(req));
         db.prepare('UPDATE ar_invoices SET je_id = ? WHERE id = ?').run(je.id, inv.id);
       })();

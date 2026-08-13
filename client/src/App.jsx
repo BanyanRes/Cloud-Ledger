@@ -840,7 +840,7 @@ export default function App(){
         {page==='coa'&&activeEntity&&<ChartOfAccounts entityId={activeEntity} entityName={entityName} canEdit={canEdit}/>}
         {page==='dimensions'&&activeEntity&&dimsEnabled&&<DimensionsManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='ar_customers'&&activeEntity&&arFull&&<CustomersManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='ar_invoices'&&activeEntity&&arFull&&<ArInvoices entityId={activeEntity} entityName={entityName} canEdit={canEdit} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
+        {page==='ar_invoices'&&activeEntity&&arFull&&<ArInvoices entityId={activeEntity} entityName={entityName} canEdit={canEdit} dimsEnabled={dimsEnabled} isBanyanRes={isBanyanRes} key={activeEntity+'-'+rk}/>}
         {page==='ar_recurring'&&activeEntity&&arFull&&<ArRecurring entityId={activeEntity} entityName={entityName} canEdit={canEdit} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
         {page==='ar_aging'&&activeEntity&&arAgingEnabled&&<ArAgingReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='ledger'&&activeEntity&&<GeneralLedger entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk} from={glFrom} setFrom={setGlFrom} to={glTo} setTo={setGlTo} filter={glFilter} setFilter={setGlFilter}/>}
@@ -2285,24 +2285,33 @@ function arLineAccounts(accounts){
 }
 
 // Shared line-item editor for both one-off invoices and recurring templates.
-function ArLines({lines,setLines,revAccts,classes,locations,dimsEnabled}){
+function ArLines({lines,setLines,revAccts,classes,locations,projects,dimsEnabled,isBanyanRes}){
   const upd=(i,k,v)=>setLines(ls=>ls.map((l,ix)=>ix===i?{...l,[k]:v}:l));
-  const add=()=>setLines(ls=>[...ls,{description:'',qty:1,rate:'',revenue_account_code:ls.length?ls[ls.length-1].revenue_account_code:'',class_id:'',location_id:''}]);
+  const add=()=>setLines(ls=>[...ls,{description:'',qty:1,rate:'',revenue_account_code:ls.length?ls[ls.length-1].revenue_account_code:'',class_id:'',location_id:'',project_id:''}]);
   const rm=i=>setLines(ls=>ls.length<=1?ls:ls.filter((_,ix)=>ix!==i));
   const total=lines.reduce((s,l)=>s+(Number(l.qty)||0)*(Number(l.rate)||0),0);
+  // Banyan Residential codes every transaction to a project (its only dimension),
+  // so instead of the empty Location/Class dropdowns it gets a single "Dimension"
+  // dropdown listing all project codes. The chosen project flows through to the
+  // posted journal entry's revenue line.
+  const projDim=!!(isBanyanRes&&projects&&projects.length);
+  const projLabel=p=>p.code&&p.code!==p.name?p.code+' — '+p.name:(p.code||p.name);
   return(<div>
     <div style={{overflowX:'auto'}}><table style={S.table}><thead><tr>
       <th style={S.th}>Description</th><th style={{...S.th,width:190}}>Revenue account</th>
-      {dimsEnabled&&<th style={{...S.th,width:130}}>Location</th>}
-      {dimsEnabled&&<th style={{...S.th,width:130}}>{classTerm()}</th>}
+      {projDim&&<th style={{...S.th,width:220}}>Dimension</th>}
+      {!projDim&&dimsEnabled&&<th style={{...S.th,width:130}}>Location</th>}
+      {!projDim&&dimsEnabled&&<th style={{...S.th,width:130}}>{classTerm()}</th>}
       <th style={{...S.thR,width:70}}>Qty</th><th style={{...S.thR,width:110}}>Rate</th><th style={{...S.thR,width:110}}>Amount</th><th style={{...S.th,width:28}}></th></tr></thead>
       <tbody>{lines.map((l,i)=><tr key={i}>
         <td style={{padding:'4px 6px'}}><input style={{...S.inputSm,width:'100%'}} value={l.description} onChange={e=>upd(i,'description',e.target.value)} placeholder="e.g. Land lease — May 2026"/></td>
         <td style={{padding:'4px 6px'}}><select style={{...S.select,padding:'6px 8px',fontSize:12}} value={l.revenue_account_code} onChange={e=>upd(i,'revenue_account_code',e.target.value)}>
           <option value="">— select —</option>{revAccts.map(a=><option key={a.code} value={a.code}>{a.code} {a.name}</option>)}</select></td>
-        {dimsEnabled&&<td style={{padding:'4px 6px'}}><select style={{...S.select,padding:'6px 8px',fontSize:12}} value={l.location_id||''} onChange={e=>upd(i,'location_id',e.target.value)}>
+        {projDim&&<td style={{padding:'4px 6px'}}><select style={{...S.select,padding:'6px 8px',fontSize:12}} value={l.project_id||''} onChange={e=>upd(i,'project_id',e.target.value)}>
+          <option value="">— select project —</option>{projects.map(p=><option key={p.id} value={p.id}>{projLabel(p)}</option>)}</select></td>}
+        {!projDim&&dimsEnabled&&<td style={{padding:'4px 6px'}}><select style={{...S.select,padding:'6px 8px',fontSize:12}} value={l.location_id||''} onChange={e=>upd(i,'location_id',e.target.value)}>
           <option value="">—</option>{locations.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</select></td>}
-        {dimsEnabled&&<td style={{padding:'4px 6px'}}><select style={{...S.select,padding:'6px 8px',fontSize:12}} value={l.class_id||''} onChange={e=>upd(i,'class_id',e.target.value)}>
+        {!projDim&&dimsEnabled&&<td style={{padding:'4px 6px'}}><select style={{...S.select,padding:'6px 8px',fontSize:12}} value={l.class_id||''} onChange={e=>upd(i,'class_id',e.target.value)}>
           <option value="">—</option>{classes.map(o=><option key={o.id} value={o.id}>{o.name}</option>)}</select></td>}
         <td style={{padding:'4px 6px'}}><input style={{...S.inputSm,width:'100%',textAlign:'right'}} value={l.qty} onChange={e=>upd(i,'qty',e.target.value)}/></td>
         <td style={{padding:'4px 6px'}}><input style={{...S.inputSm,width:'100%',textAlign:'right'}} value={l.rate} onChange={e=>upd(i,'rate',e.target.value)} placeholder="0.00"/></td>
@@ -2345,15 +2354,15 @@ function ArSettingsPanel({entityId,accounts,onClose,onSaved}){
   </div>);
 }
 
-function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
+function ArInvoices({entityId,entityName,canEdit,dimsEnabled,isBanyanRes}){
   const[customers,setCustomers]=useState([]);const[accounts,setAccounts]=useState([]);
-  const[classes,setClasses]=useState([]);const[locations,setLocations]=useState([]);
+  const[classes,setClasses]=useState([]);const[locations,setLocations]=useState([]);const[projects,setProjects]=useState([]);
   const[invoices,setInvoices]=useState([]);const[loading,setLoading]=useState(true);
   const[statusF,setStatusF]=useState('');const[err,setErr]=useState('');
   const[showNew,setShowNew]=useState(false);const[showSettings,setShowSettings]=useState(false);
   const[showCM,setShowCM]=useState(false);
   const[detail,setDetail]=useState(null);const[busy,setBusy]=useState('');
-  const blankLine={description:'',qty:1,rate:'',revenue_account_code:'',class_id:'',location_id:''};
+  const blankLine={description:'',qty:1,rate:'',revenue_account_code:'',class_id:'',location_id:'',project_id:''};
   const[form,setForm]=useState({customer_id:'',invoice_num:'',invoice_date:today(),due_date:'',memo:''});
   const[lines,setLines]=useState([{...blankLine}]);
   const[cmForm,setCmForm]=useState({customer_id:'',invoice_date:today(),memo:''});
@@ -2364,9 +2373,9 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
   const revAccts=arLineAccounts(accounts);
   const bankAccts=accounts.filter(a=>a.bank_acct);
   const loadRefs=useCallback(async()=>{
-    const[c,a,cl,lo]=await Promise.all([api.getArCustomers(entityId),api.getAccounts(entityId),
-      api.getClasses(entityId).catch(()=>[]),api.getLocations(entityId).catch(()=>[])]);
-    setCustomers((c||[]).filter(x=>x.active));setAccounts(a||[]);setClasses(cl||[]);setLocations(lo||[]);
+    const[c,a,cl,lo,pr]=await Promise.all([api.getArCustomers(entityId),api.getAccounts(entityId),
+      api.getClasses(entityId).catch(()=>[]),api.getLocations(entityId).catch(()=>[]),api.getProjects(entityId).catch(()=>[])]);
+    setCustomers((c||[]).filter(x=>x.active));setAccounts(a||[]);setClasses(cl||[]);setLocations(lo||[]);setProjects(pr||[]);
   },[entityId]);
   const load=useCallback(async()=>{setLoading(true);setErr('');
     try{setInvoices(await api.getArInvoices(entityId,statusF?{status:statusF}:{})||[]);}
@@ -2394,7 +2403,7 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
       const inv=await api.createArInvoice(entityId,{customer_id:+form.customer_id,invoice_num:form.invoice_num.trim()||undefined,invoice_date:form.invoice_date,
         due_date:form.due_date||undefined,memo:form.memo,
         lines:lines.map(l=>({description:l.description,qty:Number(l.qty),rate:Number(l.rate),
-          revenue_account_code:l.revenue_account_code,class_id:l.class_id?+l.class_id:null,location_id:l.location_id?+l.location_id:null}))});
+          revenue_account_code:l.revenue_account_code,class_id:l.class_id?+l.class_id:null,location_id:l.location_id?+l.location_id:null,project_id:l.project_id?+l.project_id:null}))});
       resetForm();setShowNew(false);await load();setDetail(inv);
     }catch(e){setErr(e.message);}finally{setBusy('');}
   };
@@ -2419,7 +2428,7 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled}){
         <div style={{flex:'0 0 160px'}}><label style={S.label}>Due date (blank = terms)</label><input style={S.input} type="date" value={form.due_date} onChange={e=>setForm(f=>({...f,due_date:e.target.value}))}/></div>
         <div style={{flex:'1 1 240px'}}><label style={S.label}>Memo / "Re:" line</label><input style={S.input} value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))} placeholder="April 2026 services"/></div>
       </div>
-      <div style={{marginTop:14}}><ArLines lines={lines} setLines={setLines} revAccts={revAccts} classes={classes} locations={locations} dimsEnabled={dimsEnabled}/></div>
+      <div style={{marginTop:14}}><ArLines lines={lines} setLines={setLines} revAccts={revAccts} classes={classes} locations={locations} projects={projects} isBanyanRes={isBanyanRes} dimsEnabled={dimsEnabled}/></div>
       {err&&<div style={{...S.err,marginTop:10}}>{err}</div>}
       {revAccts.length===0&&<div style={{marginTop:10,fontSize:12,color:T.orange}}>This entity has no Revenue accounts yet — add one in the Chart of Accounts first.</div>}
       <div style={{display:'flex',justifyContent:'flex-end',marginTop:12}}><button style={S.btnP} onClick={create} disabled={busy==='create'}>{busy==='create'?'Posting…':'Create Invoice (posts JE)'}</button></div>
