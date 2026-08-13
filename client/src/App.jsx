@@ -864,7 +864,7 @@ export default function App(){
         {page==='wp_gpfees'&&activeEntity&&isCLRF&&<GpFeesWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_valuation'&&activeEntity&&isCLRF&&<ValuationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} isDevEntity={isDevEntity} key={activeEntity+'-'+rk}/>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='fundrep'&&activeEntity&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
       </>})()}</div></div>
@@ -4985,7 +4985,7 @@ function TrailingTwelveMonths({entityId,entityName}){
 }
 
 // ═══ Workpapers › Financial Statements — GL-derived statement package (PDF) ═══
-function FinancialStatements({entityId,entityName,canEdit=true}){
+function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false}){
   const[asOf,setAsOf]=useState(today());
   const[period,setPeriod]=useState('monthly');
   const[execFile,setExecFile]=useState(null);
@@ -5009,7 +5009,7 @@ function FinancialStatements({entityId,entityName,canEdit=true}){
   const generate=async()=>{
     setErr('');setGen(true);setResult(null);
     try{
-      const out=await api.financialStatementsGenerate(entityId,asOf,period,execFile,reqFile);
+      const out=await api.financialStatementsGenerate(entityId,asOf,period,execFile,isDevEntity?reqFile:null);
       if(!out)return;
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
       setResult(out.summary||{});
@@ -5020,7 +5020,7 @@ function FinancialStatements({entityId,entityName,canEdit=true}){
   const cfTie=preview&&preview.checks&&preview.checks.cashFlowTies;
   return(<div>
     <div style={S.h1}>Financial Statements</div>
-    <div style={{color:T.textMuted,marginBottom:16,fontSize:13,maxWidth:820}}>Generates a GL-derived statement package for {entityName||'this entity'} — Balance Sheet, Statements of Operations, Statement of Cash Flows, and Statement of Changes in Members' Equity — as of a date, then merges it into a single PDF with your uploaded executive summary and requisition report. The requisition report's Current & Prior Invoice Log pages are removed automatically.</div>
+    <div style={{color:T.textMuted,marginBottom:16,fontSize:13,maxWidth:820}}>Generates a GL-derived statement package for {entityName||'this entity'} — Balance Sheet, Statements of Operations, Statement of Cash Flows, and Statement of Changes in Members' Equity — as of a date, then merges it into a single PDF with your uploaded executive summary{isDevEntity?' and requisition report. The requisition report\u2019s Current & Prior Invoice Log pages are removed automatically.':'.'}</div>
     {err&&<div style={S.err}>{err}</div>}
 
     <div style={{...S.card,marginBottom:16}}>
@@ -5062,11 +5062,11 @@ function FinancialStatements({entityId,entityName,canEdit=true}){
           <input type="file" accept=".pdf" disabled={!canEdit} onChange={e=>setExecFile(e.target.files[0]||null)} style={{fontSize:13}}/>
           {execFile&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{execFile.name}</span>}
         </div>
-        <div>
+        {isDevEntity&&<div>
           <label style={S.label}>Requisition report (PDF or Excel &mdash; Invoice Log pages removed automatically)</label>
           <input type="file" accept=".pdf,.xlsx,.xls" disabled={!canEdit} onChange={e=>setReqFile(e.target.files[0]||null)} style={{fontSize:13}}/>
           {reqFile&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{reqFile.name}</span>}
-        </div>
+        </div>}
       </div>
     </div>
 
