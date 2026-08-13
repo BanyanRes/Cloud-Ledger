@@ -1525,15 +1525,18 @@ async function renderStatementsPdf(s, outOffsets) {
   // and a Change column at the far right); Operations uses 3.
   const RIGHT = PAGE.w - PAGE.mR;
   // Balance Sheet: current & prior dates plus a "Change" column on the far right.
-  // Pack three columns into the same right band the two-column layout used.
-  const bsCols = [RIGHT - 190, RIGHT - 95, RIGHT];
+  // Narrower numeric columns (75pt pitch) push the value block right so long
+  // account names (e.g. "MapleMark Entity 105 Banyan SFR GP Investors - 8967 -
+  // ICS") keep a clear gap before the first figure instead of crowding it.
+  const bsCols = [RIGHT - 150, RIGHT - 75, RIGHT];
   const twoCols = [RIGHT - 95, RIGHT];
   const threeCols = [RIGHT - 200, RIGHT - 100, RIGHT];
   // Operations: four columns — current month, prior month, a Change column
   // (current − prior) sitting between the prior-month and Year-to-Date columns,
-  // and Year to Date on the far right. Numeric columns are kept narrow (76pt
-  // pitch) so the first (account-name) column is wide enough to show full names.
-  const opsCols = [RIGHT - 228, RIGHT - 152, RIGHT - 76, RIGHT];
+  // and Year to Date on the far right. Numeric columns are kept narrow (72pt
+  // pitch) so the first (account-name) column is wide enough to show full names
+  // with a clear gap before the first figure.
+  const opsCols = [RIGHT - 216, RIGHT - 144, RIGHT - 72, RIGHT];
 
   // ── 1. Balance Sheet ───────────────────────────────────────────────────────
   {
@@ -1797,12 +1800,12 @@ async function renderStatementsPdf(s, outOffsets) {
     // Right-edges anchored at the printable right edge and marched LEFT by a
     // fixed pitch. The first numeric column (c1) is placed far enough right that
     // its "$" prefix cell box (c1 - colWidth(0) + 2) clears the longest member
-    // label — the previous layout put c1 too far left, letting long labels
-    // ("Contributed Capital - County Line Rail Fund, LLP", right edge ≈ 254pt)
-    // overrun into the first column. c1 = 356 puts the "$" box left at ~280pt
-    // (a ~26pt gap after the longest label); pitch (~95pt) still leaves each
-    // column ample room for a "$" prefix and a large right-aligned value.
-    const c1 = 356;
+    // label — long trust names like "Contributed Capital - Stephen & Katherine
+    // VanDusen 2007 Trust" (right edge ≈ 308pt) were crowding the first column.
+    // c1 = 404 puts the "$" box left at ~328pt (a ~20pt gap after the longest
+    // label) and the first figure ~54pt clear of it; pitch (~84pt) still leaves
+    // each column ample room for a "$" prefix and a large right-aligned value.
+    const c1 = 404;
     const PITCH = (LRIGHT - c1) / 4;
     const c2 = c1 + PITCH, c3 = c2 + PITCH, c4 = c3 + PITCH, c5 = LRIGHT;
     const eCols = [c1, c2, c3, c4, c5];
