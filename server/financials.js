@@ -1206,15 +1206,22 @@ async function renderStatementsPdf(s, outOffsets) {
 
   // ── 2. Statements of Operations ─────────────────────────────────────────────
   {
-    const L = makeLayout(pdf, fonts, m, 'Statements of Operations', { dateLine: 'For the Months Ended ' + m.longDate + ' and ' + m.priorLongDate });
+    // Heading + column labels follow the period toggle (monthly/quarterly/
+    // annually). resolvePeriod sets m.colLabel = 'Month Ended' | 'Quarter Ended'
+    // | 'Year Ended'; pluralize it for the two-date subtitle and prefix it on
+    // the two period columns so a quarterly report reads 'For the Quarters Ended
+    // 6/30/26 and 3/31/26' with 'Quarter Ended' columns (matches the CPA package).
+    const periodWord = (m.colLabel || 'Month Ended').replace(/ Ended$/, '');
+    const opsDateLine = 'For the ' + periodWord + 's Ended ' + m.longDate + ' and ' + m.priorLongDate;
+    const L = makeLayout(pdf, fonts, m, 'Statements of Operations', { dateLine: opsDateLine });
     track('Statements of Operations');
     L.start();
     L.setCols(opsCols);
-    // Current-month column shows the current period-end date; prior-month column
-    // shows the prior period-end date (per round-2 feedback). A Change column
-    // (current − prior) sits between the prior-month and Year-to-Date columns.
+    // Period columns are labeled '<Period> Ended <date>' (e.g. 'Quarter Ended
+    // 6/30/26'); a Change column (current − prior) then the Year-to-Date column.
     // Headers underlined.
-    L.colHeaders([m.longDate, m.priorLongDate, 'Change', 'Year to Date'], { underline: true });
+    const colLbl = m.colLabel || 'Month Ended';
+    L.colHeaders([colLbl + '\n' + m.longDate, colLbl + '\n' + m.priorLongDate, 'Change', 'Year to Date'], { underline: true });
     const chg = (cur, pri) => money(r2(cur - pri));
     const line = (r, o = {}) => L.row(r.name, [money(r.cur), money(r.pri), chg(r.cur, r.pri), money(r.ytd)], { indent: 16, ...o });
 
