@@ -55,6 +55,13 @@ function entityProfile(opts) {
   const name = String((opts && opts.entityName) || '').trim();
   const code = String((opts && opts.entityCode) || '').trim().toUpperCase();
   if (/banyan\s*sfr\s*gp\s*investors/i.test(name) || code === 'BANYANSF') return 'bsfrgp';
+  // Banyan Residential (entity 41) — an operating/holding company whose CPA
+  // package uses the classic broad P&L groupings (Payroll & Related, Travel/
+  // Meals & Entertainment, Utilities & Facilities, G&A, Office Expense, Taxes &
+  // Insurance, Depreciation & Amortization) plus Other Income (Expense) and
+  // Income Taxes, and a development-cost-heavy balance sheet (Soft Costs / Land
+  // / Other Development under Other Assets). Distinct from both srn and bsfrgp.
+  if (/banyan\s*residential/i.test(name) || code === 'BANYANRE1') return 'banyan';
   return 'srn';
 }
 
@@ -85,6 +92,7 @@ const BS_ACCOUNT_MAP_BSFRGP = {
 // (BS_ACCOUNT_MAP) via bsClassify(); bsfrgp uses its own map with the same
 // heuristic fallback so no account is ever dropped.
 function bsClassifyFor(profile, row) {
+  if (profile === 'banyan') return banyanBsClassify(row);
   if (profile === 'bsfrgp') {
     const explicit = BS_ACCOUNT_MAP_BSFRGP[String(row.code)];
     if (explicit) return { section: explicit[0], sub: explicit[1] };
@@ -138,6 +146,208 @@ function bsfrgpPlRoute(row) {
   if (/penalt|other expense/.test(name)) return { bucket: 'otherExpense', group: 'Other Expense', sub: 'Other Expenses' };
   return { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Legal and Accounting' };
 }
+
+// ── Banyan Residential (entity 41) profile ─────────────────────────────────
+// Balance-sheet section map. Development-cost-heavy chart: Other Assets splits
+// into Soft Costs / Land / Other Development. Fixed Assets carries an
+// Accumulated Depreciation contra subsection. Built from the CPA June-2026
+// reference package; any code not listed falls to the heuristic below.
+const BS_ACCOUNT_MAP_BANYAN = {
+  // Current Assets → Cash and Cash Equivalents
+  '10030': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10143': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10144': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10300': ['Current Assets', 'Cash and Cash Equivalents'],
+  // Current Assets → Accounts Receivable, Net
+  '12000': ['Current Assets', 'Accounts Receivable, Net'],
+  // Current Assets → Prepaid Expenses
+  '12922': ['Current Assets', 'Prepaid Expenses'],
+  '13002': ['Current Assets', 'Prepaid Expenses'],
+  // Current Assets → Other Current Assets
+  '13003': ['Current Assets', 'Other Current Assets'],
+  // Fixed Assets, Net → Fixed Assets
+  '15500': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15510': ['Fixed Assets, Net', 'Fixed Assets'],
+  // Fixed Assets, Net → Accumulated Depreciation (contra)
+  '16500': ['Fixed Assets, Net', 'Accumulated Depreciation'],
+  '16510': ['Fixed Assets, Net', 'Accumulated Depreciation'],
+  // Other Assets → Soft Costs
+  '11760': ['Other Assets', 'Soft Costs'],
+  '11920': ['Other Assets', 'Soft Costs'],
+  '11970': ['Other Assets', 'Soft Costs'],
+  '12013': ['Other Assets', 'Soft Costs'],
+  '12112': ['Other Assets', 'Soft Costs'],
+  '12115': ['Other Assets', 'Soft Costs'],
+  '12127': ['Other Assets', 'Soft Costs'],
+  '12132': ['Other Assets', 'Soft Costs'],
+  '12180': ['Other Assets', 'Soft Costs'],
+  '12238': ['Other Assets', 'Soft Costs'],
+  '13421': ['Other Assets', 'Soft Costs'],
+  // Other Assets → Land
+  '11030': ['Other Assets', 'Land'],
+  '16900': ['Other Assets', 'Land'],
+  // Other Assets → Other Development
+  '12383': ['Other Assets', 'Other Development'],
+  '12720': ['Other Assets', 'Other Development'],
+  '12730': ['Other Assets', 'Other Development'],
+  // Current Liabilities → Accounts Payable (incl. Credit Card Payable)
+  '20000': ['Current Liabilities', 'Accounts Payable'],
+  '20500': ['Current Liabilities', 'Accounts Payable'],
+  // Current Liabilities → Other Current Liabilities
+  '21112': ['Current Liabilities', 'Other Current Liabilities'],
+  // Members Equity (Net Income handled specially in renderer). Banyan's CPA
+  // package shows contributed capital + distributions on the equity face and
+  // has NO separate Retained Earnings line, so these are all Members Equity.
+  '33104': ['Members Equity', 'Members Equity'],
+  '34004': ['Members Equity', 'Members Equity'],
+  '34117': ['Members Equity', 'Members Equity'],
+  '39000': ['Members Equity', 'Retained Earnings'],
+};
+
+// Intercompany Receivable is Banyan's largest asset subsection but its "Due
+// from ..." accounts are numerous (18xxx block) and stable; classify the whole
+// 18xxx block by prefix rather than listing each, so a new intercompany account
+// is picked up automatically.
+function banyanBsClassify(row) {
+  const explicit = BS_ACCOUNT_MAP_BANYAN[String(row.code)];
+  if (explicit) return { section: explicit[0], sub: explicit[1] };
+  const code = String(row.code || '');
+  const name = (row.name || '').toLowerCase();
+  if (row.type === 'Asset') {
+    if (/^18\d/.test(code) || /due from|intercompany/.test(name)) return { section: 'Current Assets', sub: 'Intercompany Receivable' };
+    if (/^10[0-3]\d/.test(code) || /cash|checking|savings|bank|clearing|ics|money market/.test(name)) return { section: 'Current Assets', sub: 'Cash and Cash Equivalents' };
+    if (/receivable/.test(name)) return { section: 'Current Assets', sub: 'Accounts Receivable, Net' };
+    if (/prepaid/.test(name)) return { section: 'Current Assets', sub: 'Prepaid Expenses' };
+    if (/^16[0-9]\d/.test(code) && /depreciation|amortization|accum/.test(name)) return { section: 'Fixed Assets, Net', sub: 'Accumulated Depreciation' };
+    if (/^155\d|^156\d|equipment|vehicle|furniture|computer hardware/.test(code + ' ' + name)) return { section: 'Fixed Assets, Net', sub: 'Fixed Assets' };
+    if (/earnest|security deposit|land/.test(name)) return { section: 'Other Assets', sub: 'Land' };
+    if (/organization|travel|meals/.test(name)) return { section: 'Other Assets', sub: 'Other Development' };
+    return { section: 'Other Assets', sub: 'Soft Costs' };
+  }
+  if (row.type === 'Liability') {
+    if (/payable|credit card/.test(name)) return { section: 'Current Liabilities', sub: 'Accounts Payable' };
+    if (/loan|note payable|bond/.test(name)) return { section: 'Long Term Liabilities', sub: 'Loans' };
+    return { section: 'Current Liabilities', sub: 'Other Current Liabilities' };
+  }
+  if (row.type === 'Equity') {
+    if (/retained earning/.test(name)) return { section: 'Members Equity', sub: 'Retained Earnings' };
+    return { section: 'Members Equity', sub: 'Members Equity' };
+  }
+  return { section: 'Other', sub: 'Other' };
+}
+
+// Banyan section/sub presentation order. Fixed Assets shows the Accumulated
+// Depreciation contra subsection after Fixed Assets; Other Assets shows Soft
+// Costs → Land → Other Development.
+const BS_SUB_ORDER_BANYAN = Object.assign({}, {
+  'Current Assets': ['Cash and Cash Equivalents', 'Accounts Receivable, Net', 'Prepaid Expenses', 'Intercompany Receivable', 'Other Current Assets'],
+  'Fixed Assets, Net': ['Fixed Assets', 'Accumulated Depreciation'],
+  'Other Assets': ['Soft Costs', 'Land', 'Other Development'],
+  'Current Liabilities': ['Accounts Payable', 'Other Current Liabilities'],
+});
+
+// Accumulated-depreciation contra codes (subtracted within Fixed Assets, Net).
+const BS_CONTRA_CODES_BANYAN = new Set(['16500', '16510']);
+
+// Banyan Statements-of-Operations account routing. The classic broad groupings:
+// a top-line Revenue - Services section, then Operating Expenses split into
+// Payroll & Related / Travel, Meals & Entertainment / Utilities & Facilities /
+// G&A / Office Expense / Taxes & Insurance / Depreciation & Amortization, then
+// Other Income (Expense), then Income Taxes. Each code maps to a bucket + a
+// nested group/subsection so the renderer reproduces the reference nesting.
+//   revenue   → Revenue - Services (top-line, before Operating Expenses)
+//   opex      → Operating Expenses (grouped)
+//   otherIncome / otherExpense → Other Income (Expense)
+//   incomeTax → Income Taxes
+const BANYAN_PL_MAP = {
+  // Revenue - Services
+  '42000': { bucket: 'revenue', group: 'Revenue - Services', sub: 'Revenue - Services' },
+  '42200': { bucket: 'revenue', group: 'Revenue - Services', sub: 'Revenue - Services' },
+  '43000': { bucket: 'revenue', group: 'Revenue - Services', sub: 'Revenue - Services' },
+  // Operating Expenses → Payroll and Related Expenses → Payroll Expenses
+  '60000': { bucket: 'opex', group: 'Payroll and Related Expenses', sub: 'Payroll Expenses' },
+  '60021': { bucket: 'opex', group: 'Payroll and Related Expenses', sub: 'Payroll Expenses' },
+  '60050': { bucket: 'opex', group: 'Payroll and Related Expenses', sub: 'Payroll Expenses' },
+  '60100': { bucket: 'opex', group: 'Payroll and Related Expenses', sub: 'Payroll Expenses' },
+  // Operating Expenses → Travel, Meals and Entertainment
+  '60210': { bucket: 'opex', group: 'Travel, Meals and Entertainment', sub: 'Travel Expenses' },
+  '60350': { bucket: 'opex', group: 'Travel, Meals and Entertainment', sub: 'Travel Expenses' },
+  '60500': { bucket: 'opex', group: 'Travel, Meals and Entertainment', sub: 'Meals and Entertainment' },
+  // Operating Expenses → Utilities and Facilities → Rent
+  '61000': { bucket: 'opex', group: 'Utilities and Facilities', sub: 'Rent' },
+  // Operating Expenses → General and Administrative → Legal and Accounting
+  '63000': { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Legal and Accounting' },
+  '63025': { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Legal and Accounting' },
+  '63050': { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Legal and Accounting' },
+  // Operating Expenses → General and Administrative → Debt Service
+  '60253': { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Debt Service' },
+  // Operating Expenses → Office Expense
+  '60200': { bucket: 'opex', group: 'Office Expense', sub: 'Office Expense' },
+  '67000': { bucket: 'opex', group: 'Office Expense', sub: 'Office Expense' },
+  '67150': { bucket: 'opex', group: 'Office Expense', sub: 'Office Expense' },
+  '67200': { bucket: 'opex', group: 'Office Expense', sub: 'Office Expense' },
+  '67202': { bucket: 'opex', group: 'Office Expense', sub: 'Office Expense' },
+  '67300': { bucket: 'opex', group: 'Office Expense', sub: 'Office Expense' },
+  // Operating Expenses → Taxes and Insurance → Insurance
+  '65000': { bucket: 'opex', group: 'Taxes and Insurance', sub: 'Insurance' },
+  // Operating Expenses → Depreciation and Amortization
+  '69100': { bucket: 'opex', group: 'Depreciation and Amortization Expense', sub: 'Depreciation' },
+  '69000': { bucket: 'opex', group: 'Depreciation and Amortization Expense', sub: 'Amortization' },
+  // Other Income (Expense)
+  '70000': { bucket: 'otherIncome', group: 'Other Income', sub: 'Interest Income' },
+  '67056': { bucket: 'otherExpense', group: 'Other Expense', sub: 'Other Expenses' },
+  // Income Taxes → State and Local Taxes
+  '68060': { bucket: 'incomeTax', group: 'State and Local Taxes', sub: 'State and Local Taxes' },
+  '68061': { bucket: 'incomeTax', group: 'State and Local Taxes', sub: 'State and Local Taxes' },
+};
+function banyanPlRoute(row) {
+  const m = BANYAN_PL_MAP[String(row.code)];
+  if (m) return m;
+  const code = String(row.code || '');
+  const name = (row.name || '').toLowerCase();
+  if (row.type === 'Revenue') {
+    if (/interest income/.test(name) || /^70\d/.test(code)) return { bucket: 'otherIncome', group: 'Other Income', sub: 'Interest Income' };
+    return { bucket: 'revenue', group: 'Revenue - Services', sub: 'Revenue - Services' };
+  }
+  // Expense name heuristics, mirroring the reference groupings.
+  if (/franchise tax|state and local tax|income tax/.test(name)) return { bucket: 'incomeTax', group: 'State and Local Taxes', sub: 'State and Local Taxes' };
+  if (/penalt/.test(name)) return { bucket: 'otherExpense', group: 'Other Expense', sub: 'Other Expenses' };
+  if (/salary|salaries|wage|payroll tax|health insurance|benefit|401k|retirement/.test(name)) return { bucket: 'opex', group: 'Payroll and Related Expenses', sub: 'Payroll Expenses' };
+  if (/travel/.test(name)) return { bucket: 'opex', group: 'Travel, Meals and Entertainment', sub: 'Travel Expenses' };
+  if (/meals|entertainment/.test(name)) return { bucket: 'opex', group: 'Travel, Meals and Entertainment', sub: 'Meals and Entertainment' };
+  if (/rent/.test(name)) return { bucket: 'opex', group: 'Utilities and Facilities', sub: 'Rent' };
+  if (/utilit|electric|water|gas|telephone|internet/.test(name)) return { bucket: 'opex', group: 'Utilities and Facilities', sub: 'Rent' };
+  if (/accounting|legal|professional fee/.test(name)) return { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Legal and Accounting' };
+  if (/bank fee|debt service|interest expense/.test(name)) return { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Debt Service' };
+  if (/depreciation/.test(name)) return { bucket: 'opex', group: 'Depreciation and Amortization Expense', sub: 'Depreciation' };
+  if (/amortization/.test(name)) return { bucket: 'opex', group: 'Depreciation and Amortization Expense', sub: 'Amortization' };
+  if (/insurance/.test(name)) return { bucket: 'opex', group: 'Taxes and Insurance', sub: 'Insurance' };
+  if (/property tax|tax & license|tax and license|assessment/.test(name)) return { bucket: 'opex', group: 'Taxes and Insurance', sub: 'Taxes' };
+  // Everything else administrative → Office Expense.
+  return { bucket: 'opex', group: 'Office Expense', sub: 'Office Expense' };
+}
+
+// Presentation order for Banyan operating-expense groups.
+const BANYAN_OPEX_GROUP_ORDER = [
+  'Payroll and Related Expenses',
+  'Travel, Meals and Entertainment',
+  'Utilities and Facilities',
+  'General and Administrative Expenses',
+  'Office Expense',
+  'Taxes and Insurance',
+  'Depreciation and Amortization Expense',
+];
+
+// Subsection order WITHIN a group. Without this, subsections fall in account-code
+// order, which puts Debt Service (60253) ahead of Legal and Accounting (63000)
+// and Amortization (69000) ahead of Depreciation (69100) — both backwards from
+// the CPA reference. Groups not listed keep account-code order.
+const BANYAN_SUB_ORDER_IN_GROUP = {
+  'Travel, Meals and Entertainment': ['Travel Expenses', 'Meals and Entertainment'],
+  'General and Administrative Expenses': ['Legal and Accounting', 'Debt Service'],
+  'Taxes and Insurance': ['Insurance', 'Taxes'],
+  'Depreciation and Amortization Expense': ['Depreciation', 'Amortization'],
+};
 
 // ── numeric helpers ────────────────────────────────────────────────────────
 const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
@@ -489,7 +699,12 @@ function plExpenseCategory(row) {
 async function buildStatements(getBalances, opts) {
   const asOf = opts.asOf;
   const profile = entityProfile(opts);
-  const bsSub = (profile === 'bsfrgp') ? BS_SUB_ORDER_BSFRGP : BS_SUB_ORDER;
+  const bsSub = (profile === 'bsfrgp') ? BS_SUB_ORDER_BSFRGP
+    : (profile === 'banyan') ? BS_SUB_ORDER_BANYAN
+    : BS_SUB_ORDER;
+  // Contra subsections (accumulated depreciation/amortization) are profile-
+  // specific: Banyan's are the 165xx accumulated-depreciation accounts.
+  const contraSet = (profile === 'banyan') ? BS_CONTRA_CODES_BANYAN : BS_CONTRA_CODES;
   const bsCls = (row) => bsClassifyFor(profile, row);
   const bsSec = (row) => bsClassifyFor(profile, row).section;
   const ys = yearStart(asOf);
@@ -549,7 +764,7 @@ async function buildStatements(getBalances, opts) {
         if (cls.section !== section || cls.sub !== sub) return null;
         const cur = rc ? bal(rc) : 0, pri = rp ? bal(rp) : 0;
         if (isZero(cur) && isZero(pri)) return null;
-        return { code, name: ref.name, cur: r2(cur), pri: r2(pri), change: r2(cur - pri), contra: BS_CONTRA_CODES.has(String(code)) };
+        return { code, name: ref.name, cur: r2(cur), pri: r2(pri), change: r2(cur - pri), contra: contraSet.has(String(code)) };
       })
       .filter(Boolean);
   }
@@ -772,6 +987,104 @@ async function buildStatements(getBalances, opts) {
     };
   }
 
+  // ── Banyan Residential operations restructure (banyan profile) ───────────
+  // Reproduces the CPA reference shape:
+  //   Revenue - Services (top line) → Total Revenue → Gross Profit
+  //   Operating Expenses, grouped: Payroll and Related / Travel, Meals and
+  //     Entertainment / Utilities and Facilities / General and Administrative /
+  //     Office Expense / Taxes and Insurance / Depreciation and Amortization
+  //   Other Income (Expense)  (Other Income less Other Expense)
+  //   Income Taxes            (State and Local Taxes)
+  //   Net Income (Loss) = Revenue − Operating Expenses + Other Income (Expense)
+  //                       − Income Taxes
+  // Every P&L account is routed by banyanPlRoute so nothing is dropped; the
+  // resulting net income equals the GL net income by construction.
+  let banyanOps = null;
+  if (profile === 'banyan') {
+    const allPl = plLines(() => true);
+    const byBucket = { revenue: [], opex: [], otherIncome: [], otherExpense: [], incomeTax: [] };
+    const routeOf = {};
+    for (const l of allPl) {
+      const ref = mYtd.get(l.code) || mCur.get(l.code) || mPri.get(l.code);
+      const route = banyanPlRoute({ code: l.code, name: l.name, type: ref.type });
+      routeOf[l.code] = route;
+      (byBucket[route.bucket] || byBucket.opex).push(l);
+    }
+    // Other-expense lines are NEGATED for presentation: the reference shows them
+    // inside "Other Income (Expense)" as reductions of income (e.g. a 415.84
+    // penalty prints as (415.84)), and the section nets to Income − Expense.
+    byBucket.otherExpense = byBucket.otherExpense.map(l => ({
+      ...l, cur: r2(-l.cur), pri: r2(-l.pri), ytd: r2(-l.ytd), change: r2(-l.change),
+    }));
+    // Build a nested group→subsection tree, optionally ordered by groupOrder.
+    const buildTree = (lines, groupOrder) => {
+      const groups = [];
+      const gIndex = new Map();
+      for (const l of lines) {
+        const r = routeOf[l.code];
+        let g = gIndex.get(r.group);
+        if (!g) { g = { title: r.group, subs: [], _si: new Map() }; gIndex.set(r.group, g); groups.push(g); }
+        let su = g._si.get(r.sub);
+        if (!su) { su = { title: r.sub, lines: [] }; g._si.set(r.sub, su); g.subs.push(su); }
+        su.lines.push(l);
+      }
+      for (const g of groups) {
+        // Order subsections per the reference where specified.
+        const so = BANYAN_SUB_ORDER_IN_GROUP[g.title];
+        if (so && so.length) {
+          const srank = t => { const i = so.indexOf(t); return i === -1 ? so.length : i; };
+          g.subs.sort((a, b) => srank(a.title) - srank(b.title));
+        }
+        for (const su of g.subs) {
+          su.lines.sort((a, b) => String(a.code).localeCompare(String(b.code)));
+          su.subtotal = { cur: sumCol(su.lines, 'cur'), pri: sumCol(su.lines, 'pri'), ytd: sumCol(su.lines, 'ytd') };
+        }
+        g.subtotal = {
+          cur: r2(g.subs.reduce((s, x) => s + x.subtotal.cur, 0)),
+          pri: r2(g.subs.reduce((s, x) => s + x.subtotal.pri, 0)),
+          ytd: r2(g.subs.reduce((s, x) => s + x.subtotal.ytd, 0)),
+        };
+        delete g._si;
+      }
+      if (groupOrder && groupOrder.length) {
+        const rank = t => { const i = groupOrder.indexOf(t); return i === -1 ? groupOrder.length : i; };
+        groups.sort((a, b) => rank(a.title) - rank(b.title));
+      }
+      return groups;
+    };
+    const revenueTree = buildTree(byBucket.revenue);
+    const opexTree = buildTree(byBucket.opex, BANYAN_OPEX_GROUP_ORDER);
+    const otherIncomeTree = buildTree(byBucket.otherIncome);
+    const otherExpenseTree = buildTree(byBucket.otherExpense);
+    const incomeTaxTree = buildTree(byBucket.incomeTax);
+    const sumBucket = arr => ({ cur: sumCol(arr, 'cur'), pri: sumCol(arr, 'pri'), ytd: sumCol(arr, 'ytd') });
+    const tRev = sumBucket(byBucket.revenue);
+    const tOpexB = sumBucket(byBucket.opex);
+    const tOtherIncomeB = sumBucket(byBucket.otherIncome);
+    const tOtherExpenseB = sumBucket(byBucket.otherExpense); // already negated
+    const tIncomeTaxB = sumBucket(byBucket.incomeTax);
+    // Other Income (Expense) net = Other Income + (negated) Other Expense.
+    const tOtherIEB = {
+      cur: r2(tOtherIncomeB.cur + tOtherExpenseB.cur),
+      pri: r2(tOtherIncomeB.pri + tOtherExpenseB.pri),
+      ytd: r2(tOtherIncomeB.ytd + tOtherExpenseB.ytd),
+    };
+    // No cost-of-revenue on Banyan, so Gross Profit = Total Revenue.
+    const gpB = { cur: tRev.cur, pri: tRev.pri, ytd: tRev.ytd };
+    const niBanyan = {
+      cur: r2(tRev.cur - tOpexB.cur + tOtherIEB.cur - tIncomeTaxB.cur),
+      pri: r2(tRev.pri - tOpexB.pri + tOtherIEB.pri - tIncomeTaxB.pri),
+      ytd: r2(tRev.ytd - tOpexB.ytd + tOtherIEB.ytd - tIncomeTaxB.ytd),
+    };
+    banyanOps = {
+      structured: true, banyanShape: true,
+      revenueTree, opexTree, otherIncomeTree, otherExpenseTree, incomeTaxTree,
+      totRev: tRev, grossProfit: gpB, totOpex: tOpexB,
+      totOtherIncome: tOtherIncomeB, totOtherExpense: tOtherExpenseB,
+      totOtherIE: tOtherIEB, totIncomeTax: tIncomeTaxB, netIncome: niBanyan,
+    };
+  }
+
   // ── Statement of Cash Flows (indirect, YTD) ────────────────────────────────
   // Beginning balances = as of (year start − 1 day). Deltas over the YTD window.
   const bsOpen = await getBalances({ as_of: priorMonthEnd(ys), close_pl_before: ys });
@@ -890,7 +1203,9 @@ async function buildStatements(getBalances, opts) {
             priorLongDate: longDate(priorBsDate), monthsEnded: monthsEndedLabel(asOf),
             period: (opts.period || 'monthly').toLowerCase(), periodLabel: period.periodLabel, colLabel: period.colLabel, profile },
     balanceSheet: { assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
-    operations: Object.assign({ revenue, cogs, opex, opexGroups, totRev, totCogs, grossProfit, totOpex, netIncome }, bsfrgpOps ? { bsfrgp: bsfrgpOps, netIncome: bsfrgpOps.netIncome } : {}),
+    operations: Object.assign({ revenue, cogs, opex, opexGroups, totRev, totCogs, grossProfit, totOpex, netIncome },
+      bsfrgpOps ? { bsfrgp: bsfrgpOps, netIncome: bsfrgpOps.netIncome } : {},
+      banyanOps ? { banyan: banyanOps, netIncome: banyanOps.netIncome } : {}),
     cashFlow,
     equity: { rows: equityStmt, totals: equityTotals },
     checks: {
@@ -1177,7 +1492,7 @@ async function renderStatementsPdf(s, outOffsets) {
     // avoid a redundant subtotal that just repeats a single account line.
     const renderBsSection = (sec, sectionTotalLabel) => {
       L.row(sec.title, [], { indent: 6, boldRow: true });
-      const showSubHeaders = sec.subs.length > 1 || sec.subs.some(su => su.contra) || m.profile === 'bsfrgp';
+      const showSubHeaders = sec.subs.length > 1 || sec.subs.some(su => su.contra) || m.profile === 'bsfrgp' || m.profile === 'banyan';
       for (const su of sec.subs) {
         if (showSubHeaders) L.row(su.title, [], { indent: 16 });
         const rowIndent = showSubHeaders ? 26 : 16;
@@ -1227,7 +1542,58 @@ async function renderStatementsPdf(s, outOffsets) {
 
     // A 4-column value cell (current / prior / change / YTD).
     const cell4 = t => [money(t.cur), money(t.pri), chg(t.cur, t.pri), money(t.ytd)];
-    if (s.operations.bsfrgp && s.operations.bsfrgp.structured) {
+    if (s.operations.banyan && s.operations.banyan.structured) {
+      // ── Banyan Residential shape: Revenue - Services / Operating Expenses
+      //    (grouped) / Other Income (Expense) / Income Taxes / Net Income. ────
+      const bo = s.operations.banyan;
+      const renderTree = (groups, { showGroupTotal, keepWhole } = {}) => {
+        for (const g of groups) {
+          if (keepWhole) {
+            // Reserve the whole group's height so a category never splits from
+            // its subtotal across a page break.
+            const nRows = g.subs.reduce((n, su) => n + 1 + su.lines.length + (su.lines.length > 1 ? 1 : 0), 0);
+            L.keepTogether(12 + nRows * 12 + 16);
+          }
+          L.row(g.title, [], { indent: 12, boldRow: true });
+          for (const su of g.subs) {
+            // Don't echo a subsection header that just repeats the group name.
+            const echo = su.title === g.title;
+            if (!echo) L.row(su.title, [], { indent: 20 });
+            const lineIndent = echo ? 26 : 30;
+            su.lines.forEach(r => L.row(r.name, cell4(r), { indent: lineIndent }));
+            if (su.lines.length > 1 && !echo) L.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true });
+          }
+          if (showGroupTotal !== false) L.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true });
+        }
+      };
+
+      // Revenue → Total Revenue → Gross Profit (no cost of revenue on Banyan).
+      L.sectionTitle('Revenue');
+      renderTree(bo.revenueTree, { showGroupTotal: true });
+      L.row('Total Revenue', cell4(bo.totRev), { indent: 6, boldRow: true, ruleAbove: true });
+      L.row('Gross Profit', cell4(bo.grossProfit), { indent: 6, boldRow: true, gapAfter: 6 });
+
+      L.sectionTitle('Operating Expenses');
+      renderTree(bo.opexTree, { showGroupTotal: true, keepWhole: true });
+      L.row('Total Operating Expenses', cell4(bo.totOpex), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+
+      // Other Income (Expense): income section, then expense section (shown as
+      // reductions of income), then the netted total.
+      if (bo.otherIncomeTree.length || bo.otherExpenseTree.length) {
+        L.sectionTitle('Other Income (Expense)');
+        renderTree(bo.otherIncomeTree, { showGroupTotal: true });
+        renderTree(bo.otherExpenseTree, { showGroupTotal: true });
+        L.row('Total Other Income (Expense)', cell4(bo.totOtherIE), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      }
+
+      if (bo.incomeTaxTree.length) {
+        L.sectionTitle('Income Taxes');
+        renderTree(bo.incomeTaxTree, { showGroupTotal: true });
+        L.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      }
+
+      L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+    } else if (s.operations.bsfrgp && s.operations.bsfrgp.structured) {
       // ── Banyan SFR GP Investors shape: Operating Expenses / Other Income
       //    (Expense) / Income Taxes / Net Income (Loss). ────────────────────
       const bo = s.operations.bsfrgp;
