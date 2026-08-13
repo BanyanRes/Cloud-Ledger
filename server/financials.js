@@ -1090,7 +1090,16 @@ async function buildStatements(getBalances, opts) {
   const bsOpen = await getBalances({ as_of: priorMonthEnd(ys), close_pl_before: ys });
   const openMap = new Map(); for (const r of bsOpen) openMap.set(r.code, r);
   const curMap = new Map(); for (const r of bsCur) if (r.type !== 'Revenue' && r.type !== 'Expense') curMap.set(r.code, r);
-  const isCashRow = isCashAccount;
+  // Cash detection for the cash-flow statement MUST agree with the balance
+  // sheet's "Cash and Cash Equivalents" subsection, or the statement reconciles
+  // to a different cash figure than the BS reports. Banyan's Bill.com clearing
+  // account (10300) is cash on the BS but is missed by the generic code/name
+  // test, which understated cash by that balance. For the banyan profile we
+  // therefore take the BS classification as authoritative (OR'd with the generic
+  // test so nothing is lost); other profiles keep the original test unchanged.
+  const isCashRow = (profile === 'banyan')
+    ? (r => r.type === 'Asset' && (bsCls(r).sub === 'Cash and Cash Equivalents' || isCashAccount(r)))
+    : isCashAccount;
   const cashBeg = sumRows(bsOpen.filter(isCashRow), () => true);
   const cashEnd = sumRows(bsCur.filter(isCashRow), () => true);
 
@@ -1105,6 +1114,28 @@ async function buildStatements(getBalances, opts) {
   // tying; verified against live SRN GL (actual cash change reproduced exactly).
   const amortExpense = r2(sumRows(isYtd, r => r.type === 'Expense' && /amortization|depreciation/i.test(r.name)));
   const amortization = amortExpense;
+
+  // Depreciation/amortization is booked one of two ways, and each needs
+  // different cash-flow handling:
+  //   (a) credited to an ACCUMULATED contra account (e.g. 16500 Equipment: Acc
+  //       Depreciation). The contra's movement is skipped in the loop below and
+  //       the P&L expense is added back above — consistent, nothing to do.
+  //   (b) credited DIRECTLY to the asset (e.g. Banyan's 12383 Organization Fees,
+  //       amortized 66.67/month straight off the asset with no contra). Here the
+  //       asset's decline would flow through investing as a cash INFLOW while the
+  //       expense is also added back — double-counting the same non-cash amount.
+  // The portion of D&A expense NOT matched by accumulated-contra movement is the
+  // directly-credited amount, so we remove it from investing below. Clamped at 0
+  // so entities that CAPITALIZE depreciation (amortExpense 0, e.g. SRN) and any
+  // rounding are unaffected.
+  const contraMoveAbs = r2(Math.abs([...new Set([...openMap.keys(), ...curMap.keys()])].reduce((sum, code) => {
+    const rc = curMap.get(code), ro = openMap.get(code);
+    const ref = rc || ro;
+    if (!ref || ref.type !== 'Asset') return sum;
+    if (!/accum|amortization|depreciation/i.test(ref.name || '')) return sum;
+    return sum + ((rc ? bal(rc) : 0) - (ro ? bal(ro) : 0));
+  }, 0)));
+  const directAmort = r2(Math.max(0, amortExpense - contraMoveAbs));
 
   // Classify every non-cash balance-sheet account into a cash-flow bucket by a
   // single pass, so nothing is silently dropped. Each account's period delta
@@ -1152,6 +1183,9 @@ async function buildStatements(getBalances, opts) {
       cfBuckets.equityContrib += delta;
     }
   }
+  // Remove the directly-credited D&A (case (b) above) from long-term investing:
+  // that asset decrease is non-cash and is already added back in operating.
+  if (!isZero(directAmort)) cfBuckets.ltInvest = r2(cfBuckets.ltInvest - directAmort);
   Object.keys(cfBuckets).forEach(k => { cfBuckets[k] = r2(cfBuckets[k]); });
 
   const cashFlow = {
