@@ -1443,11 +1443,30 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       // Per-column rule segments: one short line under each column's value box,
       // leaving a gutter between adjacent columns so the rules read as one-per-
       // column rather than a single line drawn straight across ("일직선").
+      //
+      // The rule is sized to HUG THE NUMBERS in this row rather than spanning the
+      // full column pitch. Sizing to the pitch made the balance-sheet rules ~87pt
+      // wide while the values are only ~50pt, so the leftmost rule ran back under
+      // the account name and collided with long labels (e.g. "Bill.Com Clearing
+      // Out Banyan Residential Entity 100"). We take the widest value in the row,
+      // add a little padding, and clamp to [RULE_MIN_W, pitch − gutter] so every
+      // column gets one consistent width that still fits fund-scale figures.
       const GUTTER = 12;
+      const RULE_MIN_W = 34;
+      let widestCell = 0;
+      (cells || []).forEach(c => {
+        if (c == null || c === '') return;
+        const w = font.widthOfTextAtSize(String(c), FS.row);
+        if (w > widestCell) widestCell = w;
+      });
+      const ruleSpan = Math.min(
+        Math.max(RULE_MIN_W, ruleBoxW - GUTTER),
+        Math.max(RULE_MIN_W, widestCell + 8),
+      );
       const drawRule = (yy) => {
         if (colRules) {
-          cols.forEach((cx, i) => {
-            const x0 = cx - ruleBoxW + 2 + GUTTER / 2;
+          cols.forEach((cx) => {
+            const x0 = cx - ruleSpan - valueInset;
             const x1 = cx;
             page.drawLine({ start: { x: x0, y: yy }, end: { x: x1, y: yy }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
           });
