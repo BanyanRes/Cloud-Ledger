@@ -1259,6 +1259,11 @@ async function buildStatements(getBalances, opts) {
 
 const PAGE = { w: 612, h: 792, mL: 54, mR: 54, mT: 60, mB: 54 };
 const FS = { title: 11, sub: 9.5, head: 8, row: 8.5, foot: 7.5 }; // point sizes
+// Data-row pitch (must match the `y -= 12` advance in layout.row()).
+const ROW_H = 12;
+// Blank space between a column-header underline and the first financial line
+// item: 3pt of breathing room below the rule plus TWO blank data rows.
+const HDR_TRAIL_GAP = 3 + 2 * ROW_H;
 
 // A tiny page-layout cursor over a pdf-lib page. Handles the y-cursor, centered
 // headers, a footer, right-aligned numeric columns, and automatic page breaks.
@@ -1374,8 +1379,10 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       if (!_replaying) _hdrSpec = { labels, hopts };
       const LH = 9;                 // header line height
       const nLines = Math.max(1, ...labels.map(l => String(l).split('\n').length));
-      // Reserve height for the tallest label block + the underline + trailing gap.
-      ensure(LH * nLines + 10);
+      // Reserve height for the tallest label block + the underline + the two-row
+      // trailing gap, so a header never lands at the very bottom of a page with
+      // its first data row orphaned onto the next one.
+      ensure(LH * nLines + 2 + HDR_TRAIL_GAP);
       // ALL column headers are bottom-aligned: the LAST line of every label sits
       // on one common baseline, and taller (multi-line) labels grow UPWARD from
       // it. That common baseline is `baseY`. Start the block by dropping from the
@@ -1410,8 +1417,14 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
           page.drawLine({ start: { x: cols[i] - span, y: uy }, end: { x: cols[i], y: uy }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
         }
       });
-      // Advance the cursor to just below the underline plus a small gap.
-      y = uy - 8;
+      // Advance the cursor below the underline, leaving TWO blank rows between
+      // the column heading and the first financial line item. This is both a
+      // house style rule and a correctness fix: at the old 8pt gap the first
+      // row's baseline landed at uy-8, so a subtotal's `ruleAbove` (drawn at
+      // baseline+9 = uy+1) was rendered ONE POINT ABOVE the header underline —
+      // the two rules visibly collided whenever a page break put a "Total ..."
+      // row first on a continuation page.
+      y = uy - HDR_TRAIL_GAP;
     },
     sectionTitle(str) {
       ensure(16);
@@ -1585,11 +1598,10 @@ async function renderStatementsPdf(s, outOffsets) {
     track('Statements of Operations');
     L.start();
     L.setCols(opsCols);
-    // Period columns are labeled '<Period> Ended <date>' (e.g. 'Quarter Ended
-    // 6/30/26'); a Change column (current − prior) then the Year-to-Date column.
-    // Headers underlined.
-    const colLbl = m.colLabel || 'Month Ended';
-    L.colHeaders([colLbl + '\n' + m.longDate, colLbl + '\n' + m.priorLongDate, 'Change', 'Year to Date'], { underline: true });
+    // Period columns show just the period-end DATE. The period type is already
+    // stated in the date line above ("For the Months Ended ..."), so repeating
+    // "Month Ended" / "Quarter Ended" over each column was redundant.
+    L.colHeaders([m.longDate, m.priorLongDate, 'Change', 'Year to Date'], { underline: true });
     const chg = (cur, pri) => money(r2(cur - pri));
     const line = (r, o = {}) => L.row(r.name, [money(r.cur), money(r.pri), chg(r.cur, r.pri), money(r.ytd)], { indent: 16, ...o });
 
