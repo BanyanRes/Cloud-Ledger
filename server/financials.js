@@ -45,6 +45,100 @@ function displayEntityName(name) {
   return n || 'Entity';
 }
 
+// ── statement profile ─────────────────────────────────────
+// The default ("srn") profile reproduces the SRN-style development-entity
+// package. A holding company like Banyan SFR GP Investors (entity 49) has a
+// different chart AND a different Statements-of-Operations shape (Operating
+// Expenses / Other Income (Expense) / Income Taxes), so it selects its own
+// profile by entity name/code. Every profile-aware helper keys off this switch.
+function entityProfile(opts) {
+  const name = String((opts && opts.entityName) || '').trim();
+  const code = String((opts && opts.entityCode) || '').trim().toUpperCase();
+  if (/banyan\s*sfr\s*gp\s*investors/i.test(name) || code === 'BANYANSF') return 'bsfrgp';
+  return 'srn';
+}
+
+// Balance-sheet section map for the Banyan SFR GP Investors (holding-company)
+// profile. Same shape as BS_ACCOUNT_MAP; selected only for that entity.
+const BS_ACCOUNT_MAP_BSFRGP = {
+  // Current Assets → Cash and Cash Equivalents
+  '10131': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10141': ['Current Assets', 'Cash and Cash Equivalents'],
+  // Current Assets → Intercompany Receivable
+  '18353': ['Current Assets', 'Intercompany Receivable'],
+  '18384': ['Current Assets', 'Intercompany Receivable'],
+  // Investments → Investment in Subsidiary
+  '19027': ['Investments', 'Investment in Subsidiary'],
+  '19037': ['Investments', 'Investment in Subsidiary'],
+  '19055': ['Investments', 'Investment in Subsidiary'],
+  '19057': ['Investments', 'Investment in Subsidiary'],
+  '19060': ['Investments', 'Investment in Subsidiary'],
+  '19074': ['Investments', 'Investment in Subsidiary'],
+  // Current Liabilities
+  '20000': ['Current Liabilities', 'Accounts Payable'],
+  '23000': ['Current Liabilities', 'Intercompany Payable'],
+  // Members Equity (Retained Earnings & Net Income handled specially in renderer)
+  '39000': ['Members Equity', 'Retained Earnings'],
+};
+
+// Per-profile balance-sheet classification. Default profile uses the SRN map
+// (BS_ACCOUNT_MAP) via bsClassify(); bsfrgp uses its own map with the same
+// heuristic fallback so no account is ever dropped.
+function bsClassifyFor(profile, row) {
+  if (profile === 'bsfrgp') {
+    const explicit = BS_ACCOUNT_MAP_BSFRGP[String(row.code)];
+    if (explicit) return { section: explicit[0], sub: explicit[1] };
+    const name = (row.name || '').toLowerCase();
+    if (row.type === 'Asset') {
+      if (/cash|checking|savings|bank|clearing|ics/.test(name)) return { section: 'Current Assets', sub: 'Cash and Cash Equivalents' };
+      if (/due from|intercompany/.test(name)) return { section: 'Current Assets', sub: 'Intercompany Receivable' };
+      if (/investment/.test(name)) return { section: 'Investments', sub: 'Investment in Subsidiary' };
+      if (/receivable/.test(name)) return { section: 'Current Assets', sub: 'Accounts Receivable, Net' };
+      return { section: 'Other Assets', sub: 'Other Assets' };
+    }
+    if (row.type === 'Liability') {
+      if (/due to|intercompany/.test(name)) return { section: 'Current Liabilities', sub: 'Intercompany Payable' };
+      if (/payable/.test(name)) return { section: 'Current Liabilities', sub: 'Accounts Payable' };
+      if (/loan|note payable|bond/.test(name)) return { section: 'Long Term Liabilities', sub: 'Loans' };
+      return { section: 'Current Liabilities', sub: 'Other Current Liabilities' };
+    }
+    if (row.type === 'Equity') {
+      if (/retained earning/.test(name)) return { section: 'Members Equity', sub: 'Retained Earnings' };
+      return { section: 'Members Equity', sub: 'Members Equity' };
+    }
+    return { section: 'Other', sub: 'Other' };
+  }
+  return bsClassify(row);
+}
+
+// Sub-order for the bsfrgp Investments section (its only extra subsection name).
+const BS_SUB_ORDER_BSFRGP = Object.assign({}, {
+  'Investments': ['Investment in Subsidiary'],
+  'Current Liabilities': ['Accounts Payable', 'Intercompany Payable'],
+});
+
+// Banyan SFR GP Investors Statements-of-Operations account routing. Maps each
+// P&L account to a top-level bucket so the statement reproduces the reference
+// nesting. Anything unmapped falls back to Operating Expenses (never dropped).
+//   opex   → Operating Expenses (General and Administrative → Legal and Accounting)
+//   otherIncome / otherExpense → Other Income (Expense)
+//   incomeTax → Income Taxes (State and Local Taxes)
+const BSFRGP_PL_MAP = {
+  '63000': { bucket: 'opex',         group: 'General and Administrative Expenses', sub: 'Legal and Accounting' },
+  '70000': { bucket: 'otherIncome',  group: 'Other Income',  sub: 'Interest Income' },
+  '67056': { bucket: 'otherExpense', group: 'Other Expense', sub: 'Other Expenses' },
+  '68061': { bucket: 'incomeTax',    group: 'State and Local Taxes', sub: 'State and Local Taxes' },
+};
+function bsfrgpPlRoute(row) {
+  const m = BSFRGP_PL_MAP[String(row.code)];
+  if (m) return m;
+  const name = (row.name || '').toLowerCase();
+  if (row.type === 'Revenue') return { bucket: 'otherIncome', group: 'Other Income', sub: 'Interest Income' };
+  if (/franchise tax|state and local tax|income tax/.test(name)) return { bucket: 'incomeTax', group: 'State and Local Taxes', sub: 'State and Local Taxes' };
+  if (/penalt|other expense/.test(name)) return { bucket: 'otherExpense', group: 'Other Expense', sub: 'Other Expenses' };
+  return { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Legal and Accounting' };
+}
+
 // ── numeric helpers ────────────────────────────────────────────────────────
 const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
 const isZero = n => Math.abs(Number(n) || 0) < 0.005;
@@ -394,6 +488,10 @@ function plExpenseCategory(row) {
 // ═══════════════════════════════════════════════════════════════════════════
 async function buildStatements(getBalances, opts) {
   const asOf = opts.asOf;
+  const profile = entityProfile(opts);
+  const bsSub = (profile === 'bsfrgp') ? BS_SUB_ORDER_BSFRGP : BS_SUB_ORDER;
+  const bsCls = (row) => bsClassifyFor(profile, row);
+  const bsSec = (row) => bsClassifyFor(profile, row).section;
   const ys = yearStart(asOf);
   const period = resolvePeriod(asOf, opts.period);
   const priorBsDate = period.bsPriorDate;
@@ -447,7 +545,7 @@ async function buildStatements(getBalances, opts) {
         const rc = colCur.map.get(code), rp = colPri.map.get(code);
         const ref = rc || rp;
         if (!ref || ref.type !== type) return null;
-        const cls = bsClassify(ref);
+        const cls = bsCls(ref);
         if (cls.section !== section || cls.sub !== sub) return null;
         const cur = rc ? bal(rc) : 0, pri = rp ? bal(rp) : 0;
         if (isZero(cur) && isZero(pri)) return null;
@@ -459,7 +557,7 @@ async function buildStatements(getBalances, opts) {
   // Build a section as an ordered list of subsections, each with its own rows and
   // subtotal. A section's net total treats contra subsections as subtractions.
   function bsSectionFor(section, type) {
-    const subOrder = BS_SUB_ORDER[section] || [];
+    const subOrder = bsSub[section] || BS_SUB_ORDER[section] || [];
     // Include any subsection that appears in the order list first, then any
     // unexpected subsections (defensive: never drop a classified account).
     const seen = new Set(subOrder);
@@ -467,7 +565,7 @@ async function buildStatements(getBalances, opts) {
     for (const code of bsCodes) {
       const ref = colCur.map.get(code) || colPri.map.get(code);
       if (!ref || ref.type !== type) continue;
-      const cls = bsClassify(ref);
+      const cls = bsCls(ref);
       if (cls.section === section && !seen.has(cls.sub)) { seen.add(cls.sub); extraSubs.push(cls.sub); }
     }
     const subs = [...subOrder, ...extraSubs]
@@ -505,7 +603,7 @@ async function buildStatements(getBalances, opts) {
         const rc = colCur.map.get(code), rp = colPri.map.get(code);
         const ref = rc || rp;
         if (!ref || ref.type !== 'Equity') return null;
-        const cls = bsClassify(ref);
+        const cls = bsCls(ref);
         if (cls.sub !== sub) return null;
         const cur = rc ? bal(rc) : 0, pri = rp ? bal(rp) : 0;
         if (isZero(cur) && isZero(pri)) return null;
@@ -593,6 +691,86 @@ async function buildStatements(getBalances, opts) {
   for (const [cat, lines] of opexByCat) {
     if (lines && lines.length) pushGroup(cat, lines);
   }
+  // ── Banyan SFR GP Investors operations restructure (bsfrgp profile) ──────
+  // Reproduces the CPA reference shape:
+  //   Operating Expenses (General and Administrative → Legal and Accounting)
+  //   Other Income (Expense)  (Other Income / Other Expense, netted)
+  //   Income Taxes            (State and Local Taxes)
+  //   Net Income (Loss) = Other Income (Expense) − Operating Expenses − Income Taxes
+  // All P&L accounts (revenue + expense) are routed by bsfrgpPlRoute so nothing
+  // is dropped; the resulting net income equals the GL net income by construction.
+  let bsfrgpOps = null;
+  if (profile === 'bsfrgp') {
+    // All P&L lines regardless of type, so Interest Income (a Revenue account)
+    // can be routed into Other Income rather than a top-line Revenue section.
+    const allPl = plLines(() => true);
+    const byBucket = { opex: [], otherIncome: [], otherExpense: [], incomeTax: [] };
+    const routeOf = {};
+    for (const l of allPl) {
+      const route = bsfrgpPlRoute({ code: l.code, name: l.name, type: (mYtd.get(l.code) || mCur.get(l.code) || mPri.get(l.code)).type });
+      routeOf[l.code] = route;
+      (byBucket[route.bucket] || byBucket.opex).push(l);
+    }
+    // Build a nested group→subsection tree for a bucket's lines (preserves the
+    // reference's 'General and Administrative Expenses → Legal and Accounting'
+    // and 'Other Income → Interest Income' nesting). Each group carries its own
+    // subtotal; each subsection carries a subtotal too.
+    const buildTree = (lines) => {
+      const groups = [];
+      const gIndex = new Map();
+      for (const l of lines) {
+        const r = routeOf[l.code];
+        let g = gIndex.get(r.group);
+        if (!g) { g = { title: r.group, subs: [], _si: new Map() }; gIndex.set(r.group, g); groups.push(g); }
+        let su = g._si.get(r.sub);
+        if (!su) { su = { title: r.sub, lines: [] }; g._si.set(r.sub, su); g.subs.push(su); }
+        su.lines.push(l);
+      }
+      // Subtotals.
+      for (const g of groups) {
+        for (const su of g.subs) {
+          su.subtotal = { cur: sumCol(su.lines, 'cur'), pri: sumCol(su.lines, 'pri'), ytd: sumCol(su.lines, 'ytd') };
+          su.lines.sort((a, b) => String(a.code).localeCompare(String(b.code)));
+        }
+        g.subtotal = {
+          cur: r2(g.subs.reduce((s, x) => s + x.subtotal.cur, 0)),
+          pri: r2(g.subs.reduce((s, x) => s + x.subtotal.pri, 0)),
+          ytd: r2(g.subs.reduce((s, x) => s + x.subtotal.ytd, 0)),
+        };
+        delete g._si;
+      }
+      return groups;
+    };
+    const opexTree = buildTree(byBucket.opex);
+    const otherIncomeTree = buildTree(byBucket.otherIncome);
+    const otherExpenseTree = buildTree(byBucket.otherExpense);
+    const incomeTaxTree = buildTree(byBucket.incomeTax);
+    const sumBucket = (arr) => ({ cur: sumCol(arr, 'cur'), pri: sumCol(arr, 'pri'), ytd: sumCol(arr, 'ytd') });
+    const tOpex = sumBucket(byBucket.opex);
+    const tOtherIncome = sumBucket(byBucket.otherIncome);
+    const tOtherExpense = sumBucket(byBucket.otherExpense);
+    const tIncomeTax = sumBucket(byBucket.incomeTax);
+    // Other Income (Expense) net = Other Income − Other Expense.
+    const tOtherIE = {
+      cur: r2(tOtherIncome.cur - tOtherExpense.cur),
+      pri: r2(tOtherIncome.pri - tOtherExpense.pri),
+      ytd: r2(tOtherIncome.ytd - tOtherExpense.ytd),
+    };
+    // Net Income (Loss) = Other Income (Expense) − Operating Expenses − Income Taxes.
+    // Income-tax accounts carry their natural expense sign (a credit/benefit is
+    // negative and therefore ADDS to net income when subtracted).
+    const niBsfrgp = {
+      cur: r2(tOtherIE.cur - tOpex.cur - tIncomeTax.cur),
+      pri: r2(tOtherIE.pri - tOpex.pri - tIncomeTax.pri),
+      ytd: r2(tOtherIE.ytd - tOpex.ytd - tIncomeTax.ytd),
+    };
+    bsfrgpOps = {
+      structured: true,
+      opexTree, otherIncomeTree, otherExpenseTree, incomeTaxTree,
+      totOpex: tOpex, totOtherIncome: tOtherIncome, totOtherExpense: tOtherExpense,
+      totOtherIE: tOtherIE, totIncomeTax: tIncomeTax, netIncome: niBsfrgp,
+    };
+  }
 
   // ── Statement of Cash Flows (indirect, YTD) ────────────────────────────────
   // Beginning balances = as of (year start − 1 day). Deltas over the YTD window.
@@ -642,7 +820,7 @@ async function buildStatements(getBalances, opts) {
     if (isZero(delta)) continue;
     const nm = ref.name || '';
     if (ref.type === 'Asset') {
-      const sec = bsSection(ref);
+      const sec = bsSec(ref);
       const cashEffect = -delta; // asset up → cash down
       if (/intercompany|due from|due to/i.test(nm)) cfBuckets.intercompany += cashEffect;
       else if (sec === 'Current Assets' && /receivable/i.test(nm)) cfBuckets.ar += cashEffect;
@@ -651,7 +829,7 @@ async function buildStatements(getBalances, opts) {
       else cfBuckets.ltInvest += cashEffect; // intangible / investment / other long-term
     } else if (ref.type === 'Liability') {
       const cashEffect = delta; // liability up → cash up
-      const sec = bsSection(ref);
+      const sec = bsSec(ref);
       if (/payable/i.test(nm)) cfBuckets.ap += cashEffect;
       else if (sec === 'Long Term Liabilities') cfBuckets.debtChange += cashEffect;
       else cfBuckets.accrued += cashEffect; // accrued / other current liabilities
@@ -710,9 +888,9 @@ async function buildStatements(getBalances, opts) {
   return {
     meta: { entityName: displayEntityName(opts.entityName), asOf, priorDate: priorBsDate, longDate: longDate(asOf),
             priorLongDate: longDate(priorBsDate), monthsEnded: monthsEndedLabel(asOf),
-            period: (opts.period || 'monthly').toLowerCase(), periodLabel: period.periodLabel, colLabel: period.colLabel },
+            period: (opts.period || 'monthly').toLowerCase(), periodLabel: period.periodLabel, colLabel: period.colLabel, profile },
     balanceSheet: { assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
-    operations: { revenue, cogs, opex, opexGroups, totRev, totCogs, grossProfit, totOpex, netIncome },
+    operations: Object.assign({ revenue, cogs, opex, opexGroups, totRev, totCogs, grossProfit, totOpex, netIncome }, bsfrgpOps ? { bsfrgp: bsfrgpOps, netIncome: bsfrgpOps.netIncome } : {}),
     cashFlow,
     equity: { rows: equityStmt, totals: equityTotals },
     checks: {
@@ -999,7 +1177,7 @@ async function renderStatementsPdf(s, outOffsets) {
     // avoid a redundant subtotal that just repeats a single account line.
     const renderBsSection = (sec, sectionTotalLabel) => {
       L.row(sec.title, [], { indent: 6, boldRow: true });
-      const showSubHeaders = sec.subs.length > 1 || sec.subs.some(su => su.contra);
+      const showSubHeaders = sec.subs.length > 1 || sec.subs.some(su => su.contra) || m.profile === 'bsfrgp';
       for (const su of sec.subs) {
         if (showSubHeaders) L.row(su.title, [], { indent: 16 });
         const rowIndent = showSubHeaders ? 26 : 16;
@@ -1040,6 +1218,46 @@ async function renderStatementsPdf(s, outOffsets) {
     const chg = (cur, pri) => money(r2(cur - pri));
     const line = (r, o = {}) => L.row(r.name, [money(r.cur), money(r.pri), chg(r.cur, r.pri), money(r.ytd)], { indent: 16, ...o });
 
+    // A 4-column value cell (current / prior / change / YTD).
+    const cell4 = t => [money(t.cur), money(t.pri), chg(t.cur, t.pri), money(t.ytd)];
+    if (s.operations.bsfrgp && s.operations.bsfrgp.structured) {
+      // ── Banyan SFR GP Investors shape: Operating Expenses / Other Income
+      //    (Expense) / Income Taxes / Net Income (Loss). ────────────────────
+      const bo = s.operations.bsfrgp;
+      // Render a nested tree (group → subsection → lines) with subtotals. A
+      // subsection subtotal shows only when it has more than one line; a group
+      // subtotal shows only when the group has more than one subsection (so a
+      // single-line 'Interest Income' doesn't get a redundant echo).
+      const renderTree = (groups, { showGroupTotal }) => {
+        for (const g of groups) {
+          L.row(g.title, [], { indent: 12, boldRow: true });
+          for (const su of g.subs) {
+            L.row(su.title, [], { indent: 20 });
+            su.lines.forEach(r => L.row(r.name, cell4(r), { indent: 30 }));
+            if (su.lines.length > 1) L.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true });
+          }
+          if (showGroupTotal && g.subs.length > 1) L.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true });
+        }
+      };
+
+      L.sectionTitle('Operating Expenses');
+      renderTree(bo.opexTree, { showGroupTotal: true });
+      L.row('Total Operating Expenses', cell4(bo.totOpex), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+
+      // Other Income (Expense): Other Income section, then Other Expense section,
+      // then a netted 'Total Other Income (Expense)'.
+      L.sectionTitle('Other Income (Expense)');
+      renderTree(bo.otherIncomeTree, { showGroupTotal: true });
+      renderTree(bo.otherExpenseTree, { showGroupTotal: true });
+      L.row('Total Other Income (Expense)', cell4(bo.totOtherIE), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+
+      // Income Taxes.
+      L.sectionTitle('Income Taxes');
+      renderTree(bo.incomeTaxTree, { showGroupTotal: true });
+      L.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+
+      L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+    } else {
     L.sectionTitle('Revenue');
     s.operations.revenue.forEach(r => line(r));
     L.row('Total Revenue', [money(s.operations.totRev.cur), money(s.operations.totRev.pri), chg(s.operations.totRev.cur, s.operations.totRev.pri), money(s.operations.totRev.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
@@ -1075,6 +1293,7 @@ async function renderStatementsPdf(s, outOffsets) {
     }
     L.row('Total Operating Expenses', [money(s.operations.totOpex.cur), money(s.operations.totOpex.pri), chg(s.operations.totOpex.cur, s.operations.totOpex.pri), money(s.operations.totOpex.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+    }
   }
 
   // ── 3. Statement of Cash Flows ──────────────────────────────────────────────

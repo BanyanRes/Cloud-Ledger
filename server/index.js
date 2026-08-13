@@ -8626,9 +8626,9 @@ app.post('/api/workpapers/financial-statements/:entity_id/preview', auth, requir
     const asOf = (req.body && req.body.as_of) || (req.query && req.query.as_of);
     const period = ((req.body && req.body.period) || (req.query && req.query.period) || 'monthly');
     if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
-    const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
+    const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
     const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
-    const s = await financials.buildStatements(getBalances, { asOf, period, entityName: ent ? ent.name : ('Entity ' + eid) });
+    const s = await financials.buildStatements(getBalances, { asOf, period, entityName: ent ? ent.name : ('Entity ' + eid), entityCode: ent ? ent.code : '' });
     res.json({
       meta: s.meta,
       checks: s.checks,
@@ -8925,11 +8925,12 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       const asOf = req.body.as_of;
       const period = req.body.period || 'monthly';
       if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
-      const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
+      const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
       const entityName = ent ? ent.name : ('Entity ' + eid);
+      const entityCode = ent ? ent.code : '';
 
       const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
-      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName });
+      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName, entityCode });
 
       const files = req.files || {};
       const execSummaryBytes = files.execSummary && files.execSummary[0] ? files.execSummary[0].buffer : null;
