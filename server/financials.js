@@ -30,6 +30,7 @@
 
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const { xlsxSheetToPdf, looksLikeXlsx } = require('./xlsxToPdf');
+const execSummaries = require('./execSummaries');
 
 // ── entity display-name normalization ───────────────────────────────
 // The report presents this development entity as "County Line SRN". The GL
@@ -1234,7 +1235,7 @@ async function buildStatements(getBalances, opts) {
   }), { beginning: 0, contributions: 0, distributions: 0, netIncome: 0, ending: 0 });
 
   return {
-    meta: { entityName: displayEntityName(opts.entityName), asOf, priorDate: priorBsDate, longDate: longDate(asOf),
+    meta: { entityName: displayEntityName(opts.entityName), rawEntityName: opts.entityName || '', entityCode: (opts.entityCode || ''), asOf, priorDate: priorBsDate, longDate: longDate(asOf),
             priorLongDate: longDate(priorBsDate), monthsEnded: monthsEndedLabel(asOf),
             period: (opts.period || 'monthly').toLowerCase(), periodLabel: period.periodLabel, colLabel: period.colLabel, profile },
     balanceSheet: { assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
@@ -2009,9 +2010,19 @@ async function generatePackage({ statements, execSummaryBytes, reqReportBytes, r
     return pages.length;
   };
 
-  // Executive summary (uploaded, merged as-is).
-  if (execSummaryBytes) await appendToBody(execSummaryBytes, 'Executive Summary', true);
-  else { info.warnings.push('No executive summary uploaded.'); }
+  // Executive summary. An uploaded PDF (execSummaryBytes) always takes
+  // precedence and is merged as-is. Otherwise fall back to the entity's built-in
+  // default (execSummaries.js), whose title-block date line is rendered
+  // dynamically from the statement period. If neither exists, warn as before.
+  if (execSummaryBytes) {
+    await appendToBody(execSummaryBytes, 'Executive Summary', true);
+  } else {
+    let defBytes = null;
+    try { defBytes = await execSummaries.renderExecSummaryPdf(statements.meta); }
+    catch (e) { info.warnings.push('Default executive summary render failed: ' + e.message); }
+    if (defBytes) await appendToBody(defBytes, 'Executive Summary', true);
+    else info.warnings.push('No executive summary uploaded and no default available for this entity.');
+  }
 
   // GL statements — capture each statement's start page within the statements
   // PDF, then offset by where the statements PDF lands in the body.
