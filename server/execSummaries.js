@@ -72,7 +72,7 @@ const GAAP_CLOSE = 'The financial statements are developed by the Company to com
 const SUMMARIES = [
   {
     key: 'banyan_residential',
-    match: { name: /banyan\s*residential/i, codes: ['BANYANRE1'] },
+    match: { name: /^banyan residential$/i, titleMatch: /banyan residential,?\s*llc/i, codes: ['BANYANRE1'], entityId: 41 },
     title: 'Banyan Residential, LLC',
     dateMode: 'monthsCompare',
     blocks: [
@@ -88,7 +88,7 @@ const SUMMARIES = [
   },
   {
     key: 'banyan_sfr_gp',
-    match: { name: /banyan\s*sfr\s*gp/i, codes: [] },
+    match: { name: /banyan\s*sfr\s*gp/i, codes: ['BANYANSF'], entityId: 49 },
     title: 'Banyan SFR GP Investors, LLC',
     dateMode: 'quartersCompare',
     blocks: [
@@ -103,7 +103,7 @@ const SUMMARIES = [
   },
   {
     key: 'clr_buna',
-    match: { name: /buna/i, codes: [] },
+    match: { name: /buna/i, codes: ['CLRBUNAP'], entityId: 38 },
     title: 'CLR Buna Property Owner, LLC',
     dateMode: 'monthsEnded',
     blocks: [
@@ -120,7 +120,7 @@ const SUMMARIES = [
   },
   {
     key: 'clrfi_midco',
-    match: { name: /clrfi|midco/i, codes: [] },
+    match: { name: /clrfi|midco/i, codes: ['CLRFIMID'], entityId: 70 },
     title: 'CLRFI Midco I LLC',
     dateMode: 'quarterEnded',
     blocks: [
@@ -137,7 +137,7 @@ const SUMMARIES = [
   },
   {
     key: 'clro',
-    match: { name: /county\s*line\s*rail\s*operations|\bclro\b/i, codes: [] },
+    match: { name: /county\s*line\s*rail\s*operations|\bclro\b/i, codes: ['COUNTYLI3'], entityId: 46 },
     title: 'County Line Rail Operations, LLC',
     dateMode: 'monthsEnded',
     blocks: [
@@ -154,7 +154,7 @@ const SUMMARIES = [
   },
   {
     key: 'clip',
-    match: { name: /county\s*line\s*industrial\s*park|\bclip\b/i, codes: [] },
+    match: { name: /county\s*line\s*industrial\s*park|\bclip\b/i, codes: ['COUNTYLI2'], entityId: 42 },
     title: 'County Line Industrial Park, LLC',
     dateMode: 'monthsEnded',
     blocks: [
@@ -170,7 +170,7 @@ const SUMMARIES = [
   },
   {
     key: 'clr_silsbee',
-    match: { name: /silsbee/i, codes: [] },
+    match: { name: /silsbee/i, codes: ['CLRSILSB2'], entityId: 39 },
     title: 'County Line Rail Silsbee, LLC',
     dateMode: 'monthsEnded',
     blocks: [
@@ -185,7 +185,7 @@ const SUMMARIES = [
   },
   {
     key: 'srn',
-    match: { name: /sabine|(county\s*line\s*)?srn/i, codes: [] },
+    match: { name: /sabine|(county\s*line\s*)?srn/i, codes: ['SABINERI'], entityId: 37 },
     title: 'County Line SRN, LLC',
     dateMode: 'monthsEnded',
     blocks: [
@@ -200,7 +200,7 @@ const SUMMARIES = [
   },
   {
     key: 'turnkey_rail',
-    match: { name: /turnkey/i, codes: [] },
+    match: { name: /turnkey/i, codes: ['TURNKEYR'], entityId: 36 },
     title: 'Turnkey Rail, LLC',
     // Inception stub: fixed start (April 16), dynamic end (period end).
     dateMode: 'periodFrom:April 16',
@@ -214,7 +214,7 @@ const SUMMARIES = [
   },
   {
     key: 'braker_qozb',
-    match: { name: /braker/i, codes: [] },
+    match: { name: /braker/i, codes: ['BRAKERQO1'], entityId: 45 },
     title: 'Braker QOZ Business, LLC',
     dateMode: 'monthsEnded',
     blocks: [
@@ -230,7 +230,7 @@ const SUMMARIES = [
   },
   {
     key: 'bridge_banyan_hp',
-    match: { name: /bridge\s*banyan\s*hp|hp\s*qozb/i, codes: [] },
+    match: { name: /bridge\s*banyan\s*hp|hp\s*qozb/i, codes: ['BRIDGEBA'], entityId: 43 },
     title: 'Bridge Banyan HP QOZB, LLC',
     dateMode: 'monthsEnded',
     blocks: [
@@ -346,4 +346,34 @@ async function renderExecSummaryPdf(meta) {
   return await pdf.save();
 }
 
-module.exports = { renderExecSummaryPdf, resolveSummary, resolveDateLine, SUMMARIES };
+// ── Storage conventions ──────────────────────────────────────────────────────
+// The persisted per-entity default lives in that entity's Workpapers tree at a
+// fixed, year-agnostic path; uploading a new one overwrites it. The uploaded
+// multi-page master is archived in an Admin-only folder (any folder whose top
+// segment is "_Admin" is hidden from non-Admins by the /files listing).
+const DEFAULT_FOLDER = 'Executive Summary';
+const DEFAULT_FILENAME = 'executive_summary.pdf';
+const ADMIN_MASTER_FOLDER = '_Admin/Executive Summaries';
+
+// Match a single master page's extracted text to one of the summary defs.
+// Title text sits at the top of each page; we test the name regexes against it.
+// Returns the def (with entityId/codes) or null.
+function matchPageToSummary(pageText) {
+  const t = String(pageText || '').replace(/\s+/g, ' ').trim();
+  // Prefer an explicit title-line match near the top to avoid a body-text regex
+  // hit bleeding across entities; fall back to a whole-page test. A summary may
+  // define a title-specific pattern (titleMatch) used only here, distinct from
+  // the strict entity-name pattern (match.name) used by resolveSummary.
+  const head = t.slice(0, 120);
+  const testPat = s => (s.match.titleMatch || s.match.name);
+  for (const scope of [head, t]) {
+    const hit = SUMMARIES.find(s => testPat(s).test(scope));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+module.exports = {
+  renderExecSummaryPdf, resolveSummary, resolveDateLine, matchPageToSummary, SUMMARIES,
+  DEFAULT_FOLDER, DEFAULT_FILENAME, ADMIN_MASTER_FOLDER,
+};

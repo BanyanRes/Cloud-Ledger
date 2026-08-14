@@ -1973,7 +1973,7 @@ async function renderCoverPdf(meta, tocEntries) {
 // }
 // Returns { bytes, info: { pages, reqRemoved, reqKept, cashFlowTies, ... } }.
 // ═══════════════════════════════════════════════════════════════════════════
-async function generatePackage({ statements, execSummaryBytes, reqReportBytes, reqReportName, reqSheetName }) {
+async function generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReportBytes, reqReportName, reqSheetName }) {
   const merged = await PDFDocument.create();
   const info = { sections: [], warnings: [] };
 
@@ -2010,18 +2010,26 @@ async function generatePackage({ statements, execSummaryBytes, reqReportBytes, r
     return pages.length;
   };
 
-  // Executive summary. An uploaded PDF (execSummaryBytes) always takes
-  // precedence and is merged as-is. Otherwise fall back to the entity's built-in
-  // default (execSummaries.js), whose title-block date line is rendered
-  // dynamically from the statement period. If neither exists, warn as before.
+  // Executive summary — resolution order:
+  //   1) a per-call uploaded PDF (execSummaryBytes) — always wins, merged as-is.
+  //      The route also persists it as this entity's new stored default.
+  //   2) the entity's stored default file (storedDefaultBytes), if one has been
+  //      uploaded/split previously.
+  //   3) the built-in rendered default (execSummaries.js), whose title-block
+  //      date line is dynamic from the statement period.
+  //   4) neither → warn as before.
   if (execSummaryBytes) {
     await appendToBody(execSummaryBytes, 'Executive Summary', true);
+    info.execSummarySource = 'uploaded';
+  } else if (storedDefaultBytes) {
+    await appendToBody(storedDefaultBytes, 'Executive Summary', true);
+    info.execSummarySource = 'stored_default';
   } else {
     let defBytes = null;
     try { defBytes = await execSummaries.renderExecSummaryPdf(statements.meta); }
     catch (e) { info.warnings.push('Default executive summary render failed: ' + e.message); }
-    if (defBytes) await appendToBody(defBytes, 'Executive Summary', true);
-    else info.warnings.push('No executive summary uploaded and no default available for this entity.');
+    if (defBytes) { await appendToBody(defBytes, 'Executive Summary', true); info.execSummarySource = 'builtin'; }
+    else { info.warnings.push('No executive summary uploaded and no default available for this entity.'); info.execSummarySource = 'none'; }
   }
 
   // GL statements — capture each statement's start page within the statements

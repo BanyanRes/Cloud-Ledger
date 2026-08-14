@@ -21,6 +21,7 @@ const { makeDevFeeClaudeCaller } = require('./requisition_devfee');
 const { saveRequisitionOutputs, saveBufferToWorkpapers: saveWpBuffer, ensureFolders: ensureWpFolders } = require('./requisition_workpaper_save');
 const { computeAllocation, buildAllocationWorkbook } = require('./insurance_allocation');
 const financials = require('./financials');
+const execSummaries = require('./execSummaries');
 const ExcelJS = require('exceljs');
 const JSZip = require('jszip');
 
@@ -4931,8 +4932,16 @@ const normFolderPath = p => {
 };
 
 app.get('/api/entities/:eid/files', auth, requireEntityAccess(), (req, res) => {
-  const files = db.prepare('SELECT id, folder_path, original_name, size, mime_type, uploaded_by, created_at FROM entity_files WHERE entity_id=? ORDER BY folder_path, original_name').all(req.params.eid);
-  const folders = db.prepare('SELECT folder_path, created_by, created_at FROM entity_folders WHERE entity_id=? ORDER BY folder_path').all(req.params.eid);
+  let files = db.prepare('SELECT id, folder_path, original_name, size, mime_type, uploaded_by, created_at FROM entity_files WHERE entity_id=? ORDER BY folder_path, original_name').all(req.params.eid);
+  let folders = db.prepare('SELECT folder_path, created_by, created_at FROM entity_folders WHERE entity_id=? ORDER BY folder_path').all(req.params.eid);
+  // Admin-only folders: any path whose top segment is "_Admin" is hidden from
+  // non-Admin users (files and folder entries alike).
+  const isAdmin = req.user && req.user.role === 'Admin';
+  if (!isAdmin) {
+    const isAdminPath = p => String(p || '').split('/')[0] === '_Admin';
+    files = files.filter(f => !isAdminPath(f.folder_path));
+    folders = folders.filter(f => !isAdminPath(f.folder_path));
+  }
   // Collect every distinct folder path from both tables plus all ancestor paths
   const folderSet = new Set();
   const addAncestors = p => { if (!p) return; const parts = p.split('/'); for (let i = 1; i <= parts.length; i++) folderSet.add(parts.slice(0, i).join('/')); };
@@ -4968,13 +4977,18 @@ app.post('/api/entities/:eid/files', auth, requireEntityAccess(), requireRole('A
 
 // Download — uses token query param like journal attachments
 app.get('/api/entity-files/:id/download', (req, res) => {
+  let claims;
   try {
     const token = req.query.token;
     if (!token) return res.status(401).json({ error: 'Token required' });
-    jwt.verify(token, JWT_SECRET);
+    claims = jwt.verify(token, JWT_SECRET);
   } catch { return res.status(401).json({ error: 'Invalid token' }); }
   const f = db.prepare('SELECT * FROM entity_files WHERE id=?').get(req.params.id);
   if (!f) return res.status(404).json({ error: 'Not found' });
+  // Admin-only folders are downloadable only by Admins.
+  if (String(f.folder_path || '').split('/')[0] === '_Admin' && !(claims && claims.role === 'Admin')) {
+    return res.status(403).json({ error: 'Admin only' });
+  }
   const filepath = path.resolve(WORKPAPERS_DIR, String(f.entity_id), f.stored_filename);
   if (!fs.existsSync(filepath)) return res.status(404).json({ error: 'File missing on disk' });
   const inlineTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'];
@@ -8917,6 +8931,27 @@ app.post('/api/entities/:eid/ttm-pl/analyze', auth, requireEntityAccess(), requi
   }
 });
 
+// Read an entity's stored default Executive Summary (single-page PDF) from its
+// Workpapers tree, or null if none has been uploaded/split for it yet.
+function readStoredExecSummary(eid) {
+  const row = db.prepare(
+    'SELECT stored_filename FROM entity_files WHERE entity_id=? AND folder_path=? AND original_name=? ORDER BY id DESC LIMIT 1'
+  ).get(eid, execSummaries.DEFAULT_FOLDER, execSummaries.DEFAULT_FILENAME);
+  if (!row) return null;
+  try {
+    const p = path.resolve(WORKPAPERS_DIR, String(eid), row.stored_filename);
+    return fs.readFileSync(p);
+  } catch (_) { return null; }
+}
+
+// Persist a single-page Executive Summary PDF as an entity's stored default,
+// overwriting any prior default. Returns the entity_files row info.
+function writeStoredExecSummary(eid, buffer, who) {
+  ensureWpFolders(db, eid, execSummaries.DEFAULT_FOLDER, who);
+  return saveWpBuffer(db, WORKPAPERS_DIR, eid, execSummaries.DEFAULT_FOLDER,
+    execSummaries.DEFAULT_FILENAME, 'application/pdf', buffer, who, { overwrite: true });
+}
+
 app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   finStmtFields(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message });
@@ -8939,7 +8974,19 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       const reqReportName = reqReportFile ? reqReportFile.originalname : null;
       const reqSheetName = req.body.req_sheet || undefined; // optional override; default "Budget to Actual"
 
-      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, reqReportBytes, reqReportName, reqSheetName });
+      // When the user uploads an exec summary with this generate call, it both
+      // goes into THIS package and becomes the entity's new stored default.
+      // Otherwise fall back to the stored default (if any) for the merge.
+      const who = req.user ? (req.user.name || req.user.email) : 'system';
+      let storedDefaultBytes = null;
+      if (execSummaryBytes) {
+        try { writeStoredExecSummary(eid, execSummaryBytes, who); }
+        catch (e) { console.error('exec-summary persist failed:', e.message); }
+      } else {
+        storedDefaultBytes = readStoredExecSummary(eid);
+      }
+
+      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReportBytes, reqReportName, reqSheetName });
 
       const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
       const safeName = entityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
@@ -8951,11 +8998,98 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
         reqRemoved: info.reqRemoved || [], reqKept: info.reqKept, reqTotal: info.reqTotal,
         reqConvertedFromXlsx: info.reqConvertedFromXlsx || false, reqSheetUsed: info.reqSheetUsed,
         balanceSheetTies: info.balanceSheetTies, cashFlowTies: info.cashFlowTies, cashFlowDiff: info.cashFlowDiff,
+        execSummarySource: info.execSummarySource,
         checks: statements.checks,
       }).replace(/[\r\n]/g, ' '));
       res.send(Buffer.from(bytes));
     } catch (e) {
       res.status(500).json({ error: 'Generate error: ' + e.message });
+    }
+  });
+});
+
+// Extract plain text per page from a PDF buffer (for entity matching). Lazy pdfjs.
+async function extractPdfPageTexts(buffer) {
+  const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(buffer), isEvalSupported: false, verbosity: 0 }).promise;
+  const out = [];
+  for (let p = 1; p <= doc.numPages; p++) {
+    const page = await doc.getPage(p);
+    const tc = await page.getTextContent();
+    out.push(tc.items.map(i => i.str).join(' ').replace(/\s+/g, ' ').trim());
+  }
+  return out;
+}
+
+// Split a multi-page master Executive Summary PDF into single-page defaults,
+// one per entity, matched by the entity title text on each page. Each matched
+// page becomes that entity's stored default (Executive Summary/executive_summary.pdf,
+// overwriting any prior). The uploaded master is archived in an Admin-only
+// Workpapers folder. Admin only.
+//
+// Body (multipart): master = the combined PDF. Optional master_home_eid = the
+// entity whose Workpapers tree stores the archived master (defaults to the first
+// matched entity, or the caller-supplied value).
+app.post('/api/admin/exec-summaries/split', auth, requireRole('Admin'), (req, res) => {
+  memUpload.single('master')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    try {
+      if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'master PDF is required' });
+      const who = req.user ? (req.user.name || req.user.email) : 'system';
+      const { PDFDocument } = require('pdf-lib');
+
+      const masterDoc = await PDFDocument.load(req.file.buffer, { ignoreEncryption: true });
+      const pageCount = masterDoc.getPageCount();
+      let pageTexts = [];
+      try { pageTexts = await extractPdfPageTexts(req.file.buffer); }
+      catch (e) { return res.status(400).json({ error: 'Could not read master PDF text: ' + e.message }); }
+
+      const results = [];
+      const usedEntities = new Set();
+      let firstMatchedEid = null;
+
+      for (let i = 0; i < pageCount; i++) {
+        const text = pageTexts[i] || '';
+        const def = execSummaries.matchPageToSummary(text);
+        if (!def) { results.push({ page: i + 1, matched: false, reason: 'no entity title matched' }); continue; }
+        const eid = def.match.entityId;
+        if (!eid) { results.push({ page: i + 1, matched: false, key: def.key, reason: 'no entityId configured' }); continue; }
+        if (usedEntities.has(eid)) { results.push({ page: i + 1, matched: false, key: def.key, reason: 'entity already matched on an earlier page' }); continue; }
+
+        // Extract this single page into its own PDF.
+        const single = await PDFDocument.create();
+        const [pg] = await single.copyPages(masterDoc, [i]);
+        single.addPage(pg);
+        const singleBytes = Buffer.from(await single.save());
+
+        try {
+          const saved = writeStoredExecSummary(eid, singleBytes, who);
+          usedEntities.add(eid);
+          if (firstMatchedEid == null) firstMatchedEid = eid;
+          const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
+          results.push({ page: i + 1, matched: true, key: def.key, entity_id: eid, entity_name: ent ? ent.name : null, entity_code: ent ? ent.code : null, file_id: saved.id });
+        } catch (e) {
+          results.push({ page: i + 1, matched: false, key: def.key, entity_id: eid, reason: 'save failed: ' + e.message });
+        }
+      }
+
+      // Archive the master in an Admin-only folder under a home entity.
+      const homeEid = req.body.master_home_eid || firstMatchedEid;
+      let archived = null;
+      if (homeEid) {
+        try {
+          ensureWpFolders(db, homeEid, execSummaries.ADMIN_MASTER_FOLDER, who);
+          const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+          const masterName = 'Executive Summaries master (' + stamp + ').pdf';
+          const a = saveWpBuffer(db, WORKPAPERS_DIR, homeEid, execSummaries.ADMIN_MASTER_FOLDER, masterName, 'application/pdf', req.file.buffer, who, { overwrite: false });
+          archived = { entity_id: homeEid, folder: execSummaries.ADMIN_MASTER_FOLDER, file_id: a.id, original_name: a.original_name };
+        } catch (e) { archived = { error: 'archive failed: ' + e.message }; }
+      }
+
+      const matchedCount = results.filter(r => r.matched).length;
+      res.json({ pages: pageCount, matched: matchedCount, unmatched: pageCount - matchedCount, results, archived });
+    } catch (e) {
+      res.status(500).json({ error: 'Split error: ' + e.message });
     }
   });
 });
