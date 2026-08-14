@@ -1170,7 +1170,7 @@ async function buildStatements(getBalances, opts) {
       if (/intercompany|due from|due to/i.test(nm)) cfBuckets.intercompany += cashEffect;
       else if (sec === 'Current Assets' && /receivable/i.test(nm)) cfBuckets.ar += cashEffect;
       else if (sec === 'Current Assets') cfBuckets.prepaidOther += cashEffect;
-      else if (sec === 'Fixed Assets') cfBuckets.capex += cashEffect;
+      else if (sec === 'Fixed Assets' || sec === 'Fixed Assets, Net') cfBuckets.capex += cashEffect;
       else cfBuckets.ltInvest += cashEffect; // intangible / investment / other long-term
     } else if (ref.type === 'Liability') {
       const cashEffect = delta; // liability up → cash up
