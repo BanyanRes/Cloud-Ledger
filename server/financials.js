@@ -38,6 +38,7 @@ const { xlsxSheetToPdf, looksLikeXlsx } = require('./xlsxToPdf');
 // aliases; anything else passes through unchanged.
 const ENTITY_DISPLAY_NAMES = [
   { match: /sabine|(county\s*line\s*)?srn/i, display: 'County Line SRN' },
+  { match: /banyan\s*residential/i, display: 'Banyan Residential LLC' },
 ];
 function displayEntityName(name) {
   const n = String(name || '').trim();
@@ -164,7 +165,7 @@ const BS_ACCOUNT_MAP_BANYAN = {
   '12922': ['Current Assets', 'Prepaid Expenses'],
   '13002': ['Current Assets', 'Prepaid Expenses'],
   // Current Assets → Other Current Assets
-  '13003': ['Current Assets', 'Other Current Assets'],
+  '13003': ['Current Assets', 'Prepaid Expenses'], // Prepaid Rent; moved to Prepaid Expenses per CLA review
   // Fixed Assets, Net → Fixed Assets
   '15500': ['Fixed Assets, Net', 'Fixed Assets'],
   '15510': ['Fixed Assets, Net', 'Fixed Assets'],
@@ -1513,7 +1514,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
 // giving each statement's 0-based starting page index within this PDF (used to
 // compute Table-of-Contents page references).
 async function renderStatementsPdf(s, outOffsets) {
-  const track = (label) => { if (outOffsets) outOffsets.push({ label, page: pdf.getPageCount() }); };
+  const track = (label, tocLabel) => { if (outOffsets) outOffsets.push({ label: (tocLabel || label), page: pdf.getPageCount() }); };
   const pdf = await PDFDocument.create();
   const reg = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -1542,8 +1543,11 @@ async function renderStatementsPdf(s, outOffsets) {
   {
     // Heading date-line repeats on every page (incl. continuation pages) and a
     // blank space follows it before the first row. Dates are NOT underlined.
-    const L = makeLayout(pdf, fonts, m, 'Balance Sheets', { dateLine: m.longDate + ' and ' + m.priorLongDate });
-    track('Balance Sheets');
+    const bsTitle = m.profile === 'banyan'
+      ? 'Statements of Assets, Liabilities, and Members\u2019 Equity \u2013 Tax Basis'
+      : 'Balance Sheets';
+    const L = makeLayout(pdf, fonts, m, bsTitle, { dateLine: m.longDate + ' and ' + m.priorLongDate });
+    track(bsTitle, m.profile === 'banyan' ? 'Statement of Assets, Liabilities, and Members\u2019 Equity \u2013 Tax Basis' : 'Balance Sheets');
     L.start();
     L.setCols(bsCols);
     // Three columns now: current date, prior date, and a "Change" column showing
@@ -1597,8 +1601,11 @@ async function renderStatementsPdf(s, outOffsets) {
     // 6/30/26 and 3/31/26' with 'Quarter Ended' columns (matches the CPA package).
     const periodWord = (m.colLabel || 'Month Ended').replace(/ Ended$/, '');
     const opsDateLine = 'For the ' + periodWord + 's Ended ' + m.longDate + ' and ' + m.priorLongDate;
-    const L = makeLayout(pdf, fonts, m, 'Statements of Operations', { dateLine: opsDateLine });
-    track('Statements of Operations');
+    const opsTitle = m.profile === 'banyan'
+      ? 'Statements of Revenues and Expenses \u2013 Tax Basis'
+      : 'Statements of Operations';
+    const L = makeLayout(pdf, fonts, m, opsTitle, { dateLine: opsDateLine });
+    track(opsTitle);
     L.start();
     L.setCols(opsCols);
     // Period columns show just the period-end DATE. The period type is already
@@ -1739,8 +1746,11 @@ async function renderStatementsPdf(s, outOffsets) {
 
   // ── 3. Statement of Cash Flows ──────────────────────────────────────────────
   {
-    const L = makeLayout(pdf, fonts, m, 'Statement of Cash Flows', { dateLine: m.monthsEnded });
-    track('Statement of Cash Flows');
+    const cfTitle = m.profile === 'banyan'
+      ? 'Statement of Cash Flows \u2013 Tax Basis'
+      : 'Statement of Cash Flows';
+    const L = makeLayout(pdf, fonts, m, cfTitle, { dateLine: m.monthsEnded });
+    track(cfTitle, 'Statement of Cash Flows');
     L.start();
     L.setCols([RIGHT]);
     // No column heading: the single YTD column is self-evident from the
@@ -1750,16 +1760,18 @@ async function renderStatementsPdf(s, outOffsets) {
     L.row('Net Income (Loss)', [money(cf.netIncome)], { indent: 16 });
     L.row('Adjustments to reconcile net income to net cash:', [], { indent: 16 });
     if (!isZero(cf.amortization)) L.row('Amortization and depreciation', [money(cf.amortization)], { indent: 28 });
+    L.space(6);
+    L.row('Changes in Operating Assets and Liabilities:', [], { indent: 16 });
     if (!isZero(cf.changeAR)) L.row('(Increase) decrease in accounts receivable', [money(cf.changeAR)], { indent: 28 });
     if (!isZero(cf.changePrepaidOther)) L.row('(Increase) decrease in prepaid and other current assets', [money(cf.changePrepaidOther)], { indent: 28 });
     if (!isZero(cf.changeIntercompany)) L.row('(Increase) decrease in intercompany balances', [money(cf.changeIntercompany)], { indent: 28 });
-    if (!isZero(cf.changeAP)) L.row('Increase (decrease) in accounts payable', [money(cf.changeAP)], { indent: 28 });
+    if (!isZero(cf.changeAP)) L.row('Increase (decrease) in accounts payable and other current liabilities', [money(cf.changeAP)], { indent: 28 });
     if (!isZero(cf.changeAccrued)) L.row('Increase (decrease) in accrued and other liabilities', [money(cf.changeAccrued)], { indent: 28 });
     L.row('Net Cash Provided (Used) by Operating Activities', [money(cf.netOperating)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
 
     L.sectionTitle('Cash Flows from Investing Activities');
-    if (!isZero(cf.capex)) L.row('Purchases of property and equipment', [money(cf.capex)], { indent: 28 });
-    if (!isZero(cf.ltInvest)) L.row('Development, intangible and other long-term costs', [money(cf.ltInvest)], { indent: 28 });
+    if (!isZero(cf.capex)) L.row('Acquisition of fixed assets', [money(cf.capex)], { indent: 28 });
+    if (!isZero(cf.ltInvest)) L.row('(Increase) decrease in Other Assets', [money(cf.ltInvest)], { indent: 28 });
     L.row('Net Cash Provided (Used) by Investing Activities', [money(cf.netInvesting)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
 
     L.sectionTitle('Cash Flows from Financing Activities');
@@ -2686,7 +2698,7 @@ async function buildFundStatements(opts) {
 // If outOffsets is passed it is filled with { label, page } for the TOC.
 // ═══════════════════════════════════════════════════════════════════════════
 async function renderFundStatementsPdf(s, outOffsets) {
-  const track = (label) => { if (outOffsets) outOffsets.push({ label, page: pdf.getPageCount() }); };
+  const track = (label, tocLabel) => { if (outOffsets) outOffsets.push({ label: (tocLabel || label), page: pdf.getPageCount() }); };
   const pdf = await PDFDocument.create();
   const reg = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
