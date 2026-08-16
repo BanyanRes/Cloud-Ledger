@@ -762,6 +762,7 @@ export default function App(){
     {key:'INTERCOMPANY',label:'Intercompany',icon:'🔗',items:[
       {id:'ic_recon',label:'IC Reconciliation',icon:'⚖️',section:'intercompany'},
       {id:'ic_mapping',label:'IC Mapping',icon:'🗺️',section:'intercompany'},
+      {id:'org_structure',label:'Org Structure',icon:'🏛️',section:'intercompany'},
     ]},
     {key:'REPORTS',label:'Reports',icon:'📊',items:[
       {id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},
@@ -856,6 +857,7 @@ export default function App(){
         {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='customdetail'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='pivot'&&activeEntity&&dimsEnabled&&<PivotReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='pivot'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='ic_recon'&&canAccess('intercompany')&&<IntercompanyReconciliation entities={entities} setPage={setPage} key={'icr-'+rk}/>}
+        {page==='org_structure'&&canAccess('intercompany')&&<OrgStructurePage entities={entities} canEdit={canEdit} key={'org-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='commitments'&&activeEntity&&<CommitmentsPage entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
@@ -6589,6 +6591,303 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{setGEdit({id:g.id,name:g.name,notes:g.notes||'',entity_ids:g.members.map(m=>m.entity_id)});setErr('');}}>Edit</button>
           <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={()=>delGroup(g)}>x</button></div></td>}</tr>)}
       </tbody></table></div>}
+    </>}
+  </div>);
+}
+
+// ═════════════════════════ Org Structure ═════════════════════════
+// The ownership tree from the legal org charts, and the tie-out it makes
+// possible: a fund's investment account against the contributed capital of the
+// company it funded, looked through the holding companies in between.
+//
+// Nodes come in two kinds. A node with an entity is a CloudLedger ledger; a
+// node without one is a shell that holds an investment balance but keeps no
+// ledger here (CLRFI CLIP Sponsor, County Line SRN, CLRFI Midco II). The
+// shells are why a plain parent column on the entities table wouldn't do: drop
+// them and the 76.51% / 54.53% steps that create the minority interest vanish.
+
+const ORG_NODE_TYPE_LABEL={fund:'Fund',holdco:'Holding co.',company:'Company',property_owner:'Property owner',shell:'Shell (no ledger)'};
+
+function OrgPctBadge({pct}){
+  if(pct==null)return null;
+  const full=Math.abs(pct-100)<0.00005;
+  return<span style={{display:'inline-block',padding:'1px 7px',borderRadius:20,fontSize:10,fontWeight:700,
+    color:full?T.textMuted:T.orange,background:full?T.bgElevated:T.orangeDim,whiteSpace:'nowrap'}}>{Number(pct).toFixed(2)}%</span>;
+}
+
+function OrgTreeRows({node,onEdit,canEdit,depth=0}){
+  if(!node)return null;
+  const shell=node.entity_id==null;
+  return(<>
+    <tr style={shell?{background:T.bgElevated}:null}>
+      <td style={{...S.td,whiteSpace:'nowrap'}}>
+        <span style={{display:'inline-block',width:depth*22}}/>
+        {depth>0&&<span style={{color:T.textDim,marginRight:6}}>{'└'}</span>}
+        <span style={{fontWeight:shell?500:600,color:shell?T.textMuted:T.textBright,fontStyle:shell?'italic':'normal'}}>{node.name}</span>
+        {shell&&<span style={{marginLeft:8}}><IcBadge kind="mute">no ledger</IcBadge></span>}
+      </td>
+      <td style={S.td}>{ORG_NODE_TYPE_LABEL[node.node_type]||node.node_type}</td>
+      <td style={S.tdR}>{depth===0?<span style={{color:T.textDim}}>{'—'}</span>:<OrgPctBadge pct={node.ownership_pct}/>}</td>
+      <td style={{...S.tdR,fontWeight:600}}>{Number(node.effective_pct).toFixed(2)}%</td>
+      <td style={{...S.tdR,color:node.nci_pct>0.00005?T.orange:T.textDim,fontWeight:node.nci_pct>0.00005?600:400}}>
+        {node.nci_pct>0.00005?Number(node.nci_pct).toFixed(2)+'%':'—'}</td>
+      <td style={{...S.td,color:T.textMuted,whiteSpace:'normal',fontSize:12}}>{node.notes||''}</td>
+      {canEdit&&<td style={S.td}><button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>onEdit(node)}>Edit</button></td>}
+    </tr>
+    {(node.children||[]).map(c=><OrgTreeRows key={c.id+'-'+c.edge_id} node={c} onEdit={onEdit} canEdit={canEdit} depth={depth+1}/>)}
+  </>);
+}
+
+function OrgStructurePage({entities,canEdit=true}){
+  const[tab,setTab]=useState('structure');
+  const[roots,setRoots]=useState([]);const[rootId,setRootId]=useState('');
+  const[nodes,setNodes]=useState([]);const[tree,setTree]=useState(null);const[cycles,setCycles]=useState([]);
+  const[asOf,setAsOf]=useState('2026-06-30');
+  const[recon,setRecon]=useState(null);
+  const[loading,setLoading]=useState(false);const[err,setErr]=useState('');const[msg,setMsg]=useState('');
+  const[edit,setEdit]=useState(null);// node being edited
+  const[addUnder,setAddUnder]=useState(null);
+  const[form,setForm]=useState({name:'',entity_id:'',node_type:'company',notes:'',ownership_pct:'100'});
+  const[open,setOpen]=useState({});
+
+  const loadRoots=useCallback(async()=>{
+    try{const d=await api.getOrgStructure();setRoots(d.roots||[]);setNodes(d.nodes||[]);
+      if(!rootId&&d.roots&&d.roots.length)setRootId(String(d.roots[0].id));
+    }catch(e){setErr(e.message);}
+  },[rootId]);
+  useEffect(()=>{loadRoots();},[]);// eslint-disable-line react-hooks/exhaustive-deps
+
+  const loadTree=useCallback(async()=>{
+    if(!rootId)return;
+    setLoading(true);setErr('');
+    try{
+      const t=await api.getOrgTree(rootId);
+      setTree(t.tree);setCycles(t.cycles||[]);
+    }catch(e){setErr(e.message);setTree(null);}
+    finally{setLoading(false);}
+  },[rootId]);
+  useEffect(()=>{loadTree();},[loadTree]);
+
+  const runRecon=useCallback(async()=>{
+    if(!rootId)return;
+    setLoading(true);setErr('');
+    try{setRecon(await api.reconcileOrgInvestments(rootId,asOf));}
+    catch(e){setErr(e.message);setRecon(null);}
+    finally{setLoading(false);}
+  },[rootId,asOf]);
+  useEffect(()=>{if(tab==='tieout'&&rootId&&!recon)runRecon();},[tab,rootId]);// eslint-disable-line react-hooks/exhaustive-deps
+
+  const seed=async()=>{
+    setErr('');setMsg('');
+    try{const r=await api.seedOrgClrf();
+      setMsg(r.created?('Loaded the County Line Rail Fund I chart — '+r.nodes+' nodes.'):'That chart is already loaded.');
+      const d=await api.getOrgStructure();setRoots(d.roots||[]);setNodes(d.nodes||[]);
+      setRootId(String(r.root_node_id));
+    }catch(e){setErr(e.message);}
+  };
+
+  const saveNode=async()=>{
+    setErr('');
+    try{
+      if(edit){
+        await api.saveOrgNode(edit.id,{name:form.name,entity_id:form.entity_id?Number(form.entity_id):null,
+          node_type:form.node_type,notes:form.notes||null,sort_order:edit.sort_order||0});
+        if(edit.edge_id!=null)await api.saveOrgEdge(edit.edge_id,{parent_node_id:edit.parent_node_id_for_edit,
+          child_node_id:edit.id,ownership_pct:Number(form.ownership_pct)});
+      }else if(addUnder){
+        const r=await api.createOrgNode({name:form.name,entity_id:form.entity_id?Number(form.entity_id):null,
+          node_type:form.node_type,notes:form.notes||null});
+        await api.createOrgEdge({parent_node_id:addUnder.id,child_node_id:r.id,ownership_pct:Number(form.ownership_pct)});
+      }
+      setEdit(null);setAddUnder(null);setRecon(null);
+      await loadRoots();await loadTree();
+    }catch(e){setErr(e.message);}
+  };
+  const removeNode=async()=>{
+    if(!edit)return;
+    if(!confirm('Remove "'+edit.name+'" from the structure? Everything under it is detached too. The CloudLedger entity itself is not touched.'))return;
+    try{await api.deleteOrgNode(edit.id);setEdit(null);setRecon(null);await loadRoots();await loadTree();}
+    catch(e){setErr(e.message);}
+  };
+
+  const startEdit=n=>{
+    // Find this node's parent so the ownership % on its incoming edge is editable.
+    let parentId=null;
+    const walk=(p)=>{for(const c of (p.children||[])){if(c.id===n.id&&c.edge_id===n.edge_id)parentId=p.id;walk(c);}};
+    if(tree)walk(tree);
+    setAddUnder(null);
+    setEdit({...n,parent_node_id_for_edit:parentId});
+    setForm({name:n.name,entity_id:n.entity_id||'',node_type:n.node_type,notes:n.notes||'',
+      ownership_pct:String(n.ownership_pct==null?100:n.ownership_pct)});
+  };
+  const startAdd=()=>{
+    const flat=[];const walk=n=>{flat.push(n);(n.children||[]).forEach(walk);};if(tree)walk(tree);
+    setEdit(null);setAddUnder(tree);
+    setForm({name:'',entity_id:'',node_type:'company',notes:'',ownership_pct:'100'});
+  };
+
+  const flat=(()=>{const out=[];const walk=n=>{out.push(n);(n.children||[]).forEach(walk);};if(tree)walk(tree);return out;})();
+  const statusBadge=s=>s==='ties_on_chain'||s==='ties_on_total'?<IcBadge kind="ok">ties</IcBadge>
+    :s==='ties_rounding'?<IcBadge kind="ok">ties (rounding)</IcBadge>
+    :s==='not_in_tree'?<IcBadge kind="mute">not in structure</IcBadge>
+    :<IcBadge kind="bad">difference</IcBadge>;
+
+  const doExport=()=>{
+    if(!recon)return;
+    const d=[['Org structure — fund investment vs. subsidiary capital'],
+      [(recon.root&&recon.root.name)||'','as of '+(recon.as_of||asOf)],[],
+      ['Investor','Account','Account name','Names','Compared against','Chain','Investment','Capital on this chain','Total capital','Difference (chain)','Difference (total)','Status']];
+    recon.rows.forEach(r=>d.push([r.investor_name,r.account_code,r.account_name,r.named_name||'',r.subsidiary_name||'',
+      (r.chain||[]).map(c=>c.name+(c.is_shell?' [shell]':'')).join(' > '),
+      r.investment,r.chain_capital,r.total_capital,r.chain_difference,r.total_difference,r.status]));
+    d.push([]);d.push(['Non-controlling interest (indicative, from GL equity)']);
+    d.push(['Entity','Ownership %','Effective %','NCI %','Entity equity','NCI equity']);
+    recon.nci.forEach(n=>d.push([n.name,n.ownership_pct,n.effective_pct,n.nci_pct,n.entity_equity,n.nci_equity]));
+    d.push(['Total','','','','',recon.totals.nci_equity_total]);
+    exportToExcel(d,'Org_Structure_Tieout_'+String(recon.as_of||asOf).replace(/-/g,'')+'.xlsx');
+  };
+
+  return(<div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8,flexWrap:'wrap',gap:12}}>
+      <div><div style={S.h1}>Org Structure</div>
+        <div style={S.sub}>Who owns whom, from the legal org charts — including holding companies that hold investment balances but keep no ledger here.</div></div>
+      <div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div><label style={S.label}>Structure</label>
+          <select style={{...S.selectSm,minWidth:220}} value={rootId} onChange={e=>{setRootId(e.target.value);setRecon(null);}}>
+            <option value=''>Select…</option>
+            {roots.map(r=><option key={r.id} value={r.id}>{r.name}</option>)}</select></div>
+        {tab==='tieout'&&<>
+          <div><label style={S.label}>As of</label>
+            <input style={S.inputSm} type='date' value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
+          <button style={S.btnP} onClick={runRecon} disabled={!rootId||loading}>{loading?'Running…':'Run'}</button>
+          {recon&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</>}
+      </div></div>
+
+    <div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
+      {[['structure','Ownership tree'],['tieout','Investment tie-out']].map(([k,l])=>
+        <button key={k} onClick={()=>{setTab(k);setErr('');setMsg('');}} style={{background:'none',border:'none',borderBottom:'2px solid '+(tab===k?T.accent:'transparent'),color:tab===k?T.accent:T.textMuted,fontWeight:tab===k?700:500,fontSize:13,padding:'9px 16px',cursor:'pointer',marginBottom:-1}}>{l}</button>)}</div>
+
+    {err&&<div style={{...S.card,borderColor:T.red+'40',padding:14}}><div style={S.err}>{err}</div></div>}
+    {msg&&<div style={{...S.card,borderColor:T.green+'40',padding:14}}><div style={S.success}>{msg}</div></div>}
+    {cycles&&cycles.length>0&&<div style={{...S.card,borderColor:T.orange+'40',padding:14}}>
+      <div style={{color:T.orange,fontSize:12,fontWeight:600}}>{cycles.length} circular ownership link{cycles.length===1?'':'s'} were skipped while drawing this tree.</div></div>}
+
+    {!roots.length&&!err&&<div style={{...S.card,textAlign:'center',padding:40}}>
+      <div style={{color:T.textDim,marginBottom:14}}>No ownership structure recorded yet.</div>
+      {canEdit&&<button style={S.btnP} onClick={seed}>Load the County Line Rail Fund I chart</button>}
+      <div style={{color:T.textMuted,fontSize:12,marginTop:10}}>Creates the CLRF I → Midco I chain from the 4/13/2026 org chart, including the four holding companies that have no ledger in CloudLedger.</div></div>}
+
+    {tab==='structure'&&tree&&<>
+      {canEdit&&<div style={{marginBottom:12,display:'flex',gap:8}}>
+        <button style={S.btnS} onClick={startAdd}>+ Add company</button>
+        {!roots.some(r=>r.name==='County Line Rail Fund I, LP')&&<button style={S.btnS} onClick={seed}>Load CLRF I chart</button>}</div>}
+
+      {(edit||addUnder)&&<div style={{...S.card,borderColor:T.green+'40'}}>
+        <div style={{fontWeight:700,color:T.textBright,marginBottom:12}}>{edit?'Edit '+edit.name:'Add a company'}</div>
+        <div style={S.row}>
+          <div style={{...S.col,flex:2}}><label style={S.label}>Name</label>
+            <input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} placeholder='CLRFI CLIP Sponsor, LLC'/></div>
+          <div style={{...S.col,flex:2}}><label style={S.label}>CloudLedger entity</label>
+            <select style={S.select} value={form.entity_id} onChange={e=>setForm(f=>({...f,entity_id:e.target.value,node_type:e.target.value?(f.node_type==='shell'?'company':f.node_type):'shell'}))}>
+              <option value=''>None — shell with no ledger</option>
+              {(entities||[]).map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
+          <div style={S.col}><label style={S.label}>Kind</label>
+            <select style={S.select} value={form.node_type} onChange={e=>setForm(f=>({...f,node_type:e.target.value}))}>
+              {Object.keys(ORG_NODE_TYPE_LABEL).map(k=><option key={k} value={k}>{ORG_NODE_TYPE_LABEL[k]}</option>)}</select></div>
+          <div style={S.col}><label style={S.label}>Owned %</label>
+            <input style={{...S.input,textAlign:'right'}} value={form.ownership_pct} onChange={e=>setForm(f=>({...f,ownership_pct:e.target.value}))} placeholder='100'/></div></div>
+        {addUnder&&<div style={{marginBottom:12}}><label style={S.label}>Owned by</label>
+          <select style={S.select} value={addUnder.id} onChange={e=>{const id=Number(e.target.value);setAddUnder(flat.find(n=>n.id===id)||tree);}}>
+            {flat.map(n=><option key={n.id+'-'+n.edge_id} value={n.id}>{' '.repeat(n.depth*3)}{n.name}</option>)}</select></div>}
+        <div style={{marginBottom:12}}><label style={S.label}>Notes</label>
+          <input style={S.input} value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} placeholder='(optional)'/></div>
+        <div style={{display:'flex',gap:8}}>
+          <button style={S.btnP} onClick={saveNode}>{edit?'Save':'Add'}</button>
+          <button style={S.btnS} onClick={()=>{setEdit(null);setAddUnder(null);setErr('');}}>Cancel</button>
+          {edit&&<button style={{...S.btnD,marginLeft:'auto'}} onClick={removeNode}>Remove from structure</button>}</div></div>}
+
+      <div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+        <th style={S.th}>Company</th><th style={S.th}>Kind</th><th style={S.thR}>Owned %</th>
+        <th style={S.thR}>Effective %</th><th style={S.thR}>Minority %</th><th style={S.th}>Notes</th>
+        {canEdit&&<th style={{...S.th,width:70}}></th>}</tr></thead>
+      <tbody><OrgTreeRows node={tree} onEdit={startEdit} canEdit={canEdit}/></tbody></table></div>
+
+      <div style={{color:T.textMuted,fontSize:12,marginTop:-8}}>
+        <b>Effective %</b> multiplies the ownership steps from the top of the structure down, so a 76.51% step reduces everything beneath it. <b>Minority %</b> is the rest — the share owned by someone outside this structure.</div>
+    </>}
+
+    {tab==='tieout'&&<>
+      {loading&&<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Reading balances…</div>}
+      {!loading&&recon&&<>
+        <div style={{...S.row,marginBottom:20}}>
+          <IcTile label='Investments tied' value={recon.totals.ties+' of '+recon.rows.length} kind={recon.totals.differences?'warn':'ok'}/>
+          <IcTile label='Investment total' value={fmt(recon.totals.investment_total)} kind='info'/>
+          <IcTile label='Unexplained difference' value={fmt(recon.totals.abs_difference)} kind={recon.totals.abs_difference>1?'bad':'ok'}/>
+          <IcTile label='Minority interest' value={fmt(recon.totals.nci_equity_total)} kind='warn'/>
+          <IcTile label='Shells in the chain' value={String(recon.totals.shell_count)} kind='info'/></div>
+
+        {recon.rows.length===0?<IcEmpty>No investment accounts are mapped on the entities in this structure. Map them on the <b>IC Mapping</b> page first.</IcEmpty>
+        :<div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+          <th style={{...S.th,width:28}}></th><th style={S.th}>Investor</th><th style={S.th}>Account</th>
+          <th style={S.th}>Compared against</th><th style={S.thR}>Investment</th>
+          <th style={S.thR}>Capital on this chain</th><th style={S.thR}>Total capital</th>
+          <th style={S.thR}>Difference</th><th style={S.th}>Status</th></tr></thead>
+        <tbody>{recon.rows.map(r=>{const k=r.investor_entity_id+'-'+r.account_code;const isOpen=!!open[k];
+          const bad=r.status==='difference'||r.status==='not_in_tree';
+          return<Fragment key={k}>
+          <tr style={{cursor:'pointer',background:bad?T.redDim:'transparent'}} onClick={()=>setOpen(o=>({...o,[k]:!o[k]}))}>
+            <td style={{...S.td,color:T.textDim,textAlign:'center'}}>{isOpen?'▼':'▶'}</td>
+            <td style={{...S.td,fontWeight:600,color:T.textBright}}>{r.investor_name}</td>
+            <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{r.account_code}</span> <span style={{color:T.textMuted}}>{r.account_name}</span></td>
+            <td style={S.td}>{r.subsidiary_name||<span style={{color:T.textDim}}>{'—'}</span>}
+              {r.retargeted&&<span style={{marginLeft:6}}><IcBadge kind="info">re-aimed</IcBadge></span>}</td>
+            <td style={{...S.tdR,fontWeight:600}}>{fmt(r.investment)}</td>
+            <td style={S.tdR}>{fmt(r.chain_capital)}</td>
+            <td style={S.tdR}>{fmt(r.total_capital)}</td>
+            <td style={{...S.tdR,fontWeight:700,color:bad?T.red:T.green}}>{fmt(r.best_difference==null?r.total_difference:r.best_difference)}</td>
+            <td style={S.td}>{statusBadge(r.status)}</td></tr>
+          {isOpen&&<tr><td colSpan={9} style={{padding:'12px 16px 14px 40px',background:T.bgElevated,borderBottom:'1px solid '+T.border,whiteSpace:'normal'}}>
+            {r.message&&<div style={{color:T.textMuted,fontSize:12,marginBottom:10}}>{r.message}</div>}
+            {r.retarget_note&&<div style={{color:T.textMuted,fontSize:12,marginBottom:10}}>{r.retarget_note}</div>}
+            {r.chain&&r.chain.length>0&&<div style={{marginBottom:10,fontSize:12}}>
+              <span style={{color:T.textMuted,fontWeight:600,marginRight:6}}>Chain:</span>
+              {r.chain.map((c,i)=><span key={c.id}>{i>0&&<span style={{color:T.textDim,margin:'0 6px'}}>{'›'}</span>}
+                <span style={{color:c.is_shell?T.textMuted:T.textBright,fontStyle:c.is_shell?'italic':'normal'}}>{c.name}</span>
+                {c.is_shell&&<span style={{color:T.textDim,fontSize:11}}> (no ledger)</span>}
+                {Math.abs(c.ownership_pct-100)>0.00005&&<span style={{marginLeft:5}}><OrgPctBadge pct={c.ownership_pct}/></span>}</span>)}</div>}
+            {r.chain_legs&&r.chain_legs.length>0&&<div style={{marginBottom:8}}>
+              <div style={{fontSize:11,fontWeight:700,color:T.textMuted,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:4}}>Capital from this chain</div>
+              {r.chain_legs.map(c=><div key={c.account_code} style={{fontSize:12,padding:'2px 0'}}>
+                <span style={{fontWeight:600,color:T.textBright}}>{c.account_code}</span> <span style={{color:T.textMuted}}>{c.account_name}</span>
+                <span style={{float:'right',fontVariantNumeric:'tabular-nums'}}>{fmt(c.amount)}</span></div>)}</div>}
+            {r.other_legs&&r.other_legs.length>0&&<div>
+              <div style={{fontSize:11,fontWeight:700,color:T.textMuted,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:4}}>Other capital on this company</div>
+              {r.other_legs.map(c=><div key={c.account_code} style={{fontSize:12,padding:'2px 0',color:T.textMuted}}>
+                <span style={{fontWeight:600}}>{c.account_code}</span> {c.account_name}
+                {!c.mapped&&<span style={{marginLeft:6}}><IcBadge kind="mute">not mapped</IcBadge></span>}
+                <span style={{float:'right',fontVariantNumeric:'tabular-nums'}}>{fmt(c.amount)}</span></div>)}</div>}
+          </td></tr>}
+          </Fragment>;})}
+        </tbody></table></div>}
+
+        {recon.nci&&recon.nci.length>0&&<div style={{...S.cardFlush,overflowX:'auto'}}>
+          <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border}}>
+            <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>Minority interest — indicative</span>
+            <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>Each company's total equity at this date multiplied by the share owned outside the structure. Only the companies where the dilution happens are counted, so the same minority isn't charged twice down the chain. This is a GL-derived estimate, not a computed NCI roll-forward — it includes any self-referential gross-up and excludes results not yet closed to equity.</span></div>
+          <table style={S.table}><thead><tr>
+            <th style={S.th}>Company</th><th style={S.thR}>Owned %</th><th style={S.thR}>Effective %</th>
+            <th style={S.thR}>Minority %</th><th style={S.thR}>Total equity</th><th style={S.thR}>Minority share</th></tr></thead>
+          <tbody>{recon.nci.map(n=><tr key={n.node_id}>
+            <td style={{...S.td,fontWeight:600,color:T.textBright}}>{n.name}</td>
+            <td style={S.tdR}>{Number(n.ownership_pct).toFixed(2)}%</td>
+            <td style={S.tdR}>{Number(n.effective_pct).toFixed(2)}%</td>
+            <td style={{...S.tdR,color:T.orange,fontWeight:600}}>{Number(n.nci_pct).toFixed(2)}%</td>
+            <td style={S.tdR}>{fmt(n.entity_equity)}</td>
+            <td style={{...S.tdR,fontWeight:600}}>{fmt(n.nci_equity)}</td></tr>)}
+            <tr style={S.grandTotalRow}><td style={S.tdBold}>Total</td><td style={S.tdR}></td><td style={S.tdR}></td><td style={S.tdR}></td><td style={S.tdR}></td>
+              <td style={{...S.tdBold,textAlign:'right'}}>{fmt(recon.totals.nci_equity_total)}</td></tr>
+          </tbody></table></div>}
+      </>}
     </>}
   </div>);
 }

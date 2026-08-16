@@ -732,6 +732,7 @@ module.exports = {
   reconcileDueFromTo,
   reconcileInvestmentCapital,
   suggestMappings,
+  listMappings,
   parseAccountName,
   matchEntity,
   normName,

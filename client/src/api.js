@@ -594,5 +594,21 @@ export const api = {
   reconcileIcInvestment: (group_id, as_of) =>
     request('/intercompany/reconcile/investment?group_id=' + group_id + (as_of ? '&as_of=' + as_of : '')),
 
+  // -- Org structure (ownership tree) --
+  // Nodes are either a CloudLedger entity or a ledger-less shell; edges carry
+  // the ownership percent. The investment tie-out is scoped by root node, not
+  // by IC group, because it walks the chain rather than a flat member list.
+  getOrgStructure: () => request('/org-structure'),
+  getOrgTree: (root_node_id) => request('/org-structure/tree?root_node_id=' + root_node_id),
+  createOrgNode: (b) => request('/org-structure/nodes', { method: 'POST', body: b }),
+  saveOrgNode: (id, b) => request('/org-structure/nodes/' + id, { method: 'PUT', body: b }),
+  deleteOrgNode: (id) => request('/org-structure/nodes/' + id, { method: 'DELETE' }),
+  createOrgEdge: (b) => request('/org-structure/edges', { method: 'POST', body: b }),
+  saveOrgEdge: (id, b) => request('/org-structure/edges/' + id, { method: 'PUT', body: b }),
+  deleteOrgEdge: (id) => request('/org-structure/edges/' + id, { method: 'DELETE' }),
+  seedOrgClrf: () => request('/org-structure/seed/clrf', { method: 'POST', body: {} }),
+  reconcileOrgInvestments: (root_node_id, as_of) =>
+    request('/org-structure/reconcile/investments?root_node_id=' + root_node_id + (as_of ? '&as_of=' + as_of : '')),
+
   setToken, getToken, clearToken,
 };

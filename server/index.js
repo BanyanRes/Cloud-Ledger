@@ -8642,6 +8642,23 @@ require('./intercompany').registerIntercompanyRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// === Org structure (ownership tree) ===
+// Who owns whom, from the legal org charts, including holding companies that
+// hold investment balances but keep no ledger here. Drives two things the
+// entities table cannot express: effective ownership / NCI through a
+// multi-level chain, and the look-through tie of a fund's investment account
+// to the contributed capital of the operating company it funded (CLRF's
+// investment names the operating company; the operating company's capital
+// names an intermediate shell, so neither side names the other).
+// See server/orgstructure.js.
+require('./orgstructure').registerOrgStructureRoutes(app, {
+  db,
+  auth,
+  requireRole,
+  userHasEntityAccess,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ Financial Statements package generator ═══
 // Generates GL-derived financial statements (Balance Sheet, Operations, Cash
 // Flows, Members' Equity) for an entity as of a date, on a monthly/quarterly/
