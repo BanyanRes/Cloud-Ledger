@@ -265,6 +265,57 @@ function matchCompany(label, entities, companies) {
   return { ...viaEntity, node_id: null };
 }
 
+// ── Individual investors ──
+//
+// Outside individuals hold capital in most of these entities ("Contributed
+// Capital - John H. Grayson Jr."). They are not intercompany counterparties:
+// nothing ever eliminates against a person, and proposing a mapping for each
+// one buries the handful of real company counterparties in noise. They are
+// therefore kept out of the suggestion list and out of the "not mapped yet"
+// panel entirely.
+//
+// The test is deliberately narrow. It is applied ONLY to contributed-capital
+// accounts, because that is the only place a person appears — an investment
+// account never names one. That restriction is what makes it safe: two-word
+// company names like "North Tempe" and "Mountain Banyan" read exactly like
+// personal names, but they sit on investment accounts and are never examined.
+
+// Any of these words means the label is an organisation, whatever else it says.
+const COMPANY_HINTS = /\b(llc|l\.l\.c|lp|llp|lllp|inc|incorporated|corp|corporation|co|company|ltd|limited|plc|pllc|pc|trust|fund|funds|capital|holding|holdings|partner|partners|partnership|group|venture|ventures|management|manager|properties|property|investment|investments|investor|investors|associates|sponsor|midco|propco|opco|qozb|qof|jv|joint|bank|reit|gst|endowment|foundation|university|realty|development|enterprises|solutions|services|industries|resources|energy|equity|advisors|advisers|estates|land|rail|railroad|sfr|qoz)\b/i;
+
+// Any of these means the label is a thing rather than a party — "Waived
+// Development Fee", "Prior Period Adjustment". Those are not people either, but
+// they must not be reported as one.
+const NON_PARTY_HINTS = /\b(fee|fees|waived|expense|expenses|reserve|contribution|contributions|adjustment|distribution|distributions|note|notes|loan|interest|misc|miscellaneous|other|various|prior|opening|beginning|retained|earnings|income|syndication|organization|organisation|org|payable|receivable|clearing|suspense)\b/i;
+
+const NAME_SUFFIX = /^(jr|sr|ii|iii|iv|md|phd|esq)$/i;
+
+// True when the label reads as a personal name: two to four alphabetic words,
+// allowing a middle initial and a generational suffix, with no organisation
+// word, no digits and no ampersand.
+function looksIndividual(label) {
+  const raw = String(label || '').trim();
+  if (!raw) return false;
+  if (COMPANY_HINTS.test(raw)) return false;
+  if (NON_PARTY_HINTS.test(raw)) return false;
+  if (/[&@\/\d]/.test(raw)) return false;
+  const toks = raw.replace(/[.,]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  if (toks.length < 2 || toks.length > 4) return false;
+  let core = 0;
+  for (const t of toks) {
+    if (NAME_SUFFIX.test(t)) continue;
+    if (!/^[A-Za-z'-]+$/.test(t)) return false;
+    if (t.length === 1) continue;
+    core++;
+  }
+  return core >= 2;
+}
+
+// A parsed account is an individual investor's capital only on the capital side.
+function isIndividualInvestor(parsed) {
+  return !!parsed && parsed.ic_type === 'contributed_capital' && looksIndividual(parsed.label);
+}
+
 // Parse a GL account name into { ic_type, counterparty_label }, or null when the
 // name is not an intercompany account at all.
 function parseAccountName(name) {
@@ -387,7 +438,8 @@ function deleteMapping(db, id) {
 // counterparty was chosen, so a reviewer can see what actually matters (a
 // nonzero balance) and where the matcher was unsure. Nothing is saved here —
 // the client posts back only the rows a person accepted.
-function suggestMappings(db, entityId, { computeBalances, as_of }) {
+function suggestMappings(db, entityId, { computeBalances, as_of, includeIndividuals }) {
+  const hiddenIndividuals = [];
   ensureSchema(db);
   const entities = db.prepare('SELECT id, name, code FROM entities').all();
   const companies = listCompanies(db);
@@ -402,6 +454,10 @@ function suggestMappings(db, entityId, { computeBalances, as_of }) {
     if (existing.has(String(a.code))) continue;
     const parsed = parseAccountName(a.name);
     if (!parsed) continue;
+    if (isIndividualInvestor(parsed)) {
+      hiddenIndividuals.push({ account_code: String(a.code), account_name: a.name, label: parsed.label });
+      if (!includeIndividuals) continue;
+    }
     const match = matchCompany(parsed.label, entities, companies);
     const bal = balByCode.get(String(a.code));
     const self = match.entity_id != null && Number(match.entity_id) === Number(entityId);
@@ -427,7 +483,8 @@ function suggestMappings(db, entityId, { computeBalances, as_of }) {
   }
   // Accounts that carry money first — a zero-balance shell account is noise.
   out.sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance) || a.account_code.localeCompare(b.account_code));
-  return out;
+  if (includeIndividuals) for (const o of out) o.individual = looksIndividual(o.counterparty_label) && o.ic_type === 'contributed_capital';
+  return { suggestions: out, hidden_individuals: hiddenIndividuals.length, hidden_examples: hiddenIndividuals.slice(0, 5) };
 }
 
 // ══════════════════════════ Reconciliation helpers ══════════════════════════
@@ -479,6 +536,9 @@ function findUnmapped(db, memberIds, balances, mappings, wantedTypes) {
       if (mapped.has(eid + '|' + String(a.code))) continue;
       const parsed = parseAccountName(a.name);
       if (!parsed || !wantedTypes.includes(parsed.ic_type)) continue;
+      // An outside individual's capital is not an unmapped intercompany
+      // balance — it is simply not intercompany.
+      if (isIndividualInvestor(parsed)) continue;
       const row = (balances.get(eid) || new Map()).get(String(a.code));
       const bal = row ? Number(row.balance) || 0 : 0;
       if (Math.abs(bal) < DEFAULT_TOLERANCE) continue;
@@ -812,7 +872,8 @@ function registerIntercompanyRoutes(app, deps) {
       const entity_id = Number(req.query.entity_id);
       if (!entity_id) return res.status(400).json({ error: 'entity_id is required' });
       assertEntityAccess(req, [entity_id]);
-      res.json(suggestMappings(db, entity_id, { computeBalances, as_of: req.query.as_of }));
+      res.json(suggestMappings(db, entity_id, { computeBalances, as_of: req.query.as_of,
+        includeIndividuals: req.query.include_individuals === '1' }));
     } catch (e) { fail(res, e); }
   });
 
@@ -886,6 +947,8 @@ module.exports = {
   listCompanies,
   resolveCounterparties,
   matchCompany,
+  looksIndividual,
+  isIndividualInvestor,
   parseAccountName,
   matchEntity,
   normName,

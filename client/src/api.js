@@ -583,8 +583,13 @@ export const api = {
     const s = p.toString();
     return request('/intercompany/mappings' + (s ? '?' + s : ''));
   },
-  suggestIcMappings: (entity_id, as_of) =>
-    request('/intercompany/mappings/suggest?entity_id=' + entity_id + (as_of ? '&as_of=' + as_of : '')),
+  // Returns { suggestions, hidden_individuals, hidden_examples }. Outside
+  // individuals holding capital are dropped by default — they are never
+  // intercompany counterparties. Pass includeIndividuals to see them anyway.
+  suggestIcMappings: (entity_id, as_of, includeIndividuals) =>
+    request('/intercompany/mappings/suggest?entity_id=' + entity_id
+      + (as_of ? '&as_of=' + as_of : '')
+      + (includeIndividuals ? '&include_individuals=1' : '')),
   // Accepts one mapping object or an array of them (the "accept suggestions" path).
   createIcMapping: (b) => request('/intercompany/mappings', { method: 'POST', body: b }),
   updateIcMapping: (id, b) => request('/intercompany/mappings/' + id, { method: 'PUT', body: b }),

@@ -6401,6 +6401,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[rows,setRows]=useState([]);const[groups,setGroups]=useState([]);
   const[loading,setLoading]=useState(false);const[err,setErr]=useState('');const[msg,setMsg]=useState('');
   const[sugg,setSugg]=useState(null);const[picked,setPicked]=useState({});
+  const[hiddenIndiv,setHiddenIndiv]=useState(0);const[showIndiv,setShowIndiv]=useState(false);
   const[editId,setEditId]=useState(null);const[editForm,setEditForm]=useState({});
   const[showAdd,setShowAdd]=useState(false);
   const[form,setForm]=useState({account_code:'',account_name:'',ic_type:'due_from',counterparty_entity_id:'',counterparty_node_id:'',is_external:false,notes:''});
@@ -6421,13 +6422,17 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   useEffect(()=>{loadGroups();},[loadGroups]);
   useEffect(()=>{loadCompanies();},[loadCompanies]);
 
-  const runSuggest=async()=>{
+  const runSuggest=async(withIndividuals)=>{
     if(!eid)return;
     setErr('');setMsg('');
-    try{const s=await api.suggestIcMappings(eid);setSugg(s);
-      const p={};s.forEach((x,i)=>{p[i]=Math.abs(x.balance)>0.005&&(x.counterparty_entity_id!=null||x.counterparty_node_id!=null||x.is_external);});
+    try{const r=await api.suggestIcMappings(eid,null,withIndividuals);
+      const s=r.suggestions||[];
+      setSugg(s);setHiddenIndiv(r.hidden_individuals||0);setShowIndiv(!!withIndividuals);
+      // Pre-tick only rows that carry money AND already resolve. An individual,
+      // if revealed, is never pre-ticked — revealing is not the same as wanting.
+      const p={};s.forEach((x,i)=>{p[i]=!x.individual&&Math.abs(x.balance)>0.005&&(x.counterparty_entity_id!=null||x.counterparty_node_id!=null||x.is_external);});
       setPicked(p);
-      if(!s.length)setMsg('No unmapped intercompany-looking accounts found for this entity.');
+      if(!s.length)setMsg((r.hidden_individuals?('Nothing to map here — '+r.hidden_individuals+' individual investor account'+(r.hidden_individuals===1?'':'s')+' were skipped.'):'No unmapped intercompany-looking accounts found for this entity.'));
     }catch(e){setErr(e.message);}
   };
   const acceptSuggestions=async()=>{
@@ -6524,7 +6529,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           <select style={S.select} value={eid} onChange={e=>{setEid(e.target.value);setSugg(null);setMsg('');}}>
             <option value=''>Select an entity…</option>
             {(entities||[]).map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
-        {canEdit&&eid&&<><button style={S.btnS} onClick={runSuggest}>Suggest from account names</button>
+        {canEdit&&eid&&<><button style={S.btnS} onClick={()=>runSuggest(false)}>Suggest from account names</button>
           <button style={S.btnP} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add mapping'}</button></>}</div>
 
       {showAdd&&<div style={{...S.card,borderColor:T.green+'40'}}>
@@ -6545,13 +6550,19 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         <div style={{padding:'12px 16px',background:T.accentDim,borderBottom:'1px solid '+T.border,display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
           <div><span style={{fontWeight:700,color:T.accent,fontSize:13}}>Suggested from account names ({sugg.length})</span>
             <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>Nothing is saved until you accept. Rows with a balance and a confident match are pre-ticked.</span></div>
-          <div style={{display:'flex',gap:8}}>
+          <div style={{display:'flex',gap:8,alignItems:'center'}}>
+            {hiddenIndiv>0&&!showIndiv&&<span style={{color:T.textMuted,fontSize:12}}>
+              {hiddenIndiv} individual investor{hiddenIndiv===1?'':'s'} skipped
+              <button style={{...S.link,marginLeft:6}} onClick={()=>runSuggest(true)}>show</button></span>}
+            {showIndiv&&<span style={{color:T.textMuted,fontSize:12}}>
+              showing individuals
+              <button style={{...S.link,marginLeft:6}} onClick={()=>runSuggest(false)}>hide</button></span>}
             <button style={S.btnS} onClick={()=>setSugg(null)}>Discard</button>
             <button style={S.btnP} onClick={acceptSuggestions}>Accept selected</button></div></div>
         <div style={{overflowX:'auto'}}><table style={S.table}><thead><tr>
           <th style={{...S.th,width:36}}></th><th style={S.th}>Account</th><th style={S.th}>Kind</th>
           <th style={S.th}>Counterparty</th><th style={S.thR}>Balance</th><th style={S.th}>Match</th></tr></thead>
-        <tbody>{sugg.map((s,i)=><tr key={s.account_code} style={{background:s.self_referential?T.redDim:(picked[i]?T.accentDim:'transparent')}}>
+        <tbody>{sugg.map((s,i)=><tr key={s.account_code} style={{background:s.self_referential?T.redDim:(picked[i]?T.accentDim:'transparent'),opacity:s.individual?0.65:1}}>
           <td style={S.tdC}><input type='checkbox' style={S.checkbox} checked={!!picked[i]} onChange={e=>setPicked(p=>({...p,[i]:e.target.checked}))}/></td>
           <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{s.account_code}</span> <span style={{color:T.textMuted}}>{s.account_name}</span></td>
           <td style={S.td}>{IC_TYPE_LABEL[s.ic_type]||s.ic_type}</td>
@@ -6561,13 +6572,14 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
             v=>setSugg(a=>a.map((x,j)=>j===i?{...x,counterparty_node_id:v?Number(v):null,counterparty_entity_id:null,is_external:0}:x)),
             s.counterparty_label)}</td>
           <td style={{...S.tdR,fontWeight:Math.abs(s.balance)>0.005?600:400,color:Math.abs(s.balance)>0.005?T.textBright:T.textDim}}>{fmt(s.balance)}</td>
-          <td style={{...S.td,whiteSpace:'normal'}}>{s.self_referential?<IcBadge kind="bad">points at itself</IcBadge>
+          <td style={{...S.td,whiteSpace:'normal'}}>{s.individual?<IcBadge kind="mute">individual</IcBadge>
+            :s.self_referential?<IcBadge kind="bad">points at itself</IcBadge>
             :s.confidence==='external'?<IcBadge kind="warn">external</IcBadge>
             :s.counterparty_node_id?<IcBadge kind="ok">company</IcBadge>
             :s.counterparty_entity_id?<IcBadge kind="ok">{s.confidence}</IcBadge>
             :<IcBadge kind="mute">{s.confidence}</IcBadge>}
             <span style={{color:T.textDim,fontSize:11,marginLeft:6}}>{s.reason}</span>
-            {s.can_register&&!s.counterparty_node_id&&!s.counterparty_entity_id&&
+            {s.can_register&&!s.individual&&!s.counterparty_node_id&&!s.counterparty_entity_id&&
               <button style={{...S.link,marginLeft:8,fontWeight:600}} onClick={async()=>{
                 try{const r=await api.createIcCompany({name:s.counterparty_label});
                   await loadCompanies();
