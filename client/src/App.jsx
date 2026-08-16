@@ -176,6 +176,25 @@ const T = {
   sidebarBg: '#1e293b', sidebarText: '#94a3b8', sidebarActive: '#e2e8f0', sidebarAccent: '#3b82f6',
 };
 
+// Wide tables used to put their horizontal scrollbar at the BOTTOM OF THE TABLE,
+// so reaching it meant scrolling the whole page down past every row. Capping the
+// container's height keeps both scrollbars on screen at all times, and the CSS
+// below pins the header row so the columns stay labelled while scrolling.
+const scrollBox = extra => ({
+  background: T.bgCard, border: '1px solid ' + T.border, borderRadius: T.radius,
+  marginBottom: 20, boxShadow: T.shadow,
+  overflow: 'auto', maxHeight: 'calc(100vh - 300px)',
+  ...(extra || {}),
+});
+const SCROLL_CSS = `
+.cl-scroll thead th { position: sticky; top: 0; z-index: 2; }
+.cl-scroll { scrollbar-color: #cbd5e1 #f1f5f9; }
+.cl-scroll::-webkit-scrollbar { height: 12px; width: 12px; }
+.cl-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 6px; }
+.cl-scroll::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+.cl-scroll::-webkit-scrollbar-track { background: #f1f5f9; }
+`;
+
 const S = {
   app: { fontFamily: "'Inter',-apple-system,sans-serif", background: T.bg, color: T.text, minHeight: '100vh', display: 'flex', flexDirection: 'column', fontSize: 13, lineHeight: 1.5 },
   topBar: { background: T.bgCard, borderBottom: '1px solid '+T.border, padding: '0 24px', height: 56, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, zIndex: 10, boxShadow: T.shadow },
@@ -811,6 +830,7 @@ export default function App(){
   };
 
   return(<div style={S.app}>
+    <style>{SCROLL_CSS}</style>
     <div style={S.topBar}><div style={{display:'flex',alignItems:'center',gap:16}}>
       <button style={{...S.btnGhost,fontSize:18,padding:'4px 6px',color:T.textMuted}} onClick={()=>setSidebarCol(c=>!c)}>{sidebarCol?'\u2630':'\u2190'}</button>
       <div style={{display:'flex',alignItems:'center',gap:10}}><Logo size={32}/>{!sidebarCol&&<div style={{fontSize:17,fontWeight:800,color:T.textBright}}>CloudLedger</div>}</div>
@@ -2472,7 +2492,7 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled,isBanyanRes}){
         <span style={{margin:'0 10px'}}>·</span>Open <span style={{color:T.textBright,fontWeight:600}}>{fmt(totals.open)}</span></div>
     </div>
     {err&&!showNew&&<div style={S.err}>{err}</div>}
-    <div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+    <div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
       <th style={S.th}>Invoice #</th><th style={S.th}>Date</th><th style={S.th}>Customer</th><th style={S.th}>Memo</th>
       <th style={S.th}>Due</th><th style={{...S.th,width:100}}>Status</th><th style={S.thR}>Total</th><th style={S.thR}>Open</th></tr></thead>
       <tbody>
@@ -2637,7 +2657,7 @@ function ArRecurring({entityId,entityName,canEdit,dimsEnabled}){
         <button style={S.btnP} onClick={save} disabled={busy==='save'}>{busy==='save'?'Saving…':(editId?'Save Template':'Create Template')}</button></div>
     </div>}
     {err&&!showNew&&<div style={S.err}>{err}</div>}
-    <div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+    <div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
       <th style={S.th}>Customer</th><th style={S.th}>Memo</th><th style={S.th}>Frequency</th><th style={S.th}>Next run</th>
       <th style={S.thR}>Amount</th><th style={{...S.th,width:90}}>Status</th>{canEdit&&<th style={{...S.th,width:210}}>Actions</th>}</tr></thead>
       <tbody>
@@ -2804,7 +2824,7 @@ function ArAgingReport({entityId,entityName}){
       <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,cursor:'pointer'}}><input type="checkbox" style={S.checkbox} checked={showDetail} onChange={e=>setShowDetail(e.target.checked)}/>Show invoice detail</label>
     </div>{err&&<div style={S.err}>{err}</div>}</div>
     {data&&<>
-      <div style={{...S.cardFlush,overflowX:'auto'}}>
+      <div className="cl-scroll" style={scrollBox()}>
         {!hasAnything?<div style={{padding:24,color:T.textMuted}}>No open A/R as of {data.as_of}.</div>:
         <table style={S.table}><thead><tr><th style={S.th}>Customer</th>{BK.map(b=><th key={b[0]} style={S.thR}>{b[1]}</th>)}<th style={{...S.thR,color:T.accent}}>GL</th><th style={S.thR}>Total</th></tr></thead>
           <tbody>
@@ -4241,7 +4261,7 @@ function PivotReport({entityId,entityName,canEdit=true,pendingConfig,clearPendin
       {err&&<div style={S.err}>{err}</div>}
       <button style={{...S.btnP,marginTop:14}} onClick={run} disabled={loading}>{loading?'Running...':'Run Pivot'}</button>
     </div>
-    {data&&<div style={{...S.cardFlush,overflowX:'auto'}}>
+    {data&&<div className="cl-scroll" style={scrollBox()}>
       {data.rows.length===0?<div style={{padding:24,color:T.textDim}}>No activity for the selected accounts/period.</div>:
       <table style={S.table}><thead><tr><th style={{...S.th,position:'sticky',left:0,background:T.bgCard}}>{dim==='class'?(classTerm()==='Class'?'Class / Investor':classTerm()):dim==='location'?'Location':'Project'}</th>{data.columns.map(c=><th key={c.code} style={S.thR} title={c.code+' '+c.name}>{c.name||c.code}</th>)}<th style={S.thR}>Total</th></tr></thead>
       <tbody>{data.rows.map(r=><tr key={r.id}><td style={{...S.td,position:'sticky',left:0,background:T.bgCard,fontWeight:500}}>{r.name}</td>{data.columns.map(c=><td key={c.code} style={S.tdR}>{r.cells[c.code]?fmt(r.cells[c.code]):''}</td>)}<td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(r.total)}</td></tr>)}
@@ -4400,7 +4420,7 @@ function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPend
       </div>
       {err&&<div style={S.err}>{err}</div>}
     </div>
-    {data&&<div style={{...S.cardFlush,overflowX:'auto'}}>
+    {data&&<div className="cl-scroll" style={scrollBox()}>
       {!hasAnything?<div style={{padding:24,color:T.textDim}}>No open A/P as of {data.as_of}.</div>:
       <table style={S.table}><thead><tr>
         <th style={S.th}>Date</th><th style={S.th}>Type</th><th style={S.th}>Num</th><th style={S.th}>Vendor</th><th style={S.th}>Due Date</th><th style={S.thR}>Past Due</th>
@@ -5149,7 +5169,7 @@ function CommitmentsPage({entityId,entityName,canEdit=true}){
     {loading?<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Loading…</div>:
      err&&!showAdd?<div style={S.err}>{err}</div>:
      !data||data.investors.length===0?<div style={{...S.card,textAlign:'center',padding:50,color:T.textDim}}>No commitments recorded yet.</div>:
-     <div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+     <div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
        <th style={S.th}>Investor</th><th style={S.thR}>Commitment</th><th style={S.thR}>Called to Date</th><th style={S.thR}>Uncalled</th><th style={S.thR}>% Called</th><th style={S.thR}>Ownership %</th><th style={S.th}>Commit Date</th>{canEdit&&<th style={{...S.th,width:120}}>Actions</th>}</tr></thead>
        <tbody>{data.investors.map(i=>editId===i.id?(<tr key={i.id} style={{background:T.accentDim}}>
          <td style={S.td}>{i.investor}</td>
@@ -5855,7 +5875,7 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
         {rows.length>0&&<span style={{fontSize:11,color:T.textMuted}}>{rows.length} entit{rows.length===1?'y':'ies'}: {['accounting','development','shell','operating'].map(t=>({t,n:rows.filter(r=>r.type===t).length})).filter(x=>x.n>0).map(x=>x.n+' '+x.t).join(', ')}</span>}
       </div>
       {err&&<div style={S.err}>{err}</div>}<button style={{...S.btnP,marginTop:10}} disabled={bulkBusy} onClick={async()=>{if(!rows.length){setErr('None');return;}setBulkBusy(true);setErr('');try{for(const r of rows)await api.createEntity(r.name,r.type);setBulkText('');setBulk(false);refresh();}catch(e){setErr(e.message);}finally{setBulkBusy(false);}}}>{bulkBusy?'Importing...':'Import'}</button></div>);})()}
-    <div style={{...S.cardFlush,overflowX:'auto'}}><table style={{...S.table,minWidth:1180}}><thead><tr><th style={{...S.th,minWidth:240}}>Entity</th><th style={{...S.th,width:760,minWidth:760}}>Actions</th></tr></thead>
+    <div className="cl-scroll" style={scrollBox()}><table style={{...S.table,minWidth:1180}}><thead><tr><th style={{...S.th,minWidth:240}}>Entity</th><th style={{...S.th,width:760,minWidth:760}}>Actions</th></tr></thead>
       <tbody>{ENTITY_TYPES.map(t=>{const grp=entities.filter(e=>entTypeOf(e)===t.key).sort((a,b)=>a.name.localeCompare(b.name));const isOpen=openType[t.key];return(<Fragment key={t.key}>
         <tr style={{cursor:'pointer',background:T.bgElevated,borderTop:'2px solid '+T.border}} onClick={()=>setOpenType(o=>({...o,[t.key]:!o[t.key]}))}>
           <td colSpan={2} style={{...S.td,fontWeight:700,color:T.textBright}}><span style={{marginRight:6,fontSize:12,color:T.textMuted}}>{isOpen?'▾':'▸'}</span><span style={{marginRight:8}}>{t.icon}</span>{t.label}<span style={{marginLeft:8,fontSize:11,fontWeight:600,color:T.textMuted}}>({grp.length})</span></td>
@@ -6204,7 +6224,7 @@ function IcEmpty({children}){return<div style={{...S.card,textAlign:'center',pad
 // eliminated. (CLRFI Midco I Q2 eliminated three of them by mistake.)
 function IcExternalPanel({rows}){
   if(!rows||!rows.length)return null;
-  return<div style={{...S.cardFlush,overflowX:'auto',border:'1px solid '+T.orange+'40'}}>
+  return<div style={{...S.cardFlush,border:'1px solid '+T.orange+'40'}}>
     <div style={{padding:'12px 16px',background:T.orangeDim,borderBottom:'1px solid '+T.border}}>
       <span style={{fontWeight:700,color:T.orange,fontSize:13}}>Outside the group — not eliminated ({rows.length})</span>
       <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>These face a party that is not in this group, so they stay on the consolidated balance sheet.</span></div>
@@ -6225,7 +6245,7 @@ function IcExternalPanel({rows}){
 function IcUnmappedPanel({rows,entities,onGoToMapping}){
   if(!rows||!rows.length)return null;
   const nm=id=>{const e=(entities||[]).find(x=>x.id===id);return e?e.name:'Entity '+id;};
-  return<div style={{...S.cardFlush,overflowX:'auto'}}>
+  return<div className="cl-scroll" style={scrollBox()}>
     <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border}}>
       <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>Not mapped yet ({rows.length})</span>
       <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>These accounts carry a balance and look intercompany, but no mapping tells us who they face — so they are left out of the tie-out.</span>
@@ -6320,7 +6340,7 @@ function IntercompanyReconciliation({entities,setPage}){
         <IcTile label='Not mapped' value={String(due.totals.unmapped_count)} kind={due.totals.unmapped_count?'warn':'ok'}/></div>
 
       {due.pairs.length===0?<IcEmpty>No intercompany pairs inside this group carry a balance at {due.as_of||asOf}.</IcEmpty>
-      :<div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+      :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
         <th style={{...S.th,width:28}}></th><th style={S.th}>Entity A</th><th style={S.thR}>A net receivable</th>
         <th style={S.th}>Entity B</th><th style={S.thR}>B net receivable</th>
         <th style={S.thR}>Difference</th><th style={S.thR}>Eliminates</th><th style={S.th}>Status</th></tr></thead>
@@ -6361,7 +6381,7 @@ function IntercompanyReconciliation({entities,setPage}){
         <IcTile label='Eliminates' value={fmt(inv.totals.total_eliminate)} kind='info'/>
         <IcTile label='Outside group (no elim)' value={fmt(inv.totals.external_total)} kind={inv.totals.external_count?'warn':'ok'}/></div>
 
-      {inv.findings.length>0&&<div style={{...S.cardFlush,border:'1px solid '+T.red+'40',overflowX:'auto'}}>
+      {inv.findings.length>0&&<div className="cl-scroll" style={scrollBox({border:'1px solid '+T.red+'40'})}>
         <div style={{padding:'12px 16px',background:T.redDim,borderBottom:'1px solid '+T.border}}>
           <span style={{fontWeight:700,color:T.red,fontSize:13}}>Investment in itself ({inv.findings.length})</span>
           <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>An entity holding an investment in itself inflates both its own assets and its own equity. A parent holding an investment in a child is normal and is not flagged.</span></div>
@@ -6374,7 +6394,7 @@ function IntercompanyReconciliation({entities,setPage}){
           <td style={{...S.td,whiteSpace:'normal'}}>{f.severity==='error'?<IcBadge kind="bad">error</IcBadge>:<IcBadge kind="warn">check</IcBadge>} <span style={{marginLeft:6}}>{f.message}</span></td></tr>)}</tbody></table></div>}
 
       {inv.pairs.length===0?<IcEmpty>No parent/child investment relationships inside this group carry a balance at {inv.as_of||asOf}.</IcEmpty>
-      :<div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+      :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
         <th style={S.th}>Parent (holds the investment)</th><th style={S.th}>Child</th>
         <th style={S.thR}>Investment</th><th style={S.thR}>Contributed capital</th>
         <th style={S.thR}>Difference</th><th style={S.thR}>Eliminates</th><th style={S.th}>Status</th></tr></thead>
@@ -6564,7 +6584,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           <th style={S.th}>Counterparty</th><th style={S.thR}>Balance</th><th style={S.th}>Match</th></tr></thead>
         <tbody>{sugg.map((s,i)=><tr key={s.account_code} style={{background:s.self_referential?T.redDim:(picked[i]?T.accentDim:'transparent'),opacity:s.individual?0.65:1}}>
           <td style={S.tdC}><input type='checkbox' style={S.checkbox} checked={!!picked[i]} onChange={e=>setPicked(p=>({...p,[i]:e.target.checked}))}/></td>
-          <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{s.account_code}</span> <span style={{color:T.textMuted}}>{s.account_name}</span></td>
+          <td style={{...S.td,whiteSpace:'normal',minWidth:220}}><span style={{fontWeight:600,color:T.textBright}}>{s.account_code}</span> <span style={{color:T.textMuted}}>{s.account_name}</span></td>
           <td style={S.td}>{IC_TYPE_LABEL[s.ic_type]||s.ic_type}</td>
           <td style={S.td}>{cpCell(s.counterparty_entity_id,s.counterparty_node_id,!!s.is_external,
             v=>setSugg(a=>a.map((x,j)=>j===i?{...x,is_external:v?1:0,counterparty_entity_id:null,counterparty_node_id:null}:x)),
@@ -6592,7 +6612,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
       {loading?<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Loading…</div>
       :!eid?<IcEmpty>Pick an entity to see and edit its intercompany account mappings.</IcEmpty>
       :rows.length===0?<IcEmpty>{entName(eid)} has no intercompany mappings yet. Use <b>Suggest from account names</b> to get started.</IcEmpty>
-      :<div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+      :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
         <th style={S.th}>Account</th><th style={S.th}>Kind</th><th style={S.th}>Counterparty</th><th style={S.th}>Notes</th>
         {canEdit&&<th style={{...S.th,width:110}}>Actions</th>}</tr></thead>
       <tbody>{rows.map(r=>editId===r.id?(<tr key={r.id} style={{background:T.accentDim}}>
@@ -6630,7 +6650,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           }catch(e){setErr(e.message);}}}>+ Register company</button>}</div>
 
       {offLedgerCompanies.length===0?<IcEmpty>No off-ledger companies registered yet. When a suggested mapping names a company CloudLedger doesn't have, you can register it in one click from the suggestions list.</IcEmpty>
-      :<div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+      :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
         <th style={S.th}>Company</th><th style={S.th}>Kind</th><th style={S.th}>Notes</th></tr></thead>
       <tbody>{offLedgerCompanies.map(c=><tr key={c.id}>
         <td style={{...S.td,fontWeight:600,color:T.textBright}}>{c.name} <span style={{marginLeft:6}}><IcBadge kind="info">no ledger</IcBadge></span></td>
@@ -6663,7 +6683,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           <button style={S.btnS} onClick={()=>{setGEdit(null);setErr('');}}>Cancel</button></div></div>}
 
       {groups.length===0&&!gEdit?<IcEmpty>No groups yet. Create one to run the reconciliation.</IcEmpty>
-      :<div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+      :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
         <th style={S.th}>Group</th><th style={S.th}>Entities</th><th style={S.th}>Notes</th>{canEdit&&<th style={{...S.th,width:110}}>Actions</th>}</tr></thead>
       <tbody>{groups.map(g=><tr key={g.id}>
         <td style={{...S.td,fontWeight:600,color:T.textBright}}>{g.name}</td>
@@ -6888,7 +6908,7 @@ function OrgStructurePage({entities,canEdit=true}){
           <button style={S.btnS} onClick={()=>{setEdit(null);setAddUnder(null);setErr('');}}>Cancel</button>
           {edit&&<button style={{...S.btnD,marginLeft:'auto'}} onClick={removeNode}>Remove from structure</button>}</div></div>}
 
-      <div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+      <div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
         <th style={S.th}>Company</th><th style={S.th}>Kind</th><th style={S.thR}>Owned %</th>
         <th style={S.thR}>Effective %</th><th style={S.thR}>Minority %</th><th style={S.th}>Notes</th>
         {canEdit&&<th style={{...S.th,width:70}}></th>}</tr></thead>
@@ -6909,7 +6929,7 @@ function OrgStructurePage({entities,canEdit=true}){
           <IcTile label='Shells in the chain' value={String(recon.totals.shell_count)} kind='info'/></div>
 
         {recon.rows.length===0?<IcEmpty>No investment accounts are mapped on the entities in this structure. Map them on the <b>IC Mapping</b> page first.</IcEmpty>
-        :<div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+        :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
           <th style={{...S.th,width:28}}></th><th style={S.th}>Investor</th><th style={S.th}>Account</th>
           <th style={S.th}>Compared against</th><th style={S.thR}>Investment</th>
           <th style={S.thR}>Capital on this chain</th><th style={S.thR}>Total capital</th>
@@ -6952,7 +6972,7 @@ function OrgStructurePage({entities,canEdit=true}){
           </Fragment>;})}
         </tbody></table></div>}
 
-        {recon.nci&&recon.nci.length>0&&<div style={{...S.cardFlush,overflowX:'auto'}}>
+        {recon.nci&&recon.nci.length>0&&<div className="cl-scroll" style={scrollBox()}>
           <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border}}>
             <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>Minority interest — indicative</span>
             <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>Each company's total equity at this date multiplied by the share owned outside the structure. Only the companies where the dilution happens are counted, so the same minority isn't charged twice down the chain. This is a GL-derived estimate, not a computed NCI roll-forward — it includes any self-referential gross-up and excludes results not yet closed to equity.</span></div>
