@@ -6262,31 +6262,35 @@ function IcUnmappedPanel({rows,entities,onGoToMapping}){
 
 function IntercompanyReconciliation({entities,setPage}){
   const[tab,setTab]=useState('due');
-  const[groups,setGroups]=useState([]);const[groupId,setGroupId]=useState('');
   const[asOf,setAsOf]=useState(today());
   const[due,setDue]=useState(null);const[inv,setInv]=useState(null);
   const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
   const[open,setOpen]=useState({});
-
-  useEffect(()=>{api.getIcGroups().then(g=>{setGroups(g||[]);if(g&&g.length)setGroupId(String(g[0].id));}).catch(e=>setErr(e.message));},[]);
+  // '' = show everything. Set by clicking a count in the overview strip, so the
+  // headline number and the rows behind it are never out of step.
+  const[filter,setFilter]=useState('');
 
   const run=useCallback(async()=>{
-    if(!groupId)return;
     setLoading(true);setErr('');
     try{
-      const[d,i]=await Promise.all([api.reconcileIcDue(groupId,asOf),api.reconcileIcInvestment(groupId,asOf)]);
+      const[d,i]=await Promise.all([api.reconcileIcDue(asOf),api.reconcileIcInvestment(asOf)]);
       setDue(d);setInv(i);
     }catch(e){setErr(e.message);setDue(null);setInv(null);}
     finally{setLoading(false);}
-  },[groupId,asOf]);
-  useEffect(()=>{if(groupId)run();},[groupId]);// eslint-disable-line react-hooks/exhaustive-deps
+  },[asOf]);
+  useEffect(()=>{run();},[]);// eslint-disable-line react-hooks/exhaustive-deps
+
+  // One place decides what a status is called and coloured, so the overview
+  // strip, the filter chips and the table can never disagree.
+  const ST={matched:['ok','Matched'],mismatch:['bad','Mismatch'],one_sided:['warn','One side only']};
+  const jump=(t,f)=>{setTab(t);setFilter(f);};
+  const visible=rows=>filter?rows.filter(r=>r.status===filter):rows;
 
   const toggle=k=>setOpen(o=>({...o,[k]:!o[k]}));
 
   const doExport=()=>{
     if(!due||!inv)return;
-    const g=(due.group&&due.group.name)||'Group';
-    const d=[['Intercompany Reconciliation'],[g+' — as of '+(due.as_of||asOf)],[],
+    const d=[['Intercompany Reconciliation'],['All mapped entities — as of '+(due.as_of||asOf)],[],
       ['DUE FROM / DUE TO'],['Entity A','A net (receivable)','Entity B','B net (receivable)','Difference','Eliminate','Status']];
     due.pairs.forEach(p=>d.push([p.entity_a_name,p.a_net,p.entity_b_name,p.b_net,p.difference,p.eliminate,p.status]));
     d.push([]);d.push(['OUTSIDE THE GROUP — NOT ELIMINATED']);
@@ -6300,7 +6304,7 @@ function IntercompanyReconciliation({entities,setPage}){
     d.push([]);d.push(['OUTSIDE THE GROUP — NOT ELIMINATED']);
     d.push(['Entity','Account','Account name','Type','Counterparty','Amount','Why']);
     inv.external.forEach(r=>d.push([r.entity_name,r.account_code,r.account_name,IC_TYPE_LABEL[r.ic_type]||r.ic_type,r.counterparty_name,r.amount,r.reason]));
-    exportToExcel(d,'Intercompany_Reconciliation_'+(due.as_of||asOf).replace(/-/g,'')+'.xlsx');
+    exportToExcel(d,'Intercompany_Reconciliation_'+String(due.as_of||asOf).replace(/-/g,'')+'.xlsx');
   };
 
   const statusBadge=s=>s==='matched'?<IcBadge kind="ok">matched</IcBadge>
@@ -6310,43 +6314,58 @@ function IntercompanyReconciliation({entities,setPage}){
   return(<div>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8,flexWrap:'wrap',gap:12}}>
       <div><div style={S.h1}>IC Reconciliation</div>
-        <div style={S.sub}>Ties each entity's intercompany balances to its counterparty's. Balances facing a party outside the group are never eliminated.</div></div>
+        <div style={S.sub}>Every entity that has mappings, compared against its counterparty{due?' · '+due.totals.entity_count+' entities':''}. A balance whose counterparty has no ledger here can never match, and is listed on its own.</div></div>
       <div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}>
-        <div><label style={S.label}>Group</label>
-          <select style={{...S.selectSm,minWidth:200}} value={groupId} onChange={e=>setGroupId(e.target.value)}>
-            <option value=''>Select a group…</option>
-            {groups.map(g=><option key={g.id} value={g.id}>{g.name} ({g.members.length})</option>)}</select></div>
         <div><label style={S.label}>As of</label>
           <input style={S.inputSm} type='date' value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
-        <button style={S.btnP} onClick={run} disabled={!groupId||loading}>{loading?'Running…':'Run'}</button>
+        <button style={S.btnP} onClick={run} disabled={loading}>{loading?'Running…':'Run'}</button>
         {due&&inv&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
 
-    {!groups.length&&!err&&<IcEmpty>No intercompany groups yet. Create one on the <button style={S.link} onClick={()=>setPage&&setPage('ic_mapping')}>IC Mapping</button> page — a group is the set of entities being consolidated, and it decides what eliminates and what doesn't.</IcEmpty>}
     {err&&<div style={{...S.card,borderColor:T.red+'40'}}><div style={S.err}>{err}</div></div>}
 
-    {groups.length>0&&<div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
+    {due&&inv&&<div style={{...S.card,padding:'14px 18px'}}>
+      {[['due','Due from / Due to',due,null],
+        ['investment','Investment / Contributed capital',inv,inv.totals.error_count]].map(([k,label,d,errCount])=>(
+        <div key={k} style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',padding:'7px 0',
+          borderTop:k==='investment'?'1px solid '+T.borderLight:'none'}}>
+          <div style={{minWidth:230,fontWeight:600,color:T.textBright,fontSize:13}}>{label}</div>
+          {d.totals.pair_count===0
+            ?<span style={{color:T.textDim,fontSize:12}}>nothing to compare</span>
+            :[['matched',d.totals.matched],['mismatch',d.totals.mismatched],['one_sided',d.totals.one_sided]]
+              .map(([st,n])=>(
+              <button key={st} onClick={()=>jump(k,filter===st&&tab===k?'':st)} disabled={!n}
+                style={{background:'none',border:'1px solid '+(filter===st&&tab===k?T.accent:'transparent'),
+                  borderRadius:20,padding:'2px 4px',cursor:n?'pointer':'default',opacity:n?1:0.45}}>
+                <IcBadge kind={ST[st][0]}>{n} {ST[st][1].toLowerCase()}</IcBadge></button>))}
+          {errCount>0&&<button onClick={()=>jump('investment','')} style={{background:'none',border:'none',cursor:'pointer',padding:0}}>
+            <IcBadge kind="bad">{errCount} investment in itself</IcBadge></button>}
+          <span style={{marginLeft:'auto',fontSize:12,color:T.textMuted,fontVariantNumeric:'tabular-nums'}}>
+            {d.totals.mismatched>0?<b style={{color:T.red}}>{fmt(d.totals.abs_difference!=null?d.totals.abs_difference:d.totals.total_difference)} unexplained</b>:'agrees'}
+            {d.totals.external_count>0&&<span style={{marginLeft:12}}>{d.totals.external_count} no counterparty ledger</span>}
+            {d.totals.unmapped_count>0&&<span style={{marginLeft:12}}>{d.totals.unmapped_count} not mapped</span>}</span>
+        </div>))}
+      {filter&&<div style={{marginTop:8,fontSize:12,color:T.textMuted}}>
+        Showing <b>{ST[filter]?ST[filter][1].toLowerCase():filter}</b> only
+        <button style={{...S.link,marginLeft:8}} onClick={()=>setFilter('')}>show all</button></div>}
+    </div>}
+
+    <div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
       {[['due','Due from / Due to'],['investment','Investment / Contributed capital']].map(([k,l])=>
         <button key={k} onClick={()=>setTab(k)} style={{background:'none',border:'none',borderBottom:'2px solid '+(tab===k?T.accent:'transparent'),color:tab===k?T.accent:T.textMuted,fontWeight:tab===k?700:500,fontSize:13,padding:'9px 16px',cursor:'pointer',marginBottom:-1}}>{l}
-          {k==='investment'&&inv&&inv.totals.error_count>0&&<span style={{marginLeft:7}}><IcBadge kind="bad">{inv.totals.error_count}</IcBadge></span>}</button>)}</div>}
+          {k==='investment'&&inv&&inv.totals.error_count>0&&<span style={{marginLeft:7}}><IcBadge kind="bad">{inv.totals.error_count}</IcBadge></span>}</button>)}</div>
 
     {loading&&<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Reading balances…</div>}
 
     {!loading&&tab==='due'&&due&&<>
-      <div style={{...S.row,marginBottom:20}}>
-        <IcTile label='Pairs matched' value={due.totals.matched+' of '+due.totals.pair_count} kind={due.totals.mismatched?'warn':'ok'}/>
-        <IcTile label='Eliminates' value={fmt(due.totals.total_eliminate)} kind='info'/>
-        <IcTile label='Unreconciled difference' value={fmt(due.totals.abs_difference)} kind={due.totals.abs_difference>0.005?'bad':'ok'}/>
-        <IcTile label='Outside group (no elim)' value={fmt(due.totals.external_total)} kind={due.totals.external_count?'warn':'ok'}/>
-        <IcTile label='Not mapped' value={String(due.totals.unmapped_count)} kind={due.totals.unmapped_count?'warn':'ok'}/></div>
-
-      {due.pairs.length===0?<IcEmpty>No intercompany pairs inside this group carry a balance at {due.as_of||asOf}.</IcEmpty>
+      {due.pairs.length===0?<IcEmpty>No mapped intercompany pair carries a balance at {due.as_of||asOf}. Map some accounts on the <button style={S.link} onClick={()=>setPage&&setPage('ic_mapping')}>IC Mapping</button> page first.</IcEmpty>
+      :visible(due.pairs).length===0?<IcEmpty>No pair has that status. <button style={S.link} onClick={()=>setFilter('')}>Show all</button></IcEmpty>
       :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
         <th style={{...S.th,width:28}}></th><th style={S.th}>Entity A</th><th style={S.thR}>A net receivable</th>
         <th style={S.th}>Entity B</th><th style={S.thR}>B net receivable</th>
         <th style={S.thR}>Difference</th><th style={S.thR}>Eliminates</th><th style={S.th}>Status</th></tr></thead>
-      <tbody>{due.pairs.map(p=>{const k='d'+p.entity_a_id+'-'+p.entity_b_id;const isOpen=!!open[k];
+      <tbody>{visible(due.pairs).map(p=>{const k='d'+p.entity_a_id+'-'+p.entity_b_id;const isOpen=!!open[k];
         return<Fragment key={k}>
-        <tr style={{cursor:'pointer',background:p.status==='mismatch'?T.redDim:'transparent'}} onClick={()=>toggle(k)}>
+        <tr style={{cursor:'pointer',background:p.status==='mismatch'?T.redDim:(p.status==='one_sided'?T.orangeDim:'transparent')}} onClick={()=>toggle(k)}>
           <td style={{...S.td,color:T.textDim,textAlign:'center'}}>{isOpen?'▼':'▶'}</td>
           <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.entity_a_name}</td>
           <td style={S.tdR}>{fmt(p.a_net)}</td>
@@ -6364,9 +6383,9 @@ function IntercompanyReconciliation({entities,setPage}){
             <td style={S.td}>{IC_TYPE_LABEL[l.ic_type]||l.ic_type}</td>
             <td style={S.tdR}>{fmt(l.amount)}</td></tr>)}</tbody></table></td></tr>}
         </Fragment>;})}
-        <tr style={S.grandTotalRow}><td style={S.td}></td><td style={S.tdBold}>Total</td><td style={S.tdR}></td><td style={S.td}></td><td style={S.tdR}></td>
-          <td style={{...S.tdBold,textAlign:'right',color:due.totals.abs_difference>0.005?T.red:T.green}}>{fmt(due.totals.total_difference)}</td>
-          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(due.totals.total_eliminate)}</td><td style={S.td}></td></tr>
+        <tr style={S.grandTotalRow}><td style={S.td}></td><td style={S.tdBold}>{filter?'Shown':'Total'}</td><td style={S.tdR}></td><td style={S.td}></td><td style={S.tdR}></td>
+          <td style={{...S.tdBold,textAlign:'right',color:visible(due.pairs).some(p=>p.status==='mismatch')?T.red:T.green}}>{fmt(visible(due.pairs).reduce((s,p)=>s+p.difference,0))}</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(visible(due.pairs).reduce((s,p)=>s+p.eliminate,0))}</td><td style={S.td}></td></tr>
       </tbody></table></div>}
 
       <IcExternalPanel rows={due.external}/>
@@ -6374,12 +6393,6 @@ function IntercompanyReconciliation({entities,setPage}){
     </>}
 
     {!loading&&tab==='investment'&&inv&&<>
-      <div style={{...S.row,marginBottom:20}}>
-        <IcTile label='Self-referential investments' value={String(inv.totals.error_count)} kind={inv.totals.error_count?'bad':'ok'}/>
-        <IcTile label='Gross-up amount' value={fmt(inv.totals.self_investment_total)} kind={inv.totals.self_investment_total>0.005?'bad':'ok'}/>
-        <IcTile label='Pairs matched' value={inv.totals.matched+' of '+inv.totals.pair_count} kind={inv.totals.mismatched?'warn':'ok'}/>
-        <IcTile label='Eliminates' value={fmt(inv.totals.total_eliminate)} kind='info'/>
-        <IcTile label='Outside group (no elim)' value={fmt(inv.totals.external_total)} kind={inv.totals.external_count?'warn':'ok'}/></div>
 
       {inv.findings.length>0&&<div className="cl-scroll" style={scrollBox({border:'1px solid '+T.red+'40'})}>
         <div style={{padding:'12px 16px',background:T.redDim,borderBottom:'1px solid '+T.border}}>
@@ -6393,12 +6406,13 @@ function IntercompanyReconciliation({entities,setPage}){
           <td style={{...S.tdR,fontWeight:700,color:f.severity==='error'?T.red:T.orange}}>{fmt(f.amount)}</td>
           <td style={{...S.td,whiteSpace:'normal'}}>{f.severity==='error'?<IcBadge kind="bad">error</IcBadge>:<IcBadge kind="warn">check</IcBadge>} <span style={{marginLeft:6}}>{f.message}</span></td></tr>)}</tbody></table></div>}
 
-      {inv.pairs.length===0?<IcEmpty>No parent/child investment relationships inside this group carry a balance at {inv.as_of||asOf}.</IcEmpty>
+      {inv.pairs.length===0?<IcEmpty>No mapped investment relationship carries a balance at {inv.as_of||asOf}.</IcEmpty>
+      :visible(inv.pairs).length===0?<IcEmpty>No pair has that status. <button style={S.link} onClick={()=>setFilter('')}>Show all</button></IcEmpty>
       :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
         <th style={S.th}>Parent (holds the investment)</th><th style={S.th}>Child</th>
         <th style={S.thR}>Investment</th><th style={S.thR}>Contributed capital</th>
         <th style={S.thR}>Difference</th><th style={S.thR}>Eliminates</th><th style={S.th}>Status</th></tr></thead>
-      <tbody>{inv.pairs.map(p=><tr key={p.parent_id+'>'+p.child_id} style={{background:p.status!=='matched'?T.orangeDim:'transparent'}}>
+      <tbody>{visible(inv.pairs).map(p=><tr key={p.parent_id+'>'+p.child_id} style={{background:p.status==='mismatch'?T.redDim:(p.status!=='matched'?T.orangeDim:'transparent')}}>
         <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.parent_name}</td>
         <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.child_name}</td>
         <td style={S.tdR}>{fmt(p.investment)}</td><td style={S.tdR}>{fmt(p.contributed_capital)}</td>

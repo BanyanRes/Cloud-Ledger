@@ -594,10 +594,11 @@ export const api = {
   createIcMapping: (b) => request('/intercompany/mappings', { method: 'POST', body: b }),
   updateIcMapping: (id, b) => request('/intercompany/mappings/' + id, { method: 'PUT', body: b }),
   deleteIcMapping: (id) => request('/intercompany/mappings/' + id, { method: 'DELETE' }),
-  reconcileIcDue: (group_id, as_of) =>
-    request('/intercompany/reconcile/due?group_id=' + group_id + (as_of ? '&as_of=' + as_of : '')),
-  reconcileIcInvestment: (group_id, as_of) =>
-    request('/intercompany/reconcile/investment?group_id=' + group_id + (as_of ? '&as_of=' + as_of : '')),
+  // No group: both reconciliations cover every entity that has mappings.
+  reconcileIcDue: (as_of) =>
+    request('/intercompany/reconcile/due' + (as_of ? '?as_of=' + as_of : '')),
+  reconcileIcInvestment: (as_of) =>
+    request('/intercompany/reconcile/investment' + (as_of ? '?as_of=' + as_of : '')),
 
   // People. Marking a name as an individual stops it being proposed as a
   // counterparty anywhere — the automatic name-shape test only covers capital

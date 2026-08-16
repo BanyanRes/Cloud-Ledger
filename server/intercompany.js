@@ -522,22 +522,23 @@ function suggestMappings(db, entityId, { computeBalances, as_of, includeIndividu
 
 // ══════════════════════════ Reconciliation helpers ══════════════════════════
 
-function loadGroupContext(db, groupId, { computeBalances, as_of }) {
+// Scope is every entity that has at least one mapping. An entity with no
+// mappings cannot take part in a comparison anyway - there is nothing on its
+// side to compare against - so including it would only add empty rows.
+function loadContext(db, { computeBalances, as_of, allowEntity }) {
   ensureSchema(db);
-  const group = db.prepare('SELECT * FROM intercompany_groups WHERE id = ?').get(groupId);
-  if (!group) { const e = new Error('Group not found'); e.status = 404; throw e; }
-  const memberIds = getGroupEntityIds(db, groupId);
-  if (!memberIds.length) { const e = new Error('This group has no entities yet'); e.status = 400; throw e; }
   const entities = db.prepare('SELECT id, name, code FROM entities').all();
   const entById = new Map(entities.map(e => [e.id, e]));
-  const inGroup = new Set(memberIds);
+  let mappings = resolveCounterparties(db, listMappings(db, {}));
+  if (allowEntity) mappings = mappings.filter(m => allowEntity(m.entity_id));
+  const memberIds = [...new Set(mappings.map(m => m.entity_id))];
+  const inScope = new Set(memberIds);
   const balances = new Map();
   for (const eid of memberIds) {
     const rows = computeBalances(eid, as_of ? { as_of } : {});
     balances.set(eid, new Map(rows.map(r => [String(r.code), r])));
   }
-  const mappings = resolveCounterparties(db, listMappings(db, { group_id: groupId }));
-  return { group, memberIds, inGroup, entById, balances, mappings };
+  return { memberIds, inScope, entById, balances, mappings };
 }
 
 const nameOf = (entById, id) => (entById.get(id) || {}).name || ('Entity ' + id);
@@ -551,10 +552,10 @@ function amountFor(balances, m) {
 }
 
 // Is this mapping's counterparty inside the selected group?
-function isInternal(m, inGroup) {
+function isInternal(m, inScope) {
   if (m.is_external) return false;
   if (m.counterparty_entity_id == null) return false;
-  return inGroup.has(Number(m.counterparty_entity_id));
+  return inScope.has(Number(m.counterparty_entity_id));
 }
 
 // Every intercompany-looking account that carries a balance but has no mapping
@@ -590,9 +591,9 @@ function findUnmapped(db, memberIds, balances, mappings, wantedTypes) {
 // same computed from B's side. If the relationship is stated consistently the
 // two are equal and opposite, so their SUM is the unreconciled difference.
 
-function reconcileDueFromTo(db, groupId, opts) {
+function reconcileDueFromTo(db, opts) {
   const tol = Number(opts.tolerance) > 0 ? Number(opts.tolerance) : DEFAULT_TOLERANCE;
-  const { group, memberIds, inGroup, entById, balances, mappings } = loadGroupContext(db, groupId, opts);
+  const { memberIds, inScope, entById, balances, mappings } = loadContext(db, opts);
   const rows = mappings.filter(m => m.ic_type === 'due_from' || m.ic_type === 'due_to');
 
   const pairs = new Map();   // "loId|hiId" -> pair record
@@ -606,8 +607,10 @@ function reconcileDueFromTo(db, groupId, opts) {
       amount: amt, notes: m.notes || null,
     };
 
-    if (!isInternal(m, inGroup)) {
-      // OUTSIDE THE GROUP — never eliminated. This is the CLRFI Midco I bug.
+    if (!isInternal(m, inScope)) {
+      // No second ledger to compare against, so this can never match and never
+      // eliminates. Reported on its own rather than mixed into the pairs - the
+      // CLRFI Midco I draft eliminated three of these by mistake.
       external.push({
         ...leg,
         counterparty_entity_id: m.counterparty_entity_id || null,
@@ -622,7 +625,7 @@ function reconcileDueFromTo(db, groupId, opts) {
               ? 'Registered company with no ledger in CloudLedger — nothing to match against'
               : (m.counterparty_entity_id == null
                   ? 'No counterparty mapped'
-                  : 'Counterparty is not in this group')),
+                  : 'That entity has no intercompany mappings of its own yet')),
       });
       continue;
     }
@@ -645,47 +648,59 @@ function reconcileDueFromTo(db, groupId, opts) {
 
   const pairRows = [...pairs.values()].map(p => {
     const difference = p.a_net + p.b_net;
-    // The portion that genuinely offsets and may be eliminated. When the two
-    // sides disagree only the smaller side is supported by both ledgers.
     const eliminate = (p.a_net * p.b_net < 0) ? Math.min(Math.abs(p.a_net), Math.abs(p.b_net)) : 0;
-    let status = 'matched';
-    if (Math.abs(difference) >= tol) status = 'mismatch';
-    if (Math.abs(p.a_net) < tol && Math.abs(p.b_net) < tol) status = 'empty';
+    // ONE_SIDED is the mapping-completeness signal: this side mapped the
+    // relationship and the other side never did, so the comparison cannot be
+    // made yet. That is not the same as the two sides disagreeing, and calling
+    // it a mismatch would send someone hunting a difference that does not exist.
+    const oneSided = !p.a_legs.length || !p.b_legs.length;
+    const bothEmpty = Math.abs(p.a_net) < tol && Math.abs(p.b_net) < tol;
+    let status;
+    if (bothEmpty) status = 'empty';
+    else if (oneSided) status = 'one_sided';
+    else if (Math.abs(difference) < tol) status = 'matched';
+    else status = 'mismatch';
     // Both sides receivable (or both payable) — one ledger has the sign wrong.
     const same_direction = Math.abs(p.a_net) >= tol && Math.abs(p.b_net) >= tol && p.a_net * p.b_net > 0;
     return { ...p, difference, eliminate, status, same_direction };
-  }).filter(p => p.status !== 'empty')
-    .sort((x, y) => Math.abs(y.difference) - Math.abs(x.difference));
+  }).sort((x, y) => Math.abs(y.difference) - Math.abs(x.difference));
+  const settledCount = pairRows.filter(p => p.status === 'empty').length;
+  const livePairs = pairRows.filter(p => p.status !== 'empty');
 
   const unmapped = findUnmapped(db, memberIds, balances, mappings, ['due_from', 'due_to']);
 
   return {
-    group: { id: group.id, name: group.name },
     as_of: opts.as_of || null,
     tolerance: tol,
     entities: memberIds.map(id => ({ id, name: nameOf(entById, id) })),
-    pairs: pairRows,
+    pairs: livePairs,
     external,
     unmapped,
     totals: {
-      pair_count: pairRows.length,
-      matched: pairRows.filter(p => p.status === 'matched').length,
-      mismatched: pairRows.filter(p => p.status === 'mismatch').length,
-      total_eliminate: round2(pairRows.reduce((s, p) => s + p.eliminate, 0)),
-      total_difference: round2(pairRows.reduce((s, p) => s + p.difference, 0)),
-      abs_difference: round2(pairRows.reduce((s, p) => s + Math.abs(p.difference), 0)),
+      pair_count: livePairs.length,
+      matched: livePairs.filter(p => p.status === 'matched').length,
+      mismatched: livePairs.filter(p => p.status === 'mismatch').length,
+      one_sided: livePairs.filter(p => p.status === 'one_sided').length,
+      settled: settledCount,
+      total_eliminate: round2(livePairs.reduce((s, p) => s + p.eliminate, 0)),
+      total_difference: round2(livePairs.reduce((s, p) => s + p.difference, 0)),
+      // Genuine disagreements only. A one-sided pair is an unfinished mapping,
+      // not a difference, and folding it in here would overstate the problem.
+      abs_difference: round2(livePairs.filter(p => p.status === 'mismatch')
+        .reduce((s, p) => s + Math.abs(p.difference), 0)),
       external_count: external.length,
       external_total: round2(external.reduce((s, r) => s + Math.abs(r.amount), 0)),
       unmapped_count: unmapped.length,
+      entity_count: memberIds.length,
     },
   };
 }
 
 // ═══════════ Investment / Contributed capital reconciliation ═══════════
 
-function reconcileInvestmentCapital(db, groupId, opts) {
+function reconcileInvestmentCapital(db, opts) {
   const tol = Number(opts.tolerance) > 0 ? Number(opts.tolerance) : DEFAULT_TOLERANCE;
-  const { group, memberIds, inGroup, entById, balances, mappings } = loadGroupContext(db, groupId, opts);
+  const { memberIds, inScope, entById, balances, mappings } = loadContext(db, opts);
   const rows = mappings.filter(m => m.ic_type === 'investment' || m.ic_type === 'contributed_capital');
 
   const findings = [];   // self-referential errors
@@ -717,7 +732,7 @@ function reconcileInvestmentCapital(db, groupId, opts) {
       continue;
     }
 
-    if (!isInternal(m, inGroup)) {
+    if (!isInternal(m, inScope)) {
       external.push({
         ...leg,
         counterparty_entity_id: m.counterparty_entity_id || null,
@@ -732,7 +747,7 @@ function reconcileInvestmentCapital(db, groupId, opts) {
               ? 'Registered company with no ledger in CloudLedger — nothing to match against'
               : (m.counterparty_entity_id == null
                   ? 'No counterparty mapped'
-                  : 'Counterparty is not in this group')),
+                  : 'That entity has no intercompany mappings of its own yet')),
       });
       continue;
     }
@@ -768,7 +783,6 @@ function reconcileInvestmentCapital(db, groupId, opts) {
   const unmapped = findUnmapped(db, memberIds, balances, mappings, ['investment', 'contributed_capital']);
 
   return {
-    group: { id: group.id, name: group.name },
     as_of: opts.as_of || null,
     tolerance: tol,
     entities: memberIds.map(id => ({ id, name: nameOf(entById, id) })),
@@ -782,8 +796,10 @@ function reconcileInvestmentCapital(db, groupId, opts) {
       self_investment_total: round2(findings.filter(f => f.finding === 'self_investment')
         .reduce((s, f) => s + Math.abs(f.amount), 0)),
       pair_count: pairRows.length,
+      entity_count: memberIds.length,
       matched: pairRows.filter(p => p.status === 'matched').length,
-      mismatched: pairRows.filter(p => p.status !== 'matched').length,
+      one_sided: pairRows.filter(p => p.status === 'one_sided').length,
+      mismatched: pairRows.filter(p => p.status === 'mismatch').length,
       total_eliminate: round2(pairRows.reduce((s, p) => s + p.eliminate, 0)),
       total_difference: round2(pairRows.reduce((s, p) => s + p.difference, 0)),
       external_count: external.length,
@@ -991,13 +1007,16 @@ function registerIntercompanyRoutes(app, deps) {
   });
 
   // ── Reconciliation ──
+  // No group: the reconciliation covers every entity that has mappings, so the
+  // whole picture arrives in one request. Entities the caller cannot see are
+  // filtered out rather than refused, so a scoped user still gets an answer.
   const runRecon = (fn) => (req, res) => {
     try {
-      const groupId = Number(req.query.group_id);
-      if (!groupId) return res.status(400).json({ error: 'group_id is required' });
-      assertEntityAccess(req, getGroupEntityIds(db, groupId));
       const as_of = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.as_of || '')) ? String(req.query.as_of) : null;
-      res.json(fn(db, groupId, { computeBalances, as_of, tolerance: req.query.tolerance }));
+      res.json(fn(db, {
+        computeBalances, as_of, tolerance: req.query.tolerance,
+        allowEntity: eid => userHasEntityAccess(req.user.id, req.user.role, eid),
+      }));
     } catch (e) { fail(res, e); }
   };
 
