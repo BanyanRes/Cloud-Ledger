@@ -6428,6 +6428,9 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[gEdit,setGEdit]=useState(null);// {id,name,notes,entity_ids:[]}
   const[companies,setCompanies]=useState([]);
   const[people,setPeople]=useState([]);
+  // Sorted by the name shown, not by the entity code the API sorts on — see the
+  // BROZ FUND I LLC case (code "1000", so it sorted above every other entity).
+  const entityOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
   const offLedgerCompanies=companies.filter(c=>c.entity_id==null);
 
   const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
@@ -6538,7 +6541,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
     }}>
       <option value=''>{'\u2014 pick counterparty \u2014'}</option>
       <optgroup label='CloudLedger entities'>
-        {(entities||[]).map(x=><option key={x.id} value={'e'+x.id}>{x.name}</option>)}</optgroup>
+        {entityOpts.map(x=><option key={x.id} value={'e'+x.id}>{x.name}</option>)}</optgroup>
       {offLedgerCompanies.length>0&&<optgroup label='Registered companies (no ledger)'>
         {offLedgerCompanies.map(c=><option key={c.id} value={'n'+c.id}>{c.name}</option>)}</optgroup>}
       <optgroup label='Other'>
@@ -6563,7 +6566,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         <div style={{minWidth:280}}><label style={S.label}>Entity</label>
           <select style={S.select} value={eid} onChange={e=>{setEid(e.target.value);setSugg(null);setMsg('');}}>
             <option value=''>Select an entity…</option>
-            {(entities||[]).map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
+            {entityOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
         {canEdit&&eid&&<><button style={S.btnS} onClick={()=>runSuggest(false)}>Suggest from account names</button>
           <button style={S.btnP} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add mapping'}</button></>}</div>
 
@@ -6705,7 +6708,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
             <input style={S.input} value={gEdit.notes||''} onChange={e=>setGEdit(g=>({...g,notes:e.target.value}))} placeholder='(optional)'/></div></div>
         <label style={S.label}>Entities in the group ({gEdit.entity_ids.length})</label>
         <div style={{maxHeight:260,overflowY:'auto',border:'1px solid '+T.border,borderRadius:T.radiusXs,padding:'8px 12px',marginBottom:12,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(260px,1fr))',gap:'2px 12px'}}>
-          {(entities||[]).map(x=><label key={x.id} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 0',cursor:'pointer',fontSize:12.5}}>
+          {entityOpts.map(x=><label key={x.id} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 0',cursor:'pointer',fontSize:12.5}}>
             <input type='checkbox' style={S.checkbox} checked={gEdit.entity_ids.includes(x.id)}
               onChange={e=>setGEdit(g=>({...g,entity_ids:e.target.checked?[...g.entity_ids,x.id]:g.entity_ids.filter(i=>i!==x.id)}))}/>
             <span>{x.name}</span></label>)}</div>
@@ -6782,6 +6785,8 @@ function OrgStructurePage({entities,canEdit=true}){
   const[addUnder,setAddUnder]=useState(null);
   const[form,setForm]=useState({name:'',entity_id:'',node_type:'company',notes:'',ownership_pct:'100'});
   const[open,setOpen]=useState({});
+  // By displayed name, not by entity code — see the note in IntercompanyMapping.
+  const entityOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
 
   const loadRoots=useCallback(async()=>{
     try{const d=await api.getOrgStructure();setRoots(d.roots||[]);setNodes(d.nodes||[]);
@@ -6923,7 +6928,7 @@ function OrgStructurePage({entities,canEdit=true}){
           <div style={{...S.col,flex:2}}><label style={S.label}>CloudLedger entity</label>
             <select style={S.select} value={form.entity_id} onChange={e=>setForm(f=>({...f,entity_id:e.target.value,node_type:e.target.value?(f.node_type==='shell'?'company':f.node_type):'shell'}))}>
               <option value=''>None — shell with no ledger</option>
-              {(entities||[]).map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
+              {entityOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
           <div style={S.col}><label style={S.label}>Kind</label>
             <select style={S.select} value={form.node_type} onChange={e=>setForm(f=>({...f,node_type:e.target.value}))}>
               {Object.keys(ORG_NODE_TYPE_LABEL).map(k=><option key={k} value={k}>{ORG_NODE_TYPE_LABEL[k]}</option>)}</select></div>
