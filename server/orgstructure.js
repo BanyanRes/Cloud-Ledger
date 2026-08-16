@@ -41,7 +41,7 @@
 // investor. Validated at 6/30/2026 — CLRF 121031 (60,408,356.37) against SRN's
 // total contributed capital (60,408,356.26) ties to $0.11.
 
-const { parseAccountName, listMappings } = require('./intercompany');
+const { parseAccountName, listMappings, resolveCounterparties } = require('./intercompany');
 
 const NODE_TYPES = ['fund', 'holdco', 'company', 'property_owner', 'shell'];
 const DEFAULT_TOLERANCE = 0.005;
@@ -273,7 +273,9 @@ function reconcileFundInvestments(db, rootNodeId, opts) {
   // side is read straight off the chart of accounts so an unmapped capital
   // account still counts).
   const mappings = [];
-  for (const eid of ledgerEntityIds) mappings.push(...listMappings(db, { entity_id: eid }));
+  for (const eid of ledgerEntityIds) {
+    mappings.push(...resolveCounterparties(db, listMappings(db, { entity_id: eid })));
+  }
 
   // Every contributed-capital account on a ledger entity, with the counterparty
   // its mapping names (or, when unmapped, the label parsed from its name).
@@ -315,9 +317,21 @@ function reconcileFundInvestments(db, rootNodeId, opts) {
   // capital (11,760,052.36) that represents the same money.
   const comparisonNodeFor = (investorNode, targetNode) => {
     const i = targetNode.path.indexOf(investorNode.id);
-    if (i < 0) return targetNode;
-    const below = targetNode.path.slice(i + 1);
-    for (const id of below) if (hasCapital(id)) return byNodeId.get(id);
+    if (i >= 0) {
+      const below = targetNode.path.slice(i + 1);
+      for (const id of below) if (hasCapital(id)) return byNodeId.get(id);
+    }
+    if (hasCapital(targetNode.id)) return targetNode;
+    // The account may name a company that has no ledger of its own — a QOZB, a
+    // joint venture. The capital that answers to the investment then sits on
+    // the operating company BELOW it, so keep descending. Breadth-first so the
+    // nearest such company wins rather than the deepest.
+    const queue = [...(targetNode.children || [])];
+    while (queue.length) {
+      const n = queue.shift();
+      if (hasCapital(n.id)) return n;
+      queue.push(...(n.children || []));
+    }
     return targetNode;
   };
 
@@ -327,7 +341,13 @@ function reconcileFundInvestments(db, rootNodeId, opts) {
     const investorNode = nodeForEntity.get(m.entity_id);
     if (!investorNode) continue;
     const amount = amountOf(m.entity_id, m.account_code);
-    const targetNode = m.counterparty_entity_id != null ? nodeForEntity.get(Number(m.counterparty_entity_id)) : null;
+    // A mapping may face a registered company (an org node) rather than an
+    // entity. Prefer the node: it pins the exact position in the tree, which an
+    // entity id cannot when the same entity appears on two branches.
+    const targetNode = m.counterparty_node_id != null
+      ? (byNodeId.get(Number(m.counterparty_node_id))
+         || (m.counterparty_entity_id != null ? nodeForEntity.get(Number(m.counterparty_entity_id)) : null))
+      : (m.counterparty_entity_id != null ? nodeForEntity.get(Number(m.counterparty_entity_id)) : null);
 
     // Self-referential investments are the IC Reconciliation's job, not this
     // report's — skip them here so they aren't double-reported.
@@ -339,9 +359,12 @@ function reconcileFundInvestments(db, rootNodeId, opts) {
         account_code: m.account_code, account_name: m.account_name, investment: amount,
         named_entity_id: m.counterparty_entity_id || null, named_name: null,
         subsidiary_entity_id: null, subsidiary_name: null, status: 'not_in_tree',
-        message: m.counterparty_entity_id
-          ? 'The subsidiary this account names is not in this ownership structure.'
-          : 'This investment account has no counterparty mapped.',
+        message: m.off_ledger
+          ? 'This account faces a registered company that has no ledger in CloudLedger, and it is not placed in this ownership structure. Add it to the structure to tie the investment through to the company below it.'
+          : (m.counterparty_entity_id
+              ? 'The subsidiary this account names is not in this ownership structure.'
+              : 'This investment account has no counterparty mapped.'),
+        off_ledger: !!m.off_ledger,
         chain: [], chain_capital: 0, total_capital: 0,
         chain_difference: amount, total_difference: amount,
         chain_legs: [], other_legs: [], effective_pct: null, nci_pct: null, retargeted: false,
@@ -351,6 +374,25 @@ function reconcileFundInvestments(db, rootNodeId, opts) {
 
     const cmpNode = comparisonNodeFor(investorNode, targetNode);
     const retargeted = cmpNode.id !== targetNode.id;
+    if (cmpNode.entity_id == null) {
+      // Nothing below this branch keeps a ledger, so there is no capital to
+      // compare against. Reported rather than shown as a 100% difference.
+      rows.push({
+        investor_entity_id: m.entity_id, investor_name: investorNode.name,
+        account_code: m.account_code, account_name: m.account_name, investment: amount,
+        named_entity_id: targetNode.entity_id, named_name: targetNode.name,
+        subsidiary_entity_id: null, subsidiary_name: targetNode.name,
+        status: 'off_ledger', off_ledger: true, retargeted: false, retarget_note: null,
+        message: targetNode.name + ' has no ledger in CloudLedger, and no company beneath it does either, so there is no contributed capital to compare this investment against.',
+        effective_pct: round4(targetNode.effective_pct), nci_pct: round4(targetNode.nci_pct),
+        chain: (targetNode.path || []).map(id => byNodeId.get(id)).filter(Boolean)
+          .map(n => ({ id: n.id, name: n.name, entity_id: n.entity_id, is_shell: n.entity_id == null, ownership_pct: n.ownership_pct == null ? 100 : n.ownership_pct })),
+        chain_capital: 0, total_capital: 0,
+        chain_difference: 0, total_difference: 0, best_difference: 0,
+        chain_legs: [], other_legs: [],
+      });
+      continue;
+    }
 
     // The chain: every node from the investor down to the comparison company.
     // Capital naming any node ABOVE the comparison company on that chain is
@@ -434,9 +476,12 @@ function reconcileFundInvestments(db, rootNodeId, opts) {
       investment_total: round2(rows.reduce((s, r) => s + r.investment, 0)),
       chain_capital_total: round2(rows.reduce((s, r) => s + r.chain_capital, 0)),
       total_capital_total: round2(rows.reduce((s, r) => s + r.total_capital, 0)),
-      ties: rows.filter(r => r.status !== 'difference' && r.status !== 'not_in_tree').length,
+      comparable: rows.filter(r => r.status !== 'off_ledger' && r.status !== 'not_in_tree').length,
+      ties: rows.filter(r => String(r.status).startsWith('ties')).length,
       rounding_ties: rows.filter(r => r.status === 'ties_rounding').length,
       differences: rows.filter(r => r.status === 'difference' || r.status === 'not_in_tree').length,
+      off_ledger_count: rows.filter(r => r.status === 'off_ledger').length,
+      off_ledger_total: round2(rows.filter(r => r.status === 'off_ledger').reduce((s, r) => s + Math.abs(r.investment), 0)),
       // Sum of each row's BEST difference, so a row that ties on one basis
       // does not inflate the headline via the other.
       abs_difference: round2(rows.reduce((s, r) => s + Math.abs(r.best_difference == null ? r.total_difference : r.best_difference), 0)),

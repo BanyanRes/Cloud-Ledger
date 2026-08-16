@@ -594,6 +594,12 @@ export const api = {
   reconcileIcInvestment: (group_id, as_of) =>
     request('/intercompany/reconcile/investment?group_id=' + group_id + (as_of ? '&as_of=' + as_of : '')),
 
+  // Registered companies: counterparties that appear on the org charts but have
+  // no ledger here (QOZBs, joint ventures, sponsor holdcos). Stored as org
+  // nodes, so one registered here can later be placed in an ownership tree.
+  getIcCompanies: () => request('/intercompany/companies'),
+  createIcCompany: (b) => request('/intercompany/companies', { method: 'POST', body: b }),
+
   // -- Org structure (ownership tree) --
   // Nodes are either a CloudLedger entity or a ledger-less shell; edges carry
   // the ownership percent. The investment tie-out is scoped by root node, not

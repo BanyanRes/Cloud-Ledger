@@ -83,6 +83,55 @@ function ensureSchema(db) {
       PRIMARY KEY (group_id, entity_id)
     );
   `);
+  // A counterparty may be a company that has no ledger here — a QOZB, a joint
+  // venture, a sponsor holdco. Those live in org_nodes (entity_id NULL) and are
+  // referenced by counterparty_node_id. Added by migration so existing mappings
+  // keep working untouched.
+  const icCols = db.prepare("PRAGMA table_info(intercompany_accounts)").all().map(c => c.name);
+  if (!icCols.includes('counterparty_node_id')) {
+    db.exec("ALTER TABLE intercompany_accounts ADD COLUMN counterparty_node_id INTEGER");
+    console.log('[db migrate] intercompany_accounts.counterparty_node_id added');
+  }
+}
+
+// org_nodes is created by server/orgstructure.js. Both modules register at boot,
+// so it exists by the time any request runs — but a read that happens before
+// that (or on a database restored without it) must degrade, not throw.
+function hasOrgNodes(db) {
+  try { db.prepare('SELECT 1 FROM org_nodes LIMIT 1').get(); return true; }
+  catch { return false; }
+}
+
+// Registered companies: every org_node, whether or not it is backed by a
+// CloudLedger entity. This is the list the counterparty picker offers beyond
+// the entity list.
+function listCompanies(db) {
+  if (!hasOrgNodes(db)) return [];
+  return db.prepare(`
+    SELECT n.id, n.name, n.entity_id, n.node_type, n.notes,
+           e.name AS entity_name, e.code AS entity_code
+    FROM org_nodes n LEFT JOIN entities e ON e.id = n.entity_id
+    ORDER BY n.name COLLATE NOCASE`).all();
+}
+
+// Fold a node-based counterparty into the shape the reconciliations expect.
+// A node that IS backed by an entity resolves to that entity, so registering a
+// company for an entity that already exists changes nothing. A node with no
+// entity stays off-ledger: there is no second ledger to match it against, so it
+// can never be eliminated, and it is reported as its own case rather than being
+// lumped in with "external".
+function resolveCounterparties(db, mappings) {
+  if (!hasOrgNodes(db)) return mappings.map(m => ({ ...m, off_ledger: false }));
+  const byId = new Map(db.prepare('SELECT id, name, entity_id FROM org_nodes').all().map(n => [n.id, n]));
+  return mappings.map(m => {
+    if (m.counterparty_entity_id != null || !m.counterparty_node_id) return { ...m, off_ledger: false };
+    const n = byId.get(Number(m.counterparty_node_id));
+    if (!n) return { ...m, off_ledger: false };
+    if (n.entity_id != null) {
+      return { ...m, counterparty_entity_id: n.entity_id, counterparty_name: n.name, off_ledger: false };
+    }
+    return { ...m, counterparty_name: n.name, off_ledger: true };
+  });
 }
 
 // ══════════════════════════ Name → entity matching ══════════════════════════
@@ -123,6 +172,20 @@ const ALIASES = [
   [/^turn ?key rail/,                                     'TURNKEYR'],
 ];
 
+// Roman numerals and bare numbers act as series markers in these company names.
+// They are the only thing telling "QOZB I" from "QOZB III", so they are compared
+// exactly rather than as ordinary tokens.
+const ROMAN = /^(i|ii|iii|iv|v|vi|vii|viii|ix|x|xi|xii)$/;
+function seriesTokens(normalized) {
+  return new Set(String(normalized || '').split(' ')
+    .filter(t => t && (ROMAN.test(t) || /^\d+$/.test(t))));
+}
+function sameSeries(a, b) {
+  if (a.size !== b.size) return false;
+  for (const t of a) if (!b.has(t)) return false;
+  return true;
+}
+
 // Counterparty labels that are explicitly NOT another entity in the ledger.
 const EXTERNAL_HINTS = [/outside vendor/i, /third party/i, /^vendor$/i, /affiliates?$/i,
                         /management company/i, /portfolio compan/i, /port co\b/i];
@@ -155,8 +218,18 @@ function matchEntity(label, entities) {
   // Token overlap, accepted only when a single entity clearly wins.
   const want = new Set(n.split(' ').filter(Boolean));
   if (!want.size) return { entity_id: null, confidence: 'none', reason: 'no usable tokens' };
+  const wantSeries = seriesTokens(n);
   const scored = entities.map(e => {
-    const have = new Set(normName(e.name).split(' ').filter(Boolean));
+    const en = normName(e.name);
+    // Series guard. Names in these structures are distinguished ONLY by a roman
+    // numeral or a number — "Bridge Banyan QOZB I / II / III", "CLRFI Midco I"
+    // vs "Midco II", "Milhaus QOZ Fund V / VI / VII". Plain token overlap rates
+    // those as near-identical: "Bridge Banyan QOZB III" scores 0.75 against the
+    // entity "Bridge Banyan HP QOZB" and would be accepted as a confident
+    // match. If the two sides carry different series markers, they are
+    // different companies, whatever the rest of the words say.
+    if (!sameSeries(wantSeries, seriesTokens(en))) return { e, score: 0 };
+    const have = new Set(en.split(' ').filter(Boolean));
     let hit = 0; for (const w of want) if (have.has(w)) hit++;
     return { e, score: hit / Math.max(want.size, have.size || 1) };
   }).filter(s => s.score >= 0.6).sort((a, b) => b.score - a.score);
@@ -165,6 +238,31 @@ function matchEntity(label, entities) {
   }
   if (scored.length > 1) return { entity_id: null, confidence: 'ambiguous', reason: 'several entities match "' + raw + '"' };
   return { entity_id: null, confidence: 'none', reason: 'no entity matches "' + raw + '"' };
+}
+
+// Resolve a counterparty label to an entity FIRST, then to a registered company.
+// Entities win: a company registered for an entity that already exists should
+// not shadow the entity itself. Returns the same shape as matchEntity plus
+// node_id, and — when nothing matches — the label to offer as a new company.
+function matchCompany(label, entities, companies) {
+  const viaEntity = matchEntity(label, entities);
+  if (viaEntity.entity_id != null || viaEntity.confidence === 'external') {
+    return { ...viaEntity, node_id: null };
+  }
+  const offLedger = (companies || []).filter(c => c.entity_id == null);
+  if (offLedger.length) {
+    // Reuse the entity matcher by presenting companies in the same shape.
+    const asEntities = offLedger.map(c => ({ id: c.id, name: c.name, code: null }));
+    const viaNode = matchEntity(label, asEntities);
+    if (viaNode.entity_id != null) {
+      const hit = offLedger.find(c => c.id === viaNode.entity_id);
+      return {
+        entity_id: null, node_id: viaNode.entity_id, confidence: 'company',
+        reason: 'matched the registered company ' + (hit ? hit.name : ''),
+      };
+    }
+  }
+  return { ...viaEntity, node_id: null };
 }
 
 // Parse a GL account name into { ic_type, counterparty_label }, or null when the
@@ -229,12 +327,20 @@ function listMappings(db, { entity_id, group_id } = {}) {
     where = 'WHERE m.entity_id IN (' + ids.map(() => '?').join(',') + ')';
     params = ids;
   }
+  // COALESCE so a node-based counterparty shows its company name in the UI
+  // exactly like an entity-based one.
+  const nodeJoin = hasOrgNodes(db)
+    ? 'LEFT JOIN org_nodes n ON n.id = m.counterparty_node_id'
+    : '';
+  const nodeName = hasOrgNodes(db) ? 'n.name' : 'NULL';
   return db.prepare(`
     SELECT m.*, e.name AS entity_name, e.code AS entity_code,
-           c.name AS counterparty_name, c.code AS counterparty_code
+           COALESCE(c.name, ${nodeName}) AS counterparty_name, c.code AS counterparty_code,
+           ${nodeName} AS counterparty_node_name
     FROM intercompany_accounts m
     LEFT JOIN entities e ON e.id = m.entity_id
     LEFT JOIN entities c ON c.id = m.counterparty_entity_id
+    ${nodeJoin}
     ${where}
     ORDER BY e.name COLLATE NOCASE, m.account_code`).all(...params);
 }
@@ -243,8 +349,8 @@ function validateMapping(body) {
   if (!body.entity_id) return 'entity_id is required';
   if (!body.account_code) return 'account_code is required';
   if (!IC_TYPES.includes(body.ic_type)) return 'ic_type must be one of: ' + IC_TYPES.join(', ');
-  if (!body.is_external && !body.counterparty_entity_id) {
-    return 'Pick a counterparty entity, or mark the account external';
+  if (!body.is_external && !body.counterparty_entity_id && !body.counterparty_node_id) {
+    return 'Pick a counterparty — a CloudLedger entity, a registered company, or mark it external';
   }
   return null;
 }
@@ -252,10 +358,11 @@ function validateMapping(body) {
 function createMapping(db, body, who) {
   const now = new Date().toISOString();
   const r = db.prepare(`INSERT INTO intercompany_accounts
-    (entity_id, account_code, account_name, counterparty_entity_id, ic_type, is_external, notes, created_at, created_by, updated_at, updated_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+    (entity_id, account_code, account_name, counterparty_entity_id, counterparty_node_id, ic_type, is_external, notes, created_at, created_by, updated_at, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       Number(body.entity_id), String(body.account_code), body.account_name || null,
       body.is_external ? null : (body.counterparty_entity_id ? Number(body.counterparty_entity_id) : null),
+      body.is_external ? null : (body.counterparty_node_id ? Number(body.counterparty_node_id) : null),
       body.ic_type, body.is_external ? 1 : 0, body.notes || null, now, who || null, now, who || null);
   return r.lastInsertRowid;
 }
@@ -263,10 +370,11 @@ function createMapping(db, body, who) {
 function updateMapping(db, id, body, who) {
   const now = new Date().toISOString();
   db.prepare(`UPDATE intercompany_accounts SET
-      account_code=?, account_name=?, counterparty_entity_id=?, ic_type=?, is_external=?, notes=?, updated_at=?, updated_by=?
+      account_code=?, account_name=?, counterparty_entity_id=?, counterparty_node_id=?, ic_type=?, is_external=?, notes=?, updated_at=?, updated_by=?
     WHERE id=?`).run(
       String(body.account_code), body.account_name || null,
       body.is_external ? null : (body.counterparty_entity_id ? Number(body.counterparty_entity_id) : null),
+      body.is_external ? null : (body.counterparty_node_id ? Number(body.counterparty_node_id) : null),
       body.ic_type, body.is_external ? 1 : 0, body.notes || null, now, who || null, id);
 }
 
@@ -282,6 +390,7 @@ function deleteMapping(db, id) {
 function suggestMappings(db, entityId, { computeBalances, as_of }) {
   ensureSchema(db);
   const entities = db.prepare('SELECT id, name, code FROM entities').all();
+  const companies = listCompanies(db);
   const existing = new Set(db.prepare('SELECT account_code FROM intercompany_accounts WHERE entity_id = ?')
     .all(entityId).map(r => r.account_code));
   const balances = computeBalances(entityId, as_of ? { as_of } : {});
@@ -293,7 +402,7 @@ function suggestMappings(db, entityId, { computeBalances, as_of }) {
     if (existing.has(String(a.code))) continue;
     const parsed = parseAccountName(a.name);
     if (!parsed) continue;
-    const match = matchEntity(parsed.label, entities);
+    const match = matchCompany(parsed.label, entities, companies);
     const bal = balByCode.get(String(a.code));
     const self = match.entity_id != null && Number(match.entity_id) === Number(entityId);
     out.push({
@@ -304,10 +413,15 @@ function suggestMappings(db, entityId, { computeBalances, as_of }) {
       ic_type: parsed.ic_type,
       counterparty_label: parsed.label,
       counterparty_entity_id: match.entity_id,
+      counterparty_node_id: match.node_id || null,
       is_external: match.confidence === 'external' ? 1 : 0,
       confidence: match.confidence,
       reason: match.reason,
       self_referential: self,
+      // Nothing in CloudLedger answers to this name. The UI offers a one-click
+      // "register this company" so the 36 unresolved counterparties in the
+      // portfolio can be entered as they are met, rather than up front.
+      can_register: match.entity_id == null && !match.node_id && match.confidence !== 'external',
       balance: bal ? bal.balance : 0,
     });
   }
@@ -332,7 +446,7 @@ function loadGroupContext(db, groupId, { computeBalances, as_of }) {
     const rows = computeBalances(eid, as_of ? { as_of } : {});
     balances.set(eid, new Map(rows.map(r => [String(r.code), r])));
   }
-  const mappings = listMappings(db, { group_id: groupId });
+  const mappings = resolveCounterparties(db, listMappings(db, { group_id: groupId }));
   return { group, memberIds, inGroup, entById, balances, mappings };
 }
 
@@ -407,11 +521,14 @@ function reconcileDueFromTo(db, groupId, opts) {
           ? nameOf(entById, m.counterparty_entity_id)
           : (m.notes || 'External party'),
         tag: 'no_elim',
+        off_ledger: !!m.off_ledger,
         reason: m.is_external
           ? 'Marked external in IC Mapping'
-          : (m.counterparty_entity_id == null
-              ? 'No counterparty mapped'
-              : 'Counterparty is not in this group'),
+          : (m.off_ledger
+              ? 'Registered company with no ledger in CloudLedger — nothing to match against'
+              : (m.counterparty_entity_id == null
+                  ? 'No counterparty mapped'
+                  : 'Counterparty is not in this group')),
       });
       continue;
     }
@@ -514,11 +631,14 @@ function reconcileInvestmentCapital(db, groupId, opts) {
           ? nameOf(entById, m.counterparty_entity_id)
           : (m.notes || 'External party'),
         tag: 'no_elim',
+        off_ledger: !!m.off_ledger,
         reason: m.is_external
           ? 'Marked external in IC Mapping'
-          : (m.counterparty_entity_id == null
-              ? 'No counterparty mapped'
-              : 'Counterparty is not in this group'),
+          : (m.off_ledger
+              ? 'Registered company with no ledger in CloudLedger — nothing to match against'
+              : (m.counterparty_entity_id == null
+                  ? 'No counterparty mapped'
+                  : 'Counterparty is not in this group')),
       });
       continue;
     }
@@ -643,6 +763,36 @@ function registerIntercompanyRoutes(app, deps) {
     } catch (e) { fail(res, e); }
   });
 
+  // ── Registered companies ──
+  // Companies that appear on the org charts as counterparties. They live in
+  // org_nodes so the same row can later be placed in an ownership tree without
+  // being re-entered; a company created here simply has no edges yet. Exposed
+  // from this module (not just from /api/org-structure) because the need shows
+  // up while mapping accounts, and making someone leave the page to register a
+  // QOZB before they can finish a mapping is the wrong shape.
+  app.get('/api/intercompany/companies', ...gate, (req, res) => {
+    try { res.json(listCompanies(db)); } catch (e) { fail(res, e); }
+  });
+
+  app.post('/api/intercompany/companies', ...gate, (req, res) => {
+    try {
+      const name = req.body && String(req.body.name || '').trim();
+      if (!name) return res.status(400).json({ error: 'Company name is required' });
+      const dup = db.prepare('SELECT id, name FROM org_nodes WHERE LOWER(name) = LOWER(?)').get(name);
+      if (dup) return res.json({ id: dup.id, existing: true, name: dup.name });
+      const eid = req.body.entity_id ? Number(req.body.entity_id) : null;
+      if (eid && !userHasEntityAccess(req.user.id, req.user.role, eid)) {
+        return res.status(403).json({ error: 'No access to entity ' + eid });
+      }
+      const now = new Date().toISOString();
+      const r = db.prepare(`INSERT INTO org_nodes (name, entity_id, node_type, notes, sort_order, created_at, created_by, updated_at, updated_by)
+        VALUES (?,?,?,?,0,?,?,?,?)`).run(
+          name, eid, eid ? 'company' : 'shell', (req.body.notes || null),
+          now, who(req), now, who(req));
+      res.json({ id: r.lastInsertRowid, existing: false, name });
+    } catch (e) { fail(res, e); }
+  });
+
   // ── Mappings ──
   app.get('/api/intercompany/mappings', ...gate, (req, res) => {
     try {
@@ -733,6 +883,9 @@ module.exports = {
   reconcileInvestmentCapital,
   suggestMappings,
   listMappings,
+  listCompanies,
+  resolveCounterparties,
+  matchCompany,
   parseAccountName,
   matchEntity,
   normName,

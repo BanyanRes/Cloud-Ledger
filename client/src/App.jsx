@@ -6403,10 +6403,13 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[sugg,setSugg]=useState(null);const[picked,setPicked]=useState({});
   const[editId,setEditId]=useState(null);const[editForm,setEditForm]=useState({});
   const[showAdd,setShowAdd]=useState(false);
-  const[form,setForm]=useState({account_code:'',account_name:'',ic_type:'due_from',counterparty_entity_id:'',is_external:false,notes:''});
+  const[form,setForm]=useState({account_code:'',account_name:'',ic_type:'due_from',counterparty_entity_id:'',counterparty_node_id:'',is_external:false,notes:''});
   const[gEdit,setGEdit]=useState(null);// {id,name,notes,entity_ids:[]}
+  const[companies,setCompanies]=useState([]);
+  const offLedgerCompanies=companies.filter(c=>c.entity_id==null);
 
   const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
+  const loadCompanies=useCallback(async()=>{try{setCompanies(await api.getIcCompanies());}catch(e){console.error('[ic] companies:',e.message);}},[]);
 
   const loadRows=useCallback(async()=>{
     if(!eid){setRows([]);return;}
@@ -6416,12 +6419,13 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const loadGroups=useCallback(async()=>{try{setGroups(await api.getIcGroups());}catch(e){setErr(e.message);}},[]);
   useEffect(()=>{loadRows();},[loadRows]);
   useEffect(()=>{loadGroups();},[loadGroups]);
+  useEffect(()=>{loadCompanies();},[loadCompanies]);
 
   const runSuggest=async()=>{
     if(!eid)return;
     setErr('');setMsg('');
     try{const s=await api.suggestIcMappings(eid);setSugg(s);
-      const p={};s.forEach((x,i)=>{p[i]=Math.abs(x.balance)>0.005&&(x.counterparty_entity_id!=null||x.is_external);});
+      const p={};s.forEach((x,i)=>{p[i]=Math.abs(x.balance)>0.005&&(x.counterparty_entity_id!=null||x.counterparty_node_id!=null||x.is_external);});
       setPicked(p);
       if(!s.length)setMsg('No unmapped intercompany-looking accounts found for this entity.');
     }catch(e){setErr(e.message);}
@@ -6430,8 +6434,9 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
     const items=(sugg||[]).filter((_,i)=>picked[i]).map(s=>({
       entity_id:s.entity_id,account_code:s.account_code,account_name:s.account_name,
       ic_type:s.ic_type,counterparty_entity_id:s.counterparty_entity_id,
+      counterparty_node_id:s.counterparty_node_id||null,
       is_external:s.is_external?1:0,notes:s.notes||null}));
-    const bad=items.find(i=>!i.is_external&&!i.counterparty_entity_id);
+    const bad=items.find(i=>!i.is_external&&!i.counterparty_entity_id&&!i.counterparty_node_id);
     if(bad){setErr('Pick a counterparty for '+bad.account_code+', or mark it external.');return;}
     if(!items.length){setErr('Nothing selected.');return;}
     try{const r=await api.createIcMapping(items);setSugg(null);setPicked({});setMsg('Added '+r.count+' mapping'+(r.count===1?'':'s')+'.');loadRows();}
@@ -6441,13 +6446,15 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
     if(!eid){setErr('Pick an entity first.');return;}
     try{await api.createIcMapping({...form,entity_id:Number(eid),
       counterparty_entity_id:form.is_external?null:(form.counterparty_entity_id?Number(form.counterparty_entity_id):null),
+      counterparty_node_id:form.is_external?null:(form.counterparty_node_id?Number(form.counterparty_node_id):null),
       is_external:form.is_external?1:0});
-      setShowAdd(false);setForm({account_code:'',account_name:'',ic_type:'due_from',counterparty_entity_id:'',is_external:false,notes:''});
+      setShowAdd(false);setForm({account_code:'',account_name:'',ic_type:'due_from',counterparty_entity_id:'',counterparty_node_id:'',is_external:false,notes:''});
       setErr('');loadRows();}catch(e){setErr(e.message);}
   };
   const saveEdit=async()=>{
     try{await api.updateIcMapping(editId,{...editForm,
       counterparty_entity_id:editForm.is_external?null:(editForm.counterparty_entity_id?Number(editForm.counterparty_entity_id):null),
+      counterparty_node_id:editForm.is_external?null:(editForm.counterparty_node_id?Number(editForm.counterparty_node_id):null),
       is_external:editForm.is_external?1:0});
       setEditId(null);setErr('');loadRows();}catch(e){setErr(e.message);}
   };
@@ -6466,12 +6473,38 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const delGroup=async g=>{if(!confirm('Delete the group "'+g.name+'"? Mappings are not affected.'))return;
     try{await api.deleteIcGroup(g.id);loadGroups();}catch(e){setErr(e.message);}};
 
-  const cpCell=(val,isExt,onType,onCp)=>(<div style={{display:'flex',gap:6,alignItems:'center'}}>
-    <select style={{...S.selectSm,minWidth:180}} value={isExt?'__ext':(val||'')} onChange={e=>{
-      if(e.target.value==='__ext'){onType(true);onCp('');}else{onType(false);onCp(e.target.value);}}}>
-      <option value=''>— pick counterparty —</option>
-      <option value='__ext'>External (outside the ledger)</option>
-      {(entities||[]).map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>);
+  // Counterparty = a CloudLedger entity, a registered company (a name on the org
+  // charts with no ledger here), or "external". Encoded as 'e<id>' / 'n<id>' /
+  // '__ext' so one <select> can carry all three without a second control.
+  // '__new' registers a company inline: leaving the page to create a QOZB before
+  // a mapping can be finished is the wrong shape for this job.
+  const cpValue=(entId,nodeId,isExt)=>isExt?'__ext':(nodeId?'n'+nodeId:(entId?'e'+entId:''));
+  const cpCell=(entId,nodeId,isExt,setExt,setEnt,setNode,seedName)=>(
+    <select style={{...S.selectSm,minWidth:200}} value={cpValue(entId,nodeId,isExt)} onChange={async e=>{
+      const v=e.target.value;
+      if(v==='__ext'){setExt(true);setEnt('');setNode('');return;}
+      if(v==='__new'){
+        const name=prompt('Register a company that has no ledger in CloudLedger:',seedName||'');
+        if(!name||!name.trim())return;
+        try{const r=await api.createIcCompany({name:name.trim()});
+          await loadCompanies();setExt(false);setEnt('');setNode(r.id);
+          setMsg(r.existing?('"'+r.name+'" was already registered — selected it.'):('Registered "'+r.name+'".'));
+        }catch(ex){setErr(ex.message);}
+        return;}
+      setExt(false);
+      if(v.startsWith('n')){setNode(v.slice(1));setEnt('');}
+      else if(v.startsWith('e')){setEnt(v.slice(1));setNode('');}
+      else{setEnt('');setNode('');}
+    }}>
+      <option value=''>{'\u2014 pick counterparty \u2014'}</option>
+      <optgroup label='CloudLedger entities'>
+        {(entities||[]).map(x=><option key={x.id} value={'e'+x.id}>{x.name}</option>)}</optgroup>
+      {offLedgerCompanies.length>0&&<optgroup label='Registered companies (no ledger)'>
+        {offLedgerCompanies.map(c=><option key={c.id} value={'n'+c.id}>{c.name}</option>)}</optgroup>}
+      <optgroup label='Other'>
+        <option value='__ext'>External (a vendor or third party)</option>
+        <option value='__new'>+ Register a new company…</option></optgroup>
+    </select>);
 
   return(<div>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8,flexWrap:'wrap',gap:12}}>
@@ -6479,7 +6512,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         <div style={S.sub}>Tells the reconciliation which account faces which entity. Account names are only a suggestion — a person confirms every row.</div></div></div>
 
     <div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
-      {[['mappings','Account mappings'],['groups','Groups ('+groups.length+')']].map(([k,l])=>
+      {[['mappings','Account mappings'],['companies','Companies ('+offLedgerCompanies.length+')'],['groups','Groups ('+groups.length+')']].map(([k,l])=>
         <button key={k} onClick={()=>{setTab(k);setErr('');setMsg('');}} style={{background:'none',border:'none',borderBottom:'2px solid '+(tab===k?T.accent:'transparent'),color:tab===k?T.accent:T.textMuted,fontWeight:tab===k?700:500,fontSize:13,padding:'9px 16px',cursor:'pointer',marginBottom:-1}}>{l}</button>)}</div>
 
     {err&&<div style={{...S.card,borderColor:T.red+'40',padding:14}}><div style={S.err}>{err}</div></div>}
@@ -6502,7 +6535,9 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
             <select style={S.select} value={form.ic_type} onChange={e=>setForm(f=>({...f,ic_type:e.target.value}))}>
               {Object.keys(IC_TYPE_LABEL).map(k=><option key={k} value={k}>{IC_TYPE_LABEL[k]}</option>)}</select></div>
           <div style={{...S.col,flex:2}}><label style={S.label}>Counterparty</label>
-            {cpCell(form.counterparty_entity_id,form.is_external,v=>setForm(f=>({...f,is_external:v})),v=>setForm(f=>({...f,counterparty_entity_id:v})))}</div></div>
+            {cpCell(form.counterparty_entity_id,form.counterparty_node_id,form.is_external,
+              v=>setForm(f=>({...f,is_external:v})),v=>setForm(f=>({...f,counterparty_entity_id:v})),
+              v=>setForm(f=>({...f,counterparty_node_id:v})),form.account_name)}</div></div>
         <div style={{marginBottom:12}}><label style={S.label}>Notes</label><input style={S.input} value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} placeholder='(optional — e.g. the outside party name)'/></div>
         <button style={S.btnP} onClick={add}>Add mapping</button></div>}
 
@@ -6520,15 +6555,27 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           <td style={S.tdC}><input type='checkbox' style={S.checkbox} checked={!!picked[i]} onChange={e=>setPicked(p=>({...p,[i]:e.target.checked}))}/></td>
           <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{s.account_code}</span> <span style={{color:T.textMuted}}>{s.account_name}</span></td>
           <td style={S.td}>{IC_TYPE_LABEL[s.ic_type]||s.ic_type}</td>
-          <td style={S.td}>{cpCell(s.counterparty_entity_id,!!s.is_external,
-            v=>setSugg(a=>a.map((x,j)=>j===i?{...x,is_external:v?1:0,counterparty_entity_id:v?null:x.counterparty_entity_id}:x)),
-            v=>setSugg(a=>a.map((x,j)=>j===i?{...x,counterparty_entity_id:v?Number(v):null,is_external:0}:x)))}</td>
+          <td style={S.td}>{cpCell(s.counterparty_entity_id,s.counterparty_node_id,!!s.is_external,
+            v=>setSugg(a=>a.map((x,j)=>j===i?{...x,is_external:v?1:0,counterparty_entity_id:null,counterparty_node_id:null}:x)),
+            v=>setSugg(a=>a.map((x,j)=>j===i?{...x,counterparty_entity_id:v?Number(v):null,counterparty_node_id:null,is_external:0}:x)),
+            v=>setSugg(a=>a.map((x,j)=>j===i?{...x,counterparty_node_id:v?Number(v):null,counterparty_entity_id:null,is_external:0}:x)),
+            s.counterparty_label)}</td>
           <td style={{...S.tdR,fontWeight:Math.abs(s.balance)>0.005?600:400,color:Math.abs(s.balance)>0.005?T.textBright:T.textDim}}>{fmt(s.balance)}</td>
-          <td style={S.td}>{s.self_referential?<IcBadge kind="bad">points at itself</IcBadge>
+          <td style={{...S.td,whiteSpace:'normal'}}>{s.self_referential?<IcBadge kind="bad">points at itself</IcBadge>
             :s.confidence==='external'?<IcBadge kind="warn">external</IcBadge>
+            :s.counterparty_node_id?<IcBadge kind="ok">company</IcBadge>
             :s.counterparty_entity_id?<IcBadge kind="ok">{s.confidence}</IcBadge>
             :<IcBadge kind="mute">{s.confidence}</IcBadge>}
-            <span style={{color:T.textDim,fontSize:11,marginLeft:6}}>{s.reason}</span></td></tr>)}</tbody></table></div></div>}
+            <span style={{color:T.textDim,fontSize:11,marginLeft:6}}>{s.reason}</span>
+            {s.can_register&&!s.counterparty_node_id&&!s.counterparty_entity_id&&
+              <button style={{...S.link,marginLeft:8,fontWeight:600}} onClick={async()=>{
+                try{const r=await api.createIcCompany({name:s.counterparty_label});
+                  await loadCompanies();
+                  setSugg(a=>a.map((x,j)=>j===i?{...x,counterparty_node_id:r.id,is_external:0,confidence:'company',reason:'registered company '+r.name}:x));
+                  setPicked(p=>({...p,[i]:true}));
+                  setMsg(r.existing?('"'+r.name+'" was already registered.'):('Registered "'+r.name+'".'));
+                }catch(ex){setErr(ex.message);}}}>+ Register “{s.counterparty_label}”</button>}
+          </td></tr>)}</tbody></table></div></div>}
 
       {loading?<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Loading…</div>
       :!eid?<IcEmpty>Pick an entity to see and edit its intercompany account mappings.</IcEmpty>
@@ -6541,8 +6588,9 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           <input style={{...S.inputSm,width:220,marginLeft:6}} value={editForm.account_name||''} onChange={e=>setEditForm(f=>({...f,account_name:e.target.value}))}/></td>
         <td style={S.td}><select style={S.selectSm} value={editForm.ic_type} onChange={e=>setEditForm(f=>({...f,ic_type:e.target.value}))}>
           {Object.keys(IC_TYPE_LABEL).map(k=><option key={k} value={k}>{IC_TYPE_LABEL[k]}</option>)}</select></td>
-        <td style={S.td}>{cpCell(editForm.counterparty_entity_id,!!editForm.is_external,
-          v=>setEditForm(f=>({...f,is_external:v})),v=>setEditForm(f=>({...f,counterparty_entity_id:v})))}</td>
+        <td style={S.td}>{cpCell(editForm.counterparty_entity_id,editForm.counterparty_node_id,!!editForm.is_external,
+          v=>setEditForm(f=>({...f,is_external:v})),v=>setEditForm(f=>({...f,counterparty_entity_id:v})),
+          v=>setEditForm(f=>({...f,counterparty_node_id:v})),editForm.account_name)}</td>
         <td style={S.td}><input style={{...S.inputSm,width:'100%'}} value={editForm.notes||''} onChange={e=>setEditForm(f=>({...f,notes:e.target.value}))}/></td>
         <td style={S.td}><div style={{display:'flex',gap:6}}>
           <button style={{...S.btnGhost,color:T.green,fontSize:11}} onClick={saveEdit}>Save</button>
@@ -6551,12 +6599,34 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{r.account_code}</span> <span style={{color:T.textMuted}}>{r.account_name}</span></td>
         <td style={S.td}>{IC_TYPE_LABEL[r.ic_type]||r.ic_type}</td>
         <td style={S.td}>{r.is_external?<IcBadge kind="warn">external</IcBadge>:(r.counterparty_name||<IcBadge kind="mute">not set</IcBadge>)}
+          {!r.is_external&&r.counterparty_node_id&&!r.counterparty_entity_id&&<span style={{marginLeft:6}}><IcBadge kind="info">no ledger</IcBadge></span>}
           {Number(r.counterparty_entity_id)===Number(r.entity_id)&&<span style={{marginLeft:6}}><IcBadge kind="bad">points at itself</IcBadge></span>}</td>
         <td style={{...S.td,color:T.textMuted}}>{r.notes||''}</td>
         {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}>
-          <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{setEditId(r.id);setEditForm({account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,counterparty_entity_id:r.counterparty_entity_id||'',is_external:!!r.is_external,notes:r.notes||''});}}>Edit</button>
+          <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{setEditId(r.id);setEditForm({account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,counterparty_entity_id:r.counterparty_entity_id||'',counterparty_node_id:r.counterparty_node_id||'',is_external:!!r.is_external,notes:r.notes||''});}}>Edit</button>
           <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={()=>del(r)}>x</button></div></td>}</tr>))}
       </tbody></table></div>}
+    </>}
+
+    {tab==='companies'&&<>
+      <div style={{marginBottom:16,color:T.textMuted,fontSize:13}}>
+        Companies that appear on the org charts as counterparties but keep no ledger in CloudLedger — QOZBs, joint ventures, sponsor holding companies. Register one here and it becomes selectable as a counterparty everywhere, and account names that mention it start matching to it automatically.
+        {canEdit&&<button style={{...S.btnP,marginLeft:12}} onClick={async()=>{
+          const name=prompt('Company name:');if(!name||!name.trim())return;
+          try{const r=await api.createIcCompany({name:name.trim()});await loadCompanies();
+            setErr('');setMsg(r.existing?('"'+r.name+'" was already registered.'):('Registered "'+r.name+'".'));
+          }catch(e){setErr(e.message);}}}>+ Register company</button>}</div>
+
+      {offLedgerCompanies.length===0?<IcEmpty>No off-ledger companies registered yet. When a suggested mapping names a company CloudLedger doesn't have, you can register it in one click from the suggestions list.</IcEmpty>
+      :<div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+        <th style={S.th}>Company</th><th style={S.th}>Kind</th><th style={S.th}>Notes</th></tr></thead>
+      <tbody>{offLedgerCompanies.map(c=><tr key={c.id}>
+        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{c.name} <span style={{marginLeft:6}}><IcBadge kind="info">no ledger</IcBadge></span></td>
+        <td style={S.td}>{c.node_type||'shell'}</td>
+        <td style={{...S.td,color:T.textMuted,whiteSpace:'normal'}}>{c.notes||''}</td></tr>)}</tbody></table></div>}
+
+      {companies.some(c=>c.entity_id!=null)&&<div style={{color:T.textMuted,fontSize:12,marginTop:12}}>
+        {companies.filter(c=>c.entity_id!=null).length} more compan{companies.filter(c=>c.entity_id!=null).length===1?'y is':'ies are'} recorded on the Org Structure page and backed by a CloudLedger entity, so they are offered under “CloudLedger entities” instead.</div>}
     </>}
 
     {tab==='groups'&&<>
