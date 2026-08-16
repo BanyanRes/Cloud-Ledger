@@ -599,6 +599,13 @@ export const api = {
   reconcileIcInvestment: (group_id, as_of) =>
     request('/intercompany/reconcile/investment?group_id=' + group_id + (as_of ? '&as_of=' + as_of : '')),
 
+  // People. Marking a name as an individual stops it being proposed as a
+  // counterparty anywhere — the automatic name-shape test only covers capital
+  // accounts, so a person on a due-from / due-to account is marked by hand.
+  getIcPeople: () => request('/intercompany/people'),
+  markIcPerson: (b) => request('/intercompany/people', { method: 'POST', body: b }),
+  unmarkIcPerson: (id) => request('/intercompany/people/' + id, { method: 'DELETE' }),
+
   // Registered companies: counterparties that appear on the org charts but have
   // no ledger here (QOZBs, joint ventures, sponsor holdcos). Stored as org
   // nodes, so one registered here can later be placed in an ownership tree.

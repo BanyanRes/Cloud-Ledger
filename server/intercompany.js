@@ -111,6 +111,7 @@ function listCompanies(db) {
     SELECT n.id, n.name, n.entity_id, n.node_type, n.notes,
            e.name AS entity_name, e.code AS entity_code
     FROM org_nodes n LEFT JOIN entities e ON e.id = n.entity_id
+    WHERE n.node_type <> 'individual'
     ORDER BY n.name COLLATE NOCASE`).all();
 }
 
@@ -316,6 +317,31 @@ function isIndividualInvestor(parsed) {
   return !!parsed && parsed.ic_type === 'contributed_capital' && looksIndividual(parsed.label);
 }
 
+// -- People marked by hand --
+//
+// The automatic test above CANNOT be extended to due-from / due-to accounts.
+// Checked against all 141 due-from/to labels in the ledger: the name-shape rule
+// flags 30 of them, and 24 are real companies - Banyan Cyrene, Banyan EIV,
+// County Line Industrial Park, Milhaus Beckley, Scottsdale Entrada I/II and
+// more. Only six are actually people. Applying it there would hide two dozen
+// genuine counterparties to catch six, which is the wrong trade every time.
+//
+// So on those accounts a person decides, once, and the answer is remembered for
+// every entity: "Due from Ben Brosseau" is marked a person and never proposed
+// again. People are stored in org_nodes with node_type 'individual', so there is
+// still one party registry rather than a second table - they are simply excluded
+// from the company picker.
+function listPeople(db) {
+  if (!hasOrgNodes(db)) return [];
+  return db.prepare("SELECT id, name, notes FROM org_nodes WHERE node_type = 'individual' ORDER BY name COLLATE NOCASE").all();
+}
+
+function isMarkedPerson(people, label) {
+  const n = normName(label);
+  if (!n) return false;
+  return people.some(p => normName(p.name) === n);
+}
+
 // Parse a GL account name into { ic_type, counterparty_label }, or null when the
 // name is not an intercompany account at all.
 function parseAccountName(name) {
@@ -443,6 +469,7 @@ function suggestMappings(db, entityId, { computeBalances, as_of, includeIndividu
   ensureSchema(db);
   const entities = db.prepare('SELECT id, name, code FROM entities').all();
   const companies = listCompanies(db);
+  const people = listPeople(db);
   const existing = new Set(db.prepare('SELECT account_code FROM intercompany_accounts WHERE entity_id = ?')
     .all(entityId).map(r => r.account_code));
   const balances = computeBalances(entityId, as_of ? { as_of } : {});
@@ -454,7 +481,7 @@ function suggestMappings(db, entityId, { computeBalances, as_of, includeIndividu
     if (existing.has(String(a.code))) continue;
     const parsed = parseAccountName(a.name);
     if (!parsed) continue;
-    if (isIndividualInvestor(parsed)) {
+    if (isIndividualInvestor(parsed) || isMarkedPerson(people, parsed.label)) {
       hiddenIndividuals.push({ account_code: String(a.code), account_name: a.name, label: parsed.label });
       if (!includeIndividuals) continue;
     }
@@ -478,12 +505,18 @@ function suggestMappings(db, entityId, { computeBalances, as_of, includeIndividu
       // "register this company" so the 36 unresolved counterparties in the
       // portfolio can be entered as they are met, rather than up front.
       can_register: match.entity_id == null && !match.node_id && match.confidence !== 'external',
+      // Offered on any unresolved row so a person on a due-from / due-to account
+      // can be dismissed for good, which the automatic test cannot do safely.
+      can_mark_person: match.entity_id == null && !match.node_id && match.confidence !== 'external',
       balance: bal ? bal.balance : 0,
     });
   }
   // Accounts that carry money first — a zero-balance shell account is noise.
   out.sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance) || a.account_code.localeCompare(b.account_code));
-  if (includeIndividuals) for (const o of out) o.individual = looksIndividual(o.counterparty_label) && o.ic_type === 'contributed_capital';
+  if (includeIndividuals) for (const o of out) {
+    o.individual = isIndividualInvestor({ ic_type: o.ic_type, label: o.counterparty_label })
+      || isMarkedPerson(people, o.counterparty_label);
+  }
   return { suggestions: out, hidden_individuals: hiddenIndividuals.length, hidden_examples: hiddenIndividuals.slice(0, 5) };
 }
 
@@ -529,6 +562,7 @@ function isInternal(m, inGroup) {
 // reconciliation — the failure mode that lets a real balance disappear.
 function findUnmapped(db, memberIds, balances, mappings, wantedTypes) {
   const mapped = new Set(mappings.map(m => m.entity_id + '|' + m.account_code));
+  const people = listPeople(db);
   const out = [];
   for (const eid of memberIds) {
     const accounts = db.prepare('SELECT code, name FROM accounts WHERE entity_id = ?').all(eid);
@@ -536,9 +570,9 @@ function findUnmapped(db, memberIds, balances, mappings, wantedTypes) {
       if (mapped.has(eid + '|' + String(a.code))) continue;
       const parsed = parseAccountName(a.name);
       if (!parsed || !wantedTypes.includes(parsed.ic_type)) continue;
-      // An outside individual's capital is not an unmapped intercompany
-      // balance — it is simply not intercompany.
-      if (isIndividualInvestor(parsed)) continue;
+      // An outside individual's balance is not an unmapped intercompany one -
+      // it is simply not intercompany.
+      if (isIndividualInvestor(parsed) || isMarkedPerson(people, parsed.label)) continue;
       const row = (balances.get(eid) || new Map()).get(String(a.code));
       const bal = row ? Number(row.balance) || 0 : 0;
       if (Math.abs(bal) < DEFAULT_TOLERANCE) continue;
@@ -853,6 +887,40 @@ function registerIntercompanyRoutes(app, deps) {
     } catch (e) { fail(res, e); }
   });
 
+  // -- People --
+  // Names marked as individuals so they stop being proposed as counterparties.
+  app.get('/api/intercompany/people', ...gate, (req, res) => {
+    try { res.json(listPeople(db)); } catch (e) { fail(res, e); }
+  });
+
+  app.post('/api/intercompany/people', ...gate, (req, res) => {
+    try {
+      const name = req.body && String(req.body.name || '').trim();
+      if (!name) return res.status(400).json({ error: 'Name is required' });
+      const dup = db.prepare('SELECT id, name, node_type FROM org_nodes WHERE LOWER(name) = LOWER(?)').get(name);
+      if (dup) {
+        // Re-marking something already registered as a company converts it,
+        // rather than leaving two rows disagreeing about what it is.
+        if (dup.node_type !== 'individual') {
+          db.prepare("UPDATE org_nodes SET node_type = 'individual', entity_id = NULL, updated_at = ?, updated_by = ? WHERE id = ?")
+            .run(new Date().toISOString(), who(req), dup.id);
+        }
+        return res.json({ id: dup.id, existing: true, name: dup.name });
+      }
+      const now = new Date().toISOString();
+      const r = db.prepare("INSERT INTO org_nodes (name, entity_id, node_type, notes, sort_order, created_at, created_by, updated_at, updated_by) VALUES (?, NULL, 'individual', ?, 0, ?, ?, ?, ?)")
+        .run(name, req.body.notes || null, now, who(req), now, who(req));
+      res.json({ id: r.lastInsertRowid, existing: false, name });
+    } catch (e) { fail(res, e); }
+  });
+
+  app.delete('/api/intercompany/people/:id', ...gate, (req, res) => {
+    try {
+      db.prepare("DELETE FROM org_nodes WHERE id = ? AND node_type = 'individual'").run(Number(req.params.id));
+      res.json({ success: true });
+    } catch (e) { fail(res, e); }
+  });
+
   // ── Mappings ──
   app.get('/api/intercompany/mappings', ...gate, (req, res) => {
     try {
@@ -945,6 +1013,8 @@ module.exports = {
   suggestMappings,
   listMappings,
   listCompanies,
+  listPeople,
+  isMarkedPerson,
   resolveCounterparties,
   matchCompany,
   looksIndividual,

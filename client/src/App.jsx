@@ -6427,10 +6427,21 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[form,setForm]=useState({account_code:'',account_name:'',ic_type:'due_from',counterparty_entity_id:'',counterparty_node_id:'',is_external:false,notes:''});
   const[gEdit,setGEdit]=useState(null);// {id,name,notes,entity_ids:[]}
   const[companies,setCompanies]=useState([]);
+  const[people,setPeople]=useState([]);
   const offLedgerCompanies=companies.filter(c=>c.entity_id==null);
 
   const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
   const loadCompanies=useCallback(async()=>{try{setCompanies(await api.getIcCompanies());}catch(e){console.error('[ic] companies:',e.message);}},[]);
+  const loadPeople=useCallback(async()=>{try{setPeople(await api.getIcPeople());}catch(e){console.error('[ic] people:',e.message);}},[]);
+  // Marking a name a person drops the row from the list immediately and keeps it
+  // out of every future suggestion, on every entity.
+  const markPerson=async(label,idx)=>{
+    try{await api.markIcPerson({name:label});await loadPeople();
+      setSugg(a=>a.filter((_,j)=>j!==idx));
+      setPicked(p=>{const q={...p};delete q[idx];return q;});
+      setHiddenIndiv(h=>h+1);setErr('');setMsg('"'+label+'" marked as a person — it will not be suggested again.');
+    }catch(e){setErr(e.message);}
+  };
 
   const loadRows=useCallback(async()=>{
     if(!eid){setRows([]);return;}
@@ -6441,6 +6452,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   useEffect(()=>{loadRows();},[loadRows]);
   useEffect(()=>{loadGroups();},[loadGroups]);
   useEffect(()=>{loadCompanies();},[loadCompanies]);
+  useEffect(()=>{loadPeople();},[loadPeople]);
 
   const runSuggest=async(withIndividuals)=>{
     if(!eid)return;
@@ -6599,6 +6611,9 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
             :s.counterparty_entity_id?<IcBadge kind="ok">{s.confidence}</IcBadge>
             :<IcBadge kind="mute">{s.confidence}</IcBadge>}
             <span style={{color:T.textDim,fontSize:11,marginLeft:6}}>{s.reason}</span>
+            {s.can_mark_person&&!s.individual&&!s.counterparty_node_id&&!s.counterparty_entity_id&&
+              <button style={{...S.link,marginLeft:8,color:T.textMuted}} title='Never suggest this name again'
+                onClick={()=>markPerson(s.counterparty_label,i)}>It{'\u2019'}s a person</button>}
             {s.can_register&&!s.individual&&!s.counterparty_node_id&&!s.counterparty_entity_id&&
               <button style={{...S.link,marginLeft:8,fontWeight:600}} onClick={async()=>{
                 try{const r=await api.createIcCompany({name:s.counterparty_label});
@@ -6656,6 +6671,18 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         <td style={{...S.td,fontWeight:600,color:T.textBright}}>{c.name} <span style={{marginLeft:6}}><IcBadge kind="info">no ledger</IcBadge></span></td>
         <td style={S.td}>{c.node_type||'shell'}</td>
         <td style={{...S.td,color:T.textMuted,whiteSpace:'normal'}}>{c.notes||''}</td></tr>)}</tbody></table></div>}
+
+      {people.length>0&&<div style={{marginTop:24}}>
+        <div style={{fontWeight:700,color:T.textBright,fontSize:13,marginBottom:6}}>Marked as people ({people.length})</div>
+        <div style={{color:T.textMuted,fontSize:12,marginBottom:10}}>These names are never proposed as counterparties. Individuals on capital accounts are detected automatically; these were marked by hand, which is how a person on a due-from or due-to account is handled.</div>
+        <div style={{...S.cardFlush,overflow:'hidden'}}><table style={S.table}><tbody>
+          {people.map(p=><tr key={p.id}>
+            <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.name}</td>
+            {canEdit&&<td style={{...S.td,textAlign:'right',width:110}}>
+              <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={async()=>{
+                try{await api.unmarkIcPerson(p.id);await loadPeople();setMsg('"'+p.name+'" is no longer marked a person.');}
+                catch(e){setErr(e.message);}}}>Undo</button></td>}</tr>)}
+        </tbody></table></div></div>}
 
       {companies.some(c=>c.entity_id!=null)&&<div style={{color:T.textMuted,fontSize:12,marginTop:12}}>
         {companies.filter(c=>c.entity_id!=null).length} more compan{companies.filter(c=>c.entity_id!=null).length===1?'y is':'ies are'} recorded on the Org Structure page and backed by a CloudLedger entity, so they are offered under “CloudLedger entities” instead.</div>}
