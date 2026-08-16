@@ -569,5 +569,30 @@ export const api = {
     return { blob, filename, summary };
   },
 
+  // ── Intercompany ──
+  // Groups define which entities consolidate together; mappings say which GL
+  // account faces which entity. Both reconcile endpoints are group-scoped.
+  getIcGroups: () => request('/intercompany/groups'),
+  createIcGroup: (b) => request('/intercompany/groups', { method: 'POST', body: b }),
+  updateIcGroup: (id, b) => request('/intercompany/groups/' + id, { method: 'PUT', body: b }),
+  deleteIcGroup: (id) => request('/intercompany/groups/' + id, { method: 'DELETE' }),
+  getIcMappings: (q = {}) => {
+    const p = new URLSearchParams();
+    if (q.entity_id) p.set('entity_id', q.entity_id);
+    if (q.group_id) p.set('group_id', q.group_id);
+    const s = p.toString();
+    return request('/intercompany/mappings' + (s ? '?' + s : ''));
+  },
+  suggestIcMappings: (entity_id, as_of) =>
+    request('/intercompany/mappings/suggest?entity_id=' + entity_id + (as_of ? '&as_of=' + as_of : '')),
+  // Accepts one mapping object or an array of them (the "accept suggestions" path).
+  createIcMapping: (b) => request('/intercompany/mappings', { method: 'POST', body: b }),
+  updateIcMapping: (id, b) => request('/intercompany/mappings/' + id, { method: 'PUT', body: b }),
+  deleteIcMapping: (id) => request('/intercompany/mappings/' + id, { method: 'DELETE' }),
+  reconcileIcDue: (group_id, as_of) =>
+    request('/intercompany/reconcile/due?group_id=' + group_id + (as_of ? '&as_of=' + as_of : '')),
+  reconcileIcInvestment: (group_id, as_of) =>
+    request('/intercompany/reconcile/investment?group_id=' + group_id + (as_of ? '&as_of=' + as_of : '')),
+
   setToken, getToken, clearToken,
 };

@@ -8623,6 +8623,25 @@ require('./invval').registerInvValRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ Intercompany (IC Mapping + IC Reconciliation) ═══
+// A top-level section, peer to A/R and A/P. Two things live here:
+//   • IC Mapping   — setup: which GL account on which entity faces which other
+//                     entity, and what kind of intercompany balance it is.
+//                     A person confirms every row; name parsing only suggests.
+//   • IC Reconcile — Due from / Due to (transactional, netted by counterparty
+//                     pair) and Investment / Contributed capital (structural).
+// A counterparty outside the selected group is tagged "no elim" and is never
+// eliminated — see server/intercompany.js for why that rule exists.
+// All endpoints are Admin/Accountant; entity access is checked per group member
+// inside the module because these reports span several entities at once.
+require('./intercompany').registerIntercompanyRoutes(app, {
+  db,
+  auth,
+  requireRole,
+  userHasEntityAccess,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ Financial Statements package generator ═══
 // Generates GL-derived financial statements (Balance Sheet, Operations, Cash
 // Flows, Members' Equity) for an entity as of a date, on a monthly/quarterly/

@@ -702,7 +702,7 @@ export default function App(){
   useEffect(()=>{if(user)Promise.all([api.getEntities(),api.getMyPrefs().catch(()=>({}))]).then(([e,p])=>{setEntities(e);if(p&&p.defaultEntityId!=null)setDefaultEntityId(p.defaultEntityId);if(e.length>0&&!activeEntity){const def=p&&p.defaultEntityId;setActiveEntity((def!=null&&e.find(x=>x.id===def))?def:e[0].id);}});},[user]);
   const setDefaultEntity=(id)=>{setDefaultEntityId(id);api.saveMyPrefs({defaultEntityId:id}).catch(err=>console.error('[prefs] save default entity failed:',err.message));};
   const refreshEntities=useCallback(async()=>{const e=await api.getEntities();setEntities(e);return e;},[]);
-  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
+  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers','intercompany'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
   // Read-only users (Viewer) SEE the same sections as an Accountant but cannot edit.
   // canEdit gates every write control; it must never be derived from mere visibility.
   const canEdit = !!user && (user.role==='Admin' || (()=>{ const ae=activeEntity?entities.find(e=>e.id===activeEntity):null; return ae&&ae.access_level ? ae.access_level==='full' : user.role==='Accountant'; })());
@@ -758,6 +758,10 @@ export default function App(){
     {key:'AP',label:'Accounts Payable',icon:'📥',items:[
       {id:'apaging',label:'A/P Aging',icon:'⏳',section:'reports'},
       {id:'billcom_sync',label:'Bill.com Sync',icon:'🔄',section:'billcom'},
+    ]},
+    {key:'INTERCOMPANY',label:'Intercompany',icon:'🔗',items:[
+      {id:'ic_recon',label:'IC Reconciliation',icon:'⚖️',section:'intercompany'},
+      {id:'ic_mapping',label:'IC Mapping',icon:'🗺️',section:'intercompany'},
     ]},
     {key:'REPORTS',label:'Reports',icon:'📊',items:[
       {id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},
@@ -851,6 +855,8 @@ export default function App(){
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo} canEdit={canEdit}/>}
         {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='customdetail'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='pivot'&&activeEntity&&dimsEnabled&&<PivotReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='pivot'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
+        {page==='ic_recon'&&canAccess('intercompany')&&<IntercompanyReconciliation entities={entities} setPage={setPage} key={'icr-'+rk}/>}
+        {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='commitments'&&activeEntity&&<CommitmentsPage entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='memorized'&&activeEntity&&<MemorizedReportsPage entityId={activeEntity} entityName={entityName} canEdit={canEdit} onOpen={(r)=>{const c=r.config||{};if(r.report_type==='trial'&&c.asOf)setTbAsOf(c.asOf);else if(r.report_type==='bs'&&c.asOf)setBsAsOf(c.asOf);else if(r.report_type==='is'){if(c.from)setIsFrom(c.from);if(c.to)setIsTo(c.to);}else setPendingReportConfig({type:r.report_type,config:c});setPage(r.report_type==='drilldown'?'coa':r.report_type);}} key={activeEntity+'-'+rk}/>}
@@ -6163,3 +6169,426 @@ function UserManagement({currentUser}){
       {resetMsg&&<div style={{fontSize:12,marginTop:8,color:resetMsg.includes('!')?T.green:T.red}}>{resetMsg}</div>}
       <button style={{...S.btnP,width:'100%',padding:11,marginTop:12}} onClick={async()=>{if(resetPw.length<3){setResetMsg('Min 3 chars');return;}try{await api.adminResetPassword(resetId,resetPw);setResetMsg('Password reset!');setTimeout(()=>setResetId(null),1500);}catch(e){setResetMsg(e.message);}}}>Reset Password</button>
     </div></div>}</div>);}
+
+// ═══════════════════════════ Intercompany ═══════════════════════════
+// Two pages under the Intercompany nav section.
+//
+//   IntercompanyReconciliation — Due from / Due to (transactional) and
+//     Investment / Contributed capital (structural), run against a saved group
+//     as of a date.
+//   IntercompanyMapping — the setup page. Tells the reconciliation which GL
+//     account faces which entity, and defines the groups.
+//
+// The rule the whole section exists to protect: a counterparty OUTSIDE the
+// selected group is tagged "no elim" and never eliminated. It is shown in its
+// own panel so the amount is visible rather than quietly netted away.
+
+const IC_TYPE_LABEL={due_from:'Due from',due_to:'Due to',investment:'Investment',contributed_capital:'Contributed capital'};
+
+function IcBadge({kind,children}){
+  const C={ok:[T.green,T.greenDim],warn:[T.orange,T.orangeDim],bad:[T.red,T.redDim],info:[T.accent,T.accentDim],mute:[T.textMuted,T.bgElevated]}[kind]||[T.textMuted,T.bgElevated];
+  return<span style={{display:'inline-block',padding:'2px 9px',borderRadius:20,fontSize:10,fontWeight:700,color:C[0],background:C[1],whiteSpace:'nowrap'}}>{children}</span>;
+}
+function IcTile({label,value,kind}){
+  const c={ok:T.green,warn:T.orange,bad:T.red,info:T.accent}[kind]||T.textBright;
+  return<div style={{flex:1,minWidth:150,background:T.bgCard,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:'12px 16px'}}>
+    <div style={{fontSize:10,color:T.textMuted,fontWeight:600,textTransform:'uppercase',letterSpacing:'0.06em',marginBottom:4}}>{label}</div>
+    <div style={{fontSize:19,fontWeight:700,color:c,fontVariantNumeric:'tabular-nums'}}>{value}</div></div>;
+}
+function IcEmpty({children}){return<div style={{...S.card,textAlign:'center',padding:40,color:T.textDim}}>{children}</div>;}
+
+// Panel listing every balance that faces a party outside the group. These are
+// real third-party balances: they survive consolidation and must never be
+// eliminated. (CLRFI Midco I Q2 eliminated three of them by mistake.)
+function IcExternalPanel({rows}){
+  if(!rows||!rows.length)return null;
+  return<div style={{...S.cardFlush,overflowX:'auto',border:'1px solid '+T.orange+'40'}}>
+    <div style={{padding:'12px 16px',background:T.orangeDim,borderBottom:'1px solid '+T.border}}>
+      <span style={{fontWeight:700,color:T.orange,fontSize:13}}>Outside the group — not eliminated ({rows.length})</span>
+      <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>These face a party that is not in this group, so they stay on the consolidated balance sheet.</span></div>
+    <table style={S.table}><thead><tr>
+      <th style={S.th}>Entity</th><th style={S.th}>Account</th><th style={S.th}>Type</th>
+      <th style={S.th}>Counterparty</th><th style={S.thR}>Amount</th><th style={S.th}>Why</th></tr></thead>
+    <tbody>{rows.map((r,i)=><tr key={i}>
+      <td style={S.td}>{r.entity_name}</td>
+      <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{r.account_code}</span> <span style={{color:T.textMuted}}>{r.account_name}</span></td>
+      <td style={S.td}>{IC_TYPE_LABEL[r.ic_type]||r.ic_type}</td>
+      <td style={S.td}>{r.counterparty_name}</td>
+      <td style={{...S.tdR,fontWeight:600}}>{fmt(r.amount)}</td>
+      <td style={S.td}><IcBadge kind="warn">no elim</IcBadge> <span style={{color:T.textMuted,fontSize:11,marginLeft:6}}>{r.reason}</span></td></tr>)}</tbody></table></div>;
+}
+
+// Intercompany-looking accounts carrying a balance that nobody has mapped yet.
+// Surfaced so an unmapped account can't silently drop out of the tie-out.
+function IcUnmappedPanel({rows,entities,onGoToMapping}){
+  if(!rows||!rows.length)return null;
+  const nm=id=>{const e=(entities||[]).find(x=>x.id===id);return e?e.name:'Entity '+id;};
+  return<div style={{...S.cardFlush,overflowX:'auto'}}>
+    <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border}}>
+      <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>Not mapped yet ({rows.length})</span>
+      <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>These accounts carry a balance and look intercompany, but no mapping tells us who they face — so they are left out of the tie-out.</span>
+      {onGoToMapping&&<button style={{...S.link,marginLeft:10}} onClick={onGoToMapping}>Open IC Mapping</button>}</div>
+    <table style={S.table}><thead><tr>
+      <th style={S.th}>Entity</th><th style={S.th}>Account</th><th style={S.th}>Reads as</th><th style={S.th}>Counterparty in name</th><th style={S.thR}>Balance</th></tr></thead>
+    <tbody>{rows.map((r,i)=><tr key={i}>
+      <td style={S.td}>{nm(r.entity_id)}</td>
+      <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{r.account_code}</span> <span style={{color:T.textMuted}}>{r.account_name}</span></td>
+      <td style={S.td}>{IC_TYPE_LABEL[r.ic_type]||r.ic_type}</td>
+      <td style={S.td}>{r.counterparty_label}</td>
+      <td style={{...S.tdR,fontWeight:600}}>{fmt(r.balance)}</td></tr>)}</tbody></table></div>;
+}
+
+function IntercompanyReconciliation({entities,setPage}){
+  const[tab,setTab]=useState('due');
+  const[groups,setGroups]=useState([]);const[groupId,setGroupId]=useState('');
+  const[asOf,setAsOf]=useState(today());
+  const[due,setDue]=useState(null);const[inv,setInv]=useState(null);
+  const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
+  const[open,setOpen]=useState({});
+
+  useEffect(()=>{api.getIcGroups().then(g=>{setGroups(g||[]);if(g&&g.length)setGroupId(String(g[0].id));}).catch(e=>setErr(e.message));},[]);
+
+  const run=useCallback(async()=>{
+    if(!groupId)return;
+    setLoading(true);setErr('');
+    try{
+      const[d,i]=await Promise.all([api.reconcileIcDue(groupId,asOf),api.reconcileIcInvestment(groupId,asOf)]);
+      setDue(d);setInv(i);
+    }catch(e){setErr(e.message);setDue(null);setInv(null);}
+    finally{setLoading(false);}
+  },[groupId,asOf]);
+  useEffect(()=>{if(groupId)run();},[groupId]);// eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggle=k=>setOpen(o=>({...o,[k]:!o[k]}));
+
+  const doExport=()=>{
+    if(!due||!inv)return;
+    const g=(due.group&&due.group.name)||'Group';
+    const d=[['Intercompany Reconciliation'],[g+' — as of '+(due.as_of||asOf)],[],
+      ['DUE FROM / DUE TO'],['Entity A','A net (receivable)','Entity B','B net (receivable)','Difference','Eliminate','Status']];
+    due.pairs.forEach(p=>d.push([p.entity_a_name,p.a_net,p.entity_b_name,p.b_net,p.difference,p.eliminate,p.status]));
+    d.push([]);d.push(['OUTSIDE THE GROUP — NOT ELIMINATED']);
+    d.push(['Entity','Account','Account name','Type','Counterparty','Amount','Why']);
+    due.external.forEach(r=>d.push([r.entity_name,r.account_code,r.account_name,IC_TYPE_LABEL[r.ic_type]||r.ic_type,r.counterparty_name,r.amount,r.reason]));
+    d.push([]);d.push(['INVESTMENT / CONTRIBUTED CAPITAL']);
+    d.push(['Severity','Entity','Account','Account name','Amount','Finding']);
+    inv.findings.forEach(f=>d.push([f.severity,f.entity_name,f.account_code,f.account_name,f.amount,f.message]));
+    d.push([]);d.push(['Parent','Child','Investment','Contributed capital','Difference','Status']);
+    inv.pairs.forEach(p=>d.push([p.parent_name,p.child_name,p.investment,p.contributed_capital,p.difference,p.status]));
+    d.push([]);d.push(['OUTSIDE THE GROUP — NOT ELIMINATED']);
+    d.push(['Entity','Account','Account name','Type','Counterparty','Amount','Why']);
+    inv.external.forEach(r=>d.push([r.entity_name,r.account_code,r.account_name,IC_TYPE_LABEL[r.ic_type]||r.ic_type,r.counterparty_name,r.amount,r.reason]));
+    exportToExcel(d,'Intercompany_Reconciliation_'+(due.as_of||asOf).replace(/-/g,'')+'.xlsx');
+  };
+
+  const statusBadge=s=>s==='matched'?<IcBadge kind="ok">matched</IcBadge>
+    :s==='one_sided'?<IcBadge kind="warn">one side only</IcBadge>
+    :<IcBadge kind="bad">mismatch</IcBadge>;
+
+  return(<div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8,flexWrap:'wrap',gap:12}}>
+      <div><div style={S.h1}>IC Reconciliation</div>
+        <div style={S.sub}>Ties each entity's intercompany balances to its counterparty's. Balances facing a party outside the group are never eliminated.</div></div>
+      <div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div><label style={S.label}>Group</label>
+          <select style={{...S.selectSm,minWidth:200}} value={groupId} onChange={e=>setGroupId(e.target.value)}>
+            <option value=''>Select a group…</option>
+            {groups.map(g=><option key={g.id} value={g.id}>{g.name} ({g.members.length})</option>)}</select></div>
+        <div><label style={S.label}>As of</label>
+          <input style={S.inputSm} type='date' value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
+        <button style={S.btnP} onClick={run} disabled={!groupId||loading}>{loading?'Running…':'Run'}</button>
+        {due&&inv&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
+
+    {!groups.length&&!err&&<IcEmpty>No intercompany groups yet. Create one on the <button style={S.link} onClick={()=>setPage&&setPage('ic_mapping')}>IC Mapping</button> page — a group is the set of entities being consolidated, and it decides what eliminates and what doesn't.</IcEmpty>}
+    {err&&<div style={{...S.card,borderColor:T.red+'40'}}><div style={S.err}>{err}</div></div>}
+
+    {groups.length>0&&<div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
+      {[['due','Due from / Due to'],['investment','Investment / Contributed capital']].map(([k,l])=>
+        <button key={k} onClick={()=>setTab(k)} style={{background:'none',border:'none',borderBottom:'2px solid '+(tab===k?T.accent:'transparent'),color:tab===k?T.accent:T.textMuted,fontWeight:tab===k?700:500,fontSize:13,padding:'9px 16px',cursor:'pointer',marginBottom:-1}}>{l}
+          {k==='investment'&&inv&&inv.totals.error_count>0&&<span style={{marginLeft:7}}><IcBadge kind="bad">{inv.totals.error_count}</IcBadge></span>}</button>)}</div>}
+
+    {loading&&<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Reading balances…</div>}
+
+    {!loading&&tab==='due'&&due&&<>
+      <div style={{...S.row,marginBottom:20}}>
+        <IcTile label='Pairs matched' value={due.totals.matched+' of '+due.totals.pair_count} kind={due.totals.mismatched?'warn':'ok'}/>
+        <IcTile label='Eliminates' value={fmt(due.totals.total_eliminate)} kind='info'/>
+        <IcTile label='Unreconciled difference' value={fmt(due.totals.abs_difference)} kind={due.totals.abs_difference>0.005?'bad':'ok'}/>
+        <IcTile label='Outside group (no elim)' value={fmt(due.totals.external_total)} kind={due.totals.external_count?'warn':'ok'}/>
+        <IcTile label='Not mapped' value={String(due.totals.unmapped_count)} kind={due.totals.unmapped_count?'warn':'ok'}/></div>
+
+      {due.pairs.length===0?<IcEmpty>No intercompany pairs inside this group carry a balance at {due.as_of||asOf}.</IcEmpty>
+      :<div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+        <th style={{...S.th,width:28}}></th><th style={S.th}>Entity A</th><th style={S.thR}>A net receivable</th>
+        <th style={S.th}>Entity B</th><th style={S.thR}>B net receivable</th>
+        <th style={S.thR}>Difference</th><th style={S.thR}>Eliminates</th><th style={S.th}>Status</th></tr></thead>
+      <tbody>{due.pairs.map(p=>{const k='d'+p.entity_a_id+'-'+p.entity_b_id;const isOpen=!!open[k];
+        return<Fragment key={k}>
+        <tr style={{cursor:'pointer',background:p.status==='mismatch'?T.redDim:'transparent'}} onClick={()=>toggle(k)}>
+          <td style={{...S.td,color:T.textDim,textAlign:'center'}}>{isOpen?'▼':'▶'}</td>
+          <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.entity_a_name}</td>
+          <td style={S.tdR}>{fmt(p.a_net)}</td>
+          <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.entity_b_name}</td>
+          <td style={S.tdR}>{fmt(p.b_net)}</td>
+          <td style={{...S.tdR,fontWeight:700,color:Math.abs(p.difference)>=due.tolerance?T.red:T.green}}>{fmt(p.difference)}</td>
+          <td style={S.tdR}>{fmt(p.eliminate)}</td>
+          <td style={S.td}>{statusBadge(p.status)}{p.same_direction&&<span style={{marginLeft:6}}><IcBadge kind="warn">same direction</IcBadge></span>}</td></tr>
+        {isOpen&&<tr><td colSpan={8} style={{padding:'0 0 0 28px',background:T.bgElevated,borderBottom:'1px solid '+T.border}}>
+          <table style={{...S.table,marginBottom:6}}><thead><tr>
+            <th style={S.th}>Entity</th><th style={S.th}>Account</th><th style={S.th}>Type</th><th style={S.thR}>Balance</th></tr></thead>
+          <tbody>{[...p.a_legs,...p.b_legs].map(l=><tr key={l.mapping_id}>
+            <td style={S.td}>{l.entity_name}</td>
+            <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{l.account_code}</span> <span style={{color:T.textMuted}}>{l.account_name}</span></td>
+            <td style={S.td}>{IC_TYPE_LABEL[l.ic_type]||l.ic_type}</td>
+            <td style={S.tdR}>{fmt(l.amount)}</td></tr>)}</tbody></table></td></tr>}
+        </Fragment>;})}
+        <tr style={S.grandTotalRow}><td style={S.td}></td><td style={S.tdBold}>Total</td><td style={S.tdR}></td><td style={S.td}></td><td style={S.tdR}></td>
+          <td style={{...S.tdBold,textAlign:'right',color:due.totals.abs_difference>0.005?T.red:T.green}}>{fmt(due.totals.total_difference)}</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(due.totals.total_eliminate)}</td><td style={S.td}></td></tr>
+      </tbody></table></div>}
+
+      <IcExternalPanel rows={due.external}/>
+      <IcUnmappedPanel rows={due.unmapped} entities={entities} onGoToMapping={()=>setPage&&setPage('ic_mapping')}/>
+    </>}
+
+    {!loading&&tab==='investment'&&inv&&<>
+      <div style={{...S.row,marginBottom:20}}>
+        <IcTile label='Self-referential investments' value={String(inv.totals.error_count)} kind={inv.totals.error_count?'bad':'ok'}/>
+        <IcTile label='Gross-up amount' value={fmt(inv.totals.self_investment_total)} kind={inv.totals.self_investment_total>0.005?'bad':'ok'}/>
+        <IcTile label='Pairs matched' value={inv.totals.matched+' of '+inv.totals.pair_count} kind={inv.totals.mismatched?'warn':'ok'}/>
+        <IcTile label='Eliminates' value={fmt(inv.totals.total_eliminate)} kind='info'/>
+        <IcTile label='Outside group (no elim)' value={fmt(inv.totals.external_total)} kind={inv.totals.external_count?'warn':'ok'}/></div>
+
+      {inv.findings.length>0&&<div style={{...S.cardFlush,border:'1px solid '+T.red+'40',overflowX:'auto'}}>
+        <div style={{padding:'12px 16px',background:T.redDim,borderBottom:'1px solid '+T.border}}>
+          <span style={{fontWeight:700,color:T.red,fontSize:13}}>Investment in itself ({inv.findings.length})</span>
+          <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>An entity holding an investment in itself inflates both its own assets and its own equity. A parent holding an investment in a child is normal and is not flagged.</span></div>
+        <table style={S.table}><thead><tr>
+          <th style={S.th}>Entity</th><th style={S.th}>Account</th><th style={S.thR}>Amount</th><th style={S.th}>What it means</th></tr></thead>
+        <tbody>{inv.findings.map(f=><tr key={f.mapping_id} style={{background:f.severity==='error'?T.redDim:T.orangeDim}}>
+          <td style={{...S.td,fontWeight:600,color:T.textBright}}>{f.entity_name}</td>
+          <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{f.account_code}</span> <span style={{color:T.textMuted}}>{f.account_name}</span></td>
+          <td style={{...S.tdR,fontWeight:700,color:f.severity==='error'?T.red:T.orange}}>{fmt(f.amount)}</td>
+          <td style={{...S.td,whiteSpace:'normal'}}>{f.severity==='error'?<IcBadge kind="bad">error</IcBadge>:<IcBadge kind="warn">check</IcBadge>} <span style={{marginLeft:6}}>{f.message}</span></td></tr>)}</tbody></table></div>}
+
+      {inv.pairs.length===0?<IcEmpty>No parent/child investment relationships inside this group carry a balance at {inv.as_of||asOf}.</IcEmpty>
+      :<div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+        <th style={S.th}>Parent (holds the investment)</th><th style={S.th}>Child</th>
+        <th style={S.thR}>Investment</th><th style={S.thR}>Contributed capital</th>
+        <th style={S.thR}>Difference</th><th style={S.thR}>Eliminates</th><th style={S.th}>Status</th></tr></thead>
+      <tbody>{inv.pairs.map(p=><tr key={p.parent_id+'>'+p.child_id} style={{background:p.status!=='matched'?T.orangeDim:'transparent'}}>
+        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.parent_name}</td>
+        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.child_name}</td>
+        <td style={S.tdR}>{fmt(p.investment)}</td><td style={S.tdR}>{fmt(p.contributed_capital)}</td>
+        <td style={{...S.tdR,fontWeight:700,color:Math.abs(p.difference)>=inv.tolerance?T.red:T.green}}>{fmt(p.difference)}</td>
+        <td style={S.tdR}>{fmt(p.eliminate)}</td><td style={S.td}>{statusBadge(p.status)}</td></tr>)}</tbody></table></div>}
+
+      <IcExternalPanel rows={inv.external}/>
+      <IcUnmappedPanel rows={inv.unmapped} entities={entities} onGoToMapping={()=>setPage&&setPage('ic_mapping')}/>
+    </>}
+  </div>);
+}
+
+// ── IC Mapping: the setup page a person owns ──
+// Account names alone can't be trusted (CloudLedger copies the same chart of
+// accounts across entities, so an entity can own an account named "Due from
+// <itself>"). Suggestions read the names and propose; a person confirms.
+function IntercompanyMapping({entities,activeEntity,canEdit=true}){
+  const[tab,setTab]=useState('mappings');
+  const[eid,setEid]=useState(activeEntity||'');
+  const[rows,setRows]=useState([]);const[groups,setGroups]=useState([]);
+  const[loading,setLoading]=useState(false);const[err,setErr]=useState('');const[msg,setMsg]=useState('');
+  const[sugg,setSugg]=useState(null);const[picked,setPicked]=useState({});
+  const[editId,setEditId]=useState(null);const[editForm,setEditForm]=useState({});
+  const[showAdd,setShowAdd]=useState(false);
+  const[form,setForm]=useState({account_code:'',account_name:'',ic_type:'due_from',counterparty_entity_id:'',is_external:false,notes:''});
+  const[gEdit,setGEdit]=useState(null);// {id,name,notes,entity_ids:[]}
+
+  const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
+
+  const loadRows=useCallback(async()=>{
+    if(!eid){setRows([]);return;}
+    setLoading(true);setErr('');
+    try{setRows(await api.getIcMappings({entity_id:eid}));}catch(e){setErr(e.message);}finally{setLoading(false);}
+  },[eid]);
+  const loadGroups=useCallback(async()=>{try{setGroups(await api.getIcGroups());}catch(e){setErr(e.message);}},[]);
+  useEffect(()=>{loadRows();},[loadRows]);
+  useEffect(()=>{loadGroups();},[loadGroups]);
+
+  const runSuggest=async()=>{
+    if(!eid)return;
+    setErr('');setMsg('');
+    try{const s=await api.suggestIcMappings(eid);setSugg(s);
+      const p={};s.forEach((x,i)=>{p[i]=Math.abs(x.balance)>0.005&&(x.counterparty_entity_id!=null||x.is_external);});
+      setPicked(p);
+      if(!s.length)setMsg('No unmapped intercompany-looking accounts found for this entity.');
+    }catch(e){setErr(e.message);}
+  };
+  const acceptSuggestions=async()=>{
+    const items=(sugg||[]).filter((_,i)=>picked[i]).map(s=>({
+      entity_id:s.entity_id,account_code:s.account_code,account_name:s.account_name,
+      ic_type:s.ic_type,counterparty_entity_id:s.counterparty_entity_id,
+      is_external:s.is_external?1:0,notes:s.notes||null}));
+    const bad=items.find(i=>!i.is_external&&!i.counterparty_entity_id);
+    if(bad){setErr('Pick a counterparty for '+bad.account_code+', or mark it external.');return;}
+    if(!items.length){setErr('Nothing selected.');return;}
+    try{const r=await api.createIcMapping(items);setSugg(null);setPicked({});setMsg('Added '+r.count+' mapping'+(r.count===1?'':'s')+'.');loadRows();}
+    catch(e){setErr(e.message);}
+  };
+  const add=async()=>{
+    if(!eid){setErr('Pick an entity first.');return;}
+    try{await api.createIcMapping({...form,entity_id:Number(eid),
+      counterparty_entity_id:form.is_external?null:(form.counterparty_entity_id?Number(form.counterparty_entity_id):null),
+      is_external:form.is_external?1:0});
+      setShowAdd(false);setForm({account_code:'',account_name:'',ic_type:'due_from',counterparty_entity_id:'',is_external:false,notes:''});
+      setErr('');loadRows();}catch(e){setErr(e.message);}
+  };
+  const saveEdit=async()=>{
+    try{await api.updateIcMapping(editId,{...editForm,
+      counterparty_entity_id:editForm.is_external?null:(editForm.counterparty_entity_id?Number(editForm.counterparty_entity_id):null),
+      is_external:editForm.is_external?1:0});
+      setEditId(null);setErr('');loadRows();}catch(e){setErr(e.message);}
+  };
+  const del=async r=>{if(!confirm('Remove the mapping for '+r.account_code+' '+(r.account_name||'')+'?'))return;
+    try{await api.deleteIcMapping(r.id);loadRows();}catch(e){setErr(e.message);}};
+
+  const saveGroup=async()=>{
+    if(!gEdit||!gEdit.name.trim()){setErr('Group name is required.');return;}
+    if(!gEdit.entity_ids.length){setErr('Pick at least one entity for the group.');return;}
+    try{
+      if(gEdit.id)await api.updateIcGroup(gEdit.id,{name:gEdit.name,notes:gEdit.notes||null,entity_ids:gEdit.entity_ids});
+      else await api.createIcGroup({name:gEdit.name,notes:gEdit.notes||null,entity_ids:gEdit.entity_ids});
+      setGEdit(null);setErr('');loadGroups();
+    }catch(e){setErr(e.message);}
+  };
+  const delGroup=async g=>{if(!confirm('Delete the group "'+g.name+'"? Mappings are not affected.'))return;
+    try{await api.deleteIcGroup(g.id);loadGroups();}catch(e){setErr(e.message);}};
+
+  const cpCell=(val,isExt,onType,onCp)=>(<div style={{display:'flex',gap:6,alignItems:'center'}}>
+    <select style={{...S.selectSm,minWidth:180}} value={isExt?'__ext':(val||'')} onChange={e=>{
+      if(e.target.value==='__ext'){onType(true);onCp('');}else{onType(false);onCp(e.target.value);}}}>
+      <option value=''>— pick counterparty —</option>
+      <option value='__ext'>External (outside the ledger)</option>
+      {(entities||[]).map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>);
+
+  return(<div>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8,flexWrap:'wrap',gap:12}}>
+      <div><div style={S.h1}>IC Mapping</div>
+        <div style={S.sub}>Tells the reconciliation which account faces which entity. Account names are only a suggestion — a person confirms every row.</div></div></div>
+
+    <div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
+      {[['mappings','Account mappings'],['groups','Groups ('+groups.length+')']].map(([k,l])=>
+        <button key={k} onClick={()=>{setTab(k);setErr('');setMsg('');}} style={{background:'none',border:'none',borderBottom:'2px solid '+(tab===k?T.accent:'transparent'),color:tab===k?T.accent:T.textMuted,fontWeight:tab===k?700:500,fontSize:13,padding:'9px 16px',cursor:'pointer',marginBottom:-1}}>{l}</button>)}</div>
+
+    {err&&<div style={{...S.card,borderColor:T.red+'40',padding:14}}><div style={S.err}>{err}</div></div>}
+    {msg&&<div style={{...S.card,borderColor:T.green+'40',padding:14}}><div style={S.success}>{msg}</div></div>}
+
+    {tab==='mappings'&&<>
+      <div style={{...S.row,alignItems:'flex-end'}}>
+        <div style={{minWidth:280}}><label style={S.label}>Entity</label>
+          <select style={S.select} value={eid} onChange={e=>{setEid(e.target.value);setSugg(null);setMsg('');}}>
+            <option value=''>Select an entity…</option>
+            {(entities||[]).map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
+        {canEdit&&eid&&<><button style={S.btnS} onClick={runSuggest}>Suggest from account names</button>
+          <button style={S.btnP} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add mapping'}</button></>}</div>
+
+      {showAdd&&<div style={{...S.card,borderColor:T.green+'40'}}>
+        <div style={S.row}>
+          <div style={S.col}><label style={S.label}>Account code</label><input style={S.input} value={form.account_code} onChange={e=>setForm(f=>({...f,account_code:e.target.value}))} placeholder='18307'/></div>
+          <div style={{...S.col,flex:2}}><label style={S.label}>Account name</label><input style={S.input} value={form.account_name} onChange={e=>setForm(f=>({...f,account_name:e.target.value}))} placeholder='Due from …'/></div>
+          <div style={S.col}><label style={S.label}>Kind</label>
+            <select style={S.select} value={form.ic_type} onChange={e=>setForm(f=>({...f,ic_type:e.target.value}))}>
+              {Object.keys(IC_TYPE_LABEL).map(k=><option key={k} value={k}>{IC_TYPE_LABEL[k]}</option>)}</select></div>
+          <div style={{...S.col,flex:2}}><label style={S.label}>Counterparty</label>
+            {cpCell(form.counterparty_entity_id,form.is_external,v=>setForm(f=>({...f,is_external:v})),v=>setForm(f=>({...f,counterparty_entity_id:v})))}</div></div>
+        <div style={{marginBottom:12}}><label style={S.label}>Notes</label><input style={S.input} value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} placeholder='(optional — e.g. the outside party name)'/></div>
+        <button style={S.btnP} onClick={add}>Add mapping</button></div>}
+
+      {sugg&&sugg.length>0&&<div style={{...S.cardFlush,border:'1px solid '+T.accent+'40'}}>
+        <div style={{padding:'12px 16px',background:T.accentDim,borderBottom:'1px solid '+T.border,display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
+          <div><span style={{fontWeight:700,color:T.accent,fontSize:13}}>Suggested from account names ({sugg.length})</span>
+            <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>Nothing is saved until you accept. Rows with a balance and a confident match are pre-ticked.</span></div>
+          <div style={{display:'flex',gap:8}}>
+            <button style={S.btnS} onClick={()=>setSugg(null)}>Discard</button>
+            <button style={S.btnP} onClick={acceptSuggestions}>Accept selected</button></div></div>
+        <div style={{overflowX:'auto'}}><table style={S.table}><thead><tr>
+          <th style={{...S.th,width:36}}></th><th style={S.th}>Account</th><th style={S.th}>Kind</th>
+          <th style={S.th}>Counterparty</th><th style={S.thR}>Balance</th><th style={S.th}>Match</th></tr></thead>
+        <tbody>{sugg.map((s,i)=><tr key={s.account_code} style={{background:s.self_referential?T.redDim:(picked[i]?T.accentDim:'transparent')}}>
+          <td style={S.tdC}><input type='checkbox' style={S.checkbox} checked={!!picked[i]} onChange={e=>setPicked(p=>({...p,[i]:e.target.checked}))}/></td>
+          <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{s.account_code}</span> <span style={{color:T.textMuted}}>{s.account_name}</span></td>
+          <td style={S.td}>{IC_TYPE_LABEL[s.ic_type]||s.ic_type}</td>
+          <td style={S.td}>{cpCell(s.counterparty_entity_id,!!s.is_external,
+            v=>setSugg(a=>a.map((x,j)=>j===i?{...x,is_external:v?1:0,counterparty_entity_id:v?null:x.counterparty_entity_id}:x)),
+            v=>setSugg(a=>a.map((x,j)=>j===i?{...x,counterparty_entity_id:v?Number(v):null,is_external:0}:x)))}</td>
+          <td style={{...S.tdR,fontWeight:Math.abs(s.balance)>0.005?600:400,color:Math.abs(s.balance)>0.005?T.textBright:T.textDim}}>{fmt(s.balance)}</td>
+          <td style={S.td}>{s.self_referential?<IcBadge kind="bad">points at itself</IcBadge>
+            :s.confidence==='external'?<IcBadge kind="warn">external</IcBadge>
+            :s.counterparty_entity_id?<IcBadge kind="ok">{s.confidence}</IcBadge>
+            :<IcBadge kind="mute">{s.confidence}</IcBadge>}
+            <span style={{color:T.textDim,fontSize:11,marginLeft:6}}>{s.reason}</span></td></tr>)}</tbody></table></div></div>}
+
+      {loading?<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Loading…</div>
+      :!eid?<IcEmpty>Pick an entity to see and edit its intercompany account mappings.</IcEmpty>
+      :rows.length===0?<IcEmpty>{entName(eid)} has no intercompany mappings yet. Use <b>Suggest from account names</b> to get started.</IcEmpty>
+      :<div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+        <th style={S.th}>Account</th><th style={S.th}>Kind</th><th style={S.th}>Counterparty</th><th style={S.th}>Notes</th>
+        {canEdit&&<th style={{...S.th,width:110}}>Actions</th>}</tr></thead>
+      <tbody>{rows.map(r=>editId===r.id?(<tr key={r.id} style={{background:T.accentDim}}>
+        <td style={S.td}><input style={{...S.inputSm,width:80}} value={editForm.account_code} onChange={e=>setEditForm(f=>({...f,account_code:e.target.value}))}/>
+          <input style={{...S.inputSm,width:220,marginLeft:6}} value={editForm.account_name||''} onChange={e=>setEditForm(f=>({...f,account_name:e.target.value}))}/></td>
+        <td style={S.td}><select style={S.selectSm} value={editForm.ic_type} onChange={e=>setEditForm(f=>({...f,ic_type:e.target.value}))}>
+          {Object.keys(IC_TYPE_LABEL).map(k=><option key={k} value={k}>{IC_TYPE_LABEL[k]}</option>)}</select></td>
+        <td style={S.td}>{cpCell(editForm.counterparty_entity_id,!!editForm.is_external,
+          v=>setEditForm(f=>({...f,is_external:v})),v=>setEditForm(f=>({...f,counterparty_entity_id:v})))}</td>
+        <td style={S.td}><input style={{...S.inputSm,width:'100%'}} value={editForm.notes||''} onChange={e=>setEditForm(f=>({...f,notes:e.target.value}))}/></td>
+        <td style={S.td}><div style={{display:'flex',gap:6}}>
+          <button style={{...S.btnGhost,color:T.green,fontSize:11}} onClick={saveEdit}>Save</button>
+          <button style={{...S.btnGhost,fontSize:11}} onClick={()=>setEditId(null)}>Cancel</button></div></td></tr>
+      ):(<tr key={r.id} style={Number(r.counterparty_entity_id)===Number(r.entity_id)?{background:T.redDim}:null}>
+        <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{r.account_code}</span> <span style={{color:T.textMuted}}>{r.account_name}</span></td>
+        <td style={S.td}>{IC_TYPE_LABEL[r.ic_type]||r.ic_type}</td>
+        <td style={S.td}>{r.is_external?<IcBadge kind="warn">external</IcBadge>:(r.counterparty_name||<IcBadge kind="mute">not set</IcBadge>)}
+          {Number(r.counterparty_entity_id)===Number(r.entity_id)&&<span style={{marginLeft:6}}><IcBadge kind="bad">points at itself</IcBadge></span>}</td>
+        <td style={{...S.td,color:T.textMuted}}>{r.notes||''}</td>
+        {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}>
+          <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{setEditId(r.id);setEditForm({account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,counterparty_entity_id:r.counterparty_entity_id||'',is_external:!!r.is_external,notes:r.notes||''});}}>Edit</button>
+          <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={()=>del(r)}>x</button></div></td>}</tr>))}
+      </tbody></table></div>}
+    </>}
+
+    {tab==='groups'&&<>
+      <div style={{marginBottom:16,color:T.textMuted,fontSize:13}}>
+        A group is the set of entities being consolidated. It is what decides elimination: a balance between two members eliminates; a balance facing anyone else is tagged <IcBadge kind="warn">no elim</IcBadge> and stays on the consolidated statements.
+        {canEdit&&<button style={{...S.btnP,marginLeft:12}} onClick={()=>{setGEdit({name:'',notes:'',entity_ids:[]});setErr('');}}>+ New group</button>}</div>
+
+      {gEdit&&<div style={{...S.card,borderColor:T.green+'40'}}>
+        <div style={S.row}>
+          <div style={{...S.col,flex:2}}><label style={S.label}>Group name</label>
+            <input style={S.input} value={gEdit.name} onChange={e=>setGEdit(g=>({...g,name:e.target.value}))} placeholder='County Line Rail Fund I'/></div>
+          <div style={{...S.col,flex:3}}><label style={S.label}>Notes</label>
+            <input style={S.input} value={gEdit.notes||''} onChange={e=>setGEdit(g=>({...g,notes:e.target.value}))} placeholder='(optional)'/></div></div>
+        <label style={S.label}>Entities in the group ({gEdit.entity_ids.length})</label>
+        <div style={{maxHeight:260,overflowY:'auto',border:'1px solid '+T.border,borderRadius:T.radiusXs,padding:'8px 12px',marginBottom:12,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(260px,1fr))',gap:'2px 12px'}}>
+          {(entities||[]).map(x=><label key={x.id} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 0',cursor:'pointer',fontSize:12.5}}>
+            <input type='checkbox' style={S.checkbox} checked={gEdit.entity_ids.includes(x.id)}
+              onChange={e=>setGEdit(g=>({...g,entity_ids:e.target.checked?[...g.entity_ids,x.id]:g.entity_ids.filter(i=>i!==x.id)}))}/>
+            <span>{x.name}</span></label>)}</div>
+        <div style={{display:'flex',gap:8}}>
+          <button style={S.btnP} onClick={saveGroup}>{gEdit.id?'Save group':'Create group'}</button>
+          <button style={S.btnS} onClick={()=>{setGEdit(null);setErr('');}}>Cancel</button></div></div>}
+
+      {groups.length===0&&!gEdit?<IcEmpty>No groups yet. Create one to run the reconciliation.</IcEmpty>
+      :<div style={{...S.cardFlush,overflowX:'auto'}}><table style={S.table}><thead><tr>
+        <th style={S.th}>Group</th><th style={S.th}>Entities</th><th style={S.th}>Notes</th>{canEdit&&<th style={{...S.th,width:110}}>Actions</th>}</tr></thead>
+      <tbody>{groups.map(g=><tr key={g.id}>
+        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{g.name}</td>
+        <td style={{...S.td,whiteSpace:'normal'}}>{g.members.map(m=>m.name).join(', ')||<span style={{color:T.textDim}}>none</span>}</td>
+        <td style={{...S.td,color:T.textMuted}}>{g.notes||''}</td>
+        {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}>
+          <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{setGEdit({id:g.id,name:g.name,notes:g.notes||'',entity_ids:g.members.map(m=>m.entity_id)});setErr('');}}>Edit</button>
+          <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={()=>delGroup(g)}>x</button></div></td>}</tr>)}
+      </tbody></table></div>}
+    </>}
+  </div>);
+}

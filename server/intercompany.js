@@ -1,0 +1,739 @@
+// ─────────────────────────── Intercompany module ───────────────────────────
+//
+// Two jobs:
+//
+//   1. IC MAPPING (setup, human-owned). A table that says, for one entity's GL
+//      account, WHICH other entity it faces and WHAT KIND of intercompany
+//      balance it is. Account names alone are not trustworthy — CloudLedger
+//      copies the same chart of accounts across entities, so entity 39 owns an
+//      account literally named "Due from CLR Silsbee Property Owner" while
+//      BEING CLR Silsbee Property Owner. The mapping is therefore confirmed by
+//      a person; `suggestMappings` only proposes.
+//
+//   2. IC RECONCILIATION (report). Two independent views:
+//
+//      • Due from / Due to — transactional. Entity A's net receivable from B
+//        must equal entity B's net payable to A. Netted BY COUNTERPARTY PAIR,
+//        not by account, because one relationship routinely spans several
+//        accounts. Validated against the 6/30/2026 CLIP ↔ CLR Silsbee gap:
+//            CLIP 18307 due from Silsbee            215,228.93
+//            Silsbee 18378 due from CLIP             26,948.26
+//            Silsbee 23375 due to CLIP              202,420.88
+//            Silsbee net toward CLIP  26,948.26 - 202,420.88 = (175,472.62)
+//            difference 215,228.93 - 175,472.62   =    39,756.31
+//        which is the $39,756 reported in the 8/15 statement comparison.
+//
+//      • Investment / Contributed capital — structural. A parent's
+//        "Investment in <child>" should equal the child's "Contributed capital
+//        – <parent>".
+//
+// ── The elimination rule that this module exists to enforce ──
+//
+// A counterparty OUTSIDE the selected group is never eliminated. It gets a
+// "no elim" tag and is reported separately. The CLRFI Midco I Q2 draft got this
+// wrong three times — 18310 (due from County Line Rail Fund I, 2,674), 18311
+// (due from County Line Rail Operations, 7,671) and 22100 (short-term loan
+// payable to CLRF I, 30,073) were all eliminated against parties that are not
+// in the consolidation group. Balances facing an outside party are real
+// third-party balances and must survive consolidation.
+//
+// ── The self-referential investment rule ──
+//
+// Only ONE investment pattern is an error: an entity holding an "Investment in
+// [itself]" (ic_type 'investment' AND counterparty_entity_id === entity_id).
+// That is the gross-up found at CLIP Property Owner (19041, 1,837,842.67) and
+// CLR Silsbee Property Owner (17001, 11,760,052.36) — each carries an
+// investment in itself with matching contributed capital, inflating both sides
+// of its own balance sheet. A normal parent→child investment is NOT an error:
+// County Line Industrial Park (42) legitimately holds 19041 "Investment in CLIP
+// Property Owner" of 53,980,295.39, and County Line Rail Silsbee (52)
+// legitimately holds 17001 of 11,760,052.36.
+
+const IC_TYPES = ['due_from', 'due_to', 'investment', 'contributed_capital'];
+const DEFAULT_TOLERANCE = 0.005;
+
+// ══════════════════════════════ Schema ══════════════════════════════
+
+function ensureSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS intercompany_accounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_id INTEGER NOT NULL,
+      account_code TEXT NOT NULL,
+      account_name TEXT,
+      counterparty_entity_id INTEGER,
+      ic_type TEXT NOT NULL,
+      is_external INTEGER NOT NULL DEFAULT 0,
+      notes TEXT,
+      created_at TEXT, created_by TEXT, updated_at TEXT, updated_by TEXT,
+      UNIQUE(entity_id, account_code)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ic_entity ON intercompany_accounts(entity_id);
+    CREATE INDEX IF NOT EXISTS idx_ic_cp ON intercompany_accounts(counterparty_entity_id);
+
+    CREATE TABLE IF NOT EXISTS intercompany_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      notes TEXT,
+      created_at TEXT, created_by TEXT, updated_at TEXT, updated_by TEXT
+    );
+    CREATE TABLE IF NOT EXISTS intercompany_group_members (
+      group_id INTEGER NOT NULL,
+      entity_id INTEGER NOT NULL,
+      PRIMARY KEY (group_id, entity_id)
+    );
+  `);
+}
+
+// ══════════════════════════ Name → entity matching ══════════════════════════
+
+// Strip the noise that stops "County Line Rail Fund I LP" from matching the
+// entity "County Line Rail Fund".
+function normName(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[.,'"()]/g, ' ')
+    .replace(/\b(llc|l\.l\.c|lp|l\.p|llp|inc|incorporated|corp|corporation|co|company|ltd|limited|the)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+// Hand-maintained aliases for the County Line family, where GL account names
+// use short forms ("Due from Buna", "Due to SRN") that no generic matcher can
+// resolve. Ordered MOST SPECIFIC FIRST — "county line rail silsbee" has to be
+// tested before the bare "silsbee", and "county line industrial park" before
+// "clip", or the wrong entity wins.
+const ALIASES = [
+  [/^clrfi\b.*midco|^midco/,                              'CLRFIMID'],
+  [/^county line rail silsbee|^clr silsbee$/,             'COUNTYLI5'],
+  [/^county line industrial park/,                        'COUNTYLI2'],
+  [/^county line rail operations|^clro\b/,                'COUNTYLI3'],
+  [/^county line railroad interest|^clri\b/,              'COUNTYLI'],
+  [/^county line rail fund|^clrf\b|^clr fund\b/,          'COUNTYLI1'],
+  [/^clr silsbee property owner|^silsbee property owner/, 'CLRSILSB2'],
+  [/^clr silsbee sponsor/,                                'CLRSILSB1'],
+  [/^clr silsbee manager/,                                'CLRSILSB'],
+  [/^clip property owner/,                                'CLIPPROP'],
+  [/^clip sponsor/,                                       'CLIPSPON'],
+  [/^clr buna property owner|^buna/,                      'CLRBUNAP'],
+  [/^sabine river|^srn\b|^county line srn/,               'SABINERI'],
+  [/^silsbee/,                                            'CLRSILSB2'],
+  [/^clip/,                                               'CLIPPROP'],
+  [/^banyan residential$/,                                'BANYANRE1'],
+  [/^turn ?key rail/,                                     'TURNKEYR'],
+];
+
+// Counterparty labels that are explicitly NOT another entity in the ledger.
+const EXTERNAL_HINTS = [/outside vendor/i, /third party/i, /^vendor$/i, /affiliates?$/i,
+                        /management company/i, /portfolio compan/i, /port co\b/i];
+
+// Resolve a counterparty label from an account name to an entity id.
+// Returns { entity_id, confidence, reason } or { entity_id: null, ... }.
+// Deliberately conservative: an ambiguous label resolves to null so the setup
+// page shows it blank and a person decides, rather than guessing wrong and
+// having a wrong guess quietly drive an elimination.
+function matchEntity(label, entities) {
+  const raw = String(label || '').trim();
+  if (!raw) return { entity_id: null, confidence: 'none', reason: 'no counterparty in account name' };
+  if (EXTERNAL_HINTS.some(re => re.test(raw))) {
+    return { entity_id: null, confidence: 'external', reason: 'looks like a party outside the ledger' };
+  }
+  const n = normName(raw);
+  if (!n) return { entity_id: null, confidence: 'none', reason: 'counterparty name empty after normalization' };
+
+  for (const [re, code] of ALIASES) {
+    if (re.test(n)) {
+      const ent = entities.find(e => e.code === code);
+      if (ent) return { entity_id: ent.id, confidence: 'alias', reason: 'matched alias for ' + ent.name };
+    }
+  }
+
+  const exact = entities.filter(e => normName(e.name) === n);
+  if (exact.length === 1) return { entity_id: exact[0].id, confidence: 'exact', reason: 'exact name match' };
+  if (exact.length > 1) return { entity_id: null, confidence: 'ambiguous', reason: exact.length + ' entities share this name' };
+
+  // Token overlap, accepted only when a single entity clearly wins.
+  const want = new Set(n.split(' ').filter(Boolean));
+  if (!want.size) return { entity_id: null, confidence: 'none', reason: 'no usable tokens' };
+  const scored = entities.map(e => {
+    const have = new Set(normName(e.name).split(' ').filter(Boolean));
+    let hit = 0; for (const w of want) if (have.has(w)) hit++;
+    return { e, score: hit / Math.max(want.size, have.size || 1) };
+  }).filter(s => s.score >= 0.6).sort((a, b) => b.score - a.score);
+  if (scored.length === 1 || (scored.length > 1 && scored[0].score - scored[1].score >= 0.15)) {
+    return { entity_id: scored[0].e.id, confidence: 'fuzzy', reason: 'token match to ' + scored[0].e.name };
+  }
+  if (scored.length > 1) return { entity_id: null, confidence: 'ambiguous', reason: 'several entities match "' + raw + '"' };
+  return { entity_id: null, confidence: 'none', reason: 'no entity matches "' + raw + '"' };
+}
+
+// Parse a GL account name into { ic_type, counterparty_label }, or null when the
+// name is not an intercompany account at all.
+function parseAccountName(name) {
+  const s = String(name || '').trim();
+  let m;
+  if ((m = s.match(/^due\s+from\s+(.+)$/i)))                      return { ic_type: 'due_from', label: m[1] };
+  if ((m = s.match(/^due\s+to\s+(.+)$/i)))                        return { ic_type: 'due_to', label: m[1] };
+  if ((m = s.match(/^contributed\s+capital\s*[-–—:]?\s*(.+)$/i))) return { ic_type: 'contributed_capital', label: m[1] };
+  if ((m = s.match(/^investments?\s*(?:in|-|–|—|:)\s*(.+)$/i)))   return { ic_type: 'investment', label: m[1] };
+  // CLRF's fund-level naming: "CLIP - Investment Purchase", "Silsbee - Investment Purchase"
+  if ((m = s.match(/^(.+?)\s*[-–—]\s*investment\s+purchase$/i)))  return { ic_type: 'investment', label: m[1] };
+  return null;
+}
+
+// ══════════════════════════════ Groups ══════════════════════════════
+
+function listGroups(db) {
+  const groups = db.prepare('SELECT * FROM intercompany_groups ORDER BY name COLLATE NOCASE').all();
+  const members = db.prepare(`
+    SELECT m.group_id, m.entity_id, e.name, e.code
+    FROM intercompany_group_members m LEFT JOIN entities e ON e.id = m.entity_id
+    ORDER BY e.name COLLATE NOCASE`).all();
+  return groups.map(g => ({ ...g, members: members.filter(m => m.group_id === g.id) }));
+}
+
+function getGroupEntityIds(db, groupId) {
+  return db.prepare('SELECT entity_id FROM intercompany_group_members WHERE group_id = ?')
+    .all(groupId).map(r => r.entity_id);
+}
+
+function saveGroup(db, { id, name, notes, entity_ids }, who) {
+  const now = new Date().toISOString();
+  let gid = id;
+  if (gid) {
+    db.prepare('UPDATE intercompany_groups SET name=?, notes=?, updated_at=?, updated_by=? WHERE id=?')
+      .run(name, notes || null, now, who || null, gid);
+  } else {
+    gid = db.prepare('INSERT INTO intercompany_groups (name, notes, created_at, created_by) VALUES (?,?,?,?)')
+      .run(name, notes || null, now, who || null).lastInsertRowid;
+  }
+  db.prepare('DELETE FROM intercompany_group_members WHERE group_id = ?').run(gid);
+  const ins = db.prepare('INSERT OR IGNORE INTO intercompany_group_members (group_id, entity_id) VALUES (?,?)');
+  for (const eid of (entity_ids || [])) ins.run(gid, Number(eid));
+  return gid;
+}
+
+function deleteGroup(db, id) {
+  db.prepare('DELETE FROM intercompany_group_members WHERE group_id = ?').run(id);
+  db.prepare('DELETE FROM intercompany_groups WHERE id = ?').run(id);
+}
+
+// ══════════════════════════════ Mappings ══════════════════════════════
+
+function listMappings(db, { entity_id, group_id } = {}) {
+  let where = '', params = [];
+  if (entity_id) { where = 'WHERE m.entity_id = ?'; params = [entity_id]; }
+  else if (group_id) {
+    const ids = getGroupEntityIds(db, group_id);
+    if (!ids.length) return [];
+    where = 'WHERE m.entity_id IN (' + ids.map(() => '?').join(',') + ')';
+    params = ids;
+  }
+  return db.prepare(`
+    SELECT m.*, e.name AS entity_name, e.code AS entity_code,
+           c.name AS counterparty_name, c.code AS counterparty_code
+    FROM intercompany_accounts m
+    LEFT JOIN entities e ON e.id = m.entity_id
+    LEFT JOIN entities c ON c.id = m.counterparty_entity_id
+    ${where}
+    ORDER BY e.name COLLATE NOCASE, m.account_code`).all(...params);
+}
+
+function validateMapping(body) {
+  if (!body.entity_id) return 'entity_id is required';
+  if (!body.account_code) return 'account_code is required';
+  if (!IC_TYPES.includes(body.ic_type)) return 'ic_type must be one of: ' + IC_TYPES.join(', ');
+  if (!body.is_external && !body.counterparty_entity_id) {
+    return 'Pick a counterparty entity, or mark the account external';
+  }
+  return null;
+}
+
+function createMapping(db, body, who) {
+  const now = new Date().toISOString();
+  const r = db.prepare(`INSERT INTO intercompany_accounts
+    (entity_id, account_code, account_name, counterparty_entity_id, ic_type, is_external, notes, created_at, created_by, updated_at, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+      Number(body.entity_id), String(body.account_code), body.account_name || null,
+      body.is_external ? null : (body.counterparty_entity_id ? Number(body.counterparty_entity_id) : null),
+      body.ic_type, body.is_external ? 1 : 0, body.notes || null, now, who || null, now, who || null);
+  return r.lastInsertRowid;
+}
+
+function updateMapping(db, id, body, who) {
+  const now = new Date().toISOString();
+  db.prepare(`UPDATE intercompany_accounts SET
+      account_code=?, account_name=?, counterparty_entity_id=?, ic_type=?, is_external=?, notes=?, updated_at=?, updated_by=?
+    WHERE id=?`).run(
+      String(body.account_code), body.account_name || null,
+      body.is_external ? null : (body.counterparty_entity_id ? Number(body.counterparty_entity_id) : null),
+      body.ic_type, body.is_external ? 1 : 0, body.notes || null, now, who || null, id);
+}
+
+function deleteMapping(db, id) {
+  db.prepare('DELETE FROM intercompany_accounts WHERE id = ?').run(id);
+}
+
+// Propose mappings for one entity by reading its chart of accounts. Every
+// proposal carries the account's current balance and the reason the
+// counterparty was chosen, so a reviewer can see what actually matters (a
+// nonzero balance) and where the matcher was unsure. Nothing is saved here —
+// the client posts back only the rows a person accepted.
+function suggestMappings(db, entityId, { computeBalances, as_of }) {
+  ensureSchema(db);
+  const entities = db.prepare('SELECT id, name, code FROM entities').all();
+  const existing = new Set(db.prepare('SELECT account_code FROM intercompany_accounts WHERE entity_id = ?')
+    .all(entityId).map(r => r.account_code));
+  const balances = computeBalances(entityId, as_of ? { as_of } : {});
+  const balByCode = new Map(balances.map(b => [String(b.code), b]));
+  const accounts = db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ? ORDER BY code').all(entityId);
+
+  const out = [];
+  for (const a of accounts) {
+    if (existing.has(String(a.code))) continue;
+    const parsed = parseAccountName(a.name);
+    if (!parsed) continue;
+    const match = matchEntity(parsed.label, entities);
+    const bal = balByCode.get(String(a.code));
+    const self = match.entity_id != null && Number(match.entity_id) === Number(entityId);
+    out.push({
+      entity_id: Number(entityId),
+      account_code: String(a.code),
+      account_name: a.name,
+      account_type: a.type,
+      ic_type: parsed.ic_type,
+      counterparty_label: parsed.label,
+      counterparty_entity_id: match.entity_id,
+      is_external: match.confidence === 'external' ? 1 : 0,
+      confidence: match.confidence,
+      reason: match.reason,
+      self_referential: self,
+      balance: bal ? bal.balance : 0,
+    });
+  }
+  // Accounts that carry money first — a zero-balance shell account is noise.
+  out.sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance) || a.account_code.localeCompare(b.account_code));
+  return out;
+}
+
+// ══════════════════════════ Reconciliation helpers ══════════════════════════
+
+function loadGroupContext(db, groupId, { computeBalances, as_of }) {
+  ensureSchema(db);
+  const group = db.prepare('SELECT * FROM intercompany_groups WHERE id = ?').get(groupId);
+  if (!group) { const e = new Error('Group not found'); e.status = 404; throw e; }
+  const memberIds = getGroupEntityIds(db, groupId);
+  if (!memberIds.length) { const e = new Error('This group has no entities yet'); e.status = 400; throw e; }
+  const entities = db.prepare('SELECT id, name, code FROM entities').all();
+  const entById = new Map(entities.map(e => [e.id, e]));
+  const inGroup = new Set(memberIds);
+  const balances = new Map();
+  for (const eid of memberIds) {
+    const rows = computeBalances(eid, as_of ? { as_of } : {});
+    balances.set(eid, new Map(rows.map(r => [String(r.code), r])));
+  }
+  const mappings = listMappings(db, { group_id: groupId });
+  return { group, memberIds, inGroup, entById, balances, mappings };
+}
+
+const nameOf = (entById, id) => (entById.get(id) || {}).name || ('Entity ' + id);
+
+// Amount for one mapping row at the as-of date, in natural sign
+// (asset debit-positive, liability/equity credit-positive), which is what
+// computeBalances already returns.
+function amountFor(balances, m) {
+  const row = (balances.get(m.entity_id) || new Map()).get(String(m.account_code));
+  return row ? Number(row.balance) || 0 : 0;
+}
+
+// Is this mapping's counterparty inside the selected group?
+function isInternal(m, inGroup) {
+  if (m.is_external) return false;
+  if (m.counterparty_entity_id == null) return false;
+  return inGroup.has(Number(m.counterparty_entity_id));
+}
+
+// Every intercompany-looking account that carries a balance but has no mapping
+// row. Reported so an unmapped account can never silently drop out of the
+// reconciliation — the failure mode that lets a real balance disappear.
+function findUnmapped(db, memberIds, balances, mappings, wantedTypes) {
+  const mapped = new Set(mappings.map(m => m.entity_id + '|' + m.account_code));
+  const out = [];
+  for (const eid of memberIds) {
+    const accounts = db.prepare('SELECT code, name FROM accounts WHERE entity_id = ?').all(eid);
+    for (const a of accounts) {
+      if (mapped.has(eid + '|' + String(a.code))) continue;
+      const parsed = parseAccountName(a.name);
+      if (!parsed || !wantedTypes.includes(parsed.ic_type)) continue;
+      const row = (balances.get(eid) || new Map()).get(String(a.code));
+      const bal = row ? Number(row.balance) || 0 : 0;
+      if (Math.abs(bal) < DEFAULT_TOLERANCE) continue;
+      out.push({ entity_id: eid, account_code: String(a.code), account_name: a.name,
+                 ic_type: parsed.ic_type, counterparty_label: parsed.label, balance: bal });
+    }
+  }
+  return out.sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance));
+}
+
+// ════════════════════ Due from / Due to reconciliation ════════════════════
+//
+// Netted by counterparty PAIR. A's net position toward B is
+// (sum of A's due-from B) − (sum of A's due-to B); B's net toward A is the
+// same computed from B's side. If the relationship is stated consistently the
+// two are equal and opposite, so their SUM is the unreconciled difference.
+
+function reconcileDueFromTo(db, groupId, opts) {
+  const tol = Number(opts.tolerance) > 0 ? Number(opts.tolerance) : DEFAULT_TOLERANCE;
+  const { group, memberIds, inGroup, entById, balances, mappings } = loadGroupContext(db, groupId, opts);
+  const rows = mappings.filter(m => m.ic_type === 'due_from' || m.ic_type === 'due_to');
+
+  const pairs = new Map();   // "loId|hiId" -> pair record
+  const external = [];
+
+  for (const m of rows) {
+    const amt = amountFor(balances, m);
+    const leg = {
+      mapping_id: m.id, entity_id: m.entity_id, entity_name: nameOf(entById, m.entity_id),
+      account_code: m.account_code, account_name: m.account_name, ic_type: m.ic_type,
+      amount: amt, notes: m.notes || null,
+    };
+
+    if (!isInternal(m, inGroup)) {
+      // OUTSIDE THE GROUP — never eliminated. This is the CLRFI Midco I bug.
+      external.push({
+        ...leg,
+        counterparty_entity_id: m.counterparty_entity_id || null,
+        counterparty_name: m.counterparty_entity_id
+          ? nameOf(entById, m.counterparty_entity_id)
+          : (m.notes || 'External party'),
+        tag: 'no_elim',
+        reason: m.is_external
+          ? 'Marked external in IC Mapping'
+          : (m.counterparty_entity_id == null
+              ? 'No counterparty mapped'
+              : 'Counterparty is not in this group'),
+      });
+      continue;
+    }
+
+    const a = Number(m.entity_id), b = Number(m.counterparty_entity_id);
+    const key = Math.min(a, b) + '|' + Math.max(a, b);
+    if (!pairs.has(key)) {
+      const lo = Math.min(a, b), hi = Math.max(a, b);
+      pairs.set(key, {
+        entity_a_id: lo, entity_a_name: nameOf(entById, lo),
+        entity_b_id: hi, entity_b_name: nameOf(entById, hi),
+        a_legs: [], b_legs: [], a_net: 0, b_net: 0,
+      });
+    }
+    const p = pairs.get(key);
+    const signed = m.ic_type === 'due_from' ? amt : -amt;  // receivable positive
+    if (a === p.entity_a_id) { p.a_legs.push(leg); p.a_net += signed; }
+    else { p.b_legs.push(leg); p.b_net += signed; }
+  }
+
+  const pairRows = [...pairs.values()].map(p => {
+    const difference = p.a_net + p.b_net;
+    // The portion that genuinely offsets and may be eliminated. When the two
+    // sides disagree only the smaller side is supported by both ledgers.
+    const eliminate = (p.a_net * p.b_net < 0) ? Math.min(Math.abs(p.a_net), Math.abs(p.b_net)) : 0;
+    let status = 'matched';
+    if (Math.abs(difference) >= tol) status = 'mismatch';
+    if (Math.abs(p.a_net) < tol && Math.abs(p.b_net) < tol) status = 'empty';
+    // Both sides receivable (or both payable) — one ledger has the sign wrong.
+    const same_direction = Math.abs(p.a_net) >= tol && Math.abs(p.b_net) >= tol && p.a_net * p.b_net > 0;
+    return { ...p, difference, eliminate, status, same_direction };
+  }).filter(p => p.status !== 'empty')
+    .sort((x, y) => Math.abs(y.difference) - Math.abs(x.difference));
+
+  const unmapped = findUnmapped(db, memberIds, balances, mappings, ['due_from', 'due_to']);
+
+  return {
+    group: { id: group.id, name: group.name },
+    as_of: opts.as_of || null,
+    tolerance: tol,
+    entities: memberIds.map(id => ({ id, name: nameOf(entById, id) })),
+    pairs: pairRows,
+    external,
+    unmapped,
+    totals: {
+      pair_count: pairRows.length,
+      matched: pairRows.filter(p => p.status === 'matched').length,
+      mismatched: pairRows.filter(p => p.status === 'mismatch').length,
+      total_eliminate: round2(pairRows.reduce((s, p) => s + p.eliminate, 0)),
+      total_difference: round2(pairRows.reduce((s, p) => s + p.difference, 0)),
+      abs_difference: round2(pairRows.reduce((s, p) => s + Math.abs(p.difference), 0)),
+      external_count: external.length,
+      external_total: round2(external.reduce((s, r) => s + Math.abs(r.amount), 0)),
+      unmapped_count: unmapped.length,
+    },
+  };
+}
+
+// ═══════════ Investment / Contributed capital reconciliation ═══════════
+
+function reconcileInvestmentCapital(db, groupId, opts) {
+  const tol = Number(opts.tolerance) > 0 ? Number(opts.tolerance) : DEFAULT_TOLERANCE;
+  const { group, memberIds, inGroup, entById, balances, mappings } = loadGroupContext(db, groupId, opts);
+  const rows = mappings.filter(m => m.ic_type === 'investment' || m.ic_type === 'contributed_capital');
+
+  const findings = [];   // self-referential errors
+  const pairs = new Map();
+  const external = [];
+
+  for (const m of rows) {
+    const amt = amountFor(balances, m);
+    const leg = {
+      mapping_id: m.id, entity_id: m.entity_id, entity_name: nameOf(entById, m.entity_id),
+      account_code: m.account_code, account_name: m.account_name, ic_type: m.ic_type,
+      amount: amt, notes: m.notes || null,
+    };
+
+    // ── The one red flag: an entity holding an investment in ITSELF. ──
+    // CLIP Property Owner 19041 (1,837,842.67) and CLR Silsbee Property Owner
+    // 17001 (11,760,052.36) both do this, grossing up their own assets and
+    // equity. A parent holding an investment in a child is normal and is not
+    // flagged here.
+    if (m.counterparty_entity_id != null && Number(m.counterparty_entity_id) === Number(m.entity_id)) {
+      findings.push({
+        ...leg,
+        severity: m.ic_type === 'investment' ? 'error' : 'warning',
+        finding: m.ic_type === 'investment' ? 'self_investment' : 'self_contributed_capital',
+        message: m.ic_type === 'investment'
+          ? nameOf(entById, m.entity_id) + ' holds an investment in itself — this grosses up its own assets and equity by ' + fmtMoney(amt) + '.'
+          : nameOf(entById, m.entity_id) + ' shows contributed capital from itself (' + fmtMoney(amt) + ').',
+      });
+      continue;
+    }
+
+    if (!isInternal(m, inGroup)) {
+      external.push({
+        ...leg,
+        counterparty_entity_id: m.counterparty_entity_id || null,
+        counterparty_name: m.counterparty_entity_id
+          ? nameOf(entById, m.counterparty_entity_id)
+          : (m.notes || 'External party'),
+        tag: 'no_elim',
+        reason: m.is_external
+          ? 'Marked external in IC Mapping'
+          : (m.counterparty_entity_id == null
+              ? 'No counterparty mapped'
+              : 'Counterparty is not in this group'),
+      });
+      continue;
+    }
+
+    // Key by (parent, child): the parent is whoever holds the investment.
+    const parent = m.ic_type === 'investment' ? Number(m.entity_id) : Number(m.counterparty_entity_id);
+    const child  = m.ic_type === 'investment' ? Number(m.counterparty_entity_id) : Number(m.entity_id);
+    const key = parent + '>' + child;
+    if (!pairs.has(key)) {
+      pairs.set(key, {
+        parent_id: parent, parent_name: nameOf(entById, parent),
+        child_id: child, child_name: nameOf(entById, child),
+        investment_legs: [], capital_legs: [], investment: 0, contributed_capital: 0,
+      });
+    }
+    const p = pairs.get(key);
+    if (m.ic_type === 'investment') { p.investment_legs.push(leg); p.investment += amt; }
+    else { p.capital_legs.push(leg); p.contributed_capital += amt; }
+  }
+
+  const pairRows = [...pairs.values()].map(p => {
+    const difference = p.investment - p.contributed_capital;
+    const has_inv = Math.abs(p.investment) >= tol, has_cap = Math.abs(p.contributed_capital) >= tol;
+    let status = 'matched';
+    if (!has_inv && !has_cap) status = 'empty';
+    else if (!has_inv || !has_cap) status = 'one_sided';
+    else if (Math.abs(difference) >= tol) status = 'mismatch';
+    const eliminate = Math.min(Math.abs(p.investment), Math.abs(p.contributed_capital));
+    return { ...p, difference, eliminate, status };
+  }).filter(p => p.status !== 'empty')
+    .sort((x, y) => Math.abs(y.difference) - Math.abs(x.difference));
+
+  const unmapped = findUnmapped(db, memberIds, balances, mappings, ['investment', 'contributed_capital']);
+
+  return {
+    group: { id: group.id, name: group.name },
+    as_of: opts.as_of || null,
+    tolerance: tol,
+    entities: memberIds.map(id => ({ id, name: nameOf(entById, id) })),
+    findings: findings.sort((a, b) => Math.abs(b.amount) - Math.abs(a.amount)),
+    pairs: pairRows,
+    external,
+    unmapped,
+    totals: {
+      error_count: findings.filter(f => f.severity === 'error').length,
+      warning_count: findings.filter(f => f.severity === 'warning').length,
+      self_investment_total: round2(findings.filter(f => f.finding === 'self_investment')
+        .reduce((s, f) => s + Math.abs(f.amount), 0)),
+      pair_count: pairRows.length,
+      matched: pairRows.filter(p => p.status === 'matched').length,
+      mismatched: pairRows.filter(p => p.status !== 'matched').length,
+      total_eliminate: round2(pairRows.reduce((s, p) => s + p.eliminate, 0)),
+      total_difference: round2(pairRows.reduce((s, p) => s + p.difference, 0)),
+      external_count: external.length,
+      external_total: round2(external.reduce((s, r) => s + Math.abs(r.amount), 0)),
+      unmapped_count: unmapped.length,
+    },
+  };
+}
+
+function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+function fmtMoney(n) {
+  return '$' + Math.abs(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// ══════════════════════════════ Routes ══════════════════════════════
+
+function registerIntercompanyRoutes(app, deps) {
+  const { db, auth, requireRole, computeBalances, userHasEntityAccess } = deps;
+  ensureSchema(db);
+
+  const who = req => (req.user && (req.user.name || req.user.email)) || null;
+  const gate = [auth, requireRole('Admin', 'Accountant')];
+
+  // Every intercompany read spans several entities at once, so entity access is
+  // checked per entity rather than by the usual single-:eid middleware. A user
+  // who cannot see one member of the group cannot run the group's report.
+  function assertEntityAccess(req, entityIds) {
+    for (const eid of entityIds) {
+      if (!userHasEntityAccess(req.user.id, req.user.role, eid)) {
+        const e = new Error('No access to entity ' + eid);
+        e.status = 403; throw e;
+      }
+    }
+  }
+  const fail = (res, e) => res.status(e.status || 500).json({ error: e.message });
+
+  // ── Groups ──
+  app.get('/api/intercompany/groups', ...gate, (req, res) => {
+    try {
+      const all = listGroups(db);
+      const visible = all.filter(g => g.members.every(m => userHasEntityAccess(req.user.id, req.user.role, m.entity_id)));
+      res.json(visible);
+    } catch (e) { fail(res, e); }
+  });
+
+  app.post('/api/intercompany/groups', ...gate, (req, res) => {
+    try {
+      if (!req.body || !req.body.name) return res.status(400).json({ error: 'Group name is required' });
+      const ids = (req.body.entity_ids || []).map(Number);
+      assertEntityAccess(req, ids);
+      const id = saveGroup(db, { name: req.body.name, notes: req.body.notes, entity_ids: ids }, who(req));
+      res.json({ id, success: true });
+    } catch (e) { fail(res, e); }
+  });
+
+  app.put('/api/intercompany/groups/:id', ...gate, (req, res) => {
+    try {
+      if (!req.body || !req.body.name) return res.status(400).json({ error: 'Group name is required' });
+      const ids = (req.body.entity_ids || []).map(Number);
+      assertEntityAccess(req, ids);
+      saveGroup(db, { id: Number(req.params.id), name: req.body.name, notes: req.body.notes, entity_ids: ids }, who(req));
+      res.json({ success: true });
+    } catch (e) { fail(res, e); }
+  });
+
+  app.delete('/api/intercompany/groups/:id', ...gate, (req, res) => {
+    try {
+      assertEntityAccess(req, getGroupEntityIds(db, Number(req.params.id)));
+      deleteGroup(db, Number(req.params.id));
+      res.json({ success: true });
+    } catch (e) { fail(res, e); }
+  });
+
+  // ── Mappings ──
+  app.get('/api/intercompany/mappings', ...gate, (req, res) => {
+    try {
+      const entity_id = req.query.entity_id ? Number(req.query.entity_id) : null;
+      const group_id = req.query.group_id ? Number(req.query.group_id) : null;
+      if (entity_id) assertEntityAccess(req, [entity_id]);
+      if (group_id) assertEntityAccess(req, getGroupEntityIds(db, group_id));
+      const rows = listMappings(db, { entity_id, group_id });
+      res.json(entity_id || group_id
+        ? rows
+        : rows.filter(r => userHasEntityAccess(req.user.id, req.user.role, r.entity_id)));
+    } catch (e) { fail(res, e); }
+  });
+
+  app.get('/api/intercompany/mappings/suggest', ...gate, (req, res) => {
+    try {
+      const entity_id = Number(req.query.entity_id);
+      if (!entity_id) return res.status(400).json({ error: 'entity_id is required' });
+      assertEntityAccess(req, [entity_id]);
+      res.json(suggestMappings(db, entity_id, { computeBalances, as_of: req.query.as_of }));
+    } catch (e) { fail(res, e); }
+  });
+
+  app.post('/api/intercompany/mappings', ...gate, (req, res) => {
+    try {
+      // Accepts one mapping or an array (the "accept these suggestions" path).
+      const items = Array.isArray(req.body) ? req.body : [req.body];
+      for (const it of items) {
+        const bad = validateMapping(it);
+        if (bad) return res.status(400).json({ error: bad });
+        assertEntityAccess(req, [Number(it.entity_id)]);
+      }
+      const ids = [];
+      const tx = db.transaction(() => { for (const it of items) ids.push(createMapping(db, it, who(req))); });
+      tx();
+      res.json({ ids, count: ids.length, success: true });
+    } catch (e) {
+      if (/UNIQUE/i.test(e.message)) return res.status(400).json({ error: 'That account is already mapped for this entity' });
+      fail(res, e);
+    }
+  });
+
+  app.put('/api/intercompany/mappings/:id', ...gate, (req, res) => {
+    try {
+      const cur = db.prepare('SELECT * FROM intercompany_accounts WHERE id = ?').get(req.params.id);
+      if (!cur) return res.status(404).json({ error: 'Mapping not found' });
+      const body = { ...req.body, entity_id: cur.entity_id };
+      const bad = validateMapping(body);
+      if (bad) return res.status(400).json({ error: bad });
+      assertEntityAccess(req, [cur.entity_id]);
+      updateMapping(db, Number(req.params.id), body, who(req));
+      res.json({ success: true });
+    } catch (e) {
+      if (/UNIQUE/i.test(e.message)) return res.status(400).json({ error: 'That account is already mapped for this entity' });
+      fail(res, e);
+    }
+  });
+
+  app.delete('/api/intercompany/mappings/:id', ...gate, (req, res) => {
+    try {
+      const cur = db.prepare('SELECT * FROM intercompany_accounts WHERE id = ?').get(req.params.id);
+      if (!cur) return res.status(404).json({ error: 'Mapping not found' });
+      assertEntityAccess(req, [cur.entity_id]);
+      deleteMapping(db, Number(req.params.id));
+      res.json({ success: true });
+    } catch (e) { fail(res, e); }
+  });
+
+  // ── Reconciliation ──
+  const runRecon = (fn) => (req, res) => {
+    try {
+      const groupId = Number(req.query.group_id);
+      if (!groupId) return res.status(400).json({ error: 'group_id is required' });
+      assertEntityAccess(req, getGroupEntityIds(db, groupId));
+      const as_of = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.as_of || '')) ? String(req.query.as_of) : null;
+      res.json(fn(db, groupId, { computeBalances, as_of, tolerance: req.query.tolerance }));
+    } catch (e) { fail(res, e); }
+  };
+
+  app.get('/api/intercompany/reconcile/due', ...gate, runRecon(reconcileDueFromTo));
+  app.get('/api/intercompany/reconcile/investment', ...gate, runRecon(reconcileInvestmentCapital));
+}
+
+module.exports = {
+  registerIntercompanyRoutes,
+  ensureSchema,
+  reconcileDueFromTo,
+  reconcileInvestmentCapital,
+  suggestMappings,
+  parseAccountName,
+  matchEntity,
+  normName,
+  IC_TYPES,
+};
