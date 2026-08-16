@@ -6516,22 +6516,25 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   // '__new' registers a company inline: leaving the page to create a QOZB before
   // a mapping can be finished is the wrong shape for this job.
   const cpValue=(entId,nodeId,isExt)=>isExt?'__ext':(nodeId?'n'+nodeId:(entId?'e'+entId:''));
-  const cpCell=(entId,nodeId,isExt,setExt,setEnt,setNode,seedName)=>(
+  // ONE callback carrying the whole choice. The three fields are mutually
+  // exclusive, so they must be written together — setting them through separate
+  // setters meant the second call undid the first.
+  const cpCell=(entId,nodeId,isExt,onPick,seedName)=>(
     <select style={{...S.selectSm,minWidth:200}} value={cpValue(entId,nodeId,isExt)} onChange={async e=>{
       const v=e.target.value;
-      if(v==='__ext'){setExt(true);setEnt('');setNode('');return;}
+      if(v==='__ext'){onPick({entity_id:null,node_id:null,is_external:true});return;}
       if(v==='__new'){
         const name=prompt('Register a company that has no ledger in CloudLedger:',seedName||'');
         if(!name||!name.trim())return;
         try{const r=await api.createIcCompany({name:name.trim()});
-          await loadCompanies();setExt(false);setEnt('');setNode(r.id);
+          await loadCompanies();
+          onPick({entity_id:null,node_id:r.id,is_external:false});
           setMsg(r.existing?('"'+r.name+'" was already registered — selected it.'):('Registered "'+r.name+'".'));
         }catch(ex){setErr(ex.message);}
         return;}
-      setExt(false);
-      if(v.startsWith('n')){setNode(v.slice(1));setEnt('');}
-      else if(v.startsWith('e')){setEnt(v.slice(1));setNode('');}
-      else{setEnt('');setNode('');}
+      if(v.startsWith('n'))onPick({entity_id:null,node_id:Number(v.slice(1)),is_external:false});
+      else if(v.startsWith('e'))onPick({entity_id:Number(v.slice(1)),node_id:null,is_external:false});
+      else onPick({entity_id:null,node_id:null,is_external:false});
     }}>
       <option value=''>{'\u2014 pick counterparty \u2014'}</option>
       <optgroup label='CloudLedger entities'>
@@ -6573,8 +6576,8 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
               {Object.keys(IC_TYPE_LABEL).map(k=><option key={k} value={k}>{IC_TYPE_LABEL[k]}</option>)}</select></div>
           <div style={{...S.col,flex:2}}><label style={S.label}>Counterparty</label>
             {cpCell(form.counterparty_entity_id,form.counterparty_node_id,form.is_external,
-              v=>setForm(f=>({...f,is_external:v})),v=>setForm(f=>({...f,counterparty_entity_id:v})),
-              v=>setForm(f=>({...f,counterparty_node_id:v})),form.account_name)}</div></div>
+              p=>setForm(f=>({...f,counterparty_entity_id:p.entity_id||'',counterparty_node_id:p.node_id||'',is_external:!!p.is_external})),
+              form.account_name)}</div></div>
         <div style={{marginBottom:12}}><label style={S.label}>Notes</label><input style={S.input} value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} placeholder='(optional — e.g. the outside party name)'/></div>
         <button style={S.btnP} onClick={add}>Add mapping</button></div>}
 
@@ -6599,9 +6602,10 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           <td style={{...S.td,whiteSpace:'normal',minWidth:220}}><span style={{fontWeight:600,color:T.textBright}}>{s.account_code}</span> <span style={{color:T.textMuted}}>{s.account_name}</span></td>
           <td style={S.td}>{IC_TYPE_LABEL[s.ic_type]||s.ic_type}</td>
           <td style={S.td}>{cpCell(s.counterparty_entity_id,s.counterparty_node_id,!!s.is_external,
-            v=>setSugg(a=>a.map((x,j)=>j===i?{...x,is_external:v?1:0,counterparty_entity_id:null,counterparty_node_id:null}:x)),
-            v=>setSugg(a=>a.map((x,j)=>j===i?{...x,counterparty_entity_id:v?Number(v):null,counterparty_node_id:null,is_external:0}:x)),
-            v=>setSugg(a=>a.map((x,j)=>j===i?{...x,counterparty_node_id:v?Number(v):null,counterparty_entity_id:null,is_external:0}:x)),
+            p=>{setSugg(a=>a.map((x,j)=>j===i?{...x,counterparty_entity_id:p.entity_id,counterparty_node_id:p.node_id,is_external:p.is_external?1:0}:x));
+                // Choosing a counterparty is the point of the row — tick it, so
+                // "Accept selected" does not quietly skip what was just picked.
+                setPicked(q=>({...q,[i]:!!(p.entity_id||p.node_id||p.is_external)}));},
             s.counterparty_label)}</td>
           <td style={{...S.tdR,fontWeight:Math.abs(s.balance)>0.005?600:400,color:Math.abs(s.balance)>0.005?T.textBright:T.textDim}}>{fmt(s.balance)}</td>
           <td style={{...S.td,whiteSpace:'normal'}}>{s.individual?<IcBadge kind="mute">individual</IcBadge>
@@ -6636,8 +6640,8 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         <td style={S.td}><select style={S.selectSm} value={editForm.ic_type} onChange={e=>setEditForm(f=>({...f,ic_type:e.target.value}))}>
           {Object.keys(IC_TYPE_LABEL).map(k=><option key={k} value={k}>{IC_TYPE_LABEL[k]}</option>)}</select></td>
         <td style={S.td}>{cpCell(editForm.counterparty_entity_id,editForm.counterparty_node_id,!!editForm.is_external,
-          v=>setEditForm(f=>({...f,is_external:v})),v=>setEditForm(f=>({...f,counterparty_entity_id:v})),
-          v=>setEditForm(f=>({...f,counterparty_node_id:v})),editForm.account_name)}</td>
+          p=>setEditForm(f=>({...f,counterparty_entity_id:p.entity_id||'',counterparty_node_id:p.node_id||'',is_external:!!p.is_external})),
+          editForm.account_name)}</td>
         <td style={S.td}><input style={{...S.inputSm,width:'100%'}} value={editForm.notes||''} onChange={e=>setEditForm(f=>({...f,notes:e.target.value}))}/></td>
         <td style={S.td}><div style={{display:'flex',gap:6}}>
           <button style={{...S.btnGhost,color:T.green,fontSize:11}} onClick={saveEdit}>Save</button>
