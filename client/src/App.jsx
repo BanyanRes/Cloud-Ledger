@@ -6591,7 +6591,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
               <button style={{...S.link,marginLeft:6}} onClick={()=>runSuggest(false)}>hide</button></span>}
             <button style={S.btnS} onClick={()=>setSugg(null)}>Discard</button>
             <button style={S.btnP} onClick={acceptSuggestions}>Accept selected</button></div></div>
-        <div style={{overflowX:'auto'}}><table style={S.table}><thead><tr>
+        <div className="cl-scroll" style={{overflow:'auto',maxHeight:'calc(100vh - 400px)'}}><table style={S.table}><thead><tr>
           <th style={{...S.th,width:36}}></th><th style={S.th}>Account</th><th style={S.th}>Kind</th>
           <th style={S.th}>Counterparty</th><th style={S.thR}>Balance</th><th style={S.th}>Match</th></tr></thead>
         <tbody>{sugg.map((s,i)=><tr key={s.account_code} style={{background:s.self_referential?T.redDim:(picked[i]?T.accentDim:'transparent'),opacity:s.individual?0.65:1}}>
