@@ -1670,6 +1670,10 @@ async function renderStatementsPdf(s, outOffsets) {
       L.sectionTitle('Revenue');
       plFirstRow = true;
       renderTree(bo.revenueTree, { showGroupTotal: true });
+      // Disarm even if the revenue tree rendered nothing. A latch left armed
+      // would be consumed by the first OPERATING EXPENSE line instead, putting
+      // the "$" several sections down the statement.
+      plFirstRow = false;
       L.row('Total Revenue', cell4(bo.totRev), { indent: 6, boldRow: true, ruleAbove: true });
       L.row('Gross Profit', cell4(bo.grossProfit), { indent: 6, boldRow: true, gapAfter: 6 });
 
