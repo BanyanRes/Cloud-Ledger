@@ -482,6 +482,32 @@ function suggestMappings(db, entityId, { computeBalances, as_of, includeIndividu
   return { suggestions: out, hidden_individuals: hiddenIndividuals.length, hidden_examples: hiddenIndividuals.slice(0, 5) };
 }
 
+// An intercompany balance can only live on the BALANCE SHEET. A revenue or
+// expense account has no balance for a counterparty ledger to agree with, so
+// mapping one would put a row in the reconciliation that can never reconcile —
+// it would sit there as a permanent unexplained difference. Management fees and
+// interest charged between affiliates are real intercompany TRANSACTIONS, but
+// what they leave behind for this module is the due-from / due-to balance, and
+// that is what gets mapped. So P&L accounts are kept out of the unmapped lists.
+//
+// `type` is authoritative. The code range is only the fallback for a chart that
+// never set one, and matches how index.js derives type from a code:
+// 40000-49999 Revenue, 50000-69999 Expense, 70000+ Revenue.
+function isPnlAccount(type, code) {
+  const t = String(type || '').trim().toLowerCase();
+  if (t) {
+    // A type that names the balance sheet wins outright. QuickBooks-style charts
+    // say "Other Current Liability", "Fixed Asset", "Accounts Receivable", and
+    // one of those must never be read as P&L: hiding a real intercompany account
+    // is a far worse failure than listing an expense account someone can ignore.
+    if (/\b(assets?|liabilit(y|ies)|equity|receivable|payable|bank)\b/.test(t)) return false;
+    return /\b(revenue|income|expenses?)\b|\bcogs\b|cost of (goods|sales)/.test(t);
+  }
+  const c = String(code == null ? '' : code).trim();
+  if (!/^\d+$/.test(c)) return false;
+  return Number(c) >= 40000;
+}
+
 // Every account on one entity that has no intercompany mapping yet — not only
 // the ones whose NAME the parser recognises. `suggestMappings` can only offer
 // what it can read: "Due from X", "Investment in Y". An account called "Loan
@@ -501,8 +527,12 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   const accounts = db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ? ORDER BY code').all(eid);
 
   const out = [];
+  let excludedPnl = 0;
   for (const a of accounts) {
     if (mapped.has(String(a.code))) continue;
+    // Balance sheet only. Counted rather than silently dropped, so the page can
+    // say why an expense account someone was looking for is not in the list.
+    if (isPnlAccount(a.type, a.code)) { excludedPnl++; continue; }
     const parsed = parseAccountName(a.name);
     const bal = balByCode.get(String(a.code));
     const row = {
@@ -544,6 +574,7 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
     count: out.length,
     ic_like: out.filter(r => r.looks_ic && !r.individual).length,
     with_balance: out.filter(r => Math.abs(r.balance) >= DEFAULT_TOLERANCE).length,
+    excluded_pnl: excludedPnl,
     accounts: out,
   };
 }
@@ -735,9 +766,10 @@ function reconcileForEntity(db, entityId, opts) {
   // reconciliation page can offer to map it where it is found. Sending someone
   // to IC Mapping to retype an account code that is already on the screen is
   // the reason these rows sat unmapped in the first place.
-  const unmappedFor = (types) => db.prepare('SELECT code, name FROM accounts WHERE entity_id = ?').all(eid)
+  const unmappedFor = (types) => db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ?').all(eid)
     .filter(a => {
       if (mappedCodes.has(String(a.code))) return false;
+      if (isPnlAccount(a.type, a.code)) return false;
       const p = parseAccountName(a.name);
       if (!p || !types.includes(p.ic_type)) return false;
       if (isIndividualInvestor(p) || isMarkedPerson(people, p.label)) return false;
@@ -996,6 +1028,7 @@ module.exports = {
   listCompanies,
   listPeople,
   isMarkedPerson,
+  isPnlAccount,
   resolveCounterparties,
   matchCompany,
   looksIndividual,

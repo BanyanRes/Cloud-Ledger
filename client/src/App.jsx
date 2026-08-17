@@ -6391,6 +6391,8 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,on
       display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
       <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>
         Unmapped accounts{data?' ('+shown.length+' of '+data.count+')':''}</span>
+      <span style={{color:T.textDim,fontSize:11.5}} title='An intercompany balance can only sit on the balance sheet. A revenue or expense account has nothing for a counterparty ledger to agree with.'>
+        balance sheet only{data&&data.excluded_pnl>0?' — '+data.excluded_pnl+' P&L account'+(data.excluded_pnl===1?'':'s')+' not shown':''}</span>
       <IcSearch value={q} onChange={setQ} placeholder='Account code or name…' width={220}/>
       <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.textMuted,cursor:'pointer'}}>
         <input type='checkbox' style={S.checkbox} checked={icOnly} onChange={e=>setIcOnly(e.target.checked)}/>
