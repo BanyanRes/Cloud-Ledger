@@ -650,8 +650,14 @@ function listMappedPairs(db, entityId, { computeBalances, as_of }) {
     .filter(m => !m.is_external && m.counterparty_entity_id != null)
     .map(m => Number(m.counterparty_entity_id)))];
   const theirBal = new Map();
+  const theirAccts = new Map(); // Track actual accounts, not just ones with balances
   for (const id of cpIds) {
     theirBal.set(id, new Map(computeBalances(id, as_of ? { as_of } : {}).map(b => [String(b.code), b])));
+    // Also load all accounts from the counterparty's chart, regardless of balance.
+    // A newly created account (zero balance, no transactions) won't appear in
+    // computeBalances, so we need a separate check.
+    const accts = new Map(db.prepare('SELECT code, name, type FROM accounts WHERE entity_id=?').all(id).map(a => [String(a.code), a]));
+    theirAccts.set(id, accts);
   }
 
   const pairRows = all
@@ -661,8 +667,14 @@ function listMappedPairs(db, entityId, { computeBalances, as_of }) {
     .map(m => {
       const ours = mine.get(String(m.account_code)) || null;
       const ourSigned = receivableSigned(ours);
+      const acctRec = m.counterparty_account_code
+        ? (theirAccts.get(Number(m.counterparty_entity_id)) || new Map()).get(String(m.counterparty_account_code)) || null
+        : null;
+      // Balance rows only exist for accounts with journal lines. An account
+      // that exists but has none IS at zero — say 0.00, not blank/unknown.
       const theirs = m.counterparty_account_code
-        ? (theirBal.get(Number(m.counterparty_entity_id)) || new Map()).get(String(m.counterparty_account_code)) || null
+        ? ((theirBal.get(Number(m.counterparty_entity_id)) || new Map()).get(String(m.counterparty_account_code))
+            || (acctRec ? { name: acctRec.name, type: acctRec.type, balance: 0 } : null))
         : null;
       const theirSigned = receivableSigned(theirs);
       const gap = (ourSigned != null && theirSigned != null)
@@ -685,7 +697,9 @@ function listMappedPairs(db, entityId, { computeBalances, as_of }) {
         their_signed: theirSigned == null ? null : round2(theirSigned),
         // The counterparty account was named but is not in its ledger at all —
         // renamed, renumbered or deleted since. Worth saying out loud.
-        their_account_missing: !!(m.counterparty_account_code && !theirs),
+        // Check the accounts table directly, not just balances, because a newly
+        // created account (zero balance, no transactions) won't appear in computeBalances.
+        their_account_missing: !!(m.counterparty_account_code && !acctRec),
         gap,
         offsets: gap != null && gap < tol,
         notes: m.notes || null,
