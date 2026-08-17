@@ -1590,6 +1590,11 @@ async function renderStatementsPdf(s, outOffsets) {
     // dollar signs are a global presentation change, not banyan-only).
     const wantDollar = true;
     let bsFirstRow = false;
+    // Underline BELOW the subtotal figure (CLA/Jimmy 8/17) on exactly the
+    // listed section totals. "Underline" here means the rule UNDER the number
+    // -- these rows always had the rule ABOVE (separating them from the detail
+    // lines), which is a different thing.
+    const RULE_BELOW_SECTIONS = /^Total (Current Assets|Fixed Assets, Net)$/;
     const renderBsSection = (sec, sectionTotalLabel) => {
       L.row(sec.title, [], { indent: 6, boldRow: true });
       const showSubHeaders = sec.subs.length > 1 || sec.subs.some(su => su.contra) || m.profile === 'bsfrgp' || m.profile === 'banyan';
@@ -1606,7 +1611,7 @@ async function renderStatementsPdf(s, outOffsets) {
           L.row('Total ' + su.title, bsCells(su.subtotal.cur, su.subtotal.pri), { indent: 20, ruleAbove: true });
         }
       }
-      L.row(sectionTotalLabel, bsCells(sec.total.cur, sec.total.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      L.row(sectionTotalLabel, bsCells(sec.total.cur, sec.total.pri), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: RULE_BELOW_SECTIONS.test(sectionTotalLabel), gapAfter: 6 });
     };
     bsFirstRow = wantDollar;
     for (const sec of s.balanceSheet.assetSections) renderBsSection(sec, 'Total ' + sec.title);
@@ -1615,7 +1620,7 @@ async function renderStatementsPdf(s, outOffsets) {
     L.sectionTitle('LIABILITIES AND MEMBERS\u2019 EQUITY');
     bsFirstRow = wantDollar;
     for (const sec of s.balanceSheet.liabSections) renderBsSection(sec, 'Total ' + sec.title);
-    L.row('Total Liabilities', bsCells(s.balanceSheet.totalLiab.cur, s.balanceSheet.totalLiab.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    L.row('Total Liabilities', bsCells(s.balanceSheet.totalLiab.cur, s.balanceSheet.totalLiab.pri), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     L.row('Members\u2019 Equity', [], { indent: 6, boldRow: true });
     for (const r of s.balanceSheet.equityRows) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
     for (const r of (s.balanceSheet.retainedRows || [])) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
@@ -1689,12 +1694,12 @@ async function renderStatementsPdf(s, outOffsets) {
       // would be consumed by the first OPERATING EXPENSE line instead, putting
       // the "$" several sections down the statement.
       plFirstRow = false;
-      L.row('Total Revenue', cell4(bo.totRev), { indent: 6, boldRow: true, ruleAbove: true });
-      L.row('Gross Profit', cell4(bo.grossProfit), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      L.row('Total Revenue', cell4(bo.totRev), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true });
+      L.row('Gross Profit', cell4(bo.grossProfit), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
 
       L.sectionTitle('Operating Expenses');
       renderTree(bo.opexTree, { showGroupTotal: true, keepWhole: true });
-      L.row('Total Operating Expenses', cell4(bo.totOpex), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      L.row('Total Operating Expenses', cell4(bo.totOpex), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
 
       // Other Income (Expense): income section, then expense section (shown as
       // reductions of income), then the netted total.
@@ -1702,13 +1707,13 @@ async function renderStatementsPdf(s, outOffsets) {
         L.sectionTitle('Other Income (Expense)');
         renderTree(bo.otherIncomeTree, { showGroupTotal: true });
         renderTree(bo.otherExpenseTree, { showGroupTotal: true });
-        L.row('Total Other Income (Expense)', cell4(bo.totOtherIE), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+        L.row('Total Other Income (Expense)', cell4(bo.totOtherIE), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
       }
 
       if (bo.incomeTaxTree.length) {
         L.sectionTitle('Income Taxes');
         renderTree(bo.incomeTaxTree, { showGroupTotal: true });
-        L.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+        L.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
       }
 
       L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
@@ -1738,31 +1743,31 @@ async function renderStatementsPdf(s, outOffsets) {
       L.sectionTitle('Operating Expenses');
       plFirstRow = true;
       renderTree(bo.opexTree, { showGroupTotal: true });
-      L.row('Total Operating Expenses', cell4(bo.totOpex), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      L.row('Total Operating Expenses', cell4(bo.totOpex), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
 
       // Other Income (Expense): Other Income section, then Other Expense section,
       // then a netted 'Total Other Income (Expense)'.
       L.sectionTitle('Other Income (Expense)');
       renderTree(bo.otherIncomeTree, { showGroupTotal: true });
       renderTree(bo.otherExpenseTree, { showGroupTotal: true });
-      L.row('Total Other Income (Expense)', cell4(bo.totOtherIE), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      L.row('Total Other Income (Expense)', cell4(bo.totOtherIE), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
 
       // Income Taxes.
       L.sectionTitle('Income Taxes');
       renderTree(bo.incomeTaxTree, { showGroupTotal: true });
-      L.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      L.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
 
       L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
     } else {
     L.sectionTitle('Revenue');
     // $ on the first figure line of the statement (CLA 8/17, global).
     s.operations.revenue.forEach((r, i) => line(r, { dollarPrefix: i === 0 }));
-    L.row('Total Revenue', [money(s.operations.totRev.cur), money(s.operations.totRev.pri), chg(s.operations.totRev.cur, s.operations.totRev.pri), money(s.operations.totRev.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    L.row('Total Revenue', [money(s.operations.totRev.cur), money(s.operations.totRev.pri), chg(s.operations.totRev.cur, s.operations.totRev.pri), money(s.operations.totRev.ytd)], { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     if (s.operations.cogs.length) {
       L.sectionTitle('Cost of Revenue');
       s.operations.cogs.forEach(r => line(r));
       L.row('Total Cost of Revenue', [money(s.operations.totCogs.cur), money(s.operations.totCogs.pri), chg(s.operations.totCogs.cur, s.operations.totCogs.pri), money(s.operations.totCogs.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 4 });
-      L.row('Gross Profit', [money(s.operations.grossProfit.cur), money(s.operations.grossProfit.pri), chg(s.operations.grossProfit.cur, s.operations.grossProfit.pri), money(s.operations.grossProfit.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      L.row('Gross Profit', [money(s.operations.grossProfit.cur), money(s.operations.grossProfit.pri), chg(s.operations.grossProfit.cur, s.operations.grossProfit.pri), money(s.operations.grossProfit.ytd)], { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     }
     L.sectionTitle('Operating Expenses');
     // Grouped into the 11 presentation categories, each with its own subtotal.
@@ -1788,7 +1793,7 @@ async function renderStatementsPdf(s, outOffsets) {
     } else {
       s.operations.opex.forEach(r => line(r));
     }
-    L.row('Total Operating Expenses', [money(s.operations.totOpex.cur), money(s.operations.totOpex.pri), chg(s.operations.totOpex.cur, s.operations.totOpex.pri), money(s.operations.totOpex.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    L.row('Total Operating Expenses', [money(s.operations.totOpex.cur), money(s.operations.totOpex.pri), chg(s.operations.totOpex.cur, s.operations.totOpex.pri), money(s.operations.totOpex.ytd)], { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
     }
   }
