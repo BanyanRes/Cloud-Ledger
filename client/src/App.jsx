@@ -6396,10 +6396,15 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
   return<div style={{...S.cardFlush,border:'1px solid '+T.border,marginBottom:16,overflow:'hidden'}}>
     <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border,
       display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+      {/* ONE number, and it is the number of rows below it. "(0 of 38)" next to
+          "38 are unmapped in total" read as a contradiction — the 38 were real,
+          they were just all zero-balance and the filter was on. */}
       <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>
-        Unmapped accounts{data?' ('+shown.length+' of '+data.count+')':''}</span>
+        Unmapped accounts{data?' ('+shown.length+')':''}</span>
       <span style={{color:T.textDim,fontSize:11.5}} title='These are the only balances a counterparty ledger states back, so they are the only ones the reconciliation can match.'>
         Due from / Due to · Investment / Contributed capital only</span>
+      {data&&data.count>shown.length&&<span style={{color:T.textDim,fontSize:11.5}}>
+        · {data.count-shown.length} more hidden by the filters</span>}
       {data&&data.shell_entity&&<IcBadge kind="info">shell entity — contributed capital left out</IcBadge>}
       <IcSearch value={q} onChange={setQ} placeholder='Account code or name…' width={220}/>
       <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.textMuted,cursor:'pointer'}}>
@@ -6415,7 +6420,16 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
         {data.skipped_other} other account{data.skipped_other===1?'':'s'} on this entity {data.skipped_other===1?'is':'are'} not
         the kind the reconciliation matches, so {data.skipped_other===1?'it is':'they are'} not listed.</div>}</div>
     :shown.length===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
-      No unmapped account matches these filters. {data.count} {data.count===1?'is':'are'} unmapped in total.</div>
+      {n
+        ? <>No unmapped account matches “{q}”. {data.count} {data.count===1?'is':'are'} unmapped in total.</>
+        : withBal
+        ? <><b style={{color:T.textBright}}>Nothing here needs mapping right now.</b><br/>
+            <span style={{fontSize:12}}>All {data.count} unmapped account{data.count===1?'':'s'} on {entityName||'this entity'} carr{data.count===1?'ies':'y'} a
+            {' '}zero balance, so {data.count===1?'it has':'they have'} nothing for a counterparty ledger to disagree with.
+            {' '}Mapping {data.count===1?'it':'them'} would change no reconciliation.</span><br/>
+            <button style={{...S.link,marginTop:8}} onClick={()=>setWithBal(false)}>
+              List them anyway ({data.count})</button></>
+        : <>No unmapped account matches these filters.</>}</div>
     :<div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(300px, calc(100vh - 460px))'}}>
       <table style={S.table}><thead><tr>
         <th style={S.th}>Account</th><th style={S.th}>Type</th><th style={S.thR}>Balance</th>
