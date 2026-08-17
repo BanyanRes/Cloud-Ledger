@@ -1796,12 +1796,24 @@ async function renderStatementsPdf(s, outOffsets) {
     if (!isZero(cf.changeAR)) L.row('(Increase) decrease in accounts receivable', [money(cf.changeAR)], { indent: 28 });
     if (!isZero(cf.changePrepaidOther)) L.row('(Increase) decrease in prepaid and other current assets', [money(cf.changePrepaidOther)], { indent: 28 });
     if (!isZero(cf.changeIntercompany)) L.row('(Increase) decrease in intercompany balances', [money(cf.changeIntercompany)], { indent: 28 });
-    // "accounts payable" ONLY \u2014 this bucket collects payables; every other
-    // current liability lands on the accrued line below. Saying "and other
-    // current liabilities" here made the two lines look like duplicates
-    // (CLA 8/17).
-    if (!isZero(cf.changeAP)) L.row('Increase (decrease) in accounts payable', [money(cf.changeAP)], { indent: 28 });
-    if (!isZero(cf.changeAccrued)) L.row('Increase (decrease) in accrued and other liabilities', [money(cf.changeAccrued)], { indent: 28 });
+    // CLA 8/17, final answer: present the payables bucket and the other-current-
+    // liabilities bucket as ONE line on the Banyan package (Dennis's first option).
+    // Internally they stay separate \u2014 cfBuckets.ap collects accounts named
+    // "... payable", cfBuckets.accrued collects every other current liability \u2014 so
+    // this is purely a presentation merge. Both were already inside netOperating,
+    // so no total moves and the statement still ties.
+    //
+    // Other profiles keep the two-line split; nobody has asked to change theirs.
+    if (m.profile === 'banyan') {
+      const changeApOther = r2(cf.changeAP + cf.changeAccrued);
+      if (!isZero(changeApOther)) {
+        L.row('Increase (decrease) in accounts payable and other current liabilities',
+          [money(changeApOther)], { indent: 28 });
+      }
+    } else {
+      if (!isZero(cf.changeAP)) L.row('Increase (decrease) in accounts payable', [money(cf.changeAP)], { indent: 28 });
+      if (!isZero(cf.changeAccrued)) L.row('Increase (decrease) in accrued and other liabilities', [money(cf.changeAccrued)], { indent: 28 });
+    }
     L.row('Net Cash Provided (Used) by Operating Activities', [money(cf.netOperating)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
 
     L.sectionTitle('Cash Flows from Investing Activities');
