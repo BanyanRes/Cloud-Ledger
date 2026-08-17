@@ -1578,8 +1578,9 @@ async function renderStatementsPdf(s, outOffsets) {
     // "$" on the FIRST figure line of each section and on the section's grand
     // total (CLA 8/17). The first line is an account row nested two levels down
     // inside the section, so a latch is armed before each section and consumed
-    // by whichever account row renders first. Banyan profile only.
-    const wantDollar = m.profile === 'banyan';
+    // by whichever account row renders first. All profiles (CLA 8/17: the
+    // dollar signs are a global presentation change, not banyan-only).
+    const wantDollar = true;
     let bsFirstRow = false;
     const renderBsSection = (sec, sectionTotalLabel) => {
       L.row(sec.title, [], { indent: 6, boldRow: true });
@@ -1707,6 +1708,9 @@ async function renderStatementsPdf(s, outOffsets) {
       // ── Banyan SFR GP Investors shape: Operating Expenses / Other Income
       //    (Expense) / Income Taxes / Net Income (Loss). ────────────────────
       const bo = s.operations.bsfrgp;
+      // $ on the first figure line of the statement (first operating-expense
+      // line) and on Net Income (Loss) -- global, CLA 8/17.
+      let plFirstRow = false;
       // Render a nested tree (group → subsection → lines) with subtotals. A
       // subsection subtotal shows only when it has more than one line; a group
       // subtotal shows only when the group has more than one subsection (so a
@@ -1716,7 +1720,7 @@ async function renderStatementsPdf(s, outOffsets) {
           L.row(g.title, [], { indent: 12, boldRow: true });
           for (const su of g.subs) {
             L.row(su.title, [], { indent: 20 });
-            su.lines.forEach(r => L.row(r.name, cell4(r), { indent: 30 }));
+            su.lines.forEach(r => { L.row(r.name, cell4(r), { indent: 30, dollarPrefix: plFirstRow }); plFirstRow = false; });
             if (su.lines.length > 1) L.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true });
           }
           if (showGroupTotal && g.subs.length > 1) L.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true });
@@ -1724,6 +1728,7 @@ async function renderStatementsPdf(s, outOffsets) {
       };
 
       L.sectionTitle('Operating Expenses');
+      plFirstRow = true;
       renderTree(bo.opexTree, { showGroupTotal: true });
       L.row('Total Operating Expenses', cell4(bo.totOpex), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
 
@@ -1739,10 +1744,11 @@ async function renderStatementsPdf(s, outOffsets) {
       renderTree(bo.incomeTaxTree, { showGroupTotal: true });
       L.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
 
-      L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+      L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
     } else {
     L.sectionTitle('Revenue');
-    s.operations.revenue.forEach(r => line(r));
+    // $ on the first figure line of the statement (CLA 8/17, global).
+    s.operations.revenue.forEach((r, i) => line(r, { dollarPrefix: i === 0 }));
     L.row('Total Revenue', [money(s.operations.totRev.cur), money(s.operations.totRev.pri), chg(s.operations.totRev.cur, s.operations.totRev.pri), money(s.operations.totRev.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     if (s.operations.cogs.length) {
       L.sectionTitle('Cost of Revenue');
@@ -1775,7 +1781,7 @@ async function renderStatementsPdf(s, outOffsets) {
       s.operations.opex.forEach(r => line(r));
     }
     L.row('Total Operating Expenses', [money(s.operations.totOpex.cur), money(s.operations.totOpex.pri), chg(s.operations.totOpex.cur, s.operations.totOpex.pri), money(s.operations.totOpex.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
-    L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+    L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
     }
   }
 
@@ -1794,7 +1800,7 @@ async function renderStatementsPdf(s, outOffsets) {
     // statement title, so no "Year to Date" label is drawn above it.
     const cf = s.cashFlow;
     L.sectionTitle('Cash Flows from Operating Activities');
-    L.row('Net Income (Loss)', [money(cf.netIncome)], { indent: 16, dollarPrefix: m.profile === 'banyan' });
+    L.row('Net Income (Loss)', [money(cf.netIncome)], { indent: 16, dollarPrefix: true });
     L.row('Adjustments to reconcile net income to net cash:', [], { indent: 16 });
     if (!isZero(cf.amortization)) L.row('Amortization and depreciation', [money(cf.amortization)], { indent: 28 });
     L.space(6);
@@ -1802,23 +1808,16 @@ async function renderStatementsPdf(s, outOffsets) {
     if (!isZero(cf.changeAR)) L.row('(Increase) decrease in accounts receivable', [money(cf.changeAR)], { indent: 28 });
     if (!isZero(cf.changePrepaidOther)) L.row('(Increase) decrease in prepaid and other current assets', [money(cf.changePrepaidOther)], { indent: 28 });
     if (!isZero(cf.changeIntercompany)) L.row('(Increase) decrease in intercompany balances', [money(cf.changeIntercompany)], { indent: 28 });
-    // CLA 8/17, final answer: present the payables bucket and the other-current-
-    // liabilities bucket as ONE line on the Banyan package (Dennis's first option).
-    // Internally they stay separate \u2014 cfBuckets.ap collects accounts named
-    // "... payable", cfBuckets.accrued collects every other current liability \u2014 so
-    // this is purely a presentation merge. Both were already inside netOperating,
-    // so no total moves and the statement still ties.
-    //
-    // Other profiles keep the two-line split; nobody has asked to change theirs.
-    if (m.profile === 'banyan') {
-      const changeApOther = r2(cf.changeAP + cf.changeAccrued);
-      if (!isZero(changeApOther)) {
-        L.row('Increase (decrease) in accounts payable and other current liabilities',
-          [money(changeApOther)], { indent: 28 });
-      }
-    } else {
-      if (!isZero(cf.changeAP)) L.row('Increase (decrease) in accounts payable and other current liabilities', [money(cf.changeAP)], { indent: 28 });
-      if (!isZero(cf.changeAccrued)) L.row('Increase (decrease) in accrued and other liabilities', [money(cf.changeAccrued)], { indent: 28 });
+    // CLA 8/17 (global): present the payables bucket and the other-current-
+    // liabilities bucket as ONE line on EVERY profile. Internally they stay
+    // separate (cfBuckets.ap = accounts named "... payable"; cfBuckets.accrued =
+    // every other current liability), so this is purely a presentation merge --
+    // both were already inside netOperating, so no subtotal moves and every
+    // statement still ties. Jimmy 8/17: this is a global change, not banyan-only.
+    const changeApOther = r2(cf.changeAP + cf.changeAccrued);
+    if (!isZero(changeApOther)) {
+      L.row('Increase (decrease) in accounts payable and other current liabilities',
+        [money(changeApOther)], { indent: 28 });
     }
     L.row('Net Cash Provided (Used) by Operating Activities', [money(cf.netOperating)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
 
@@ -1834,7 +1833,7 @@ async function renderStatementsPdf(s, outOffsets) {
 
     L.row('Net Increase (Decrease) in Cash', [money(cf.netChange)], { indent: 6, boldRow: true, ruleAbove: true });
     L.row('Cash, Beginning of Period', [money(cf.cashBeg)], { indent: 6 });
-    L.row('Cash, End of Period', [money(cf.cashEnd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: m.profile === 'banyan' });
+    L.row('Cash, End of Period', [money(cf.cashEnd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
     if (!isZero(cf.tieOut)) {
       L.space(6);
       L.row('Note: reconciled change differs from cash movement by ' + money(cf.tieOut) + ' (see notes).', [], { indent: 6 });
@@ -1897,7 +1896,7 @@ async function renderStatementsPdf(s, outOffsets) {
     // "$" on the first member row and the Total row only (CLA 8/17). The c1
     // column edge was already positioned to leave room for a "$" cell box at
     // ~328pt, clear of the longest member label.
-    const eqDollar = m.profile === 'banyan';
+    const eqDollar = true;
     L.row('Member', [], { indent: 6, boldRow: true });
     s.equity.rows.forEach((r, i) => {
       dollarRow(r.name, [r.beginning, r.contributions, r.distributions, r.netIncome, r.ending],
