@@ -6558,7 +6558,7 @@ function IcPinForm({mapping,entityId,onSaved,onCancel,onMsg,onErr}){
         counterparty_account_code:v||null,
         is_external:0,notes:mapping.notes||null});
       if(onErr)onErr('');
-      if(onMsg)onMsg(v?('Pinned '+mapping.account_code+' to their '+v+'.')
+      if(onMsg)onMsg(v?(mapping.account_code+' now answers their '+v+'.')
         :('Cleared the counterparty account on '+mapping.account_code+'.'));
       if(onSaved)await onSaved();
     }catch(e){if(onErr)onErr(e.message);}
@@ -6699,7 +6699,7 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
           {canEdit&&<td style={{...S.td,textAlign:'right',width:90}}>
             <button style={{...S.btnGhost,color:T.accent,fontSize:11}}
               onClick={()=>setPinning(pinning===m.id?null:m.id)}>
-              {pinning===m.id?'Close':'Pin'}</button></td>}</tr>
+              {pinning===m.id?'Close':'Set account'}</button></td>}</tr>
         {canEdit&&pinning===m.id&&<tr style={{background:T.accentDim}}>
           <td colSpan={5} style={{...S.td,whiteSpace:'normal'}}>
             <IcPinForm mapping={m} entityId={entityId} onCancel={()=>setPinning(null)}
@@ -6874,7 +6874,7 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
                     {r.off_ledger?'no ledger in CloudLedger':'this entity has not mapped its side'}</span>:'')}
                   {b&&b.ic_type&&<span style={{marginLeft:6,fontSize:10,color:T.textDim}}>{IC_TYPE_LABEL[b.ic_type]}</span>}
                   {b&&b.from_pin&&<span style={{marginLeft:6}} title={'Read straight from '+r.counterparty_name+'\u2019s ledger because the mapping on this side names this account. '+r.counterparty_name+' has not mapped it.'}>
-                    <IcBadge kind="info">from their ledger</IcBadge></span>}</td>
+                    <IcBadge kind="info">their GL</IcBadge></span>}</td>
                 <td style={{...S.tdR,width:130}}>{b?fmt(b.amount):''}</td>
                 <td style={S.tdR}></td></tr>)}
               {tab==='due'&&<tr style={{background:T.bgElevated}}>
