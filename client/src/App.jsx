@@ -6499,12 +6499,14 @@ function IcMappedAccounts({entityId,entityName,canEdit,reloadKey,onMapped,onMsg,
           <td style={{...S.td,whiteSpace:'normal',minWidth:200}}>
             <div style={{color:T.textBright,fontWeight:600}}>{r.counterparty_name}
               {r.self&&<span style={{marginLeft:6}}><IcBadge kind="bad">points at itself</IcBadge></span>}</div>
-            <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>
-              <b style={{color:T.textBright}}>{r.their_account_code}</b> {r.their_account_name||''}
-              {r.their_account_missing&&<span style={{marginLeft:6}}><IcBadge kind="bad">not in their ledger</IcBadge></span>}</div></td>
-          <td style={{...S.tdR,width:130}}>{r.their_balance==null?'':fmt(r.their_balance)}</td>
+            {r.investor_capital
+              ?<div style={{marginTop:3}}><IcBadge kind="ok">investor capital — account not required</IcBadge></div>
+              :<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>
+                <b style={{color:T.textBright}}>{r.their_account_code}</b> {r.their_account_name||''}
+                {r.their_account_missing&&<span style={{marginLeft:6}}><IcBadge kind="bad">not in their ledger</IcBadge></span>}</div>}</td>
+          <td style={{...S.tdR,width:130}}>{r.investor_capital?<span style={{color:T.textDim}}>—</span>:(r.their_balance==null?'':fmt(r.their_balance))}</td>
           {canEdit&&<td style={{...S.td,textAlign:'right'}}>
-            {!r.self&&<button style={{...S.btnGhost,color:T.accent,fontSize:11}}
+            {!r.self&&!r.investor_capital&&<button style={{...S.btnGhost,color:T.accent,fontSize:11}}
               onClick={()=>setPinning(pinning===r.id?null:r.id)}>
               {pinning===r.id?'Close':'Change'}</button>}
             <button style={{...S.btnGhost,color:T.red,fontSize:11}} title='Remove the mapping. The account returns to the unmapped worklist.'
@@ -6614,32 +6616,44 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
     const k=rowKey(r),st=ov[k]||{},mode=modeOf(r);
     setBusyKey(k);
     try{
+      const cpEff=st.cpOverride||r.counterparty_entity_id;
       let cpCode=null;
-      if(!r.is_external){
+      if(!r.is_external&&!r.investor_capital){
         if(mode==='new'){
-          const code=String(st.code!=null?st.code:r.suggested_new.account_code).trim();
-          const name=String(st.name!=null?st.name:r.suggested_new.account_name).trim();
-          if(!code||!name){if(onErr)onErr('The new account needs a code and a name.');return;}
+          // ONE box: leading token is the code, the rest is the name.
+          const raw=String(st.acct!=null?st.acct:(r.suggested_new.account_code+' '+r.suggested_new.account_name)).trim();
+          const m2=raw.match(/^(\S+)\s+(.+)$/);
+          if(!m2){if(onErr)onErr('Enter the new account as “code name” — e.g. “23000 Due to Banyan Residential”.');return;}
           // Created on the COUNTERPARTY's ledger, at zero. The reconciliation
           // will show our balance against their zero until they book the entry
           // — that gap is the truth, not a defect.
-          await api.createAccount(r.counterparty_entity_id,{code,name,type:r.suggested_new.type,subtype:'',bank_acct:false});
-          cpCode=code;
+          await api.createAccount(cpEff,{code:m2[1],name:m2[2],type:r.suggested_new.type,subtype:'',bank_acct:false});
+          cpCode=m2[1];
         }else if(mode==='pick')cpCode=st.pickCode||null;
         else if(mode==='existing')cpCode=r.suggested_existing.account_code;
         if(!cpCode){if(onErr)onErr('Pick or create the counterparty account for '+r.account_code+' first.');return;}
       }
-      const payload={account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,
-        counterparty_entity_id:r.is_external?null:r.counterparty_entity_id,
-        counterparty_node_id:null,
-        counterparty_account_code:r.is_external?null:cpCode,
-        is_external:r.is_external?1:0,notes:r.notes||null};
+      // Investor capital completes WITHOUT an account: the contributor keeps no
+      // ledger in CloudLedger. Saved to the registered company if one matched,
+      // external otherwise, with the investor's name kept in the notes.
+      const payload=r.investor_capital
+        ?{account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,
+          counterparty_entity_id:null,
+          counterparty_node_id:r.counterparty_node_id||null,
+          counterparty_account_code:null,
+          is_external:r.counterparty_node_id?0:1,
+          notes:r.notes||r.counterparty_label||null}
+        :{account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,
+          counterparty_entity_id:r.is_external?null:cpEff,
+          counterparty_node_id:null,
+          counterparty_account_code:r.is_external?null:cpCode,
+          is_external:r.is_external?1:0,notes:r.notes||null};
       if(r.mapping_id)await api.updateIcMapping(r.mapping_id,payload);
       else await api.createIcMapping({...payload,entity_id:Number(entityId)});
       if(onErr)onErr('');
-      if(onMsg)onMsg(r.is_external?('Mapped '+r.account_code+' as external.')
-        :(r.account_code+' now answers '+(r.counterparty_name||'their')+' '+cpCode
-          +(mode==='new'?' (created)':'')+'.'));
+      if(onMsg)onMsg(r.investor_capital?('Mapped '+r.account_code+' as investor capital — no counterparty account required.')
+        :r.is_external?('Mapped '+r.account_code+' as external.')
+        :(r.account_code+' now answers '+cpCode+(mode==='new'?' (created)':'')+'.'));
       await load();if(onMapped)await onMapped();
     }catch(e){if(onErr)onErr(e.message);}
     finally{setBusyKey(null);}
@@ -6676,7 +6690,10 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
         {canEdit&&<th style={{...S.th,width:130}}></th>}</tr></thead>
       <tbody>{shown.map(r=>{
         const k=rowKey(r),st=ov[k]||{},mode=modeOf(r),busy=busyKey===k;
-        const confirmable=!r.individual&&(r.is_external||(r.counterparty_entity_id&&mode));
+        // The accountant may re-point the counterparty; the account lookup on
+        // the right then runs against the newly chosen entity.
+        const cpEff=st.cpOverride||r.counterparty_entity_id;
+        const confirmable=!r.individual&&(r.is_external||r.investor_capital||(cpEff&&mode));
         return<Fragment key={k}>
         <tr style={mapping===k?{background:T.accentDim}:null}>
           <td style={{...S.td,whiteSpace:'normal',minWidth:220}}>
@@ -6685,27 +6702,36 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
             {r.individual&&<span style={{marginLeft:6}}><IcBadge kind="mute">individual</IcBadge></span>}</td>
           <td style={{...S.tdR,width:120,fontWeight:600,color:T.textBright}}>{fmt(r.balance)}</td>
           <td style={{...S.td,whiteSpace:'normal'}}>
-            {r.is_external?<IcBadge kind="warn">external</IcBadge>
-            :r.counterparty_entity_id?<span style={{color:T.textBright}}>{r.counterparty_name||r.counterparty_label}</span>
+            {r.investor_capital?<><IcBadge kind="warn">investor — not in CL</IcBadge>
+              {r.counterparty_label&&<div style={{color:T.textMuted,fontSize:12,marginTop:2}}>{r.counterparty_label}</div>}</>
+            :r.is_external?<IcBadge kind="warn">external</IcBadge>
+            :r.counterparty_entity_id?<select style={{...S.selectSm,minWidth:210}} value={String(cpEff)}
+                onChange={e=>setSt(r,{cpOverride:Number(e.target.value),mode:'pick',pickCode:''})}>
+                {entityOpts.map(x=><option key={x.id} value={String(x.id)}>{x.name}</option>)}</select>
             :r.counterparty_node_id?<>{r.counterparty_label} <IcBadge kind="info">no ledger</IcBadge></>
             :<span style={{color:T.textDim,fontStyle:'italic'}}>{r.counterparty_label||'not recognised'}</span>}</td>
           <td style={{...S.td,whiteSpace:'normal',minWidth:280}}>
-            {r.is_external?<span style={{color:T.textDim}}>outside the group — nothing to map to</span>
-            :!r.counterparty_entity_id?<span style={{color:T.textDim}}>—</span>
+            {r.investor_capital?<span style={{color:T.green,fontSize:12.5,fontWeight:600}}>No counterparty account needed
+                <span style={{display:'block',fontWeight:400,color:T.textMuted,fontSize:11.5}}>This investor keeps no ledger in CloudLedger, so there is no investment account to match.</span></span>
+            :r.is_external?<span style={{color:T.textDim}}>outside the group — nothing to map to</span>
+            :!cpEff?<span style={{color:T.textDim}}>—</span>
             :mode==='pick'?<div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
                 <IcCpAccountSelect entityId={entityId} accountCode={r.account_code}
-                  counterpartyEntityId={r.counterparty_entity_id} value={st.pickCode||''}
-                  onChange={v=>setSt(r,{mode:'pick',pickCode:v})} width={230} showGap={false}/>
-                {r.suggested_new&&<button style={S.link} onClick={()=>setSt(r,{mode:'new'})}>new account…</button>}</div>
+                  counterpartyEntityId={cpEff} value={st.pickCode||''}
+                  onChange={v=>setSt(r,{mode:'pick',pickCode:v})}
+                  onLoaded={res=>{if(!st.pickCode&&res.best)setSt(r,{mode:'pick',pickCode:res.best});}}
+                  width={280} showGap={false}/>
+                {r.suggested_new&&!st.cpOverride&&<button style={S.link} onClick={()=>setSt(r,{mode:'new'})}>new account…</button>}</div>
             :mode==='new'?<div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
-                <input style={{...S.inputSm,width:70}} value={st.code!=null?st.code:r.suggested_new.account_code}
-                  onChange={e=>setSt(r,{mode:'new',code:e.target.value})}/>
-                <input style={{...S.inputSm,width:190}} value={st.name!=null?st.name:r.suggested_new.account_name}
-                  onChange={e=>setSt(r,{mode:'new',name:e.target.value})}/>
+                {/* ONE box: the leading token is the code, the rest is the name. */}
+                <input style={{...S.inputSm,width:270,borderStyle:'dashed',borderColor:T.accent}}
+                  value={st.acct!=null?st.acct:(r.suggested_new.account_code+' '+r.suggested_new.account_name)}
+                  onChange={e=>setSt(r,{mode:'new',acct:e.target.value})}/>
                 <IcBadge kind="info">will be created</IcBadge>
                 <button style={S.link} onClick={()=>setSt(r,{mode:'pick'})}>pick existing…</button></div>
             :mode==='existing'?<div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
-                <span><span style={{fontWeight:600,color:T.textBright}}>{r.suggested_existing.account_code}</span>{' '}
+                <span style={{display:'inline-flex',gap:6,alignItems:'center',border:'1px solid '+T.border,borderRadius:7,padding:'6px 10px'}}>
+                  <span style={{fontWeight:600,color:T.textBright}}>{r.suggested_existing.account_code}</span>
                   <span style={{color:T.textMuted}}>{r.suggested_existing.account_name}</span></span>
                 <button style={S.link} onClick={()=>setSt(r,{mode:'pick'})}>change…</button></div>
             :<span style={{color:T.textDim}}>—</span>}</td>
@@ -6986,8 +7012,10 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   // excludes it by design. Leaving them in the working list buries the rows that
   // still need attention — on Banyan Residential they are 66 of 89. They are
   // hidden by default, never deleted, and one click away.
-  const externalCount=rows.filter(r=>r.is_external).length;
-  const externalRows=rows.filter(r=>r.is_external);
+  // External CAPITAL is investor money — complete by rule, shown under Show
+  // mapped with the investor-capital tag — so it stays out of this list.
+  const externalCount=rows.filter(r=>r.is_external&&r.ic_type!=='contributed_capital').length;
+  const externalRows=rows.filter(r=>r.is_external&&r.ic_type!=='contributed_capital');
 
   const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
   const loadCompanies=useCallback(async()=>{try{setCompanies(await api.getIcCompanies());}catch(e){console.error('[ic] companies:',e.message);}},[]);

@@ -654,7 +654,7 @@ function listMappedPairs(db, entityId, { computeBalances, as_of }) {
     theirBal.set(id, new Map(computeBalances(id, as_of ? { as_of } : {}).map(b => [String(b.code), b])));
   }
 
-  const rows = all
+  const pairRows = all
     .filter(m => !m.is_external
       && m.counterparty_entity_id != null
       && m.counterparty_account_code)
@@ -694,22 +694,57 @@ function listMappedPairs(db, entityId, { computeBalances, as_of }) {
     .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance)
       || String(a.account_code).localeCompare(String(b.account_code)));
 
+  // Investor capital: contributed capital whose contributor keeps no ledger in
+  // CloudLedger. Complete BY RULE without a counterparty account — the only
+  // sanctioned exception to "mapped means both sides named" — so it belongs on
+  // this list, tagged, rather than on a to-do list nobody can ever finish.
+  const investorRows = all
+    .filter(m => m.ic_type === 'contributed_capital'
+      && !m.counterparty_account_code
+      && (m.is_external || (m.counterparty_entity_id == null && m.counterparty_node_id != null)))
+    .map(m => {
+      const ours = mine.get(String(m.account_code)) || null;
+      return {
+        id: m.id,
+        account_code: String(m.account_code),
+        account_name: m.account_name,
+        ic_type: m.ic_type,
+        balance: ours ? round2(ours.balance) : 0,
+        signed: null,
+        counterparty_entity_id: null,
+        counterparty_node_id: m.counterparty_node_id || null,
+        counterparty_name: m.counterparty_name || m.notes || 'Outside investor',
+        self: false,
+        investor_capital: true,
+        their_account_code: null, their_account_name: null, their_type: null,
+        their_balance: null, their_signed: null, their_account_missing: false,
+        gap: null, offsets: false,
+        notes: m.notes || null,
+      };
+    });
+  const rows = pairRows.concat(investorRows)
+    .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance)
+      || String(a.account_code).localeCompare(String(b.account_code)));
+
   return {
     entity_id: eid,
     as_of: as_of || null,
     count: rows.length,
-    matched: rows.filter(r => r.offsets).length,
-    mismatched: rows.filter(r => r.gap != null && !r.offsets).length,
+    matched: pairRows.filter(r => r.offsets).length,
+    mismatched: pairRows.filter(r => r.gap != null && !r.offsets).length,
     // Named an account that is not in the counterparty's ledger — renamed,
     // renumbered or deleted since. Still listed, flagged, because a broken
     // pin that disappeared would be worse than one that is wrong out loud.
-    broken: rows.filter(r => r.their_account_missing).length,
+    broken: pairRows.filter(r => r.their_account_missing).length,
+    investor_capital_count: investorRows.length,
     // Mappable, but not finished: names the entity, not the account.
     incomplete_count: all.filter(m => !m.is_external
       && m.counterparty_entity_id != null && !m.counterparty_account_code).length,
     // Not mappable at all — no ledger in CloudLedger to name an account on.
-    external_count: all.filter(m => m.is_external).length,
-    off_ledger_count: all.filter(m => !m.is_external && m.counterparty_entity_id == null).length,
+    // Investor capital is carved out: those are complete by rule and listed above.
+    external_count: all.filter(m => m.is_external && m.ic_type !== 'contributed_capital').length,
+    off_ledger_count: all.filter(m => !m.is_external && m.counterparty_entity_id == null
+      && !(m.ic_type === 'contributed_capital' && m.counterparty_node_id != null)).length,
     rows,
   };
 }
@@ -902,6 +937,17 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   const balsFor = id => { if (!cpBal.has(id)) cpBal.set(id, computeBalances(id, as_of ? { as_of } : {})); return cpBal.get(id); };
   const acctsFor = id => { if (!cpAccts.has(id)) cpAccts.set(id, db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ?').all(id)); return cpAccts.get(id); };
   for (const row of out) {
+    // Contributed capital whose contributor is NOT set up in CloudLedger needs
+    // no counterparty account. Per the org charts those contributors are
+    // outside investors — Charing Cross, CIG, Marble, Milhaus — and their
+    // books are not here, so there is no investment account to match. When the
+    // contributor IS a CL entity (Odyssey → Banyan Residential, a link the
+    // charts don't even draw), the normal lookup below finds its Investment
+    // account and pre-fills it.
+    if (row.ic_type === 'contributed_capital' && row.counterparty_entity_id == null && !row.individual) {
+      row.investor_capital = true;
+      continue;
+    }
     if (row.is_external || row.counterparty_entity_id == null) continue;
     const cid = Number(row.counterparty_entity_id);
     const ourRow = balByCode.get(String(row.account_code));
