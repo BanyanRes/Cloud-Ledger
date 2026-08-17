@@ -1505,8 +1505,17 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
         const w = font.widthOfTextAtSize(s, FS.row);
         page.drawText(s, { x: cols[i] - w - valueInset, y, size: FS.row, font });
         if (dollarPrefix) {
-          // "$" anchored at the left of this column's cell box.
-          const dx = cols[i] - colWidth(i) + 2;
+          // "$" anchored a fixed gap to the LEFT of this column's own number,
+          // NOT at the column-box left edge. The old formula (cols[i] -
+          // colWidth(i) + 2) put it at cols[i-1] + 2 -- 2pt off the PREVIOUS
+          // column's amount, so the sign read as if it belonged to that column
+          // (CLA/Jimmy 8/17). Anchoring at pitch - DOLLAR_PREV_GAP leaves a
+          // constant gap after the previous column while still sitting clear of
+          // this column's widest figure. Uniform across every profile and the
+          // landscape equity page (pitch is the min inter-column pitch).
+          const DOLLAR_PREV_GAP = 12;
+          const dollarInset = (Number.isFinite(pitch) ? pitch : 78) - DOLLAR_PREV_GAP;
+          const dx = cols[i] - dollarInset - valueInset;
           page.drawText('$', { x: dx, y, size: FS.row, font });
         }
       });
