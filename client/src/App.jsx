@@ -7042,8 +7042,6 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[eid,setEid]=useState(activeEntity||'');
   const[rows,setRows]=useState([]);
   const[loading,setLoading]=useState(false);const[err,setErr]=useState('');const[msg,setMsg]=useState('');
-  const[sugg,setSugg]=useState(null);const[picked,setPicked]=useState({});
-  const[hiddenIndiv,setHiddenIndiv]=useState(0);const[showIndiv,setShowIndiv]=useState(false);
   const[showAdd,setShowAdd]=useState(false);
   const[showUnmapped,setShowUnmapped]=useState(false);
   const[showMapped,setShowMapped]=useState(false);
@@ -7070,15 +7068,6 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
   const loadCompanies=useCallback(async()=>{try{setCompanies(await api.getIcCompanies());}catch(e){console.error('[ic] companies:',e.message);}},[]);
   const loadPeople=useCallback(async()=>{try{setPeople(await api.getIcPeople());}catch(e){console.error('[ic] people:',e.message);}},[]);
-  // Marking a name a person drops the row from the list immediately and keeps it
-  // out of every future suggestion, on every entity.
-  const markPerson=async(label,idx)=>{
-    try{await api.markIcPerson({name:label});await loadPeople();
-      setSugg(a=>a.filter((_,j)=>j!==idx));
-      setPicked(p=>{const q={...p};delete q[idx];return q;});
-      setHiddenIndiv(h=>h+1);setErr('');setMsg('"'+label+'" marked as a person — it will not be suggested again.');
-    }catch(e){setErr(e.message);}
-  };
 
   const loadRows=useCallback(async()=>{
     if(!eid){setRows([]);return;}
@@ -7092,31 +7081,6 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const refreshMappings=useCallback(()=>{loadRows();setMapVersion(v=>v+1);},[loadRows]);
   useEffect(()=>{loadPeople();},[loadPeople]);
 
-  const runSuggest=async(withIndividuals)=>{
-    if(!eid)return;
-    setErr('');setMsg('');
-    try{const r=await api.suggestIcMappings(eid,null,withIndividuals);
-      const s=r.suggestions||[];
-      setSugg(s);setHiddenIndiv(r.hidden_individuals||0);setShowIndiv(!!withIndividuals);
-      // Pre-tick only rows that carry money AND already resolve. An individual,
-      // if revealed, is never pre-ticked — revealing is not the same as wanting.
-      const p={};s.forEach((x,i)=>{p[i]=!x.individual&&Math.abs(x.balance)>0.005&&(x.counterparty_entity_id!=null||x.counterparty_node_id!=null||x.is_external);});
-      setPicked(p);
-      if(!s.length)setMsg((r.hidden_individuals?('Nothing to map here — '+r.hidden_individuals+' individual investor account'+(r.hidden_individuals===1?'':'s')+' were skipped.'):'No unmapped intercompany-looking accounts found for this entity.'));
-    }catch(e){setErr(e.message);}
-  };
-  const acceptSuggestions=async()=>{
-    const items=(sugg||[]).filter((_,i)=>picked[i]).map(s=>({
-      entity_id:s.entity_id,account_code:s.account_code,account_name:s.account_name,
-      ic_type:s.ic_type,counterparty_entity_id:s.counterparty_entity_id,
-      counterparty_node_id:s.counterparty_node_id||null,
-      is_external:s.is_external?1:0,notes:s.notes||null}));
-    const bad=items.find(i=>!i.is_external&&!i.counterparty_entity_id&&!i.counterparty_node_id);
-    if(bad){setErr('Pick a counterparty for '+bad.account_code+', or mark it external.');return;}
-    if(!items.length){setErr('Nothing selected.');return;}
-    try{const r=await api.createIcMapping(items);setSugg(null);setPicked({});setMsg('Added '+r.count+' mapping'+(r.count===1?'':'s')+'.');refreshMappings();}
-    catch(e){setErr(e.message);}
-  };
   const add=async()=>{
     if(!eid){setErr('Pick an entity first.');return;}
     try{await api.createIcMapping({...form,entity_id:Number(eid),
@@ -7160,22 +7124,20 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
     {tab==='mappings'&&<>
       <div style={{...S.row,alignItems:'flex-end'}}>
         <div style={{minWidth:280}}><label style={S.label}>Entity</label>
-          <select style={S.select} value={eid} onChange={e=>{setEid(e.target.value);setSugg(null);setMsg('');}}>
+          <select style={S.select} value={eid} onChange={e=>{setEid(e.target.value);setMsg('');}}>
             <option value=''>Select an entity…</option>
             {entityOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
         {eid&&externalCount>0&&<button style={S.btnS} title='Accounts facing a party outside the group. There is no ledger on the other side, so there is nothing to map to.'
           onClick={()=>setShowExternal(v=>!v)}>
           {showExternal?'Hide external ('+externalCount+')':'Show external ('+externalCount+')'}</button>}
-        {canEdit&&eid&&<><button style={S.btnS} onClick={()=>{setShowUnmapped(v=>!v);setErr('');setMsg('');}}>
-            {showUnmapped?'Hide unmapped accounts':'Show unmapped accounts'}</button>
-          <button style={S.btnS} onClick={()=>{setShowMapped(v=>!v);setErr('');setMsg('');}}>
-            {showMapped?'Hide mapped':'Show mapped'}</button>
-          <button style={S.btnS} onClick={()=>runSuggest(false)}>Suggest from account names</button>
+        {canEdit&&eid&&<><button style={showUnmapped?{...S.btnS,borderColor:T.accent,color:T.accent}:S.btnS}
+            onClick={()=>{setShowUnmapped(v=>!v);setErr('');setMsg('');}}>
+            Show unmapped accounts</button>
+          <button style={showMapped?{...S.btnS,borderColor:T.accent,color:T.accent}:S.btnS}
+            onClick={()=>{setShowMapped(v=>!v);setErr('');setMsg('');}}>
+            Show mapped</button>
           <button style={S.btnP} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add mapping'}</button></>}</div>
 
-      {/* Not the same list as the suggestions: this one includes accounts whose
-          NAME the parser cannot read, which is exactly where a missing mapping
-          hides — the suggestion list can never propose one. */}
       {eid&&showMapped&&<IcMappedAccounts entityId={eid} entityName={entName(eid)} canEdit={canEdit}
         reloadKey={mapVersion} onMapped={loadRows} onMsg={setMsg} onErr={setErr}/>}
 
@@ -7206,52 +7168,6 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         <div style={{marginBottom:12}}><label style={S.label}>Notes</label><input style={S.input} value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} placeholder='(optional — e.g. the outside party name)'/></div>
         <button style={S.btnP} onClick={add}>Add mapping</button></div>}
 
-      {sugg&&sugg.length>0&&<div style={{...S.cardFlush,border:'1px solid '+T.accent+'40'}}>
-        <div style={{padding:'12px 16px',background:T.accentDim,borderBottom:'1px solid '+T.border,display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
-          <div><span style={{fontWeight:700,color:T.accent,fontSize:13}}>Suggested from account names ({sugg.length})</span>
-            <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>Nothing is saved until you accept. Rows with a balance and a confident match are pre-ticked.</span></div>
-          <div style={{display:'flex',gap:8,alignItems:'center'}}>
-            {hiddenIndiv>0&&!showIndiv&&<span style={{color:T.textMuted,fontSize:12}}>
-              {hiddenIndiv} individual investor{hiddenIndiv===1?'':'s'} skipped
-              <button style={{...S.link,marginLeft:6}} onClick={()=>runSuggest(true)}>show</button></span>}
-            {showIndiv&&<span style={{color:T.textMuted,fontSize:12}}>
-              showing individuals
-              <button style={{...S.link,marginLeft:6}} onClick={()=>runSuggest(false)}>hide</button></span>}
-            <button style={S.btnS} onClick={()=>setSugg(null)}>Discard</button>
-            <button style={S.btnP} onClick={acceptSuggestions}>Accept selected</button></div></div>
-        <div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(340px, calc(100vh - 380px))'}}><table style={S.table}><thead><tr>
-          <th style={{...S.th,width:36}}></th><th style={S.th}>Account</th><th style={S.th}>Kind</th>
-          <th style={S.th}>Counterparty</th><th style={S.thR}>Balance</th><th style={S.th}>Match</th></tr></thead>
-        <tbody>{sugg.map((s,i)=><tr key={s.account_code} style={{background:s.self_referential?T.redDim:(picked[i]?T.accentDim:'transparent'),opacity:s.individual?0.65:1}}>
-          <td style={S.tdC}><input type='checkbox' style={S.checkbox} checked={!!picked[i]} onChange={e=>setPicked(p=>({...p,[i]:e.target.checked}))}/></td>
-          <td style={{...S.td,whiteSpace:'normal',minWidth:220}}><span style={{fontWeight:600,color:T.textBright}}>{s.account_code}</span> <span style={{color:T.textMuted}}>{s.account_name}</span></td>
-          <td style={S.td}>{IC_TYPE_LABEL[s.ic_type]||s.ic_type}</td>
-          <td style={S.td}>{cpCell(s.counterparty_entity_id,s.counterparty_node_id,!!s.is_external,
-            p=>{setSugg(a=>a.map((x,j)=>j===i?{...x,counterparty_entity_id:p.entity_id,counterparty_node_id:p.node_id,is_external:p.is_external?1:0}:x));
-                // Choosing a counterparty is the point of the row — tick it, so
-                // "Accept selected" does not quietly skip what was just picked.
-                setPicked(q=>({...q,[i]:!!(p.entity_id||p.node_id||p.is_external)}));},
-            s.counterparty_label)}</td>
-          <td style={{...S.tdR,fontWeight:Math.abs(s.balance)>0.005?600:400,color:Math.abs(s.balance)>0.005?T.textBright:T.textDim}}>{fmt(s.balance)}</td>
-          <td style={{...S.td,whiteSpace:'normal'}}>{s.individual?<IcBadge kind="mute">individual</IcBadge>
-            :s.self_referential?<IcBadge kind="bad">points at itself</IcBadge>
-            :s.confidence==='external'?<IcBadge kind="warn">external</IcBadge>
-            :s.counterparty_node_id?<IcBadge kind="ok">company</IcBadge>
-            :s.counterparty_entity_id?<IcBadge kind="ok">{s.confidence}</IcBadge>
-            :<IcBadge kind="mute">{s.confidence}</IcBadge>}
-            <span style={{color:T.textDim,fontSize:11,marginLeft:6}}>{s.reason}</span>
-            {s.can_mark_person&&!s.individual&&!s.counterparty_node_id&&!s.counterparty_entity_id&&
-              <button style={{...S.link,marginLeft:8,color:T.textMuted}} title='Never suggest this name again'
-                onClick={()=>markPerson(s.counterparty_label,i)}>It{'\u2019'}s a person</button>}
-            {s.can_register&&!s.individual&&!s.counterparty_node_id&&!s.counterparty_entity_id&&
-              <button style={{...S.link,marginLeft:8,fontWeight:600}} onClick={async()=>{
-                try{const r=await api.createIcCompany({name:s.counterparty_label});
-                  await loadCompanies();
-                  setSugg(a=>a.map((x,j)=>j===i?{...x,counterparty_node_id:r.id,is_external:0,confidence:'company',reason:'registered company '+r.name}:x));
-                  setPicked(p=>({...p,[i]:true}));
-                  setMsg(r.existing?('"'+r.name+'" was already registered.'):('Registered "'+r.name+'".'));
-                }catch(ex){setErr(ex.message);}}}>+ Register “{s.counterparty_label}”</button>}
-          </td></tr>)}</tbody></table></div></div>}
 
       {!eid&&<IcEmpty>Pick an entity to see and edit its intercompany account mappings.</IcEmpty>}
 
@@ -7260,7 +7176,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           matters — is the pair complete — so a third copy of the rows under
           them was noise. Externals live behind their own toggle: no ledger on
           the other side, nothing to map to, never part of either list. */}
-      {eid&&!showUnmapped&&!showMapped&&!showExternal&&!showAdd&&!(sugg&&sugg.length)&&
+      {eid&&!showUnmapped&&!showMapped&&!showExternal&&!showAdd&&
         <IcEmpty><b>{entName(eid)}</b>: {rows.length-externalCount} mapping{(rows.length-externalCount)===1?'':'s'} facing the group{externalCount>0?', '+externalCount+' external':''}.<br/>
           <span style={{fontSize:12}}>Open <b>Show unmapped accounts</b> to work through what still needs mapping,
           {' '}or <b>Show mapped</b> to review the finished pairs.</span></IcEmpty>}
@@ -7289,7 +7205,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
             setErr('');setMsg(r.existing?('"'+r.name+'" was already registered.'):('Registered "'+r.name+'".'));
           }catch(e){setErr(e.message);}}}>+ Register company</button>}</div>
 
-      {offLedgerCompanies.length===0?<IcEmpty>No off-ledger companies registered yet. When a suggested mapping names a company CloudLedger doesn't have, you can register it in one click from the suggestions list.</IcEmpty>
+      {offLedgerCompanies.length===0?<IcEmpty>No off-ledger companies registered yet. When a mapping names a company CloudLedger doesn’t have, register it from the counterparty picker (“+ Register a new company…”).</IcEmpty>
       :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
         <th style={S.th}>Company</th><th style={S.th}>Kind</th><th style={S.th}>Notes</th></tr></thead>
       <tbody>{offLedgerCompanies.map(c=><tr key={c.id}>
