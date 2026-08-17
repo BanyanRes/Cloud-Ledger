@@ -541,7 +541,16 @@ function reconcileForEntity(db, entityId, opts) {
   if (!entity) { const e = new Error('Entity not found'); e.status = 404; throw e; }
 
   const all = resolveCounterparties(db, listMappings(db, {}));
-  const mine = all.filter(m => Number(m.entity_id) === eid);
+  const forEntity = all.filter(m => Number(m.entity_id) === eid);
+
+  // Accounts facing a party OUTSIDE the group are not reconciled. There is no
+  // counterparty ledger to agree with, so a difference on such a row means
+  // nothing — it only buries the rows that do need attention. They are counted
+  // below so the excluded balance is still visible, never silently dropped.
+  // Off-ledger counterparties are a different thing and stay in: those are
+  // inside the group, they just have no ledger in CloudLedger yet.
+  const external = forEntity.filter(m => m.is_external);
+  const mine = forEntity.filter(m => !m.is_external);
 
   // Balances are needed for this entity and for every counterparty it names,
   // because the counterparty's own accounts are printed alongside.
@@ -556,26 +565,23 @@ function reconcileForEntity(db, entityId, opts) {
   const entById = new Map(entities.map(e => [e.id, e]));
   const nm = id => (entById.get(Number(id)) || {}).name || ('Entity ' + id);
 
-  // Group this entity's mappings by counterparty. An external or off-ledger
-  // counterparty gets its own row too: it can never match, but its accounts
-  // still belong on the entity's statement of intercompany balances.
+  // Group this entity's mappings by counterparty. An off-ledger counterparty
+  // gets its own row too: it can never match, but it is inside the group and
+  // its balance belongs on the entity's intercompany position.
   const build = (types) => {
     const groups = new Map();
-    const key = m => m.is_external ? 'x' + (m.notes || m.account_code)
-      : (m.counterparty_entity_id != null ? 'e' + m.counterparty_entity_id
-        : (m.counterparty_node_id != null ? 'n' + m.counterparty_node_id : 'u' + m.account_code));
+    const key = m => m.counterparty_entity_id != null ? 'e' + m.counterparty_entity_id
+      : (m.counterparty_node_id != null ? 'n' + m.counterparty_node_id : 'u' + m.account_code);
 
     for (const m of mine) {
       if (!types.includes(m.ic_type)) continue;
       const k = key(m);
       if (!groups.has(k)) {
-        const cpEid = (!m.is_external && m.counterparty_entity_id != null) ? Number(m.counterparty_entity_id) : null;
+        const cpEid = m.counterparty_entity_id != null ? Number(m.counterparty_entity_id) : null;
         groups.set(k, {
           counterparty_entity_id: cpEid,
           counterparty_node_id: m.counterparty_node_id || null,
-          counterparty_name: m.is_external ? (m.counterparty_name || m.notes || 'External party')
-            : (cpEid != null ? nm(cpEid) : (m.counterparty_name || 'Unmapped')),
-          is_external: !!m.is_external,
+          counterparty_name: cpEid != null ? nm(cpEid) : (m.counterparty_name || 'Unmapped'),
           off_ledger: !!m.off_ledger,
           self: cpEid === eid,
           our_legs: [], their_legs: [],
@@ -604,7 +610,7 @@ function reconcileForEntity(db, entityId, opts) {
     const difference = our_net + their_net;
     const bothEmpty = Math.abs(our_net) < tol && Math.abs(their_net) < tol;
     let status;
-    if (g.is_external || g.off_ledger || g.counterparty_entity_id == null) status = 'no_ledger';
+    if (g.off_ledger || g.counterparty_entity_id == null) status = 'no_ledger';
     else if (bothEmpty) status = 'settled';
     else if (!g.their_legs.length) status = 'one_sided';
     else if (Math.abs(difference) < tol) status = 'matched';
@@ -627,7 +633,7 @@ function reconcileForEntity(db, entityId, opts) {
     const hasCap = Math.abs(our_capital) >= tol || Math.abs(their_investment) >= tol;
     let status;
     if (g.self) status = 'self';
-    else if (g.is_external || g.off_ledger || g.counterparty_entity_id == null) status = 'no_ledger';
+    else if (g.off_ledger || g.counterparty_entity_id == null) status = 'no_ledger';
     else if (!hasInv && !hasCap) status = 'settled';
     else if (!g.their_legs.length) status = 'one_sided';
     else if ((!hasInv || Math.abs(inv_difference) < tol) && (!hasCap || Math.abs(cap_difference) < tol)) status = 'matched';
@@ -654,7 +660,9 @@ function reconcileForEntity(db, entityId, opts) {
 
   // Accounts that look intercompany, carry a balance, and are not mapped. Kept
   // per-tab so the investment tab can say "nothing here" honestly.
-  const mappedCodes = new Set(mine.map(m => String(m.account_code)));
+  // Every mapping the entity has, external included: an account mapped to an
+  // outside party is mapped, and must not resurface as "not mapped yet".
+  const mappedCodes = new Set(forEntity.map(m => String(m.account_code)));
   const people = listPeople(db);
   const unmappedFor = (types) => db.prepare('SELECT code, name FROM accounts WHERE entity_id = ?').all(eid)
     .filter(a => {
@@ -679,19 +687,34 @@ function reconcileForEntity(db, entityId, opts) {
       .reduce((s, r) => s + Math.abs(r.difference), 0)),
   });
 
+  // Not reconciled, but shown as a one-line note so the balance is accounted
+  // for. Only accounts that actually carry one are worth mentioning.
+  const excludedFor = (types) => external
+    .filter(m => types.includes(m.ic_type))
+    .map(m => legOf(m, balances))
+    .filter(l => Math.abs(l.amount) >= tol)
+    .map(l => ({ account_code: l.account_code, account_name: l.account_name,
+      ic_type: l.ic_type, amount: l.amount }))
+    .sort((x, y) => Math.abs(y.amount) - Math.abs(x.amount));
+
   const dueUnmapped = unmappedFor(['due_from', 'due_to']);
   const invUnmapped = unmappedFor(['investment', 'contributed_capital']);
+  const dueExternal = excludedFor(['due_from', 'due_to']);
+  const invExternal = excludedFor(['investment', 'contributed_capital']);
+
 
   return {
     entity: { id: entity.id, name: entity.name, code: entity.code },
     as_of: as_of || null,
     tolerance: tol,
-    due: { rows: due, unmapped: dueUnmapped, totals: tally(due) },
+    due: { rows: due, unmapped: dueUnmapped, external: dueExternal, totals: tally(due) },
     investment: {
       rows: investment, unmapped: invUnmapped, findings, totals: tally(investment),
+      external: invExternal,
       // Drives an explicit "this entity has no investment accounts" message
       // rather than an empty table that looks like something failed to load.
-      has_any: investment.length > 0 || findings.length > 0 || invUnmapped.length > 0,
+      has_any: investment.length > 0 || findings.length > 0 || invUnmapped.length > 0
+        || invExternal.length > 0,
     },
   };
 }

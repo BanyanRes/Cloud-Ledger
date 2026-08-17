@@ -6294,6 +6294,13 @@ function IntercompanyReconciliation({entities,activeEntity,setPage}){
       d.push([]);
     }
     dump('INVESTMENT / CONTRIBUTED CAPITAL',data.investment.rows,false);
+    const ext=[...data.due.external,...data.investment.external];
+    if(ext.length){
+      d.push(['OUTSIDE THE GROUP — NOT RECONCILED']);
+      d.push(['Account','Account name','Type','Amount']);
+      ext.forEach(x=>d.push([x.account_code,x.account_name,IC_TYPE_LABEL[x.ic_type]||x.ic_type,x.amount]));
+      d.push([]);
+    }
     exportToExcel(d,'IC_Recon_'+String(data.entity.code||data.entity.id)+'_'+String(data.as_of||asOf).replace(/-/g,'')+'.xlsx');
   };
 
@@ -6344,9 +6351,12 @@ function IntercompanyReconciliation({entities,activeEntity,setPage}){
       {tab==='investment'&&!data.investment.has_any
         ?<IcEmpty><b>{data.entity.name}</b> has no investment or contributed-capital accounts.<br/>
           <span style={{fontSize:12}}>Nothing to reconcile on this tab for this entity.</span></IcEmpty>
-      :side.rows.length===0&&(tab==='due'||!data.investment.findings.length)
-        ?<IcEmpty>No mapped {tab==='due'?'due from / due to':'investment'} account on <b>{data.entity.name}</b> carries a balance at {data.as_of||asOf}.
+      :side.rows.length===0&&!(side.external||[]).length&&(tab==='due'||!data.investment.findings.length)
+        ?<IcEmpty>No mapped {tab==='due'?'due from / due to':'investment'} account on <b>{data.entity.name}</b> faces another group entity at {data.as_of||asOf}.
           {' '}Map its accounts on the <button style={S.link} onClick={()=>setPage&&setPage('ic_mapping')}>IC Mapping</button> page.</IcEmpty>
+      :side.rows.length===0&&(side.external||[]).length>0
+        ?<IcEmpty>Every mapped {tab==='due'?'due from / due to':'investment'} account on <b>{data.entity.name}</b> faces a party outside the group,
+          {' '}so there is nothing to reconcile. They are listed below.</IcEmpty>
       :null}
 
       {tab==='investment'&&data.investment.findings.length>0&&
@@ -6373,7 +6383,6 @@ function IntercompanyReconciliation({entities,activeEntity,setPage}){
               <tr style={{background:bad?T.redDim:(warn?T.orangeDim:T.bgElevated)}}>
                 <td colSpan={6} style={{...S.td,fontWeight:700,color:T.textBright}}>
                   {r.counterparty_name}
-                  {r.is_external&&<span style={{marginLeft:8}}><IcBadge kind="warn">external</IcBadge></span>}
                   {r.off_ledger&&<span style={{marginLeft:8}}><IcBadge kind="info">no ledger</IcBadge></span>}
                   <span style={{marginLeft:8}}><IcStatus status={r.status}/></span></td>
                 <td style={{...S.tdR,fontWeight:700,color:bad?T.red:(warn?T.orange:T.green)}}>{fmt(r.difference)}</td></tr>
@@ -6382,7 +6391,7 @@ function IntercompanyReconciliation({entities,activeEntity,setPage}){
                 <td style={{...S.td,borderLeft:'2px solid '+T.border,width:88,color:T.textBright,fontWeight:600}}>{b?b.account_code:''}</td>
                 <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{b?b.account_name:
                   (i===0&&!r.their_legs.length?<span style={{color:T.textDim,fontStyle:'italic'}}>
-                    {r.is_external||r.off_ledger?'no ledger in CloudLedger':'this entity has not mapped its side'}</span>:'')}
+                    {r.off_ledger?'no ledger in CloudLedger':'this entity has not mapped its side'}</span>:'')}
                   {b&&b.ic_type&&<span style={{marginLeft:6,fontSize:10,color:T.textDim}}>{IC_TYPE_LABEL[b.ic_type]}</span>}</td>
                 <td style={{...S.tdR,width:130}}>{b?fmt(b.amount):''}</td>
                 <td style={S.tdR}></td></tr>)}
@@ -6413,6 +6422,21 @@ function IntercompanyReconciliation({entities,activeEntity,setPage}){
           <td style={{...S.td,fontWeight:600,color:T.textBright,width:88}}>{u.account_code}</td>
           <td style={{...S.td,whiteSpace:'normal'}}>{u.account_name}</td>
           <td style={{...S.tdR,width:150}}>{fmt(u.balance)}</td></tr>)}</tbody></table></div>}
+
+      {/* Not reconciled — there is no counterparty ledger to agree with, so a
+          difference would be meaningless. Listed anyway so the balance is not
+          silently missing from the page. */}
+      {side.external&&side.external.length>0&&<details style={{...S.cardFlush,marginTop:14,padding:'10px 16px'}}>
+        <summary style={{cursor:'pointer',color:T.textMuted,fontSize:12.5}}>
+          <b style={{color:T.textBright}}>{side.external.length}</b> account{side.external.length>1?'s':''} face
+          {side.external.length>1?'':'s'} a party outside the group — not reconciled
+          <span style={{marginLeft:8,fontVariantNumeric:'tabular-nums'}}>({fmt(side.external.reduce((s,x)=>s+Math.abs(x.amount),0))})</span>
+        </summary>
+        <table style={{...S.table,marginTop:8}}><tbody>{side.external.map(x=><tr key={x.account_code}>
+          <td style={{...S.td,fontWeight:600,color:T.textBright,width:88}}>{x.account_code}</td>
+          <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{x.account_name}
+            <span style={{marginLeft:6,fontSize:10,color:T.textDim}}>{IC_TYPE_LABEL[x.ic_type]}</span></td>
+          <td style={{...S.tdR,width:150}}>{fmt(x.amount)}</td></tr>)}</tbody></table></details>}
     </>}
   </div>);
 }
