@@ -6971,7 +6971,8 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   // of the four could be the thing someone actually remembers about a row.
   const mapNeedle=q.trim().toLowerCase();
   const shownRows=!mapNeedle?rows:rows.filter(r=>
-    [r.account_code,r.account_name,r.counterparty_name,r.notes,IC_TYPE_LABEL[r.ic_type]]
+    [r.account_code,r.account_name,r.counterparty_name,r.counterparty_account_code,
+     r.counterparty_account_name,r.notes,IC_TYPE_LABEL[r.ic_type]]
       .some(v=>String(v||'').toLowerCase().includes(mapNeedle)));
   // An external mapping is a decision already made: the counterparty is outside
   // the group, CloudLedger holds no ledger for it, and the reconciliation
@@ -7184,34 +7185,45 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
       :listRows.length===0?<IcEmpty>Every mapping here faces a party outside the group, so none of them is reconciled.
         {' '}<button style={S.link} onClick={()=>setShowExternal(true)}>Show external ({externalCount})</button></IcEmpty>
       :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
-        <th style={S.th}>Account</th><th style={S.th}>Kind</th><th style={S.th}>Counterparty</th><th style={S.th}>Notes</th>
+        <th style={S.th}>Account</th><th style={S.th}>Counterparty</th><th style={S.th}>Counterparty{'\u2019'}s account</th>
         {canEdit&&<th style={{...S.th,width:110}}>Actions</th>}</tr></thead>
       <tbody>{listRows.map(r=>editId===r.id?(<tr key={r.id} style={{background:T.accentDim}}>
-        <td style={S.td}><input style={{...S.inputSm,width:80}} value={editForm.account_code} onChange={e=>setEditForm(f=>({...f,account_code:e.target.value}))}/>
-          <input style={{...S.inputSm,width:220,marginLeft:6}} value={editForm.account_name||''} onChange={e=>setEditForm(f=>({...f,account_name:e.target.value}))}/></td>
-        <td style={S.td}><select style={S.selectSm} value={editForm.ic_type} onChange={e=>setEditForm(f=>({...f,ic_type:e.target.value}))}>
-          {Object.keys(IC_TYPE_LABEL).map(k=><option key={k} value={k}>{IC_TYPE_LABEL[k]}</option>)}</select></td>
+        <td style={{...S.td,whiteSpace:'normal'}}>
+          <div><input style={{...S.inputSm,width:80}} value={editForm.account_code} onChange={e=>setEditForm(f=>({...f,account_code:e.target.value}))}/>
+            <input style={{...S.inputSm,width:200,marginLeft:6}} value={editForm.account_name||''} onChange={e=>setEditForm(f=>({...f,account_name:e.target.value}))}/></div>
+          {/* Kind and notes lost their columns, not their editability. */}
+          <div style={{marginTop:6,display:'flex',gap:6}}>
+            <select style={S.selectSm} value={editForm.ic_type} onChange={e=>setEditForm(f=>({...f,ic_type:e.target.value}))}>
+              {Object.keys(IC_TYPE_LABEL).map(k=><option key={k} value={k}>{IC_TYPE_LABEL[k]}</option>)}</select>
+            <input style={{...S.inputSm,width:150}} value={editForm.notes||''} placeholder='Notes (optional)'
+              onChange={e=>setEditForm(f=>({...f,notes:e.target.value}))}/></div></td>
         <td style={S.td}>{cpCell(editForm.counterparty_entity_id,editForm.counterparty_node_id,!!editForm.is_external,
           p=>setEditForm(f=>({...f,counterparty_entity_id:p.entity_id||'',counterparty_node_id:p.node_id||'',
             is_external:!!p.is_external,counterparty_account_code:''})),
-          editForm.account_name)}
-          {!editForm.is_external&&editForm.counterparty_entity_id&&<div style={{marginTop:6}}>
-            <IcCpAccountSelect entityId={eid} accountCode={editForm.account_code}
+          editForm.account_name)}</td>
+        <td style={{...S.td,whiteSpace:'normal'}}>
+          {!editForm.is_external&&editForm.counterparty_entity_id
+            ?<IcCpAccountSelect entityId={eid} accountCode={editForm.account_code}
               counterpartyEntityId={editForm.counterparty_entity_id} value={editForm.counterparty_account_code}
-              onChange={v=>setEditForm(f=>({...f,counterparty_account_code:v}))} width={240} showGap={false}/></div>}</td>
-        <td style={S.td}><input style={{...S.inputSm,width:'100%'}} value={editForm.notes||''} onChange={e=>setEditForm(f=>({...f,notes:e.target.value}))}/></td>
+              onChange={v=>setEditForm(f=>({...f,counterparty_account_code:v}))} width={240} showGap={false}/>
+            :<span style={{color:T.textDim}}>{'\u2014'}</span>}</td>
         <td style={S.td}><div style={{display:'flex',gap:6}}>
           <button style={{...S.btnGhost,color:T.green,fontSize:11}} onClick={saveEdit}>Save</button>
           <button style={{...S.btnGhost,fontSize:11}} onClick={()=>setEditId(null)}>Cancel</button></div></td></tr>
       ):(<tr key={r.id} style={Number(r.counterparty_entity_id)===Number(r.entity_id)?{background:T.redDim}:null}>
-        <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{r.account_code}</span> <span style={{color:T.textMuted}}>{r.account_name}</span></td>
-        <td style={S.td}>{IC_TYPE_LABEL[r.ic_type]||r.ic_type}</td>
-        <td style={S.td}>{r.is_external?<IcBadge kind="warn">external</IcBadge>:(r.counterparty_name||<IcBadge kind="mute">not set</IcBadge>)}
+        <td style={{...S.td,whiteSpace:'normal'}}><span style={{fontWeight:600,color:T.textBright}}>{r.account_code}</span> <span style={{color:T.textMuted}}>{r.account_name}</span></td>
+        <td style={{...S.td,whiteSpace:'normal'}}>{r.is_external?<IcBadge kind="warn">external</IcBadge>:(r.counterparty_name||<IcBadge kind="mute">not set</IcBadge>)}
           {!r.is_external&&r.counterparty_node_id&&!r.counterparty_entity_id&&<span style={{marginLeft:6}}><IcBadge kind="info">no ledger</IcBadge></span>}
-          {Number(r.counterparty_entity_id)===Number(r.entity_id)&&<span style={{marginLeft:6}}><IcBadge kind="bad">points at itself</IcBadge></span>}
-          {r.counterparty_account_code&&<div style={{fontSize:11,color:T.textDim,marginTop:2}}>
-            answers their <b style={{color:T.textMuted}}>{r.counterparty_account_code}</b></div>}</td>
-        <td style={{...S.td,color:T.textMuted}}>{r.notes||''}</td>
+          {Number(r.counterparty_entity_id)===Number(r.entity_id)&&<span style={{marginLeft:6}}><IcBadge kind="bad">points at itself</IcBadge></span>}</td>
+        <td style={{...S.td,whiteSpace:'normal'}}>
+          {r.counterparty_account_code
+            ?<><span style={{fontWeight:600,color:T.textBright}}>{r.counterparty_account_code}</span>
+              {r.counterparty_account_name
+                ?<span style={{color:T.textMuted,marginLeft:6}}>{r.counterparty_account_name}</span>
+                :<span style={{marginLeft:6}}><IcBadge kind="bad">not in their ledger</IcBadge></span>}</>
+            :r.is_external||!r.counterparty_entity_id
+              ?<span style={{color:T.textDim}} title='This counterparty has no ledger in CloudLedger, so there is no GL account to name.'>{'\u2014'}</span>
+              :<span style={{color:T.orange,fontSize:12,fontStyle:'italic'}}>not set</span>}</td>
         {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}>
           <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{setEditId(r.id);setEditForm({account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,counterparty_entity_id:r.counterparty_entity_id||'',counterparty_node_id:r.counterparty_node_id||'',counterparty_account_code:r.counterparty_account_code||'',is_external:!!r.is_external,notes:r.notes||''});}}>Edit</button>
           <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={()=>del(r)}>x</button></div></td>}</tr>))}

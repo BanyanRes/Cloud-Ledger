@@ -382,10 +382,13 @@ function listMappings(db, { entity_id } = {}) {
   return db.prepare(`
     SELECT m.*, e.name AS entity_name, e.code AS entity_code,
            COALESCE(c.name, ${nodeName}) AS counterparty_name, c.code AS counterparty_code,
-           ${nodeName} AS counterparty_node_name
+           ${nodeName} AS counterparty_node_name,
+           ca.name AS counterparty_account_name
     FROM intercompany_accounts m
     LEFT JOIN entities e ON e.id = m.entity_id
     LEFT JOIN entities c ON c.id = m.counterparty_entity_id
+    LEFT JOIN accounts ca ON ca.entity_id = m.counterparty_entity_id
+      AND ca.code = m.counterparty_account_code
     ${nodeJoin}
     ${where}
     ORDER BY e.name COLLATE NOCASE, m.account_code`).all(...params);
