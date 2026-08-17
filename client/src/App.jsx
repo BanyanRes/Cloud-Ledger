@@ -6612,51 +6612,94 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
       .some(v=>String(v||'').toLowerCase().includes(n));
   });
 
-  const confirmRow=async r=>{
+  // Ready = the answer is already on screen: a pre-filled account, an editable
+  // draft, external, or investor capital. A row still waiting on a human
+  // choice is not ready, and Confirm all leaves it untouched.
+  const isReady=r=>{
+    if(r.individual)return false;
+    if(r.is_external||r.investor_capital)return true;
+    const st=ov[rowKey(r)]||{},mode=modeOf(r);
+    const cpEff=st.cpOverride||r.counterparty_entity_id;
+    if(!cpEff||!mode)return false;
+    if(mode==='pick'&&!st.pickCode)return false;
+    return true;
+  };
+  const readyCount=shown.filter(isReady).length;
+
+  // The row-level save, shared by Confirm and Confirm all. Throws on failure
+  // so the caller decides how to report it.
+  const saveRow=async r=>{
     const k=rowKey(r),st=ov[k]||{},mode=modeOf(r);
-    setBusyKey(k);
+    const cpEff=st.cpOverride||r.counterparty_entity_id;
+    let cpCode=null;
+    if(!r.is_external&&!r.investor_capital){
+      if(mode==='new'){
+        // ONE box: leading token is the code, the rest is the name.
+        const raw=String(st.acct!=null?st.acct:(r.suggested_new.account_code+' '+r.suggested_new.account_name)).trim();
+        const m2=raw.match(/^(\S+)\s+(.+)$/);
+        if(!m2)throw new Error('Enter the new account for '+r.account_code+' as “code name” — e.g. “23000 Due to Banyan Residential”.');
+        // Created on the COUNTERPARTY's ledger, at zero. The reconciliation
+        // will show our balance against their zero until they book the entry
+        // — that gap is the truth, not a defect.
+        await api.createAccount(cpEff,{code:m2[1],name:m2[2],type:r.suggested_new.type,subtype:'',bank_acct:false});
+        cpCode=m2[1];
+      }else if(mode==='pick')cpCode=st.pickCode||null;
+      else if(mode==='existing')cpCode=r.suggested_existing.account_code;
+      if(!cpCode)throw new Error('Pick or create the counterparty account for '+r.account_code+' first.');
+    }
+    // Investor capital completes WITHOUT an account: the contributor keeps no
+    // ledger in CloudLedger. Saved to the registered company if one matched,
+    // external otherwise, with the investor's name kept in the notes.
+    const payload=r.investor_capital
+      ?{account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,
+        counterparty_entity_id:null,
+        counterparty_node_id:r.counterparty_node_id||null,
+        counterparty_account_code:null,
+        is_external:r.counterparty_node_id?0:1,
+        notes:r.notes||r.counterparty_label||null}
+      :{account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,
+        counterparty_entity_id:r.is_external?null:cpEff,
+        counterparty_node_id:null,
+        counterparty_account_code:r.is_external?null:cpCode,
+        is_external:r.is_external?1:0,notes:r.notes||null};
+    if(r.mapping_id)await api.updateIcMapping(r.mapping_id,payload);
+    else await api.createIcMapping({...payload,entity_id:Number(entityId)});
+    return{mode,cpCode};
+  };
+
+  const confirmRow=async r=>{
+    setBusyKey(rowKey(r));
     try{
-      const cpEff=st.cpOverride||r.counterparty_entity_id;
-      let cpCode=null;
-      if(!r.is_external&&!r.investor_capital){
-        if(mode==='new'){
-          // ONE box: leading token is the code, the rest is the name.
-          const raw=String(st.acct!=null?st.acct:(r.suggested_new.account_code+' '+r.suggested_new.account_name)).trim();
-          const m2=raw.match(/^(\S+)\s+(.+)$/);
-          if(!m2){if(onErr)onErr('Enter the new account as “code name” — e.g. “23000 Due to Banyan Residential”.');return;}
-          // Created on the COUNTERPARTY's ledger, at zero. The reconciliation
-          // will show our balance against their zero until they book the entry
-          // — that gap is the truth, not a defect.
-          await api.createAccount(cpEff,{code:m2[1],name:m2[2],type:r.suggested_new.type,subtype:'',bank_acct:false});
-          cpCode=m2[1];
-        }else if(mode==='pick')cpCode=st.pickCode||null;
-        else if(mode==='existing')cpCode=r.suggested_existing.account_code;
-        if(!cpCode){if(onErr)onErr('Pick or create the counterparty account for '+r.account_code+' first.');return;}
-      }
-      // Investor capital completes WITHOUT an account: the contributor keeps no
-      // ledger in CloudLedger. Saved to the registered company if one matched,
-      // external otherwise, with the investor's name kept in the notes.
-      const payload=r.investor_capital
-        ?{account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,
-          counterparty_entity_id:null,
-          counterparty_node_id:r.counterparty_node_id||null,
-          counterparty_account_code:null,
-          is_external:r.counterparty_node_id?0:1,
-          notes:r.notes||r.counterparty_label||null}
-        :{account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,
-          counterparty_entity_id:r.is_external?null:cpEff,
-          counterparty_node_id:null,
-          counterparty_account_code:r.is_external?null:cpCode,
-          is_external:r.is_external?1:0,notes:r.notes||null};
-      if(r.mapping_id)await api.updateIcMapping(r.mapping_id,payload);
-      else await api.createIcMapping({...payload,entity_id:Number(entityId)});
+      const res=await saveRow(r);
       if(onErr)onErr('');
       if(onMsg)onMsg(r.investor_capital?('Mapped '+r.account_code+' as investor capital — no counterparty account required.')
         :r.is_external?('Mapped '+r.account_code+' as external.')
-        :(r.account_code+' now answers '+cpCode+(mode==='new'?' (created)':'')+'.'));
+        :(r.account_code+' now answers '+res.cpCode+(res.mode==='new'?' (created)':'')+'.'));
       await load();if(onMapped)await onMapped();
     }catch(e){if(onErr)onErr(e.message);}
     finally{setBusyKey(null);}
+  };
+
+  const confirmAll=async()=>{
+    const ready=shown.filter(isReady);
+    if(!ready.length)return;
+    const creates=ready.filter(r=>!r.is_external&&!r.investor_capital&&modeOf(r)==='new').length;
+    // One dialog, stating the consequential part out loud: how many accounts
+    // get CREATED on counterparties' charts of accounts.
+    if(!window.confirm('Confirm '+ready.length+' row'+(ready.length===1?'':'s')+' as shown?'
+      +(creates?('\n\n'+creates+' new account'+(creates===1?'':'s')+' will be created on the counterparties’ charts of accounts.'):'')))return;
+    setBusyKey('__all');
+    const failed=[];
+    for(const r of ready){
+      try{await saveRow(r);}
+      catch(e){failed.push(r.account_code+': '+e.message);}
+    }
+    // Failures are named, not counted — a row that silently stayed unmapped
+    // would look identical to one that was confirmed.
+    if(onErr)onErr(failed.length?('Could not confirm '+failed.length+' — '+failed.join(' · ')):'');
+    if(onMsg)onMsg('Confirmed '+(ready.length-failed.length)+' of '+ready.length+' row'+(ready.length===1?'':'s')+'.');
+    await load();if(onMapped)await onMapped();
+    setBusyKey(null);
   };
 
   return<div style={{...S.cardFlush,border:'1px solid '+T.border,marginBottom:16,overflow:'hidden'}}>
@@ -6671,8 +6714,12 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
         title='A zero balance has nothing for a counterparty ledger to disagree with, so mapping it would change no reconciliation.'>
         · {data.skipped_zero_balance} at zero not listed</span>}
       <IcSearch value={q} onChange={setQ} placeholder='Account code or name…' width={200}/>
-      <button style={{...S.btnGhost,fontSize:12,marginLeft:'auto'}} onClick={load} disabled={loading}>
-        {loading?'Loading…':'Refresh'}</button></div>
+      <span style={{marginLeft:'auto',display:'flex',gap:8,alignItems:'center'}}>
+        {canEdit&&readyCount>0&&<button style={{...S.btnP,padding:'7px 14px',fontSize:12.5}}
+          onClick={confirmAll} disabled={busyKey!=null||loading}>
+          {busyKey==='__all'?'Confirming…':'Confirm all ('+readyCount+')'}</button>}
+        <button style={{...S.btnGhost,fontSize:12}} onClick={load} disabled={loading}>
+          {loading?'Loading…':'Refresh'}</button></span></div>
 
     {loading&&!data?<div style={{textAlign:'center',padding:30,color:T.textMuted}}>Reading both sides…</div>
     :!data||data.count===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
@@ -6689,7 +6736,7 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
         <th style={S.th}>Counterparty</th><th style={S.th}>Counterparty account</th>
         {canEdit&&<th style={{...S.th,width:130}}></th>}</tr></thead>
       <tbody>{shown.map(r=>{
-        const k=rowKey(r),st=ov[k]||{},mode=modeOf(r),busy=busyKey===k;
+        const k=rowKey(r),st=ov[k]||{},mode=modeOf(r),busy=busyKey===k||busyKey==='__all';
         // The accountant may re-point the counterparty; the account lookup on
         // the right then runs against the newly chosen entity.
         const cpEff=st.cpOverride||r.counterparty_entity_id;
