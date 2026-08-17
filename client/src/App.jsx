@@ -6320,9 +6320,32 @@ function IcMapForm({entityId,acct,entityOpts,companies,onCompanyAdded,onSaved,on
     ic_type:acct.ic_type||'due_from',
     counterparty_entity_id:acct.counterparty_entity_id||'',
     counterparty_node_id:acct.counterparty_node_id||'',
+    counterparty_account_code:acct.counterparty_account_code||'',
     is_external:!!acct.is_external,
     notes:''});
   const[busy,setBusy]=useState(false);
+  // Which account on the counterparty's ledger answers this one. Only an entity
+  // can have one — an off-ledger company has no GL here to point at, and an
+  // external party has none by definition.
+  const[cand,setCand]=useState(null);
+  const[candBusy,setCandBusy]=useState(false);
+  const cpEid=f.is_external?null:(f.counterparty_entity_id?Number(f.counterparty_entity_id):null);
+  useEffect(()=>{
+    let dead=false;
+    if(!cpEid||!acct.account_code){setCand(null);return;}
+    setCandBusy(true);
+    api.getIcCounterpartyAccounts({entity_id:Number(entityId),counterparty_entity_id:cpEid,account_code:acct.account_code})
+      .then(r=>{if(dead)return;setCand(r);
+        // Pre-fill only what the server was willing to stand behind.
+        setF(x=>({...x,counterparty_account_code:r.best||''}));})
+      .catch(e=>{if(!dead){setCand(null);console.error('[ic] counterparty accounts:',e.message);}})
+      .finally(()=>{if(!dead)setCandBusy(false);});
+    return()=>{dead=true;};
+  },[cpEid,acct.account_code,entityId]);
+
+  const picked=cand&&f.counterparty_account_code
+    ?cand.candidates.find(x=>String(x.account_code)===String(f.counterparty_account_code)):null;
+
   const save=async()=>{
     if(!f.is_external&&!f.counterparty_entity_id&&!f.counterparty_node_id){
       if(onErr)onErr('Pick a counterparty for '+acct.account_code+', or mark it external.');return;}
@@ -6332,6 +6355,7 @@ function IcMapForm({entityId,acct,entityOpts,companies,onCompanyAdded,onSaved,on
         account_code:acct.account_code,account_name:acct.account_name,ic_type:f.ic_type,
         counterparty_entity_id:f.is_external?null:(f.counterparty_entity_id?Number(f.counterparty_entity_id):null),
         counterparty_node_id:f.is_external?null:(f.counterparty_node_id?Number(f.counterparty_node_id):null),
+        counterparty_account_code:f.is_external?null:(f.counterparty_account_code||null),
         is_external:f.is_external?1:0,notes:f.notes||null});
       if(onErr)onErr('');
       if(onMsg)onMsg('Mapped '+acct.account_code+' '+(acct.account_name||'')+'.');
@@ -6344,13 +6368,39 @@ function IcMapForm({entityId,acct,entityOpts,companies,onCompanyAdded,onSaved,on
       {Object.keys(IC_TYPE_LABEL).map(k=><option key={k} value={k}>{IC_TYPE_LABEL[k]}</option>)}</select>
     <IcCpSelect entityOpts={entityOpts} companies={companies}
       entId={f.counterparty_entity_id} nodeId={f.counterparty_node_id} isExt={f.is_external}
-      onPick={pk=>setF(x=>({...x,counterparty_entity_id:pk.entity_id||'',counterparty_node_id:pk.node_id||'',is_external:!!pk.is_external}))}
+      onPick={pk=>setF(x=>({...x,counterparty_entity_id:pk.entity_id||'',counterparty_node_id:pk.node_id||'',
+        is_external:!!pk.is_external,counterparty_account_code:''}))}
       seedName={acct.counterparty_label||acct.account_name}
       onCompanyAdded={onCompanyAdded} onMsg={onMsg} onErr={onErr}/>
+    {cpEid&&<select style={{...S.selectSm,minWidth:260}} value={f.counterparty_account_code||''}
+      onChange={e=>setF(x=>({...x,counterparty_account_code:e.target.value}))}>
+      <option value=''>{candBusy?'Reading their ledger…':'— their account (optional) —'}</option>
+      {cand&&cand.candidates.map(x=><option key={x.account_code} value={x.account_code}>
+        {x.account_code+' '+x.account_name+'  '+fmt(x.balance)
+          +(x.offsets?'  ✓ offsets':(x.gap!=null?'  off by '+fmt(x.gap):''))}</option>)}</select>}
     <input style={{...S.inputSm,width:170}} value={f.notes} placeholder='Notes (optional)'
       onChange={e=>setF(x=>({...x,notes:e.target.value}))}/>
     <button style={{...S.btnP,padding:'6px 12px',fontSize:12}} onClick={save} disabled={busy}>{busy?'Saving…':'Save mapping'}</button>
     <button style={{...S.btnGhost,fontSize:12}} onClick={onCancel}>Cancel</button>
+
+    {/* The gap is the finding, so it is stated rather than left to be worked out
+        from two numbers in a dropdown. Only 2 of 28 relationships in this
+        portfolio tie to the penny — a counterparty account that disagrees is
+        still the right account. */}
+    {cpEid&&cand&&<div style={{flexBasis:'100%',fontSize:11.5,color:T.textDim,marginTop:2}}>
+      {picked
+        ?<>Ours <b style={{color:T.textBright}}>{fmt(cand.our_account.signed)}</b> receivable
+          {' '}· theirs <b style={{color:T.textBright}}>{fmt(picked.signed)}</b>
+          {' '}{picked.offsets
+            ?<span style={{color:T.green,fontWeight:700}}>— they offset exactly</span>
+            :<span style={{color:T.orange,fontWeight:700}}>— {fmt(picked.gap)} apart</span>}
+          {picked.already_mapped_to&&!picked.already_mapped_to_us&&
+            <span style={{color:T.red,marginLeft:8}}>that account is already mapped to {picked.already_mapped_to}</span>}</>
+        :candBusy?'Looking through '+cand.counterparty.name+'\u2019s ledger for an offsetting balance…'
+        :cand.candidates.length===0
+          ?<span>Nothing on {cand.counterparty.name}{'\u2019'}s ledger names {cand.entity.name} or offsets {fmt(cand.our_account.signed)}. Leave it blank — the reconciliation still nets by counterparty.</span>
+          :<span>{cand.candidates.length} candidate{cand.candidates.length===1?'':'s'} on {cand.counterparty.name}{'\u2019'}s ledger. Optional — the reconciliation nets by counterparty either way.</span>}
+    </div>}
   </div>;
 }
 

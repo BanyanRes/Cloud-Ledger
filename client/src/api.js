@@ -590,6 +590,14 @@ export const api = {
   // from suggestIcMappings, which can only propose what it recognises.
   getIcUnmappedAccounts: (entity_id, as_of) =>
     request('/intercompany/accounts/unmapped?entity_id=' + entity_id + (as_of ? '&as_of=' + as_of : '')),
+  // The counterparty's accounts, ranked as answers to one of ours. Names are not
+  // trustworthy here (a "Due from" account can carry a credit), so the ranking
+  // is: does their name resolve back to us, then how closely the balances offset.
+  getIcCounterpartyAccounts: (q) =>
+    request('/intercompany/counterparty-accounts?entity_id=' + q.entity_id
+      + '&counterparty_entity_id=' + q.counterparty_entity_id
+      + '&account_code=' + encodeURIComponent(q.account_code)
+      + (q.as_of ? '&as_of=' + q.as_of : '')),
   // Accepts one mapping object or an array of them (the "accept suggestions" path).
   createIcMapping: (b) => request('/intercompany/mappings', { method: 'POST', body: b }),
   updateIcMapping: (id, b) => request('/intercompany/mappings/' + id, { method: 'PUT', body: b }),

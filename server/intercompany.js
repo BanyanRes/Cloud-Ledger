@@ -95,6 +95,13 @@ function ensureSchema(db) {
     db.exec("ALTER TABLE intercompany_accounts ADD COLUMN counterparty_node_id INTEGER");
     console.log('[db migrate] intercompany_accounts.counterparty_node_id added');
   }
+  // The specific account on the counterparty's ledger that answers this one.
+  // Optional, and deliberately NOT authoritative for the arithmetic — see
+  // counterpartyCandidates below for why a pair is not always one-to-one.
+  if (!icCols.includes('counterparty_account_code')) {
+    db.exec("ALTER TABLE intercompany_accounts ADD COLUMN counterparty_account_code TEXT");
+    console.log('[db migrate] intercompany_accounts.counterparty_account_code added');
+  }
 }
 
 // org_nodes is created by server/orgstructure.js. Both modules register at boot,
@@ -397,11 +404,12 @@ function validateMapping(body) {
 function createMapping(db, body, who) {
   const now = new Date().toISOString();
   const r = db.prepare(`INSERT INTO intercompany_accounts
-    (entity_id, account_code, account_name, counterparty_entity_id, counterparty_node_id, ic_type, is_external, notes, created_at, created_by, updated_at, updated_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    (entity_id, account_code, account_name, counterparty_entity_id, counterparty_node_id, counterparty_account_code, ic_type, is_external, notes, created_at, created_by, updated_at, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       Number(body.entity_id), String(body.account_code), body.account_name || null,
       body.is_external ? null : (body.counterparty_entity_id ? Number(body.counterparty_entity_id) : null),
       body.is_external ? null : (body.counterparty_node_id ? Number(body.counterparty_node_id) : null),
+      body.is_external ? null : (body.counterparty_account_code ? String(body.counterparty_account_code) : null),
       body.ic_type, body.is_external ? 1 : 0, body.notes || null, now, who || null, now, who || null);
   return r.lastInsertRowid;
 }
@@ -409,11 +417,12 @@ function createMapping(db, body, who) {
 function updateMapping(db, id, body, who) {
   const now = new Date().toISOString();
   db.prepare(`UPDATE intercompany_accounts SET
-      account_code=?, account_name=?, counterparty_entity_id=?, counterparty_node_id=?, ic_type=?, is_external=?, notes=?, updated_at=?, updated_by=?
+      account_code=?, account_name=?, counterparty_entity_id=?, counterparty_node_id=?, counterparty_account_code=?, ic_type=?, is_external=?, notes=?, updated_at=?, updated_by=?
     WHERE id=?`).run(
       String(body.account_code), body.account_name || null,
       body.is_external ? null : (body.counterparty_entity_id ? Number(body.counterparty_entity_id) : null),
       body.is_external ? null : (body.counterparty_node_id ? Number(body.counterparty_node_id) : null),
+      body.is_external ? null : (body.counterparty_account_code ? String(body.counterparty_account_code) : null),
       body.ic_type, body.is_external ? 1 : 0, body.notes || null, now, who || null, id);
 }
 
@@ -494,6 +503,121 @@ function suggestMappings(db, entityId, { computeBalances, as_of, includeIndividu
 // "not a shell" rather than throwing.
 function isShellEntity(entity) {
   return String((entity && entity.entity_type) || '').trim().toLowerCase() === 'shell';
+}
+
+// ── Which account on the other side answers this one ──
+//
+// Account NAMES cannot answer this. A "Due from X" account is an asset, but it
+// can carry a credit — BROZ Fund I's "23000 Due to Banyan Residential" sits at
+// -2,900, a liability with a debit balance. So the search is by AMOUNT, in
+// receivable terms, where the two sides of a healthy relationship sum to zero:
+//
+//     asset      →  +balance   (computeBalances gives Dr-Cr for an asset)
+//     liability  →  -balance   (it gives Cr-Dr, so a payable is negative here)
+//
+// That is the same convention legOf() uses, and it reproduces the CLIP ↔ CLR
+// Silsbee gap: 26,948.26 + (-202,420.88) + 215,228.93 = 39,756.31.
+function receivableSigned(acct) {
+  if (!acct) return null;
+  if (acct.type === 'Asset') return Number(acct.balance) || 0;
+  if (acct.type === 'Liability') return -(Number(acct.balance) || 0);
+  return null; // equity and P&L are not a due-from/due-to position
+}
+
+// Rank the counterparty's accounts as answers to ONE of our accounts.
+//
+// Amount alone is not enough and must not be the primary key. Measured against
+// the real 6/30/2026 ledger, only 2 of 28 mapped relationships tie to the penny
+// — the other 26 have the obviously-right counterparty account carrying a
+// DIFFERENT number, which is the whole point of reconciling. Ranking by amount
+// alone picked "10100 Operating Checking" and "12002 Allowance for Credit
+// Losses" as best answers. So: does the account name resolve back to US first,
+// closeness of the offset second, and the gap is always reported so a person
+// sees immediately whether it ties.
+function counterpartyCandidates(db, opts) {
+  ensureSchema(db);
+  const { entityId, accountCode, counterpartyEntityId, computeBalances, as_of } = opts;
+  const eid = Number(entityId), cid = Number(counterpartyEntityId);
+  const tol = Number(opts.tolerance) > 0 ? Number(opts.tolerance) : DEFAULT_TOLERANCE;
+
+  const entities = db.prepare('SELECT id, name, code FROM entities').all();
+  const companies = listCompanies(db);
+  const us = entities.find(e => Number(e.id) === eid);
+  const them = entities.find(e => Number(e.id) === cid);
+  if (!us || !them) { const e = new Error('Entity not found'); e.status = 404; throw e; }
+
+  const ourBal = computeBalances(eid, as_of ? { as_of } : {});
+  const ourAcct = ourBal.find(b => String(b.code) === String(accountCode));
+  const ourSigned = receivableSigned(ourAcct);
+
+  // Accounts on the counterparty already spoken for by a mapping that points
+  // somewhere else — flagged, not hidden, because a wrong existing mapping is
+  // exactly the kind of thing this screen should let someone notice.
+  const theirMaps = new Map(listMappings(db, { entity_id: cid })
+    .map(m => [String(m.account_code), m]));
+
+  const rows = computeBalances(cid, as_of ? { as_of } : {})
+    .filter(b => !b.bank_acct)
+    .filter(b => !isPnlAccount(b.type, b.code))
+    .map(b => {
+      const signed = receivableSigned(b);
+      if (signed == null) return null;
+      const parsed = parseAccountName(b.name);
+      // Does THEIR account name point back at US? Reuses the same matcher the
+      // suggestions use, so aliases ("Due to SRN", "Due from Buna") resolve.
+      let nameMatch = false;
+      if (parsed) {
+        const m = matchCompany(parsed.label, entities, companies);
+        nameMatch = m.entity_id != null && Number(m.entity_id) === eid;
+      }
+      const gap = ourSigned == null ? null : round2(Math.abs(signed + ourSigned));
+      const mapped = theirMaps.get(String(b.code));
+      return {
+        account_code: String(b.code), account_name: b.name, type: b.type,
+        balance: round2(b.balance), signed: round2(signed),
+        ic_type: parsed ? parsed.ic_type : null,
+        counterparty_label: parsed ? parsed.label : null,
+        name_match: nameMatch,
+        gap,
+        offsets: gap != null && gap < tol,
+        already_mapped_to: mapped
+          ? (mapped.counterparty_name || null)
+          : null,
+        already_mapped_to_us: !!(mapped && Number(mapped.counterparty_entity_id) === eid),
+      };
+    })
+    .filter(Boolean)
+    // Worth offering: it names us, or it carries a balance that could offset.
+    .filter(r => r.name_match || r.already_mapped_to_us || Math.abs(r.signed) >= tol);
+
+  // Name first, then how close the offset is. An account that both names us and
+  // ties to the penny is the only thing that gets pre-selected without doubt,
+  // but naming us while disagreeing on the number is still the right pick — the
+  // disagreement is the finding.
+  const rank = r => (r.name_match || r.already_mapped_to_us ? 0 : 1);
+  rows.sort((a, b) =>
+    rank(a) - rank(b)
+    || (a.gap == null ? 1 : 0) - (b.gap == null ? 1 : 0)
+    || (a.gap - b.gap)
+    || String(a.account_code).localeCompare(String(b.account_code)));
+
+  // Only pre-select something defensible: it names us, or it offsets exactly.
+  const top = rows[0];
+  const best = top && (top.name_match || top.already_mapped_to_us || top.offsets)
+    ? top.account_code : null;
+
+  return {
+    entity: { id: us.id, name: us.name },
+    counterparty: { id: them.id, name: them.name },
+    as_of: as_of || null,
+    our_account: ourAcct
+      ? { account_code: String(ourAcct.code), account_name: ourAcct.name,
+          type: ourAcct.type, balance: round2(ourAcct.balance), signed: round2(ourSigned) }
+      : { account_code: String(accountCode), account_name: null, type: null, balance: 0, signed: 0 },
+    best,
+    exact_count: rows.filter(r => r.offsets).length,
+    candidates: rows.slice(0, 40),
+  };
 }
 
 // An intercompany balance can only live on the BALANCE SHEET. A revenue or
@@ -980,6 +1104,24 @@ function registerIntercompanyRoutes(app, deps) {
     } catch (e) { fail(res, e); }
   });
 
+  // Walk the counterparty's ledger for the account that answers ours. Ranked,
+  // never decided: the response says which one it would pick and by how much
+  // the two sides disagree, and a person confirms.
+  app.get('/api/intercompany/counterparty-accounts', ...gate, (req, res) => {
+    try {
+      const entity_id = Number(req.query.entity_id);
+      const counterparty_entity_id = Number(req.query.counterparty_entity_id);
+      const account_code = String(req.query.account_code || '');
+      if (!entity_id || !counterparty_entity_id || !account_code) {
+        return res.status(400).json({ error: 'entity_id, counterparty_entity_id and account_code are required' });
+      }
+      assertEntityAccess(req, [entity_id]);
+      const as_of = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.as_of || '')) ? String(req.query.as_of) : null;
+      res.json(counterpartyCandidates(db, { entityId: entity_id, accountCode: account_code,
+        counterpartyEntityId: counterparty_entity_id, computeBalances, as_of }));
+    } catch (e) { fail(res, e); }
+  });
+
   app.post('/api/intercompany/mappings', ...gate, (req, res) => {
     try {
       // Accepts one mapping or an array (the "accept these suggestions" path).
@@ -1053,6 +1195,8 @@ module.exports = {
   isMarkedPerson,
   isPnlAccount,
   isShellEntity,
+  receivableSigned,
+  counterpartyCandidates,
   resolveCounterparties,
   matchCompany,
   looksIndividual,
