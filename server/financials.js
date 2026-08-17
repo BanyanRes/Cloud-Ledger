@@ -1691,7 +1691,7 @@ async function renderStatementsPdf(s, outOffsets) {
       // the "$" several sections down the statement.
       plFirstRow = false;
       L.row('Total Revenue', cell4(bo.totRev), { indent: 6, boldRow: true, ruleAbove: true });
-      L.row('Gross Profit', cell4(bo.grossProfit), { indent: 6, boldRow: true, gapAfter: 6 });
+      L.row('Gross Profit', cell4(bo.grossProfit), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
 
       L.sectionTitle('Operating Expenses');
       renderTree(bo.opexTree, { showGroupTotal: true, keepWhole: true });
@@ -1763,7 +1763,7 @@ async function renderStatementsPdf(s, outOffsets) {
       L.sectionTitle('Cost of Revenue');
       s.operations.cogs.forEach(r => line(r));
       L.row('Total Cost of Revenue', [money(s.operations.totCogs.cur), money(s.operations.totCogs.pri), chg(s.operations.totCogs.cur, s.operations.totCogs.pri), money(s.operations.totCogs.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 4 });
-      L.row('Gross Profit', [money(s.operations.grossProfit.cur), money(s.operations.grossProfit.pri), chg(s.operations.grossProfit.cur, s.operations.grossProfit.pri), money(s.operations.grossProfit.ytd)], { indent: 6, boldRow: true, gapAfter: 6 });
+      L.row('Gross Profit', [money(s.operations.grossProfit.cur), money(s.operations.grossProfit.pri), chg(s.operations.grossProfit.cur, s.operations.grossProfit.pri), money(s.operations.grossProfit.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     }
     L.sectionTitle('Operating Expenses');
     // Grouped into the 11 presentation categories, each with its own subtotal.
