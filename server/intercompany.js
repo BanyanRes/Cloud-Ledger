@@ -620,6 +620,82 @@ function counterpartyCandidates(db, opts) {
   };
 }
 
+// Every mapping on one entity that faces another ENTITY, with both sides' GL
+// accounts and balances on the same row.
+//
+// The counterparty's account is shown whether it was pinned by hand or is still
+// blank, and its balance is read straight from its own ledger — so this is the
+// view that answers "what does the other side actually say?" without needing
+// the counterparty to have mapped anything.
+//
+// Only entity counterparties: an external party and an off-ledger company have
+// no GL here, so there is no account to put in the column. They are counted and
+// reported rather than quietly missing.
+function listMappedPairs(db, entityId, { computeBalances, as_of }) {
+  ensureSchema(db);
+  const eid = Number(entityId);
+  const tol = DEFAULT_TOLERANCE;
+  const all = listMappings(db, { entity_id: eid });
+  const mine = new Map(computeBalances(eid, as_of ? { as_of } : {}).map(b => [String(b.code), b]));
+
+  const cpIds = [...new Set(all
+    .filter(m => !m.is_external && m.counterparty_entity_id != null)
+    .map(m => Number(m.counterparty_entity_id)))];
+  const theirBal = new Map();
+  for (const id of cpIds) {
+    theirBal.set(id, new Map(computeBalances(id, as_of ? { as_of } : {}).map(b => [String(b.code), b])));
+  }
+
+  const rows = all
+    .filter(m => !m.is_external && m.counterparty_entity_id != null)
+    .map(m => {
+      const ours = mine.get(String(m.account_code)) || null;
+      const ourSigned = receivableSigned(ours);
+      const theirs = m.counterparty_account_code
+        ? (theirBal.get(Number(m.counterparty_entity_id)) || new Map()).get(String(m.counterparty_account_code)) || null
+        : null;
+      const theirSigned = receivableSigned(theirs);
+      const gap = (ourSigned != null && theirSigned != null)
+        ? round2(Math.abs(ourSigned + theirSigned)) : null;
+      return {
+        id: m.id,
+        account_code: String(m.account_code),
+        account_name: m.account_name,
+        ic_type: m.ic_type,
+        balance: ours ? round2(ours.balance) : 0,
+        signed: ourSigned == null ? null : round2(ourSigned),
+        counterparty_entity_id: m.counterparty_entity_id,
+        counterparty_node_id: m.counterparty_node_id || null,
+        counterparty_name: m.counterparty_name || null,
+        self: Number(m.counterparty_entity_id) === eid,
+        their_account_code: m.counterparty_account_code || null,
+        their_account_name: theirs ? theirs.name : null,
+        their_type: theirs ? theirs.type : null,
+        their_balance: theirs ? round2(theirs.balance) : null,
+        their_signed: theirSigned == null ? null : round2(theirSigned),
+        // The counterparty account was named but is not in its ledger at all —
+        // renamed, renumbered or deleted since. Worth saying out loud.
+        their_account_missing: !!(m.counterparty_account_code && !theirs),
+        gap,
+        offsets: gap != null && gap < tol,
+        notes: m.notes || null,
+      };
+    })
+    .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance)
+      || String(a.account_code).localeCompare(String(b.account_code)));
+
+  return {
+    entity_id: eid,
+    as_of: as_of || null,
+    count: rows.length,
+    pinned: rows.filter(r => r.their_account_code).length,
+    matched: rows.filter(r => r.offsets).length,
+    external_count: all.filter(m => m.is_external).length,
+    off_ledger_count: all.filter(m => !m.is_external && m.counterparty_entity_id == null).length,
+    rows,
+  };
+}
+
 // An intercompany balance can only live on the BALANCE SHEET. A revenue or
 // expense account has no balance for a counterparty ledger to agree with, so
 // mapping one would put a row in the reconciliation that can never reconcile —
@@ -1183,6 +1259,18 @@ function registerIntercompanyRoutes(app, deps) {
   // Every account on the entity with no mapping yet, recognised by the name
   // parser or not. The suggestion endpoint can only propose what it recognises;
   // this is what you open when the account you are after is not in that list.
+  // The finished side of the same job: mappings that face another entity, with
+  // both sides' accounts and balances on one row.
+  app.get('/api/intercompany/accounts/mapped', ...gate, (req, res) => {
+    try {
+      const entity_id = Number(req.query.entity_id);
+      if (!entity_id) return res.status(400).json({ error: 'entity_id is required' });
+      assertEntityAccess(req, [entity_id]);
+      const as_of = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.as_of || '')) ? String(req.query.as_of) : null;
+      res.json(listMappedPairs(db, entity_id, { computeBalances, as_of }));
+    } catch (e) { fail(res, e); }
+  });
+
   app.get('/api/intercompany/accounts/unmapped', ...gate, (req, res) => {
     try {
       const entity_id = Number(req.query.entity_id);
@@ -1278,6 +1366,7 @@ module.exports = {
   reconcileForEntity,
   suggestMappings,
   listUnmappedAccounts,
+  listMappedPairs,
   listMappings,
   listCompanies,
   listPeople,

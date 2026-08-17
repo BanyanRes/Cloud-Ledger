@@ -6440,6 +6440,96 @@ function IcMapForm({entityId,acct,entityOpts,companies,onCompanyAdded,onSaved,on
   </div>;
 }
 
+// The finished pairs, both sides on one row. This is the view that answers
+// "what does the other side actually say?" — their account and its balance are
+// read from their own ledger, so it works whether or not they have mapped
+// anything themselves.
+function IcMappedAccounts({entityId,entityName,canEdit,reloadKey,onMapped,onMsg,onErr}){
+  const[data,setData]=useState(null);
+  const[loading,setLoading]=useState(false);
+  const[q,setQ]=useState('');
+  const[pinning,setPinning]=useState(null);
+  const[onlyGaps,setOnlyGaps]=useState(false);
+
+  const load=useCallback(async()=>{
+    if(!entityId){setData(null);return;}
+    setLoading(true);
+    try{setData(await api.getIcMappedAccounts(entityId));if(onErr)onErr('');}
+    catch(e){if(onErr)onErr(e.message);setData(null);}
+    finally{setLoading(false);}
+  },[entityId,reloadKey]);// eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(()=>{load();},[load]);
+
+  const n=q.trim().toLowerCase();
+  const shown=(data?data.rows:[]).filter(r=>{
+    if(onlyGaps&&r.offsets)return false;
+    if(!n)return true;
+    return [r.account_code,r.account_name,r.counterparty_name,r.their_account_code,r.their_account_name]
+      .some(v=>String(v||'').toLowerCase().includes(n));
+  });
+
+  return<div style={{...S.cardFlush,border:'1px solid '+T.border,marginBottom:16,overflow:'hidden'}}>
+    <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border,
+      display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+      <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>
+        Mapped accounts{data?' ('+shown.length+')':''}</span>
+      {data&&<span style={{color:T.textDim,fontSize:11.5}}>
+        · {data.pinned} of {data.count} name the counterparty{'\u2019'}s account · {data.matched} offset exactly</span>}
+      <IcSearch value={q} onChange={setQ} placeholder="Either side's code or name…" width={220}/>
+      <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.textMuted,cursor:'pointer'}}>
+        <input type='checkbox' style={S.checkbox} checked={onlyGaps} onChange={e=>setOnlyGaps(e.target.checked)}/>
+        hide the ones that tie</label>
+      <button style={{...S.btnGhost,fontSize:12,marginLeft:'auto'}} onClick={load} disabled={loading}>
+        {loading?'Loading…':'Refresh'}</button></div>
+
+    {loading&&!data?<div style={{textAlign:'center',padding:30,color:T.textMuted}}>Reading both ledgers…</div>
+    :!data||data.count===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
+      No mapping on {entityName||'this entity'} faces another CloudLedger entity yet.</div>
+    :shown.length===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
+      Nothing matches. {data.count} mapped in total.</div>
+    :<div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(320px, calc(100vh - 460px))'}}>
+      <table style={S.table}><thead><tr>
+        <th colSpan={2} style={{...S.th,borderRight:'2px solid '+T.border}}>{entityName||'This entity'}</th>
+        <th colSpan={2} style={S.th}>Counterparty</th>
+        <th style={S.thR}>Difference</th>{canEdit&&<th style={{...S.th,width:90}}></th>}</tr></thead>
+      <tbody>{shown.map(r=><Fragment key={r.id}>
+        <tr style={pinning===r.id?{background:T.accentDim}:(r.self?{background:T.redDim}:null)}>
+          <td style={{...S.td,whiteSpace:'normal',minWidth:200}}>
+            <span style={{fontWeight:600,color:T.textBright}}>{r.account_code}</span>{' '}
+            <span style={{color:T.textMuted}}>{r.account_name}</span>
+            <span style={{marginLeft:6,fontSize:10,color:T.textDim}}>{IC_TYPE_LABEL[r.ic_type]||r.ic_type}</span></td>
+          <td style={{...S.tdR,width:130,borderRight:'2px solid '+T.border}}>{fmt(r.balance)}</td>
+          <td style={{...S.td,whiteSpace:'normal',minWidth:200}}>
+            <div style={{color:T.textBright,fontWeight:600}}>{r.counterparty_name}
+              {r.self&&<span style={{marginLeft:6}}><IcBadge kind="bad">points at itself</IcBadge></span>}</div>
+            {r.their_account_code
+              ?<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>
+                 <b style={{color:T.textBright}}>{r.their_account_code}</b> {r.their_account_name||''}
+                 {r.their_account_missing&&<span style={{marginLeft:6}}><IcBadge kind="bad">not in their ledger</IcBadge></span>}</div>
+              :<div style={{fontSize:12,color:T.textDim,fontStyle:'italic',marginTop:2}}>no counterparty account named</div>}</td>
+          <td style={{...S.tdR,width:130}}>{r.their_balance==null?'':fmt(r.their_balance)}</td>
+          <td style={{...S.tdR,width:130,fontWeight:700,
+            color:r.gap==null?T.textDim:(r.offsets?T.green:T.red)}}>
+            {r.gap==null?'—':fmt(r.gap)}</td>
+          {canEdit&&<td style={{...S.td,textAlign:'right'}}>
+            {!r.self&&<button style={{...S.btnGhost,color:T.accent,fontSize:11}}
+              onClick={()=>setPinning(pinning===r.id?null:r.id)}>
+              {pinning===r.id?'Close':(r.their_account_code?'Change':'Pin')}</button>}</td>}</tr>
+        {canEdit&&pinning===r.id&&<tr style={{background:T.accentDim}}>
+          <td colSpan={6} style={{...S.td,whiteSpace:'normal'}}>
+            <IcPinForm mapping={{...r,counterparty_account_code:r.their_account_code}} entityId={entityId}
+              onCancel={()=>setPinning(null)} onMsg={onMsg} onErr={onErr}
+              onSaved={async()=>{setPinning(null);await load();if(onMapped)await onMapped();}}/></td></tr>}
+      </Fragment>)}</tbody></table></div>}
+
+    {data&&(data.external_count>0||data.off_ledger_count>0)&&
+      <div style={{padding:'10px 16px',borderTop:'1px solid '+T.border,color:T.textDim,fontSize:11.5}}>
+        {data.external_count>0&&<span>{data.external_count} mapped to a party outside the group. </span>}
+        {data.off_ledger_count>0&&<span>{data.off_ledger_count} mapped to a company with no ledger in CloudLedger. </span>}
+        Neither has a GL account here to show.</div>}
+  </div>;
+}
+
 // Naming the counterparty account on a mapping that already names the entity.
 // Same PUT the edit row uses — the whole mapping goes back, because the server
 // validates it as a whole.
@@ -6854,6 +6944,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[showAdd,setShowAdd]=useState(false);
   const[q,setQ]=useState('');
   const[showUnmapped,setShowUnmapped]=useState(false);
+  const[showMapped,setShowMapped]=useState(false);
   const[showExternal,setShowExternal]=useState(false);
   // Bumped by every change to the mappings, so the unmapped panel reloads too.
   const[mapVersion,setMapVersion]=useState(0);
@@ -6990,12 +7081,17 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           {showExternal?'Hide external ('+externalCount+')':'Show external ('+externalCount+')'}</button>}
         {canEdit&&eid&&<><button style={S.btnS} onClick={()=>{setShowUnmapped(v=>!v);setErr('');setMsg('');}}>
             {showUnmapped?'Hide unmapped accounts':'Show unmapped accounts'}</button>
+          <button style={S.btnS} onClick={()=>{setShowMapped(v=>!v);setErr('');setMsg('');}}>
+            {showMapped?'Hide mapped':'Show mapped'}</button>
           <button style={S.btnS} onClick={()=>runSuggest(false)}>Suggest from account names</button>
           <button style={S.btnP} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add mapping'}</button></>}</div>
 
       {/* Not the same list as the suggestions: this one includes accounts whose
           NAME the parser cannot read, which is exactly where a missing mapping
           hides — the suggestion list can never propose one. */}
+      {eid&&showMapped&&<IcMappedAccounts entityId={eid} entityName={entName(eid)} canEdit={canEdit}
+        reloadKey={mapVersion} onMapped={loadRows} onMsg={setMsg} onErr={setErr}/>}
+
       {canEdit&&eid&&showUnmapped&&<IcUnmappedAccounts entityId={eid} entityName={entName(eid)}
         entityOpts={entityOpts} companies={companies} canEdit={canEdit} reloadKey={mapVersion}
         onCompanyAdded={loadCompanies} onMapped={loadRows} onMsg={setMsg} onErr={setErr}/>}

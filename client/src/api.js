@@ -588,6 +588,9 @@ export const api = {
   // Every account on the entity that carries no mapping yet, INCLUDING the ones
   // whose name the parser cannot read as intercompany. That is the difference
   // from suggestIcMappings, which can only propose what it recognises.
+  // The finished pairs: both sides' GL accounts and balances on one row.
+  getIcMappedAccounts: (entity_id, as_of) =>
+    request('/intercompany/accounts/mapped?entity_id=' + entity_id + (as_of ? '&as_of=' + as_of : '')),
   getIcUnmappedAccounts: (entity_id, as_of) =>
     request('/intercompany/accounts/unmapped?entity_id=' + entity_id + (as_of ? '&as_of=' + as_of : '')),
   // The counterparty's accounts, ranked as answers to one of ours. Names are not
