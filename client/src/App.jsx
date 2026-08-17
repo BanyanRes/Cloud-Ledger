@@ -6575,137 +6575,165 @@ function IcPinForm({mapping,entityId,onSaved,onCancel,onMsg,onErr}){
   </div>;
 }
 
-// The unmapped worklist: every account on the entity that the reconciliation
-// COULD match but no mapping covers yet. Only the four kinds it can match are
-// here — due from, due to, investment, contributed capital — because those are
-// the only balances a counterparty ledger states back. On a shell entity,
-// contributed capital is left out as well: it is the fund's money passing
-// through, and reconciling it only ever produces a one-sided row.
-//
-// This is not the same list as "Suggest from account names": that one skips
-// individuals and pre-resolves matches, and it will not show you an account with
-// no balance or one whose counterparty it could not work out.
+// ── The unmapped worklist ──
+// One list of everything standing between this entity and a fully mapped
+// intercompany position: accounts with no mapping at all, and mappings that
+// name the counterparty entity but not its GL account. Each row arrives with
+// the counterparty AND its account already filled in — an existing account
+// when the counterparty's ledger holds one, otherwise a draft of the account
+// to create, named by mirroring ours. Confirm is the only click a correct row
+// needs; nothing is saved or created before it.
 function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,reloadKey,onCompanyAdded,onMapped,onMsg,onErr}){
   const[data,setData]=useState(null);
   const[loading,setLoading]=useState(false);
   const[q,setQ]=useState('');
   const[mapping,setMapping]=useState(null);
-  const[pinning,setPinning]=useState(null);
+  // Per-row overrides, keyed by row: which answer mode is active and what the
+  // person typed. Untouched rows confirm the server's suggestion as-is.
+  const[ov,setOv]=useState({});
+  const[busyKey,setBusyKey]=useState(null);
 
   const load=useCallback(async()=>{
     if(!entityId){setData(null);return;}
     setLoading(true);
-    try{setData(await api.getIcUnmappedAccounts(entityId));if(onErr)onErr('');}
+    try{setData(await api.getIcUnmappedAccounts(entityId));setOv({});if(onErr)onErr('');}
     catch(e){if(onErr)onErr(e.message);setData(null);}
     finally{setLoading(false);}
-    // reloadKey is in the dependency list on purpose. This panel does not own
-    // the mappings — accepting suggestions, adding, editing or deleting one all
-    // happen outside it, and without this the panel went on listing accounts
-    // that had just been mapped until someone hit Refresh.
   },[entityId,reloadKey]);// eslint-disable-line react-hooks/exhaustive-deps
   useEffect(()=>{load();},[load]);
+
+  const rowKey=r=>r.mapping_id?('m'+r.mapping_id):('a'+r.account_code);
+  const setSt=(r,patch)=>setOv(o=>({...o,[rowKey(r)]:{...(o[rowKey(r)]||{}),...patch}}));
+  const modeOf=r=>{const st=ov[rowKey(r)]||{};
+    return st.mode||(r.suggested_existing?'existing':(r.suggested_new?'new':null));};
 
   const n=q.trim().toLowerCase();
   const shown=(data?data.accounts:[]).filter(a=>{
     if(!n)return true;
-    return String(a.account_code).toLowerCase().includes(n)
-      ||String(a.account_name||'').toLowerCase().includes(n)
-      ||String(a.counterparty_label||'').toLowerCase().includes(n);
+    return [a.account_code,a.account_name,a.counterparty_label,a.counterparty_name,
+      a.suggested_existing&&a.suggested_existing.account_code,
+      a.suggested_existing&&a.suggested_existing.account_name,
+      a.suggested_new&&a.suggested_new.account_name]
+      .some(v=>String(v||'').toLowerCase().includes(n));
   });
+
+  const confirmRow=async r=>{
+    const k=rowKey(r),st=ov[k]||{},mode=modeOf(r);
+    setBusyKey(k);
+    try{
+      let cpCode=null;
+      if(!r.is_external){
+        if(mode==='new'){
+          const code=String(st.code!=null?st.code:r.suggested_new.account_code).trim();
+          const name=String(st.name!=null?st.name:r.suggested_new.account_name).trim();
+          if(!code||!name){if(onErr)onErr('The new account needs a code and a name.');return;}
+          // Created on the COUNTERPARTY's ledger, at zero. The reconciliation
+          // will show our balance against their zero until they book the entry
+          // — that gap is the truth, not a defect.
+          await api.createAccount(r.counterparty_entity_id,{code,name,type:r.suggested_new.type,subtype:'',bank_acct:false});
+          cpCode=code;
+        }else if(mode==='pick')cpCode=st.pickCode||null;
+        else if(mode==='existing')cpCode=r.suggested_existing.account_code;
+        if(!cpCode){if(onErr)onErr('Pick or create the counterparty account for '+r.account_code+' first.');return;}
+      }
+      const payload={account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,
+        counterparty_entity_id:r.is_external?null:r.counterparty_entity_id,
+        counterparty_node_id:null,
+        counterparty_account_code:r.is_external?null:cpCode,
+        is_external:r.is_external?1:0,notes:r.notes||null};
+      if(r.mapping_id)await api.updateIcMapping(r.mapping_id,payload);
+      else await api.createIcMapping({...payload,entity_id:Number(entityId)});
+      if(onErr)onErr('');
+      if(onMsg)onMsg(r.is_external?('Mapped '+r.account_code+' as external.')
+        :(r.account_code+' now answers '+(r.counterparty_name||'their')+' '+cpCode
+          +(mode==='new'?' (created)':'')+'.'));
+      await load();if(onMapped)await onMapped();
+    }catch(e){if(onErr)onErr(e.message);}
+    finally{setBusyKey(null);}
+  };
 
   return<div style={{...S.cardFlush,border:'1px solid '+T.border,marginBottom:16,overflow:'hidden'}}>
     <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border,
       display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
-      {/* ONE number, and it is the number of rows below it. "(0 of 38)" next to
-          "38 are unmapped in total" read as a contradiction — the 38 were real,
-          they were just all zero-balance and the filter was on. */}
       <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>
         Unmapped accounts{data?' ('+shown.length+')':''}</span>
-      {data&&(data.unpinned||[]).length>0&&<span style={{color:T.textDim,fontSize:11.5}}>
-        · {data.unpinned.length} mapped without a counterparty account</span>}
-      <span style={{color:T.textDim,fontSize:11.5}} title='These are the only balances a counterparty ledger states back, so they are the only ones the reconciliation can match.'>
-        Due from / Due to · Investment / Contributed capital only</span>
-      {data&&data.count>shown.length&&<span style={{color:T.textDim,fontSize:11.5}}>
-        · {data.count-shown.length} more hidden by the search</span>}
+      <span style={{color:T.textDim,fontSize:11.5}} title='Due from / Due to and Investment / Contributed capital, with a balance. A mapping without the counterparty GL account counts as unmapped.'>
+        both sides pre-filled — Confirm saves the row</span>
+      {data&&data.shell_entity&&<IcBadge kind="info">shell entity — contributed capital left out</IcBadge>}
       {data&&data.skipped_zero_balance>0&&<span style={{color:T.textDim,fontSize:11.5}}
         title='A zero balance has nothing for a counterparty ledger to disagree with, so mapping it would change no reconciliation.'>
         · {data.skipped_zero_balance} at zero not listed</span>}
-      {data&&data.shell_entity&&<IcBadge kind="info">shell entity — contributed capital left out</IcBadge>}
-      <IcSearch value={q} onChange={setQ} placeholder='Account code or name…' width={220}/>
+      <IcSearch value={q} onChange={setQ} placeholder='Account code or name…' width={200}/>
       <button style={{...S.btnGhost,fontSize:12,marginLeft:'auto'}} onClick={load} disabled={loading}>
         {loading?'Loading…':'Refresh'}</button></div>
 
-    {loading&&!data?<div style={{textAlign:'center',padding:30,color:T.textMuted}}>Reading the chart of accounts…</div>
-    :!data||(data.count===0&&!(data.unpinned||[]).length)?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
+    {loading&&!data?<div style={{textAlign:'center',padding:30,color:T.textMuted}}>Reading both sides…</div>
+    :!data||data.count===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
       <b style={{color:T.textBright}}>Nothing here needs mapping.</b><br/>
       <span style={{fontSize:12}}>Every due from / due to, investment and contributed-capital account
-      on {entityName||'this entity'} that carries a balance is mapped.</span>
-      {data&&(data.skipped_zero_balance>0||data.skipped_other>0)&&<div style={{fontSize:11.5,marginTop:8}}>
-        {data.skipped_zero_balance>0&&<div>{data.skipped_zero_balance} unmapped account{data.skipped_zero_balance===1?'':'s'} sit
-          {data.skipped_zero_balance===1?'s':''} at a zero balance — nothing to reconcile, so nothing to map.</div>}
-        {data.skipped_other>0&&<div>{data.skipped_other} other account{data.skipped_other===1?'':'s'} {data.skipped_other===1?'is':'are'} not
-          the kind the reconciliation matches.</div>}</div>}</div>
-    :shown.length===0&&data.count>0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
+      on {entityName||'this entity'} that carries a balance is mapped, counterparty account included.</span>
+      {data&&data.skipped_zero_balance>0&&<div style={{fontSize:11.5,marginTop:8}}>
+        {data.skipped_zero_balance} at a zero balance — nothing to reconcile, so nothing to map.</div>}</div>
+    :shown.length===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
       No unmapped account matches “{q}”. {data.count} {data.count===1?'is':'are'} unmapped in total.</div>
-    :shown.length===0?null
-    :<div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(300px, calc(100vh - 460px))'}}>
+    :<div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(340px, calc(100vh - 420px))'}}>
       <table style={S.table}><thead><tr>
-        <th style={S.th}>Account</th><th style={S.th}>Type</th><th style={S.thR}>Balance</th>
-        <th style={S.th}>Reads as</th>{canEdit&&<th style={{...S.th,width:90}}></th>}</tr></thead>
-      <tbody>{shown.map(a=><Fragment key={a.account_code}>
-        <tr style={mapping===a.account_code?{background:T.accentDim}:null}>
-          <td style={{...S.td,whiteSpace:'normal',minWidth:240}}>
-            <span style={{fontWeight:600,color:T.textBright}}>{a.account_code}</span>{' '}
-            <span style={{color:T.textMuted}}>{a.account_name}</span></td>
-          <td style={{...S.td,color:T.textMuted}}>{a.account_type||''}</td>
-          <td style={{...S.tdR,width:140,fontWeight:Math.abs(a.balance)>0.005?600:400,
-            color:Math.abs(a.balance)>0.005?T.textBright:T.textDim}}>{fmt(a.balance)}</td>
+        <th style={S.th}>Account</th><th style={S.thR}>Balance</th>
+        <th style={S.th}>Counterparty</th><th style={S.th}>Counterparty account</th>
+        {canEdit&&<th style={{...S.th,width:130}}></th>}</tr></thead>
+      <tbody>{shown.map(r=>{
+        const k=rowKey(r),st=ov[k]||{},mode=modeOf(r),busy=busyKey===k;
+        const confirmable=!r.individual&&(r.is_external||(r.counterparty_entity_id&&mode));
+        return<Fragment key={k}>
+        <tr style={mapping===k?{background:T.accentDim}:null}>
+          <td style={{...S.td,whiteSpace:'normal',minWidth:220}}>
+            <span style={{fontWeight:600,color:T.textBright}}>{r.account_code}</span>{' '}
+            <span style={{color:T.textMuted}}>{r.account_name}</span>
+            {r.individual&&<span style={{marginLeft:6}}><IcBadge kind="mute">individual</IcBadge></span>}</td>
+          <td style={{...S.tdR,width:120,fontWeight:600,color:T.textBright}}>{fmt(r.balance)}</td>
           <td style={{...S.td,whiteSpace:'normal'}}>
-            <IcBadge kind={(a.counterparty_entity_id||a.counterparty_node_id)?'ok':'mute'}>
-              {IC_TYPE_LABEL[a.ic_type]||a.ic_type}</IcBadge>
-            {a.individual&&<span style={{marginLeft:6}}><IcBadge kind="mute">individual</IcBadge></span>}
-            <span style={{color:T.textDim,fontSize:11,marginLeft:6}}>{a.reason}</span></td>
+            {r.is_external?<IcBadge kind="warn">external</IcBadge>
+            :r.counterparty_entity_id?<span style={{color:T.textBright}}>{r.counterparty_name||r.counterparty_label}</span>
+            :r.counterparty_node_id?<>{r.counterparty_label} <IcBadge kind="info">no ledger</IcBadge></>
+            :<span style={{color:T.textDim,fontStyle:'italic'}}>{r.counterparty_label||'not recognised'}</span>}</td>
+          <td style={{...S.td,whiteSpace:'normal',minWidth:280}}>
+            {r.is_external?<span style={{color:T.textDim}}>outside the group — nothing to map to</span>
+            :!r.counterparty_entity_id?<span style={{color:T.textDim}}>—</span>
+            :mode==='pick'?<div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                <IcCpAccountSelect entityId={entityId} accountCode={r.account_code}
+                  counterpartyEntityId={r.counterparty_entity_id} value={st.pickCode||''}
+                  onChange={v=>setSt(r,{mode:'pick',pickCode:v})} width={230} showGap={false}/>
+                {r.suggested_new&&<button style={S.link} onClick={()=>setSt(r,{mode:'new'})}>new account…</button>}</div>
+            :mode==='new'?<div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                <input style={{...S.inputSm,width:70}} value={st.code!=null?st.code:r.suggested_new.account_code}
+                  onChange={e=>setSt(r,{mode:'new',code:e.target.value})}/>
+                <input style={{...S.inputSm,width:190}} value={st.name!=null?st.name:r.suggested_new.account_name}
+                  onChange={e=>setSt(r,{mode:'new',name:e.target.value})}/>
+                <IcBadge kind="info">will be created</IcBadge>
+                <button style={S.link} onClick={()=>setSt(r,{mode:'pick'})}>pick existing…</button></div>
+            :mode==='existing'?<div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                <span><span style={{fontWeight:600,color:T.textBright}}>{r.suggested_existing.account_code}</span>{' '}
+                  <span style={{color:T.textMuted}}>{r.suggested_existing.account_name}</span></span>
+                {r.suggested_existing.offsets
+                  ?<span style={{color:T.green,fontWeight:700,fontSize:11}}>✓ offsets</span>
+                  :r.suggested_existing.gap!=null
+                    ?<span style={{color:T.orange,fontWeight:700,fontSize:11}}>off by {fmt(r.suggested_existing.gap)}</span>:null}
+                <button style={S.link} onClick={()=>setSt(r,{mode:'pick'})}>change…</button></div>
+            :<span style={{color:T.textDim}}>—</span>}</td>
           {canEdit&&<td style={{...S.td,textAlign:'right'}}>
-            <button style={{...S.btnGhost,color:T.accent,fontSize:11}}
-              onClick={()=>setMapping(mapping===a.account_code?null:a.account_code)}>
-              {mapping===a.account_code?'Close':'Map'}</button></td>}</tr>
-        {canEdit&&mapping===a.account_code&&<tr style={{background:T.accentDim}}>
+            {confirmable
+              ?<><button style={{...S.btnP,padding:'5px 12px',fontSize:12}} disabled={busy}
+                  onClick={()=>confirmRow(r)}>{busy?'Saving…':'Confirm'}</button>
+                {!r.mapping_id&&<button style={{...S.btnGhost,fontSize:10.5}}
+                  onClick={()=>setMapping(mapping===k?null:k)}>{mapping===k?'close':'other…'}</button>}</>
+              :!r.mapping_id&&<button style={{...S.btnGhost,color:T.accent,fontSize:11}}
+                  onClick={()=>setMapping(mapping===k?null:k)}>{mapping===k?'Close':'Map…'}</button>}</td>}</tr>
+        {canEdit&&mapping===k&&<tr style={{background:T.accentDim}}>
           <td colSpan={5} style={{...S.td,whiteSpace:'normal'}}>
-            <IcMapForm entityId={entityId} acct={a} entityOpts={entityOpts} companies={companies}
+            <IcMapForm entityId={entityId} acct={r} entityOpts={entityOpts} companies={companies}
               onCompanyAdded={onCompanyAdded} onCancel={()=>setMapping(null)} onMsg={onMsg} onErr={onErr}
               onSaved={async()=>{setMapping(null);await load();if(onMapped)await onMapped();}}/></td></tr>}
-      </Fragment>)}</tbody></table></div>}
-
-    {/* The other half of the job. A mapping that names the entity but not the
-        account is not finished: the two entries never line up on the
-        reconciliation, and the counterparty's balance only joins if THEY map
-        their side — which for 26 of 28 relationships here has not happened. */}
-    {data&&(data.unpinned||[]).length>0&&<div style={{borderTop:'1px solid '+T.border}}>
-      <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border}}>
-        <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>
-          Mapped, but no counterparty account ({data.unpinned.length})</span>
-        <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>
-          These already name the right entity. Naming the account as well puts the two entries on the
-          same line and pulls their balance into the reconciliation even if they never map their side.</span></div>
-      <div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(240px, calc(100vh - 520px))'}}>
-      <table style={S.table}><tbody>{data.unpinned.map(m=><Fragment key={m.id}>
-        <tr style={pinning===m.id?{background:T.accentDim}:null}>
-          <td style={{...S.td,whiteSpace:'normal',minWidth:240}}>
-            <span style={{fontWeight:600,color:T.textBright}}>{m.account_code}</span>{' '}
-            <span style={{color:T.textMuted}}>{m.account_name}</span></td>
-          <td style={{...S.td,color:T.textMuted}}>{IC_TYPE_LABEL[m.ic_type]||m.ic_type}</td>
-          <td style={{...S.td}}>{m.counterparty_name}</td>
-          <td style={{...S.tdR,width:140,fontWeight:600,color:T.textBright}}>{fmt(m.balance)}</td>
-          {canEdit&&<td style={{...S.td,textAlign:'right',width:90}}>
-            <button style={{...S.btnGhost,color:T.accent,fontSize:11}}
-              onClick={()=>setPinning(pinning===m.id?null:m.id)}>
-              {pinning===m.id?'Close':'Set account'}</button></td>}</tr>
-        {canEdit&&pinning===m.id&&<tr style={{background:T.accentDim}}>
-          <td colSpan={5} style={{...S.td,whiteSpace:'normal'}}>
-            <IcPinForm mapping={m} entityId={entityId} onCancel={()=>setPinning(null)}
-              onMsg={onMsg} onErr={onErr}
-              onSaved={async()=>{setPinning(null);await load();if(onMapped)await onMapped();}}/></td></tr>}
-      </Fragment>)}</tbody></table></div></div>}
+      </Fragment>;})}</tbody></table></div>}
   </div>;
 }
 

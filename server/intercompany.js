@@ -740,13 +740,55 @@ function isPnlAccount(type, code) {
   return Number(c) >= 40000;
 }
 
-// Every account on one entity that has no intercompany mapping yet — not only
-// the ones whose NAME the parser recognises. `suggestMappings` can only offer
-// what it can read: "Due from X", "Investment in Y". An account called "Loan
-// receivable - CLIP" or "Advances — Buna" faces another entity just as much and
-// is invisible to that list, so it stays unmapped forever and quietly drops out
-// of every reconciliation. This lists them all, marks which ones the parser did
-// recognise, and leaves the judgement where it belongs — with a person.
+// ── The unmapped worklist ──
+//
+// Everything standing between one entity and a fully mapped intercompany
+// position, in one list:
+//
+//   - an account of the four reconcilable kinds, carrying a balance, with no
+//     mapping at all; and
+//   - a mapping that names the counterparty ENTITY but not that entity's GL
+//     ACCOUNT. That is not mapped — two codes and two balances are what make a
+//     mapping checkable, and it has one of each — so it is classified as
+//     unmapped work here, and Show mapped will not list it.
+//
+// Each row arrives pre-answered where the data allows: the counterparty its
+// name resolves to, and the account on THAT entity's ledger that answers ours
+// — an existing one when the ledger holds one, otherwise a DRAFT of the
+// account to create. Nothing is created or saved until a person confirms.
+//
+// Zero balances are excluded throughout: nothing to reconcile, nothing to map.
+
+// What THEIR ledger should hold to answer OUR account of each kind.
+const MIRROR_ACCOUNT = {
+  due_from:            { ic_type: 'due_to',              type: 'Liability', base: 23000, name: us => 'Due to ' + us },
+  due_to:              { ic_type: 'due_from',            type: 'Asset',     base: 18000, name: us => 'Due from ' + us },
+  investment:          { ic_type: 'contributed_capital', type: 'Equity',    base: 30100, name: us => 'Contributed Capital - ' + us },
+  contributed_capital: { ic_type: 'investment',          type: 'Asset',     base: 19000, name: us => 'Investment in ' + us },
+};
+
+// Draft the account the counterparty is missing. The name mirrors ours — our
+// "Due from X" is answered by "Due to <us>" on X's ledger — and the code
+// follows the counterparty's OWN numbering: one past the highest code it
+// already uses for that kind, falling back to the portfolio's conventional
+// block (18xxx due from, 23xxx due to, 19xxx investment, 30xxx capital) when
+// it has none, stepping over collisions either way.
+function proposeMirrorAccount(ourEntity, ourIcType, cpAccounts) {
+  const mir = MIRROR_ACCOUNT[ourIcType];
+  if (!mir) return null;
+  const codes = new Set((cpAccounts || []).map(a => String(a.code)));
+  let maxNum = -1;
+  for (const a of (cpAccounts || [])) {
+    if (!/^\d+$/.test(String(a.code))) continue;
+    const p = parseAccountName(a.name);
+    if (p && p.ic_type === mir.ic_type) maxNum = Math.max(maxNum, Number(a.code));
+  }
+  let code = maxNum >= 0 ? maxNum + 1 : mir.base;
+  while (codes.has(String(code))) code++;
+  return { account_code: String(code), account_name: mir.name(ourEntity.name),
+    type: mir.type, ic_type: mir.ic_type };
+}
+
 function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   ensureSchema(db);
   const eid = Number(entityId);
@@ -756,6 +798,7 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   if (!entity) { const e = new Error('Entity not found'); e.status = 404; throw e; }
   const shell = isShellEntity(entity);
   const entities = db.prepare('SELECT id, name, code FROM entities').all();
+  const entName = new Map(entities.map(e => [Number(e.id), e.name]));
   const companies = listCompanies(db);
   const people = listPeople(db);
   const mapped = new Set(db.prepare('SELECT account_code FROM intercompany_accounts WHERE entity_id = ?')
@@ -765,26 +808,23 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
 
   const out = [];
   let skippedOther = 0, skippedShellCapital = 0, skippedZero = 0;
+
+  // ── Accounts with no mapping at all ──
   for (const a of accounts) {
     if (mapped.has(String(a.code))) continue;
     const parsed = parseAccountName(a.name);
-    // This list is a RECONCILIATION worklist, not a chart of accounts. Only the
-    // four kinds the reconciliation can match belong in it — due from, due to,
-    // investment, contributed capital. Anything else has no counterparty balance
-    // to agree with, so putting it here would only invite a mapping that can
-    // never reconcile. The P&L test stays as a second guard for a chart that
-    // names an expense account like a receivable.
+    // Only the four kinds the reconciliation can match belong here. The P&L
+    // test stays as a second guard for a chart that names an expense account
+    // like a receivable.
     if (!parsed || isPnlAccount(a.type, a.code)) { skippedOther++; continue; }
     if (shell && parsed.ic_type === 'contributed_capital') { skippedShellCapital++; continue; }
     const bal = balByCode.get(String(a.code));
     // A zero balance has nothing for a counterparty ledger to disagree with.
-    // Mapping one changes no reconciliation, so it is not work — and on Banyan
-    // Residential it was 38 of them, which is what made this list look full
-    // when there was nothing in it to do. Same rule the reconciliation's own
-    // "Not mapped yet" has always applied.
     if (Math.abs(bal ? Number(bal.balance) || 0 : 0) < DEFAULT_TOLERANCE) { skippedZero++; continue; }
     const match = matchCompany(parsed.label, entities, companies);
-    const row = {
+    out.push({
+      source: 'account',
+      mapping_id: null,
       entity_id: eid,
       account_code: String(a.code),
       account_name: a.name,
@@ -794,55 +834,96 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
       ic_type: parsed.ic_type,
       counterparty_label: parsed.label,
       counterparty_entity_id: match.entity_id,
+      counterparty_name: match.entity_id != null ? (entName.get(Number(match.entity_id)) || null) : null,
       counterparty_node_id: match.node_id || null,
       is_external: match.confidence === 'external' ? 1 : 0,
       confidence: match.confidence,
       reason: match.reason,
       can_register: match.entity_id == null && !match.node_id && match.confidence !== 'external',
-    };
-    out.push(row);
+      notes: null,
+    });
   }
-  // By the money each account carries. A zero-balance shell account is the
-  // least likely to matter, whatever its name says.
+
+  // ── Mappings that name the entity but not its GL account ──
+  // Classified as UNMAPPED: naming the entity alone leaves nothing to compare.
+  // Show mapped excludes these; this list owns them. External and off-ledger
+  // counterparties are neither — no ledger means no account to ever name — and
+  // a mapping pointing at the entity itself is a finding, not work.
+  for (const m of listMappings(db, { entity_id: eid })) {
+    if (m.is_external || m.counterparty_entity_id == null) continue;
+    if (Number(m.counterparty_entity_id) === eid) continue;
+    if (m.counterparty_account_code) continue;
+    const b = balByCode.get(String(m.account_code));
+    const balance = b ? round2(b.balance) : 0;
+    if (Math.abs(balance) < DEFAULT_TOLERANCE) { skippedZero++; continue; }
+    out.push({
+      source: 'mapping',
+      mapping_id: m.id,
+      entity_id: eid,
+      account_code: String(m.account_code),
+      account_name: m.account_name,
+      account_type: b ? b.type : null,
+      balance,
+      individual: false,
+      ic_type: m.ic_type,
+      counterparty_label: m.counterparty_name || null,
+      counterparty_entity_id: Number(m.counterparty_entity_id),
+      counterparty_name: m.counterparty_name || entName.get(Number(m.counterparty_entity_id)) || null,
+      counterparty_node_id: null,
+      is_external: 0,
+      confidence: 'mapped',
+      reason: 'the counterparty is chosen — its GL account is not',
+      can_register: false,
+      notes: m.notes || null,
+    });
+  }
+
+  // ── Pre-answer each row from the counterparty's own ledger ──
+  // Best EXISTING account first: one whose name resolves back to us, then the
+  // closest offsetting balance. A near miss by amount alone is NOT offered —
+  // measured against the real ledger that ranking picked operating checking
+  // accounts. Only when the ledger holds nothing worth offering does the row
+  // carry a draft account to create instead. Balances and charts are read once
+  // per counterparty, not once per row.
+  const cpBal = new Map(), cpAccts = new Map();
+  const balsFor = id => { if (!cpBal.has(id)) cpBal.set(id, computeBalances(id, as_of ? { as_of } : {})); return cpBal.get(id); };
+  const acctsFor = id => { if (!cpAccts.has(id)) cpAccts.set(id, db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ?').all(id)); return cpAccts.get(id); };
+  for (const row of out) {
+    if (row.is_external || row.counterparty_entity_id == null) continue;
+    const cid = Number(row.counterparty_entity_id);
+    const ourSigned = receivableSigned(balByCode.get(String(row.account_code)));
+    let best = null;
+    for (const b of balsFor(cid)) {
+      if (b.bank_acct || isPnlAccount(b.type, b.code)) continue;
+      const signed = receivableSigned(b);
+      if (signed == null) continue;
+      const p = parseAccountName(b.name);
+      let nameMatch = false;
+      if (p) {
+        const m2 = matchCompany(p.label, entities, companies);
+        nameMatch = m2.entity_id != null && Number(m2.entity_id) === eid;
+      }
+      const gap = ourSigned == null ? null : round2(Math.abs(signed + ourSigned));
+      const offsets = gap != null && gap < DEFAULT_TOLERANCE;
+      if (!nameMatch && !offsets) continue;
+      const cand = { account_code: String(b.code), account_name: b.name, type: b.type,
+        balance: round2(b.balance), gap, offsets, name_match: nameMatch };
+      if (!best) { best = cand; continue; }
+      const rc = cand.name_match ? 0 : 1, rb = best.name_match ? 0 : 1;
+      const gc = cand.gap == null ? Infinity : cand.gap, gb = best.gap == null ? Infinity : best.gap;
+      if (rc < rb || (rc === rb && gc < gb)) best = cand;
+    }
+    if (best) row.suggested_existing = best;
+    else row.suggested_new = proposeMirrorAccount(entity, row.ic_type, acctsFor(cid));
+  }
+
   out.sort((a, b) => (Math.abs(b.balance) - Math.abs(a.balance))
     || a.account_code.localeCompare(b.account_code));
-  // Mapped to an entity, but nobody has said WHICH account on that entity's
-  // ledger answers it. Still work: without it the two entries never line up on
-  // the reconciliation, and the counterparty's balance only joins if the
-  // counterparty gets around to mapping its own side — which for 26 of the 28
-  // relationships here has not happened.
-  //
-  // Only an entity counterparty can be pinned. An external party has no ledger
-  // by definition, an off-ledger company has none in CloudLedger, and an
-  // entity pointing at ITSELF is a finding rather than something to pin.
-  const unpinned = listMappings(db, { entity_id: eid })
-    .filter(m => !m.is_external
-      && m.counterparty_entity_id != null
-      && Number(m.counterparty_entity_id) !== eid
-      && !m.counterparty_account_code)
-    .map(m => {
-      const b = balByCode.get(String(m.account_code));
-      return {
-        id: m.id,
-        account_code: String(m.account_code),
-        account_name: m.account_name,
-        ic_type: m.ic_type,
-        counterparty_entity_id: m.counterparty_entity_id,
-        counterparty_node_id: m.counterparty_node_id || null,
-        counterparty_name: m.counterparty_name || null,
-        notes: m.notes || null,
-        balance: b ? round2(b.balance) : 0,
-      };
-    })
-    .filter(m => Math.abs(m.balance) >= DEFAULT_TOLERANCE)
-    .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance));
 
   return {
     entity_id: eid,
     entity: { id: entity.id, name: entity.name, code: entity.code,
       entity_type: entity.entity_type || null },
-    unpinned,
-    unpinned_count: unpinned.length,
     shell_entity: shell,
     as_of: as_of || null,
     count: out.length,
