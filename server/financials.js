@@ -1176,10 +1176,16 @@ async function buildStatements(getBalances, opts) {
     } else if (ref.type === 'Liability') {
       const cashEffect = delta; // liability up → cash up
       const sec = bsSec(ref);
-      // Section FIRST, then the name test: a long-term account that happens to
-      // be named "... payable" is debt service, not an operating AP movement.
-      if (sec === 'Long Term Liabilities') cfBuckets.debtChange += cashEffect;
-      else if (/payable/i.test(nm)) cfBuckets.ap += cashEffect;
+      // NOTE: the name test runs BEFORE the section test, so a LONG-TERM account
+      // named "... payable" lands on the operating AP line instead of debt service.
+      // That is a real misclassification, and reversing the two tests fixes it \u2014
+      // but it moves the operating and financing subtotals for any entity that has
+      // one (measured: a 250k swing on an SRN-shaped entity with a drawn note
+      // payable; net change in cash is unaffected). Those statements are already
+      // issued, so this is deliberately left alone here and tracked as its own
+      // decision. See claude/changelog-2026-08-17-banyan-fs-cla-aug17-review.md.
+      if (/payable/i.test(nm)) cfBuckets.ap += cashEffect;
+      else if (sec === 'Long Term Liabilities') cfBuckets.debtChange += cashEffect;
       else cfBuckets.accrued += cashEffect; // accrued / other current liabilities
     } else if (ref.type === 'Equity') {
       // Equity delta includes contributions/distributions but NOT current-year
@@ -1811,7 +1817,7 @@ async function renderStatementsPdf(s, outOffsets) {
           [money(changeApOther)], { indent: 28 });
       }
     } else {
-      if (!isZero(cf.changeAP)) L.row('Increase (decrease) in accounts payable', [money(cf.changeAP)], { indent: 28 });
+      if (!isZero(cf.changeAP)) L.row('Increase (decrease) in accounts payable and other current liabilities', [money(cf.changeAP)], { indent: 28 });
       if (!isZero(cf.changeAccrued)) L.row('Increase (decrease) in accrued and other liabilities', [money(cf.changeAccrued)], { indent: 28 });
     }
     L.row('Net Cash Provided (Used) by Operating Activities', [money(cf.netOperating)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
