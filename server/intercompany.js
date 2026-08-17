@@ -620,17 +620,22 @@ function counterpartyCandidates(db, opts) {
   };
 }
 
-// Every mapping on one entity that faces another ENTITY, with both sides' GL
-// accounts and balances on the same row.
+// The MAPPED accounts of one entity, with both sides' GL accounts on one row.
 //
-// The counterparty's account is shown whether it was pinned by hand or is still
-// blank, and its balance is read straight from its own ledger — so this is the
-// view that answers "what does the other side actually say?" without needing
-// the counterparty to have mapped anything.
+// A mapping is mapped only when it names a counterparty ENTITY *and* that
+// entity's GL ACCOUNT. That is what makes it checkable: two account codes and
+// two balances that either agree or do not. Naming the entity alone leaves
+// nothing to compare, so it is unfinished work and belongs on the to-do list,
+// not here.
 //
-// Only entity counterparties: an external party and an off-ledger company have
-// no GL here, so there is no account to put in the column. They are counted and
-// reported rather than quietly missing.
+// Follows from the same rule: a counterparty with no ledger in CloudLedger can
+// never be mapped, because there is no GL account to name. That covers external
+// parties and off-ledger companies (QOZBs, sponsor holdcos). They are not
+// mapped and they are not to-do either — nobody can ever finish them — so they
+// are excluded from both lists and reported as a count.
+//
+// The counterparty's balance is read straight from its own ledger, so a pair is
+// checkable whether or not the counterparty has mapped anything itself.
 function listMappedPairs(db, entityId, { computeBalances, as_of }) {
   ensureSchema(db);
   const eid = Number(entityId);
@@ -647,7 +652,9 @@ function listMappedPairs(db, entityId, { computeBalances, as_of }) {
   }
 
   const rows = all
-    .filter(m => !m.is_external && m.counterparty_entity_id != null)
+    .filter(m => !m.is_external
+      && m.counterparty_entity_id != null
+      && m.counterparty_account_code)
     .map(m => {
       const ours = mine.get(String(m.account_code)) || null;
       const ourSigned = receivableSigned(ours);
@@ -688,8 +695,16 @@ function listMappedPairs(db, entityId, { computeBalances, as_of }) {
     entity_id: eid,
     as_of: as_of || null,
     count: rows.length,
-    pinned: rows.filter(r => r.their_account_code).length,
     matched: rows.filter(r => r.offsets).length,
+    mismatched: rows.filter(r => r.gap != null && !r.offsets).length,
+    // Named an account that is not in the counterparty's ledger — renamed,
+    // renumbered or deleted since. Still listed, flagged, because a broken
+    // pin that disappeared would be worse than one that is wrong out loud.
+    broken: rows.filter(r => r.their_account_missing).length,
+    // Mappable, but not finished: names the entity, not the account.
+    incomplete_count: all.filter(m => !m.is_external
+      && m.counterparty_entity_id != null && !m.counterparty_account_code).length,
+    // Not mappable at all — no ledger in CloudLedger to name an account on.
     external_count: all.filter(m => m.is_external).length,
     off_ledger_count: all.filter(m => !m.is_external && m.counterparty_entity_id == null).length,
     rows,

@@ -6440,10 +6440,10 @@ function IcMapForm({entityId,acct,entityOpts,companies,onCompanyAdded,onSaved,on
   </div>;
 }
 
-// The finished pairs, both sides on one row. This is the view that answers
-// "what does the other side actually say?" — their account and its balance are
-// read from their own ledger, so it works whether or not they have mapped
-// anything themselves.
+// The mapped accounts: counterparty entity AND its GL account, both named.
+// That pair is what makes a mapping checkable — two codes, two balances, and
+// either they agree or they do not. A row missing either half is not here; it
+// is work, and it shows up in the unmapped panel instead.
 function IcMappedAccounts({entityId,entityName,canEdit,reloadKey,onMapped,onMsg,onErr}){
   const[data,setData]=useState(null);
   const[loading,setLoading]=useState(false);
@@ -6473,8 +6473,9 @@ function IcMappedAccounts({entityId,entityName,canEdit,reloadKey,onMapped,onMsg,
       display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
       <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>
         Mapped accounts{data?' ('+shown.length+')':''}</span>
-      {data&&<span style={{color:T.textDim,fontSize:11.5}}>
-        · {data.pinned} of {data.count} name the counterparty{'\u2019'}s account · {data.matched} offset exactly</span>}
+      {data&&data.count>0&&<span style={{color:T.textDim,fontSize:11.5}}>
+        · {data.matched} tie · {data.mismatched} differ
+        {data.broken>0?' · '+data.broken+' name an account that is gone':''}</span>}
       <IcSearch value={q} onChange={setQ} placeholder="Either side's code or name…" width={220}/>
       <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.textMuted,cursor:'pointer'}}>
         <input type='checkbox' style={S.checkbox} checked={onlyGaps} onChange={e=>setOnlyGaps(e.target.checked)}/>
@@ -6484,7 +6485,12 @@ function IcMappedAccounts({entityId,entityName,canEdit,reloadKey,onMapped,onMsg,
 
     {loading&&!data?<div style={{textAlign:'center',padding:30,color:T.textMuted}}>Reading both ledgers…</div>
     :!data||data.count===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
-      No mapping on {entityName||'this entity'} faces another CloudLedger entity yet.</div>
+      <b style={{color:T.textBright}}>Nothing on {entityName||'this entity'} is fully mapped yet.</b><br/>
+      <span style={{fontSize:12}}>A mapping counts as mapped once it names the counterparty entity
+      {' '}<b>and</b> that entity{'\u2019'}s GL account.</span>
+      {data&&data.incomplete_count>0&&<div style={{fontSize:11.5,marginTop:8}}>
+        {data.incomplete_count} name{data.incomplete_count===1?'s':''} the entity but not the account
+        {' '}— they are in <b>Show unmapped accounts</b>, under {'\u201c'}Mapped, but no counterparty account{'\u201d'}.</div>}</div>
     :shown.length===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
       Nothing matches. {data.count} mapped in total.</div>
     :<div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(320px, calc(100vh - 460px))'}}>
@@ -6502,11 +6508,9 @@ function IcMappedAccounts({entityId,entityName,canEdit,reloadKey,onMapped,onMsg,
           <td style={{...S.td,whiteSpace:'normal',minWidth:200}}>
             <div style={{color:T.textBright,fontWeight:600}}>{r.counterparty_name}
               {r.self&&<span style={{marginLeft:6}}><IcBadge kind="bad">points at itself</IcBadge></span>}</div>
-            {r.their_account_code
-              ?<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>
-                 <b style={{color:T.textBright}}>{r.their_account_code}</b> {r.their_account_name||''}
-                 {r.their_account_missing&&<span style={{marginLeft:6}}><IcBadge kind="bad">not in their ledger</IcBadge></span>}</div>
-              :<div style={{fontSize:12,color:T.textDim,fontStyle:'italic',marginTop:2}}>no counterparty account named</div>}</td>
+            <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>
+              <b style={{color:T.textBright}}>{r.their_account_code}</b> {r.their_account_name||''}
+              {r.their_account_missing&&<span style={{marginLeft:6}}><IcBadge kind="bad">not in their ledger</IcBadge></span>}</div></td>
           <td style={{...S.tdR,width:130}}>{r.their_balance==null?'':fmt(r.their_balance)}</td>
           <td style={{...S.tdR,width:130,fontWeight:700,
             color:r.gap==null?T.textDim:(r.offsets?T.green:T.red)}}>
@@ -6514,7 +6518,7 @@ function IcMappedAccounts({entityId,entityName,canEdit,reloadKey,onMapped,onMsg,
           {canEdit&&<td style={{...S.td,textAlign:'right'}}>
             {!r.self&&<button style={{...S.btnGhost,color:T.accent,fontSize:11}}
               onClick={()=>setPinning(pinning===r.id?null:r.id)}>
-              {pinning===r.id?'Close':(r.their_account_code?'Change':'Pin')}</button>}</td>}</tr>
+              {pinning===r.id?'Close':'Change'}</button>}</td>}</tr>
         {canEdit&&pinning===r.id&&<tr style={{background:T.accentDim}}>
           <td colSpan={6} style={{...S.td,whiteSpace:'normal'}}>
             <IcPinForm mapping={{...r,counterparty_account_code:r.their_account_code}} entityId={entityId}
@@ -6522,11 +6526,18 @@ function IcMappedAccounts({entityId,entityName,canEdit,reloadKey,onMapped,onMsg,
               onSaved={async()=>{setPinning(null);await load();if(onMapped)await onMapped();}}/></td></tr>}
       </Fragment>)}</tbody></table></div>}
 
-    {data&&(data.external_count>0||data.off_ledger_count>0)&&
+    {/* What is not on this list, and why. Nothing is dropped without saying so. */}
+    {data&&(data.incomplete_count>0||data.external_count>0||data.off_ledger_count>0)&&
       <div style={{padding:'10px 16px',borderTop:'1px solid '+T.border,color:T.textDim,fontSize:11.5}}>
-        {data.external_count>0&&<span>{data.external_count} mapped to a party outside the group. </span>}
-        {data.off_ledger_count>0&&<span>{data.off_ledger_count} mapped to a company with no ledger in CloudLedger. </span>}
-        Neither has a GL account here to show.</div>}
+        {data.incomplete_count>0&&<div>
+          <b style={{color:T.textMuted}}>{data.incomplete_count}</b> name the counterparty entity but not its
+          {' '}GL account — not mapped yet, and listed as work under <b>Show unmapped accounts</b>.</div>}
+        {(data.external_count>0||data.off_ledger_count>0)&&<div style={{marginTop:4}}>
+          <b style={{color:T.textMuted}}>{data.external_count+data.off_ledger_count}</b> face a counterparty with no
+          {' '}ledger in CloudLedger{data.external_count>0&&data.off_ledger_count>0
+            ?' ('+data.external_count+' external, '+data.off_ledger_count+' off-ledger companies)'
+            :(data.external_count>0?' (external parties)':' (off-ledger companies)')}
+          {' '}— there is no GL account to name, so they can never be mapped.</div>}</div>}
   </div>;
 }
 
