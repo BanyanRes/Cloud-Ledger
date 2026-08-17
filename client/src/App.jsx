@@ -6364,7 +6364,7 @@ function IcMapForm({entityId,acct,entityOpts,companies,onCompanyAdded,onSaved,on
 // This is not the same list as "Suggest from account names": that one skips
 // individuals and pre-resolves matches, and it will not show you an account with
 // no balance or one whose counterparty it could not work out.
-function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,onCompanyAdded,onMapped,onMsg,onErr}){
+function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,reloadKey,onCompanyAdded,onMapped,onMsg,onErr}){
   const[data,setData]=useState(null);
   const[loading,setLoading]=useState(false);
   const[q,setQ]=useState('');
@@ -6377,7 +6377,11 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,on
     try{setData(await api.getIcUnmappedAccounts(entityId));if(onErr)onErr('');}
     catch(e){if(onErr)onErr(e.message);setData(null);}
     finally{setLoading(false);}
-  },[entityId]);// eslint-disable-line react-hooks/exhaustive-deps
+    // reloadKey is in the dependency list on purpose. This panel does not own
+    // the mappings — accepting suggestions, adding, editing or deleting one all
+    // happen outside it, and without this the panel went on listing accounts
+    // that had just been mapped until someone hit Refresh.
+  },[entityId,reloadKey]);// eslint-disable-line react-hooks/exhaustive-deps
   useEffect(()=>{load();},[load]);
 
   const n=q.trim().toLowerCase();
@@ -6686,6 +6690,9 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[showAdd,setShowAdd]=useState(false);
   const[q,setQ]=useState('');
   const[showUnmapped,setShowUnmapped]=useState(false);
+  const[showExternal,setShowExternal]=useState(false);
+  // Bumped by every change to the mappings, so the unmapped panel reloads too.
+  const[mapVersion,setMapVersion]=useState(0);
   const[form,setForm]=useState({account_code:'',account_name:'',ic_type:'due_from',counterparty_entity_id:'',counterparty_node_id:'',is_external:false,notes:''});
   const[companies,setCompanies]=useState([]);
   const[people,setPeople]=useState([]);
@@ -6700,6 +6707,13 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const shownRows=!mapNeedle?rows:rows.filter(r=>
     [r.account_code,r.account_name,r.counterparty_name,r.notes,IC_TYPE_LABEL[r.ic_type]]
       .some(v=>String(v||'').toLowerCase().includes(mapNeedle)));
+  // An external mapping is a decision already made: the counterparty is outside
+  // the group, CloudLedger holds no ledger for it, and the reconciliation
+  // excludes it by design. Leaving them in the working list buries the rows that
+  // still need attention — on Banyan Residential they are 66 of 89. They are
+  // hidden by default, never deleted, and one click away.
+  const externalCount=rows.filter(r=>r.is_external).length;
+  const listRows=showExternal?shownRows:shownRows.filter(r=>!r.is_external);
 
   const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
   const loadCompanies=useCallback(async()=>{try{setCompanies(await api.getIcCompanies());}catch(e){console.error('[ic] companies:',e.message);}},[]);
@@ -6721,6 +6735,9 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   },[eid]);
   useEffect(()=>{loadRows();},[loadRows]);
   useEffect(()=>{loadCompanies();},[loadCompanies]);
+  // Every mutation goes through this, not through loadRows directly: anything
+  // that changes the mappings also invalidates the unmapped panel.
+  const refreshMappings=useCallback(()=>{loadRows();setMapVersion(v=>v+1);},[loadRows]);
   useEffect(()=>{loadPeople();},[loadPeople]);
 
   const runSuggest=async(withIndividuals)=>{
@@ -6745,7 +6762,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
     const bad=items.find(i=>!i.is_external&&!i.counterparty_entity_id&&!i.counterparty_node_id);
     if(bad){setErr('Pick a counterparty for '+bad.account_code+', or mark it external.');return;}
     if(!items.length){setErr('Nothing selected.');return;}
-    try{const r=await api.createIcMapping(items);setSugg(null);setPicked({});setMsg('Added '+r.count+' mapping'+(r.count===1?'':'s')+'.');loadRows();}
+    try{const r=await api.createIcMapping(items);setSugg(null);setPicked({});setMsg('Added '+r.count+' mapping'+(r.count===1?'':'s')+'.');refreshMappings();}
     catch(e){setErr(e.message);}
   };
   const add=async()=>{
@@ -6755,17 +6772,17 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
       counterparty_node_id:form.is_external?null:(form.counterparty_node_id?Number(form.counterparty_node_id):null),
       is_external:form.is_external?1:0});
       setShowAdd(false);setForm({account_code:'',account_name:'',ic_type:'due_from',counterparty_entity_id:'',counterparty_node_id:'',is_external:false,notes:''});
-      setErr('');loadRows();}catch(e){setErr(e.message);}
+      setErr('');refreshMappings();}catch(e){setErr(e.message);}
   };
   const saveEdit=async()=>{
     try{await api.updateIcMapping(editId,{...editForm,
       counterparty_entity_id:editForm.is_external?null:(editForm.counterparty_entity_id?Number(editForm.counterparty_entity_id):null),
       counterparty_node_id:editForm.is_external?null:(editForm.counterparty_node_id?Number(editForm.counterparty_node_id):null),
       is_external:editForm.is_external?1:0});
-      setEditId(null);setErr('');loadRows();}catch(e){setErr(e.message);}
+      setEditId(null);setErr('');refreshMappings();}catch(e){setErr(e.message);}
   };
   const del=async r=>{if(!confirm('Remove the mapping for '+r.account_code+' '+(r.account_name||'')+'?'))return;
-    try{await api.deleteIcMapping(r.id);loadRows();}catch(e){setErr(e.message);}};
+    try{await api.deleteIcMapping(r.id);refreshMappings();}catch(e){setErr(e.message);}};
 
 
   // Counterparty = a CloudLedger entity, a registered company (a name on the org
@@ -6802,6 +6819,9 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
             {entityOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
         {eid&&<div><label style={S.label}>Search</label>
           <IcSearch value={q} onChange={setQ} placeholder='Account, counterparty or note…' width={240}/></div>}
+        {eid&&externalCount>0&&<button style={S.btnS} title='Accounts facing a party outside the group. The reconciliation excludes them, so they are not part of the working list.'
+          onClick={()=>{setShowExternal(v=>!v);setEditId(null);}}>
+          {showExternal?'Hide external ('+externalCount+')':'Show external ('+externalCount+')'}</button>}
         {canEdit&&eid&&<><button style={S.btnS} onClick={()=>{setShowUnmapped(v=>!v);setErr('');setMsg('');}}>
             {showUnmapped?'Hide unmapped accounts':'Show unmapped accounts'}</button>
           <button style={S.btnS} onClick={()=>runSuggest(false)}>Suggest from account names</button>
@@ -6811,7 +6831,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           NAME the parser cannot read, which is exactly where a missing mapping
           hides — the suggestion list can never propose one. */}
       {canEdit&&eid&&showUnmapped&&<IcUnmappedAccounts entityId={eid} entityName={entName(eid)}
-        entityOpts={entityOpts} companies={companies} canEdit={canEdit}
+        entityOpts={entityOpts} companies={companies} canEdit={canEdit} reloadKey={mapVersion}
         onCompanyAdded={loadCompanies} onMapped={loadRows} onMsg={setMsg} onErr={setErr}/>}
 
       {showAdd&&<div style={{...S.card,borderColor:T.green+'40'}}>
@@ -6879,10 +6899,12 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
       :!eid?<IcEmpty>Pick an entity to see and edit its intercompany account mappings.</IcEmpty>
       :rows.length===0?<IcEmpty>{entName(eid)} has no intercompany mappings yet. Use <b>Suggest from account names</b> to get started.</IcEmpty>
       :shownRows.length===0?<IcEmpty>None of the {rows.length} mapping{rows.length===1?'':'s'} on {entName(eid)} matches “{q}”.</IcEmpty>
+      :listRows.length===0?<IcEmpty>Every mapping here faces a party outside the group, so none of them is reconciled.
+        {' '}<button style={S.link} onClick={()=>setShowExternal(true)}>Show external ({externalCount})</button></IcEmpty>
       :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
         <th style={S.th}>Account</th><th style={S.th}>Kind</th><th style={S.th}>Counterparty</th><th style={S.th}>Notes</th>
         {canEdit&&<th style={{...S.th,width:110}}>Actions</th>}</tr></thead>
-      <tbody>{shownRows.map(r=>editId===r.id?(<tr key={r.id} style={{background:T.accentDim}}>
+      <tbody>{listRows.map(r=>editId===r.id?(<tr key={r.id} style={{background:T.accentDim}}>
         <td style={S.td}><input style={{...S.inputSm,width:80}} value={editForm.account_code} onChange={e=>setEditForm(f=>({...f,account_code:e.target.value}))}/>
           <input style={{...S.inputSm,width:220,marginLeft:6}} value={editForm.account_name||''} onChange={e=>setEditForm(f=>({...f,account_name:e.target.value}))}/></td>
         <td style={S.td}><select style={S.selectSm} value={editForm.ic_type} onChange={e=>setEditForm(f=>({...f,ic_type:e.target.value}))}>
@@ -6905,6 +6927,14 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{setEditId(r.id);setEditForm({account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,counterparty_entity_id:r.counterparty_entity_id||'',counterparty_node_id:r.counterparty_node_id||'',is_external:!!r.is_external,notes:r.notes||''});}}>Edit</button>
           <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={()=>del(r)}>x</button></div></td>}</tr>))}
       </tbody></table></div>}
+
+      {/* Never silently. The count is always on screen even when the rows are
+          not, because a mapping that has quietly disappeared is worse than a
+          long list. */}
+      {eid&&externalCount>0&&!showExternal&&<div style={{color:T.textMuted,fontSize:12,marginTop:10}}>
+        <b style={{color:T.textBright}}>{externalCount}</b> mapping{externalCount===1?'':'s'} on {entName(eid)} face
+        {externalCount===1?'s':''} a party outside the group and {externalCount===1?'is':'are'} not reconciled — hidden here.
+        <button style={{...S.link,marginLeft:6}} onClick={()=>setShowExternal(true)}>Show</button></div>}
     </>}
 
     {tab==='companies'&&<>
