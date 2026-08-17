@@ -768,6 +768,43 @@ function legOf(m, balances) {
     amount,
     signed: m.ic_type === 'due_to' ? -amount : amount,
     notes: m.notes || null,
+    counterparty_account_code: m.counterparty_account_code || null,
+  };
+}
+
+// The counterparty account a person pinned, turned into a leg even though the
+// counterparty has no mapping for it.
+//
+// This is the point of pinning. 26 of the 28 mapped relationships in this
+// portfolio are one_sided purely because nobody has set the OTHER entity up —
+// the balance is sitting right there in its ledger. Once a person has said
+// "their 23000 answers our 18334", waiting for someone to go and mirror the
+// mapping adds no information and hides a real difference in the meantime.
+//
+// ic_type comes from the account TYPE, never the name: a "Due from" account can
+// carry a credit, which is why the pin was found by its offsetting balance in
+// the first place.
+function pinnedLeg(balances, entityId, code, types) {
+  const row = (balances.get(Number(entityId)) || new Map()).get(String(code));
+  if (!row) return null;
+  const amount = Number(row.balance) || 0;
+  let ic_type;
+  if (row.type === 'Liability') ic_type = 'due_to';
+  else if (row.type === 'Equity') ic_type = 'contributed_capital';
+  else if (row.type === 'Asset') ic_type = types.includes('investment') ? 'investment' : 'due_from';
+  else return null;
+  if (!types.includes(ic_type)) return null;
+  return {
+    mapping_id: null,
+    account_code: String(code),
+    account_name: row.name,
+    ic_type,
+    amount,
+    signed: ic_type === 'due_to' ? -amount : amount,
+    notes: null,
+    counterparty_account_code: null,
+    // So the page can say this side was asserted here, not mapped over there.
+    from_pin: true,
   };
 }
 
@@ -795,6 +832,9 @@ function reconcileForEntity(db, entityId, opts) {
 
   // Balances are needed for this entity and for every counterparty it names,
   // because the counterparty's own accounts are printed alongside.
+  // Every counterparty this entity names. A pinned account is read from the
+  // counterparty's own ledger, so its balances have to be loaded whether or not
+  // that counterparty has any mappings of its own.
   const cpIds = [...new Set(mine
     .filter(m => m.counterparty_entity_id != null && Number(m.counterparty_entity_id) !== eid)
     .map(m => Number(m.counterparty_entity_id)))];
@@ -840,6 +880,16 @@ function reconcileForEntity(db, entityId, opts) {
         m.counterparty_entity_id != null &&
         Number(m.counterparty_entity_id) === eid);
       g.their_legs = theirs.map(m => legOf(m, balances));
+      // Then any account we pinned that they have not mapped themselves. Deduped
+      // by code, so once the counterparty does map it, their own mapping wins
+      // and nothing is counted twice.
+      const have = new Set(g.their_legs.map(l => String(l.account_code)));
+      for (const l of g.our_legs) {
+        const code = l.counterparty_account_code;
+        if (!code || have.has(String(code))) continue;
+        const pin = pinnedLeg(balances, g.counterparty_entity_id, code, types);
+        if (pin) { g.their_legs.push(pin); have.add(String(code)); }
+      }
     }
     return [...groups.values()];
   };
