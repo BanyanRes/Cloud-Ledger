@@ -767,6 +767,19 @@ const MIRROR_ACCOUNT = {
   contributed_capital: { ic_type: 'investment',          type: 'Asset',     base: 19000, name: us => 'Investment in ' + us },
 };
 
+// Which of THEIR account kinds can answer OURS. Due accounts answer each
+// other in either direction — a due-from carrying a credit is the whole reason
+// matching is done by amount — but capital is answered only by investment and
+// investment only by capital. Without this, Odyssey's "Due from Banyan
+// Residential" was offered as the answer to Banyan Residential's "Contributed
+// Capital - Odyssey", purely because the name pointed back at us.
+const COMPAT_ANSWER = {
+  due_from: ['due_from', 'due_to'],
+  due_to: ['due_from', 'due_to'],
+  investment: ['contributed_capital'],
+  contributed_capital: ['investment'],
+};
+
 // Draft the account the counterparty is missing. The name mirrors ours — our
 // "Due from X" is answered by "Due to <us>" on X's ledger — and the code
 // follows the counterparty's OWN numbering: one past the highest code it
@@ -891,19 +904,33 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   for (const row of out) {
     if (row.is_external || row.counterparty_entity_id == null) continue;
     const cid = Number(row.counterparty_entity_id);
-    const ourSigned = receivableSigned(balByCode.get(String(row.account_code)));
+    const ourRow = balByCode.get(String(row.account_code));
+    const ourSigned = receivableSigned(ourRow);
+    const ourBal = ourRow ? (Number(ourRow.balance) || 0) : 0;
+    const capital = row.ic_type === 'investment' || row.ic_type === 'contributed_capital';
+    // Capital and investment agree in EQUAL terms — a parent's investment
+    // asset should equal the child's contributed-capital equity — so their gap
+    // is a plain difference, not the receivable-signed sum the due accounts use.
+    const answerType = row.ic_type === 'investment' ? 'Equity' : 'Asset';
     let best = null;
     for (const b of balsFor(cid)) {
       if (b.bank_acct || isPnlAccount(b.type, b.code)) continue;
-      const signed = receivableSigned(b);
-      if (signed == null) continue;
       const p = parseAccountName(b.name);
+      if (p && COMPAT_ANSWER[row.ic_type] && COMPAT_ANSWER[row.ic_type].indexOf(p.ic_type) === -1) continue;
       let nameMatch = false;
       if (p) {
         const m2 = matchCompany(p.label, entities, companies);
         nameMatch = m2.entity_id != null && Number(m2.entity_id) === eid;
       }
-      const gap = ourSigned == null ? null : round2(Math.abs(signed + ourSigned));
+      let gap = null;
+      if (capital) {
+        if (b.type === answerType) gap = round2(Math.abs((Number(b.balance) || 0) - ourBal));
+        else if (!nameMatch) continue;
+      } else {
+        const signed = receivableSigned(b);
+        if (signed == null) continue;
+        gap = ourSigned == null ? null : round2(Math.abs(signed + ourSigned));
+      }
       const offsets = gap != null && gap < DEFAULT_TOLERANCE;
       if (!nameMatch && !offsets) continue;
       const cand = { account_code: String(b.code), account_name: b.name, type: b.type,
