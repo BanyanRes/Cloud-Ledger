@@ -1176,8 +1176,10 @@ async function buildStatements(getBalances, opts) {
     } else if (ref.type === 'Liability') {
       const cashEffect = delta; // liability up → cash up
       const sec = bsSec(ref);
-      if (/payable/i.test(nm)) cfBuckets.ap += cashEffect;
-      else if (sec === 'Long Term Liabilities') cfBuckets.debtChange += cashEffect;
+      // Section FIRST, then the name test: a long-term account that happens to
+      // be named "... payable" is debt service, not an operating AP movement.
+      if (sec === 'Long Term Liabilities') cfBuckets.debtChange += cashEffect;
+      else if (/payable/i.test(nm)) cfBuckets.ap += cashEffect;
       else cfBuckets.accrued += cashEffect; // accrued / other current liabilities
     } else if (ref.type === 'Equity') {
       // Equity delta includes contributions/distributions but NOT current-year
@@ -1548,7 +1550,10 @@ async function renderStatementsPdf(s, outOffsets) {
       ? 'Statements of Assets, Liabilities, and Members\u2019 Equity \u2013 Tax Basis'
       : 'Balance Sheets';
     const L = makeLayout(pdf, fonts, m, bsTitle, { dateLine: m.longDate + ' and ' + m.priorLongDate });
-    track(bsTitle, m.profile === 'banyan' ? 'Statement of Assets, Liabilities, and Members\u2019 Equity \u2013 Tax Basis' : 'Balance Sheets');
+    // TOC label must be the statement title verbatim \u2014 passing a separate string
+    // here is how the TOC drifted out of sync with the heading (CLA 8/17: the TOC
+    // read the singular "Statement of Assets ..." while the page read "Statements").
+    track(bsTitle);
     L.start();
     L.setCols(bsCols);
     // Three columns now: current date, prior date, and a "Change" column showing
@@ -1564,13 +1569,22 @@ async function renderStatementsPdf(s, outOffsets) {
     // only when a section has multiple subsections or a contra subsection;
     // otherwise the section collapses to accounts directly under its header to
     // avoid a redundant subtotal that just repeats a single account line.
+    // "$" on the FIRST figure line of each section and on the section's grand
+    // total (CLA 8/17). The first line is an account row nested two levels down
+    // inside the section, so a latch is armed before each section and consumed
+    // by whichever account row renders first. Banyan profile only.
+    const wantDollar = m.profile === 'banyan';
+    let bsFirstRow = false;
     const renderBsSection = (sec, sectionTotalLabel) => {
       L.row(sec.title, [], { indent: 6, boldRow: true });
       const showSubHeaders = sec.subs.length > 1 || sec.subs.some(su => su.contra) || m.profile === 'bsfrgp' || m.profile === 'banyan';
       for (const su of sec.subs) {
         if (showSubHeaders) L.row(su.title, [], { indent: 16 });
         const rowIndent = showSubHeaders ? 26 : 16;
-        for (const r of su.rows) L.row(r.name, bsCells(r.cur, r.pri), { indent: rowIndent });
+        for (const r of su.rows) {
+          L.row(r.name, bsCells(r.cur, r.pri), { indent: rowIndent, dollarPrefix: bsFirstRow });
+          bsFirstRow = false;
+        }
         if (showSubHeaders && su.rows.length > 1) {
           // GL balances are already signed; a contra subtotal (accumulated
           // amortization) is naturally negative and prints in parentheses.
@@ -1579,10 +1593,12 @@ async function renderStatementsPdf(s, outOffsets) {
       }
       L.row(sectionTotalLabel, bsCells(sec.total.cur, sec.total.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     };
+    bsFirstRow = wantDollar;
     for (const sec of s.balanceSheet.assetSections) renderBsSection(sec, 'Total ' + sec.title);
-    L.row('Total Assets', bsCells(s.balanceSheet.totalAssets.cur, s.balanceSheet.totalAssets.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, gapAfter: 8 });
+    L.row('Total Assets', bsCells(s.balanceSheet.totalAssets.cur, s.balanceSheet.totalAssets.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, gapAfter: 8, dollarPrefix: wantDollar });
 
     L.sectionTitle('LIABILITIES AND MEMBERS\u2019 EQUITY');
+    bsFirstRow = wantDollar;
     for (const sec of s.balanceSheet.liabSections) renderBsSection(sec, 'Total ' + sec.title);
     L.row('Total Liabilities', bsCells(s.balanceSheet.totalLiab.cur, s.balanceSheet.totalLiab.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     L.row('Members\u2019 Equity', [], { indent: 6, boldRow: true });
@@ -1590,7 +1606,7 @@ async function renderStatementsPdf(s, outOffsets) {
     for (const r of (s.balanceSheet.retainedRows || [])) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
     L.row('Net Income (Loss)', bsCells(s.balanceSheet.niLine.cur, s.balanceSheet.niLine.pri), { indent: 16 });
     L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
-    L.row('Total Liabilities and Members\u2019 Equity', bsCells(s.balanceSheet.totalLiabEquity.cur, s.balanceSheet.totalLiabEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+    L.row('Total Liabilities and Members\u2019 Equity', bsCells(s.balanceSheet.totalLiabEquity.cur, s.balanceSheet.totalLiabEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: wantDollar });
   }
 
   // ── 2. Statements of Operations ─────────────────────────────────────────────
@@ -1622,6 +1638,10 @@ async function renderStatementsPdf(s, outOffsets) {
       // ── Banyan Residential shape: Revenue - Services / Operating Expenses
       //    (grouped) / Other Income (Expense) / Income Taxes / Net Income. ────
       const bo = s.operations.banyan;
+      // "$" on the first figure line of the statement (the first revenue
+      // account) and on Net Income (Loss) \u2014 CLA 8/17. Same latch pattern as
+      // the balance sheet: armed just before the revenue tree is rendered.
+      let plFirstRow = false;
       const renderTree = (groups, { showGroupTotal, keepWhole } = {}) => {
         for (const g of groups) {
           if (keepWhole) {
@@ -1636,7 +1656,10 @@ async function renderStatementsPdf(s, outOffsets) {
             const echo = su.title === g.title;
             if (!echo) L.row(su.title, [], { indent: 20 });
             const lineIndent = echo ? 26 : 30;
-            su.lines.forEach(r => L.row(r.name, cell4(r), { indent: lineIndent }));
+            su.lines.forEach(r => {
+              L.row(r.name, cell4(r), { indent: lineIndent, dollarPrefix: plFirstRow });
+              plFirstRow = false;
+            });
             if (su.lines.length > 1 && !echo) L.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true });
           }
           if (showGroupTotal !== false) L.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true });
@@ -1645,6 +1668,7 @@ async function renderStatementsPdf(s, outOffsets) {
 
       // Revenue → Total Revenue → Gross Profit (no cost of revenue on Banyan).
       L.sectionTitle('Revenue');
+      plFirstRow = true;
       renderTree(bo.revenueTree, { showGroupTotal: true });
       L.row('Total Revenue', cell4(bo.totRev), { indent: 6, boldRow: true, ruleAbove: true });
       L.row('Gross Profit', cell4(bo.grossProfit), { indent: 6, boldRow: true, gapAfter: 6 });
@@ -1668,7 +1692,7 @@ async function renderStatementsPdf(s, outOffsets) {
         L.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
       }
 
-      L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+      L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
     } else if (s.operations.bsfrgp && s.operations.bsfrgp.structured) {
       // ── Banyan SFR GP Investors shape: Operating Expenses / Other Income
       //    (Expense) / Income Taxes / Net Income (Loss). ────────────────────
@@ -1751,14 +1775,16 @@ async function renderStatementsPdf(s, outOffsets) {
       ? 'Statement of Cash Flows \u2013 Tax Basis'
       : 'Statement of Cash Flows';
     const L = makeLayout(pdf, fonts, m, cfTitle, { dateLine: m.monthsEnded });
-    track(cfTitle, 'Statement of Cash Flows');
+    // TOC label is the title verbatim (CLA 8/17: the TOC was dropping
+    // "\u2013 Tax Basis" because this override hardcoded the old string).
+    track(cfTitle);
     L.start();
     L.setCols([RIGHT]);
     // No column heading: the single YTD column is self-evident from the
     // statement title, so no "Year to Date" label is drawn above it.
     const cf = s.cashFlow;
     L.sectionTitle('Cash Flows from Operating Activities');
-    L.row('Net Income (Loss)', [money(cf.netIncome)], { indent: 16 });
+    L.row('Net Income (Loss)', [money(cf.netIncome)], { indent: 16, dollarPrefix: m.profile === 'banyan' });
     L.row('Adjustments to reconcile net income to net cash:', [], { indent: 16 });
     if (!isZero(cf.amortization)) L.row('Amortization and depreciation', [money(cf.amortization)], { indent: 28 });
     L.space(6);
@@ -1766,7 +1792,11 @@ async function renderStatementsPdf(s, outOffsets) {
     if (!isZero(cf.changeAR)) L.row('(Increase) decrease in accounts receivable', [money(cf.changeAR)], { indent: 28 });
     if (!isZero(cf.changePrepaidOther)) L.row('(Increase) decrease in prepaid and other current assets', [money(cf.changePrepaidOther)], { indent: 28 });
     if (!isZero(cf.changeIntercompany)) L.row('(Increase) decrease in intercompany balances', [money(cf.changeIntercompany)], { indent: 28 });
-    if (!isZero(cf.changeAP)) L.row('Increase (decrease) in accounts payable and other current liabilities', [money(cf.changeAP)], { indent: 28 });
+    // "accounts payable" ONLY \u2014 this bucket collects payables; every other
+    // current liability lands on the accrued line below. Saying "and other
+    // current liabilities" here made the two lines look like duplicates
+    // (CLA 8/17).
+    if (!isZero(cf.changeAP)) L.row('Increase (decrease) in accounts payable', [money(cf.changeAP)], { indent: 28 });
     if (!isZero(cf.changeAccrued)) L.row('Increase (decrease) in accrued and other liabilities', [money(cf.changeAccrued)], { indent: 28 });
     L.row('Net Cash Provided (Used) by Operating Activities', [money(cf.netOperating)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
 
@@ -1782,7 +1812,7 @@ async function renderStatementsPdf(s, outOffsets) {
 
     L.row('Net Increase (Decrease) in Cash', [money(cf.netChange)], { indent: 6, boldRow: true, ruleAbove: true });
     L.row('Cash, Beginning of Period', [money(cf.cashBeg)], { indent: 6 });
-    L.row('Cash, End of Period', [money(cf.cashEnd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+    L.row('Cash, End of Period', [money(cf.cashEnd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: m.profile === 'banyan' });
     if (!isZero(cf.tieOut)) {
       L.space(6);
       L.row('Note: reconciled change differs from cash movement by ' + money(cf.tieOut) + ' (see notes).', [], { indent: 6 });
@@ -1793,11 +1823,15 @@ async function renderStatementsPdf(s, outOffsets) {
   {
     // Landscape page mirroring the CPA reference: five columns, a Distributions
     // column shown even when all zero, and a Net Income (Loss) column wide enough
-    // to keep the value on one row. Values are shown without a "$" prefix.
-    const L = makeLayout(pdf, fonts, m, 'Statement of Changes in Members\u2019 Equity',
+    // to keep the value on one row. Only the first member row and the Total row
+    // carry a "$" (CLA 8/17); the rows between them are bare figures.
+    const eqTitle = m.profile === 'banyan'
+      ? 'Statement of Changes in Members\u2019 Equity \u2013 Tax Basis'
+      : 'Statement of Changes in Members\u2019 Equity';
+    const L = makeLayout(pdf, fonts, m, eqTitle,
       { landscape: true, dateLine: m.monthsEnded });
     const LRIGHT = PAGE.h - PAGE.mR; // landscape printable right edge (PAGE.h is the long side)
-    track('Statement of Changes in Members\u2019 Equity');
+    track(eqTitle);
     L.start();
     // Column right-edges across the landscape width. Two-line headers, dates
     // shown as m/d/yyyy short form to match the reference.
@@ -1838,13 +1872,18 @@ async function renderStatementsPdf(s, outOffsets) {
     const dollarRow = (label, vals, o = {}) => {
       L.row(label, vals.map(v => acct(v)), Object.assign({ indent: 10, dollarPrefix: false, valueInset: 4 }, o));
     };
+    // "$" on the first member row and the Total row only (CLA 8/17). The c1
+    // column edge was already positioned to leave room for a "$" cell box at
+    // ~328pt, clear of the longest member label.
+    const eqDollar = m.profile === 'banyan';
     L.row('Member', [], { indent: 6, boldRow: true });
-    for (const r of s.equity.rows) {
-      dollarRow(r.name, [r.beginning, r.contributions, r.distributions, r.netIncome, r.ending], { indent: 16 });
-    }
+    s.equity.rows.forEach((r, i) => {
+      dollarRow(r.name, [r.beginning, r.contributions, r.distributions, r.netIncome, r.ending],
+        { indent: 16, dollarPrefix: eqDollar && i === 0 });
+    });
     const t = s.equity.totals;
     dollarRow('Total', [t.beginning, t.contributions, t.distributions, t.netIncome, t.ending],
-      { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, colRules: true });
+      { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, colRules: true, dollarPrefix: eqDollar });
   }
 
   return await pdf.save();
@@ -2099,6 +2138,32 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
   coverPages.forEach(p => merged.addPage(p));
   const bodyPages = await merged.copyPages(body, body.getPageIndices());
   bodyPages.forEach(p => merged.addPage(p));
+
+  // ── Page numbers (CLA 8/17): bottom-right of every page EXCEPT the cover
+  //    and the Table of Contents, which stay unnumbered per house style.
+  //    The number is the page's ABSOLUTE position in the package (cover = 1,
+  //    TOC = 2), which is the same basis the TOC used to compute its page
+  //    references off COVER_TOC_PAGES \u2014 so the printed digit and the TOC can
+  //    never disagree. Stamped here, on the merged doc, rather than inside
+  //    renderStatementsPdf: only the merged doc knows a page's final position,
+  //    and this way the uploaded executive summary and Budget-to-Actual pages
+  //    get numbered too. Width comes from each page's own size so the
+  //    landscape members'-equity page (and any landscape B2A page) is measured
+  //    against its long edge, not the portrait constant.
+  {
+    const pnFont = await merged.embedFont(StandardFonts.Helvetica);
+    merged.getPages().forEach((p, i) => {
+      if (i < COVER_TOC_PAGES) return;
+      const label = String(i + 1);
+      const { width } = p.getSize();
+      const w = pnFont.widthOfTextAtSize(label, FS.foot);
+      p.drawText(label, {
+        x: width - PAGE.mR - w, y: PAGE.mB - 12,
+        size: FS.foot, font: pnFont, color: rgb(0.4, 0.4, 0.4),
+      });
+    });
+    info.pageNumbersFrom = COVER_TOC_PAGES + 1;
+  }
 
   info.cashFlowTies = statements.checks.cashFlowTies;
   info.cashFlowDiff = statements.checks.cashFlowDiff;
