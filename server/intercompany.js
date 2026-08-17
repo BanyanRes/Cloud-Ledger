@@ -712,10 +712,43 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   // least likely to matter, whatever its name says.
   out.sort((a, b) => (Math.abs(b.balance) - Math.abs(a.balance))
     || a.account_code.localeCompare(b.account_code));
+  // Mapped to an entity, but nobody has said WHICH account on that entity's
+  // ledger answers it. Still work: without it the two entries never line up on
+  // the reconciliation, and the counterparty's balance only joins if the
+  // counterparty gets around to mapping its own side — which for 26 of the 28
+  // relationships here has not happened.
+  //
+  // Only an entity counterparty can be pinned. An external party has no ledger
+  // by definition, an off-ledger company has none in CloudLedger, and an
+  // entity pointing at ITSELF is a finding rather than something to pin.
+  const unpinned = listMappings(db, { entity_id: eid })
+    .filter(m => !m.is_external
+      && m.counterparty_entity_id != null
+      && Number(m.counterparty_entity_id) !== eid
+      && !m.counterparty_account_code)
+    .map(m => {
+      const b = balByCode.get(String(m.account_code));
+      return {
+        id: m.id,
+        account_code: String(m.account_code),
+        account_name: m.account_name,
+        ic_type: m.ic_type,
+        counterparty_entity_id: m.counterparty_entity_id,
+        counterparty_node_id: m.counterparty_node_id || null,
+        counterparty_name: m.counterparty_name || null,
+        notes: m.notes || null,
+        balance: b ? round2(b.balance) : 0,
+      };
+    })
+    .filter(m => Math.abs(m.balance) >= DEFAULT_TOLERANCE)
+    .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance));
+
   return {
     entity_id: eid,
     entity: { id: entity.id, name: entity.name, code: entity.code,
       entity_type: entity.entity_type || null },
+    unpinned,
+    unpinned_count: unpinned.length,
     shell_entity: shell,
     as_of: as_of || null,
     count: out.length,

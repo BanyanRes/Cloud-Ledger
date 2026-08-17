@@ -6440,6 +6440,40 @@ function IcMapForm({entityId,acct,entityOpts,companies,onCompanyAdded,onSaved,on
   </div>;
 }
 
+// Naming the counterparty account on a mapping that already names the entity.
+// Same PUT the edit row uses — the whole mapping goes back, because the server
+// validates it as a whole.
+function IcPinForm({mapping,entityId,onSaved,onCancel,onMsg,onErr}){
+  const[v,setV]=useState(mapping.counterparty_account_code||'');
+  const[busy,setBusy]=useState(false);
+  const save=async()=>{
+    setBusy(true);
+    try{
+      await api.updateIcMapping(mapping.id,{
+        account_code:mapping.account_code,account_name:mapping.account_name,
+        ic_type:mapping.ic_type,
+        counterparty_entity_id:mapping.counterparty_entity_id,
+        counterparty_node_id:mapping.counterparty_node_id||null,
+        counterparty_account_code:v||null,
+        is_external:0,notes:mapping.notes||null});
+      if(onErr)onErr('');
+      if(onMsg)onMsg(v?('Pinned '+mapping.account_code+' to their '+v+'.')
+        :('Cleared the counterparty account on '+mapping.account_code+'.'));
+      if(onSaved)await onSaved();
+    }catch(e){if(onErr)onErr(e.message);}
+    finally{setBusy(false);}
+  };
+  return<div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+    <div style={{flexBasis:'100%',display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+      <IcCpAccountSelect entityId={entityId} accountCode={mapping.account_code}
+        counterpartyEntityId={mapping.counterparty_entity_id} value={v} onChange={setV}
+        onLoaded={r=>setV(x=>x||r.best||'')}/>
+      <button style={{...S.btnP,padding:'6px 12px',fontSize:12}} onClick={save} disabled={busy}>
+        {busy?'Saving…':'Save'}</button>
+      <button style={{...S.btnGhost,fontSize:12}} onClick={onCancel}>Cancel</button></div>
+  </div>;
+}
+
 // The unmapped worklist: every account on the entity that the reconciliation
 // COULD match but no mapping covers yet. Only the four kinds it can match are
 // here — due from, due to, investment, contributed capital — because those are
@@ -6455,6 +6489,7 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
   const[loading,setLoading]=useState(false);
   const[q,setQ]=useState('');
   const[mapping,setMapping]=useState(null);
+  const[pinning,setPinning]=useState(null);
 
   const load=useCallback(async()=>{
     if(!entityId){setData(null);return;}
@@ -6485,6 +6520,8 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
           they were just all zero-balance and the filter was on. */}
       <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>
         Unmapped accounts{data?' ('+shown.length+')':''}</span>
+      {data&&(data.unpinned||[]).length>0&&<span style={{color:T.textDim,fontSize:11.5}}>
+        · {data.unpinned.length} mapped without a counterparty account</span>}
       <span style={{color:T.textDim,fontSize:11.5}} title='These are the only balances a counterparty ledger states back, so they are the only ones the reconciliation can match.'>
         Due from / Due to · Investment / Contributed capital only</span>
       {data&&data.count>shown.length&&<span style={{color:T.textDim,fontSize:11.5}}>
@@ -6498,7 +6535,7 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
         {loading?'Loading…':'Refresh'}</button></div>
 
     {loading&&!data?<div style={{textAlign:'center',padding:30,color:T.textMuted}}>Reading the chart of accounts…</div>
-    :!data||data.count===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
+    :!data||(data.count===0&&!(data.unpinned||[]).length)?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
       <b style={{color:T.textBright}}>Nothing here needs mapping.</b><br/>
       <span style={{fontSize:12}}>Every due from / due to, investment and contributed-capital account
       on {entityName||'this entity'} that carries a balance is mapped.</span>
@@ -6507,8 +6544,9 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
           {data.skipped_zero_balance===1?'s':''} at a zero balance — nothing to reconcile, so nothing to map.</div>}
         {data.skipped_other>0&&<div>{data.skipped_other} other account{data.skipped_other===1?'':'s'} {data.skipped_other===1?'is':'are'} not
           the kind the reconciliation matches.</div>}</div>}</div>
-    :shown.length===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
+    :shown.length===0&&data.count>0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
       No unmapped account matches “{q}”. {data.count} {data.count===1?'is':'are'} unmapped in total.</div>
+    :shown.length===0?null
     :<div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(300px, calc(100vh - 460px))'}}>
       <table style={S.table}><thead><tr>
         <th style={S.th}>Account</th><th style={S.th}>Type</th><th style={S.thR}>Balance</th>
@@ -6536,6 +6574,37 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
               onCompanyAdded={onCompanyAdded} onCancel={()=>setMapping(null)} onMsg={onMsg} onErr={onErr}
               onSaved={async()=>{setMapping(null);await load();if(onMapped)await onMapped();}}/></td></tr>}
       </Fragment>)}</tbody></table></div>}
+
+    {/* The other half of the job. A mapping that names the entity but not the
+        account is not finished: the two entries never line up on the
+        reconciliation, and the counterparty's balance only joins if THEY map
+        their side — which for 26 of 28 relationships here has not happened. */}
+    {data&&(data.unpinned||[]).length>0&&<div style={{borderTop:'1px solid '+T.border}}>
+      <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border}}>
+        <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>
+          Mapped, but no counterparty account ({data.unpinned.length})</span>
+        <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>
+          These already name the right entity. Naming the account as well puts the two entries on the
+          same line and pulls their balance into the reconciliation even if they never map their side.</span></div>
+      <div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(240px, calc(100vh - 520px))'}}>
+      <table style={S.table}><tbody>{data.unpinned.map(m=><Fragment key={m.id}>
+        <tr style={pinning===m.id?{background:T.accentDim}:null}>
+          <td style={{...S.td,whiteSpace:'normal',minWidth:240}}>
+            <span style={{fontWeight:600,color:T.textBright}}>{m.account_code}</span>{' '}
+            <span style={{color:T.textMuted}}>{m.account_name}</span></td>
+          <td style={{...S.td,color:T.textMuted}}>{IC_TYPE_LABEL[m.ic_type]||m.ic_type}</td>
+          <td style={{...S.td}}>{m.counterparty_name}</td>
+          <td style={{...S.tdR,width:140,fontWeight:600,color:T.textBright}}>{fmt(m.balance)}</td>
+          {canEdit&&<td style={{...S.td,textAlign:'right',width:90}}>
+            <button style={{...S.btnGhost,color:T.accent,fontSize:11}}
+              onClick={()=>setPinning(pinning===m.id?null:m.id)}>
+              {pinning===m.id?'Close':'Pin'}</button></td>}</tr>
+        {canEdit&&pinning===m.id&&<tr style={{background:T.accentDim}}>
+          <td colSpan={5} style={{...S.td,whiteSpace:'normal'}}>
+            <IcPinForm mapping={m} entityId={entityId} onCancel={()=>setPinning(null)}
+              onMsg={onMsg} onErr={onErr}
+              onSaved={async()=>{setPinning(null);await load();if(onMapped)await onMapped();}}/></td></tr>}
+      </Fragment>)}</tbody></table></div></div>}
   </div>;
 }
 
