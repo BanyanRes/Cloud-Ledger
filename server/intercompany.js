@@ -482,6 +482,72 @@ function suggestMappings(db, entityId, { computeBalances, as_of, includeIndividu
   return { suggestions: out, hidden_individuals: hiddenIndividuals.length, hidden_examples: hiddenIndividuals.slice(0, 5) };
 }
 
+// Every account on one entity that has no intercompany mapping yet — not only
+// the ones whose NAME the parser recognises. `suggestMappings` can only offer
+// what it can read: "Due from X", "Investment in Y". An account called "Loan
+// receivable - CLIP" or "Advances — Buna" faces another entity just as much and
+// is invisible to that list, so it stays unmapped forever and quietly drops out
+// of every reconciliation. This lists them all, marks which ones the parser did
+// recognise, and leaves the judgement where it belongs — with a person.
+function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
+  ensureSchema(db);
+  const eid = Number(entityId);
+  const entities = db.prepare('SELECT id, name, code FROM entities').all();
+  const companies = listCompanies(db);
+  const people = listPeople(db);
+  const mapped = new Set(db.prepare('SELECT account_code FROM intercompany_accounts WHERE entity_id = ?')
+    .all(eid).map(r => String(r.account_code)));
+  const balByCode = new Map(computeBalances(eid, as_of ? { as_of } : {}).map(b => [String(b.code), b]));
+  const accounts = db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ? ORDER BY code').all(eid);
+
+  const out = [];
+  for (const a of accounts) {
+    if (mapped.has(String(a.code))) continue;
+    const parsed = parseAccountName(a.name);
+    const bal = balByCode.get(String(a.code));
+    const row = {
+      entity_id: eid,
+      account_code: String(a.code),
+      account_name: a.name,
+      account_type: a.type || null,
+      balance: bal ? round2(bal.balance) : 0,
+      looks_ic: !!parsed,
+      individual: parsed ? (isIndividualInvestor(parsed) || isMarkedPerson(people, parsed.label)) : false,
+      ic_type: parsed ? parsed.ic_type : null,
+      counterparty_label: parsed ? parsed.label : null,
+      counterparty_entity_id: null,
+      counterparty_node_id: null,
+      is_external: 0,
+      confidence: null,
+      reason: null,
+      can_register: false,
+    };
+    if (parsed) {
+      const match = matchCompany(parsed.label, entities, companies);
+      row.counterparty_entity_id = match.entity_id;
+      row.counterparty_node_id = match.node_id || null;
+      row.is_external = match.confidence === 'external' ? 1 : 0;
+      row.confidence = match.confidence;
+      row.reason = match.reason;
+      row.can_register = match.entity_id == null && !match.node_id && match.confidence !== 'external';
+    }
+    out.push(row);
+  }
+  // Recognised accounts first, then by the money they carry. An account nobody
+  // named intercompany, holding nothing, is the least likely to matter.
+  out.sort((a, b) => (Number(b.looks_ic) - Number(a.looks_ic))
+    || (Math.abs(b.balance) - Math.abs(a.balance))
+    || a.account_code.localeCompare(b.account_code));
+  return {
+    entity_id: eid,
+    as_of: as_of || null,
+    count: out.length,
+    ic_like: out.filter(r => r.looks_ic && !r.individual).length,
+    with_balance: out.filter(r => Math.abs(r.balance) >= DEFAULT_TOLERANCE).length,
+    accounts: out,
+  };
+}
+
 // ══════════════════════════ Reconciliation helpers ══════════════════════════
 
 
@@ -664,6 +730,11 @@ function reconcileForEntity(db, entityId, opts) {
   // outside party is mapped, and must not resurface as "not mapped yet".
   const mappedCodes = new Set(forEntity.map(m => String(m.account_code)));
   const people = listPeople(db);
+  const companies = listCompanies(db);
+  // Each unmapped account carries the counterparty its NAME implies, so the
+  // reconciliation page can offer to map it where it is found. Sending someone
+  // to IC Mapping to retype an account code that is already on the screen is
+  // the reason these rows sat unmapped in the first place.
   const unmappedFor = (types) => db.prepare('SELECT code, name FROM accounts WHERE entity_id = ?').all(eid)
     .filter(a => {
       if (mappedCodes.has(String(a.code))) return false;
@@ -672,8 +743,22 @@ function reconcileForEntity(db, entityId, opts) {
       if (isIndividualInvestor(p) || isMarkedPerson(people, p.label)) return false;
       return Math.abs(amountsFor(balances, eid, a.code)) >= tol;
     })
-    .map(a => ({ account_code: String(a.code), account_name: a.name,
-      balance: round2(amountsFor(balances, eid, a.code)) }))
+    .map(a => {
+      const p = parseAccountName(a.name);
+      const match = matchCompany(p.label, entities, companies);
+      return {
+        account_code: String(a.code), account_name: a.name,
+        balance: round2(amountsFor(balances, eid, a.code)),
+        ic_type: p.ic_type,
+        counterparty_label: p.label,
+        counterparty_entity_id: match.entity_id,
+        counterparty_node_id: match.node_id || null,
+        is_external: match.confidence === 'external' ? 1 : 0,
+        confidence: match.confidence,
+        reason: match.reason,
+        can_register: match.entity_id == null && !match.node_id && match.confidence !== 'external',
+      };
+    })
     .sort((x, y) => Math.abs(y.balance) - Math.abs(x.balance));
 
   const tally = rows => ({
@@ -827,6 +912,19 @@ function registerIntercompanyRoutes(app, deps) {
     } catch (e) { fail(res, e); }
   });
 
+  // Every account on the entity with no mapping yet, recognised by the name
+  // parser or not. The suggestion endpoint can only propose what it recognises;
+  // this is what you open when the account you are after is not in that list.
+  app.get('/api/intercompany/accounts/unmapped', ...gate, (req, res) => {
+    try {
+      const entity_id = Number(req.query.entity_id);
+      if (!entity_id) return res.status(400).json({ error: 'entity_id is required' });
+      assertEntityAccess(req, [entity_id]);
+      const as_of = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.as_of || '')) ? String(req.query.as_of) : null;
+      res.json(listUnmappedAccounts(db, entity_id, { computeBalances, as_of }));
+    } catch (e) { fail(res, e); }
+  });
+
   app.post('/api/intercompany/mappings', ...gate, (req, res) => {
     try {
       // Accepts one mapping or an array (the "accept these suggestions" path).
@@ -893,6 +991,7 @@ module.exports = {
   ensureSchema,
   reconcileForEntity,
   suggestMappings,
+  listUnmappedAccounts,
   listMappings,
   listCompanies,
   listPeople,

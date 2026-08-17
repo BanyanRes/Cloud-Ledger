@@ -585,6 +585,11 @@ export const api = {
     request('/intercompany/mappings/suggest?entity_id=' + entity_id
       + (as_of ? '&as_of=' + as_of : '')
       + (includeIndividuals ? '&include_individuals=1' : '')),
+  // Every account on the entity that carries no mapping yet, INCLUDING the ones
+  // whose name the parser cannot read as intercompany. That is the difference
+  // from suggestIcMappings, which can only propose what it recognises.
+  getIcUnmappedAccounts: (entity_id, as_of) =>
+    request('/intercompany/accounts/unmapped?entity_id=' + entity_id + (as_of ? '&as_of=' + as_of : '')),
   // Accepts one mapping object or an array of them (the "accept suggestions" path).
   createIcMapping: (b) => request('/intercompany/mappings', { method: 'POST', body: b }),
   updateIcMapping: (id, b) => request('/intercompany/mappings/' + id, { method: 'PUT', body: b }),
