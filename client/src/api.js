@@ -570,16 +570,11 @@ export const api = {
   },
 
   // ── Intercompany ──
-  // Groups define which entities consolidate together; mappings say which GL
-  // account faces which entity. Both reconcile endpoints are group-scoped.
-  getIcGroups: () => request('/intercompany/groups'),
-  createIcGroup: (b) => request('/intercompany/groups', { method: 'POST', body: b }),
-  updateIcGroup: (id, b) => request('/intercompany/groups/' + id, { method: 'PUT', body: b }),
-  deleteIcGroup: (id) => request('/intercompany/groups/' + id, { method: 'DELETE' }),
+  // A mapping says which GL account faces which entity. That is the whole
+  // setup: reconciliation runs for one entity and follows the mappings.
   getIcMappings: (q = {}) => {
     const p = new URLSearchParams();
     if (q.entity_id) p.set('entity_id', q.entity_id);
-    if (q.group_id) p.set('group_id', q.group_id);
     const s = p.toString();
     return request('/intercompany/mappings' + (s ? '?' + s : ''));
   },
@@ -594,11 +589,10 @@ export const api = {
   createIcMapping: (b) => request('/intercompany/mappings', { method: 'POST', body: b }),
   updateIcMapping: (id, b) => request('/intercompany/mappings/' + id, { method: 'PUT', body: b }),
   deleteIcMapping: (id) => request('/intercompany/mappings/' + id, { method: 'DELETE' }),
-  // No group: both reconciliations cover every entity that has mappings.
-  reconcileIcDue: (as_of) =>
-    request('/intercompany/reconcile/due' + (as_of ? '?as_of=' + as_of : '')),
-  reconcileIcInvestment: (as_of) =>
-    request('/intercompany/reconcile/investment' + (as_of ? '?as_of=' + as_of : '')),
+  // Reconciliation is run for ONE entity, so every row can carry the account
+  // code and name on both sides.
+  reconcileIcEntity: (entity_id, as_of) =>
+    request('/intercompany/reconcile/entity?entity_id=' + entity_id + (as_of ? '&as_of=' + as_of : '')),
 
   // People. Marking a name as an individual stops it being proposed as a
   // counterparty anywhere — the automatic name-shape test only covers capital

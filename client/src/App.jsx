@@ -876,7 +876,7 @@ export default function App(){
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo} canEdit={canEdit}/>}
         {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='customdetail'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='pivot'&&activeEntity&&dimsEnabled&&<PivotReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='pivot'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
-        {page==='ic_recon'&&canAccess('intercompany')&&<IntercompanyReconciliation entities={entities} setPage={setPage} key={'icr-'+rk}/>}
+        {page==='ic_recon'&&canAccess('intercompany')&&<IntercompanyReconciliation entities={entities} activeEntity={activeEntity} setPage={setPage} key={'icr-'+rk}/>}
         {page==='org_structure'&&canAccess('intercompany')&&<OrgStructurePage entities={entities} canEdit={canEdit} key={'org-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
@@ -6219,208 +6219,200 @@ function IcTile({label,value,kind}){
 }
 function IcEmpty({children}){return<div style={{...S.card,textAlign:'center',padding:40,color:T.textDim}}>{children}</div>;}
 
-// Panel listing every balance that faces a party outside the group. These are
-// real third-party balances: they survive consolidation and must never be
-// eliminated. (CLRFI Midco I Q2 eliminated three of them by mistake.)
-function IcExternalPanel({rows}){
-  if(!rows||!rows.length)return null;
-  return<div style={{...S.cardFlush,border:'1px solid '+T.orange+'40'}}>
-    <div style={{padding:'12px 16px',background:T.orangeDim,borderBottom:'1px solid '+T.border}}>
-      <span style={{fontWeight:700,color:T.orange,fontSize:13}}>Outside the group — not eliminated ({rows.length})</span>
-      <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>These face a party that is not in this group, so they stay on the consolidated balance sheet.</span></div>
-    <table style={S.table}><thead><tr>
-      <th style={S.th}>Entity</th><th style={S.th}>Account</th><th style={S.th}>Type</th>
-      <th style={S.th}>Counterparty</th><th style={S.thR}>Amount</th><th style={S.th}>Why</th></tr></thead>
-    <tbody>{rows.map((r,i)=><tr key={i}>
-      <td style={S.td}>{r.entity_name}</td>
-      <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{r.account_code}</span> <span style={{color:T.textMuted}}>{r.account_name}</span></td>
-      <td style={S.td}>{IC_TYPE_LABEL[r.ic_type]||r.ic_type}</td>
-      <td style={S.td}>{r.counterparty_name}</td>
-      <td style={{...S.tdR,fontWeight:600}}>{fmt(r.amount)}</td>
-      <td style={S.td}><IcBadge kind="warn">no elim</IcBadge> <span style={{color:T.textMuted,fontSize:11,marginLeft:6}}>{r.reason}</span></td></tr>)}</tbody></table></div>;
-}
 
-// Intercompany-looking accounts carrying a balance that nobody has mapped yet.
-// Surfaced so an unmapped account can't silently drop out of the tie-out.
-function IcUnmappedPanel({rows,entities,onGoToMapping}){
-  if(!rows||!rows.length)return null;
-  const nm=id=>{const e=(entities||[]).find(x=>x.id===id);return e?e.name:'Entity '+id;};
-  return<div className="cl-scroll" style={scrollBox()}>
-    <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border}}>
-      <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>Not mapped yet ({rows.length})</span>
-      <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>These accounts carry a balance and look intercompany, but no mapping tells us who they face — so they are left out of the tie-out.</span>
-      {onGoToMapping&&<button style={{...S.link,marginLeft:10}} onClick={onGoToMapping}>Open IC Mapping</button>}</div>
-    <table style={S.table}><thead><tr>
-      <th style={S.th}>Entity</th><th style={S.th}>Account</th><th style={S.th}>Reads as</th><th style={S.th}>Counterparty in name</th><th style={S.thR}>Balance</th></tr></thead>
-    <tbody>{rows.map((r,i)=><tr key={i}>
-      <td style={S.td}>{nm(r.entity_id)}</td>
-      <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{r.account_code}</span> <span style={{color:T.textMuted}}>{r.account_name}</span></td>
-      <td style={S.td}>{IC_TYPE_LABEL[r.ic_type]||r.ic_type}</td>
-      <td style={S.td}>{r.counterparty_label}</td>
-      <td style={{...S.tdR,fontWeight:600}}>{fmt(r.balance)}</td></tr>)}</tbody></table></div>;
-}
+// ═══════════════════ IC Reconciliation — one entity ═══════════════════
+// Pick an entity; every counterparty relationship it has is listed with the
+// account CODE and NAME on BOTH sides. A netted difference tells you the two
+// ledgers disagree — the account numbers tell you which two entries to open,
+// which is the whole point of running this.
 
-function IntercompanyReconciliation({entities,setPage}){
+const IC_STATUS={
+  matched:['ok','Matched'],
+  mismatch:['bad','Mismatch'],
+  one_sided:['warn','Counterparty not mapped'],
+  no_ledger:['mute','No counterparty ledger'],
+  settled:['mute','Settled'],
+  self:['bad','Points at itself'],
+};
+function IcStatus({status}){const s=IC_STATUS[status]||['mute',status];return<IcBadge kind={s[0]}>{s[1]}</IcBadge>;}
+
+// Two ledgers rarely use the same number of accounts for one relationship, so
+// the sides are laid out row by row and the shorter one is padded. Keeping them
+// on the same row makes the comparison readable without inventing a pairing
+// that does not exist.
+function zipLegs(a,b){
+  const n=Math.max(a.length,b.length,1);
+  return Array.from({length:n},(_,i)=>[a[i]||null,b[i]||null]);
+}
+const legCells=(l,align)=>l
+  ?<><td style={{...S.td,color:T.textBright,fontWeight:600,width:88}}>{l.account_code}</td>
+     <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{l.account_name}
+       {l.ic_type&&<span style={{marginLeft:6,fontSize:10,color:T.textDim}}>{IC_TYPE_LABEL[l.ic_type]}</span>}</td>
+     <td style={{...S.tdR,width:130}}>{fmt(l.amount)}</td></>
+  :<><td style={S.td}></td><td style={S.td}></td><td style={S.tdR}></td></>;
+
+function IntercompanyReconciliation({entities,activeEntity,setPage}){
   const[tab,setTab]=useState('due');
+  const[eid,setEid]=useState(activeEntity||'');
   const[asOf,setAsOf]=useState(today());
-  const[due,setDue]=useState(null);const[inv,setInv]=useState(null);
+  const[data,setData]=useState(null);
   const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
-  const[open,setOpen]=useState({});
-  // '' = show everything. Set by clicking a count in the overview strip, so the
-  // headline number and the rows behind it are never out of step.
-  const[filter,setFilter]=useState('');
+  const entityOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
 
   const run=useCallback(async()=>{
+    if(!eid){setData(null);return;}
     setLoading(true);setErr('');
-    try{
-      const[d,i]=await Promise.all([api.reconcileIcDue(asOf),api.reconcileIcInvestment(asOf)]);
-      setDue(d);setInv(i);
-    }catch(e){setErr(e.message);setDue(null);setInv(null);}
+    try{setData(await api.reconcileIcEntity(eid,asOf));}
+    catch(e){setErr(e.message);setData(null);}
     finally{setLoading(false);}
-  },[asOf]);
-  useEffect(()=>{run();},[]);// eslint-disable-line react-hooks/exhaustive-deps
+  },[eid,asOf]);
+  useEffect(()=>{run();},[eid]);// eslint-disable-line react-hooks/exhaustive-deps
 
-  // One place decides what a status is called and coloured, so the overview
-  // strip, the filter chips and the table can never disagree.
-  const ST={matched:['ok','Matched'],mismatch:['bad','Mismatch'],one_sided:['warn','One side only']};
-  const jump=(t,f)=>{setTab(t);setFilter(f);};
-  const visible=rows=>filter?rows.filter(r=>r.status===filter):rows;
-
-  const toggle=k=>setOpen(o=>({...o,[k]:!o[k]}));
+  const side=data?(tab==='due'?data.due:data.investment):null;
+  const us=data?data.entity.name:'Selected entity';
 
   const doExport=()=>{
-    if(!due||!inv)return;
-    const d=[['Intercompany Reconciliation'],['All mapped entities — as of '+(due.as_of||asOf)],[],
-      ['DUE FROM / DUE TO'],['Entity A','A net (receivable)','Entity B','B net (receivable)','Difference','Eliminate','Status']];
-    due.pairs.forEach(p=>d.push([p.entity_a_name,p.a_net,p.entity_b_name,p.b_net,p.difference,p.eliminate,p.status]));
-    d.push([]);d.push(['OUTSIDE THE GROUP — NOT ELIMINATED']);
-    d.push(['Entity','Account','Account name','Type','Counterparty','Amount','Why']);
-    due.external.forEach(r=>d.push([r.entity_name,r.account_code,r.account_name,IC_TYPE_LABEL[r.ic_type]||r.ic_type,r.counterparty_name,r.amount,r.reason]));
-    d.push([]);d.push(['INVESTMENT / CONTRIBUTED CAPITAL']);
-    d.push(['Severity','Entity','Account','Account name','Amount','Finding']);
-    inv.findings.forEach(f=>d.push([f.severity,f.entity_name,f.account_code,f.account_name,f.amount,f.message]));
-    d.push([]);d.push(['Parent','Child','Investment','Contributed capital','Difference','Status']);
-    inv.pairs.forEach(p=>d.push([p.parent_name,p.child_name,p.investment,p.contributed_capital,p.difference,p.status]));
-    d.push([]);d.push(['OUTSIDE THE GROUP — NOT ELIMINATED']);
-    d.push(['Entity','Account','Account name','Type','Counterparty','Amount','Why']);
-    inv.external.forEach(r=>d.push([r.entity_name,r.account_code,r.account_name,IC_TYPE_LABEL[r.ic_type]||r.ic_type,r.counterparty_name,r.amount,r.reason]));
-    exportToExcel(d,'Intercompany_Reconciliation_'+String(due.as_of||asOf).replace(/-/g,'')+'.xlsx');
+    if(!data)return;
+    const d=[['Intercompany Reconciliation'],[data.entity.name+' — as of '+(data.as_of||asOf)],[]];
+    const dump=(title,rows,cols)=>{
+      d.push([title]);
+      d.push(['Counterparty','Status','Difference',data.entity.name+' acct','Account name','Amount','Counterparty acct','Account name','Amount']);
+      rows.forEach(r=>{
+        zipLegs(r.our_legs,r.their_legs).forEach(([a,b],i)=>d.push([
+          i===0?r.counterparty_name:'',i===0?(IC_STATUS[r.status]||['','' ])[1]:'',i===0?r.difference:'',
+          a?a.account_code:'',a?a.account_name:'',a?a.amount:'',
+          b?b.account_code:'',b?b.account_name:'',b?b.amount:'']));
+        if(cols)d.push(['','','','Net',...['',r.our_net,'','',r.their_net]]);
+      });
+      d.push([]);
+    };
+    dump('DUE FROM / DUE TO',data.due.rows,true);
+    if(data.investment.findings.length){
+      d.push(['INVESTMENT IN ITSELF']);
+      d.push(['Account','Account name','Amount']);
+      data.investment.findings.forEach(f=>d.push([f.account_code,f.account_name,f.amount]));
+      d.push([]);
+    }
+    dump('INVESTMENT / CONTRIBUTED CAPITAL',data.investment.rows,false);
+    exportToExcel(d,'IC_Recon_'+String(data.entity.code||data.entity.id)+'_'+String(data.as_of||asOf).replace(/-/g,'')+'.xlsx');
   };
 
-  const statusBadge=s=>s==='matched'?<IcBadge kind="ok">matched</IcBadge>
-    :s==='one_sided'?<IcBadge kind="warn">one side only</IcBadge>
-    :<IcBadge kind="bad">mismatch</IcBadge>;
+  const StatusLine=({t})=>{
+    if(!t)return null;
+    const bits=[['matched',t.matched],['mismatch',t.mismatched],['one_sided',t.one_sided],['no_ledger',t.no_ledger]]
+      .filter(([,n])=>n>0);
+    return<div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:14}}>
+      {bits.length?bits.map(([k,n])=><span key={k}>{n} <IcStatus status={k}/></span>)
+        :<span style={{color:T.textDim,fontSize:12}}>nothing with a balance</span>}
+      {t.settled>0&&<span style={{color:T.textDim,fontSize:12}}>· {t.settled} settled</span>}
+      {t.abs_difference>0.005&&<span style={{marginLeft:'auto',fontWeight:700,color:T.red,fontVariantNumeric:'tabular-nums'}}>
+        {fmt(t.abs_difference)} unexplained</span>}
+    </div>;
+  };
 
   return(<div>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8,flexWrap:'wrap',gap:12}}>
       <div><div style={S.h1}>IC Reconciliation</div>
-        <div style={S.sub}>Every entity that has mappings, compared against its counterparty{due?' · '+due.totals.entity_count+' entities':''}. A balance whose counterparty has no ledger here can never match, and is listed on its own.</div></div>
+        <div style={S.sub}>Every counterparty of the selected entity, with the account number and name on both sides.</div></div>
       <div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div><label style={S.label}>Entity</label>
+          <select style={{...S.selectSm,minWidth:240}} value={eid} onChange={e=>setEid(e.target.value)}>
+            <option value=''>Select an entity…</option>
+            {entityOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
         <div><label style={S.label}>As of</label>
           <input style={S.inputSm} type='date' value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
-        <button style={S.btnP} onClick={run} disabled={loading}>{loading?'Running…':'Run'}</button>
-        {due&&inv&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
+        <button style={S.btnP} onClick={run} disabled={!eid||loading}>{loading?'Running…':'Run'}</button>
+        {data&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
 
     {err&&<div style={{...S.card,borderColor:T.red+'40'}}><div style={S.err}>{err}</div></div>}
+    {!eid&&!err&&<IcEmpty>Pick an entity to reconcile.</IcEmpty>}
 
-    {due&&inv&&<div style={{...S.card,padding:'14px 18px'}}>
-      {[['due','Due from / Due to',due,null],
-        ['investment','Investment / Contributed capital',inv,inv.totals.error_count]].map(([k,label,d,errCount])=>(
-        <div key={k} style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',padding:'7px 0',
-          borderTop:k==='investment'?'1px solid '+T.borderLight:'none'}}>
-          <div style={{minWidth:230,fontWeight:600,color:T.textBright,fontSize:13}}>{label}</div>
-          {d.totals.pair_count===0
-            ?<span style={{color:T.textDim,fontSize:12}}>nothing to compare</span>
-            :[['matched',d.totals.matched],['mismatch',d.totals.mismatched],['one_sided',d.totals.one_sided]]
-              .map(([st,n])=>(
-              <button key={st} onClick={()=>jump(k,filter===st&&tab===k?'':st)} disabled={!n}
-                style={{background:'none',border:'1px solid '+(filter===st&&tab===k?T.accent:'transparent'),
-                  borderRadius:20,padding:'2px 4px',cursor:n?'pointer':'default',opacity:n?1:0.45}}>
-                <IcBadge kind={ST[st][0]}>{n} {ST[st][1].toLowerCase()}</IcBadge></button>))}
-          {errCount>0&&<button onClick={()=>jump('investment','')} style={{background:'none',border:'none',cursor:'pointer',padding:0}}>
-            <IcBadge kind="bad">{errCount} investment in itself</IcBadge></button>}
-          <span style={{marginLeft:'auto',fontSize:12,color:T.textMuted,fontVariantNumeric:'tabular-nums'}}>
-            {d.totals.mismatched>0?<b style={{color:T.red}}>{fmt(d.totals.abs_difference!=null?d.totals.abs_difference:d.totals.total_difference)} unexplained</b>:'agrees'}
-            {d.totals.external_count>0&&<span style={{marginLeft:12}}>{d.totals.external_count} no counterparty ledger</span>}
-            {d.totals.unmapped_count>0&&<span style={{marginLeft:12}}>{d.totals.unmapped_count} not mapped</span>}</span>
-        </div>))}
-      {filter&&<div style={{marginTop:8,fontSize:12,color:T.textMuted}}>
-        Showing <b>{ST[filter]?ST[filter][1].toLowerCase():filter}</b> only
-        <button style={{...S.link,marginLeft:8}} onClick={()=>setFilter('')}>show all</button></div>}
-    </div>}
-
-    <div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
+    {eid&&<div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
       {[['due','Due from / Due to'],['investment','Investment / Contributed capital']].map(([k,l])=>
         <button key={k} onClick={()=>setTab(k)} style={{background:'none',border:'none',borderBottom:'2px solid '+(tab===k?T.accent:'transparent'),color:tab===k?T.accent:T.textMuted,fontWeight:tab===k?700:500,fontSize:13,padding:'9px 16px',cursor:'pointer',marginBottom:-1}}>{l}
-          {k==='investment'&&inv&&inv.totals.error_count>0&&<span style={{marginLeft:7}}><IcBadge kind="bad">{inv.totals.error_count}</IcBadge></span>}</button>)}</div>
+          {k==='due'&&data&&data.due.totals.mismatched>0&&<span style={{marginLeft:7}}><IcBadge kind="bad">{data.due.totals.mismatched}</IcBadge></span>}
+          {k==='investment'&&data&&(data.investment.findings.length+data.investment.totals.mismatched)>0&&
+            <span style={{marginLeft:7}}><IcBadge kind="bad">{data.investment.findings.length+data.investment.totals.mismatched}</IcBadge></span>}</button>)}</div>}
 
     {loading&&<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Reading balances…</div>}
 
-    {!loading&&tab==='due'&&due&&<>
-      {due.pairs.length===0?<IcEmpty>No mapped intercompany pair carries a balance at {due.as_of||asOf}. Map some accounts on the <button style={S.link} onClick={()=>setPage&&setPage('ic_mapping')}>IC Mapping</button> page first.</IcEmpty>
-      :visible(due.pairs).length===0?<IcEmpty>No pair has that status. <button style={S.link} onClick={()=>setFilter('')}>Show all</button></IcEmpty>
-      :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
-        <th style={{...S.th,width:28}}></th><th style={S.th}>Entity A</th><th style={S.thR}>A net receivable</th>
-        <th style={S.th}>Entity B</th><th style={S.thR}>B net receivable</th>
-        <th style={S.thR}>Difference</th><th style={S.thR}>Eliminates</th><th style={S.th}>Status</th></tr></thead>
-      <tbody>{visible(due.pairs).map(p=>{const k='d'+p.entity_a_id+'-'+p.entity_b_id;const isOpen=!!open[k];
-        return<Fragment key={k}>
-        <tr style={{cursor:'pointer',background:p.status==='mismatch'?T.redDim:(p.status==='one_sided'?T.orangeDim:'transparent')}} onClick={()=>toggle(k)}>
-          <td style={{...S.td,color:T.textDim,textAlign:'center'}}>{isOpen?'▼':'▶'}</td>
-          <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.entity_a_name}</td>
-          <td style={S.tdR}>{fmt(p.a_net)}</td>
-          <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.entity_b_name}</td>
-          <td style={S.tdR}>{fmt(p.b_net)}</td>
-          <td style={{...S.tdR,fontWeight:700,color:Math.abs(p.difference)>=due.tolerance?T.red:T.green}}>{fmt(p.difference)}</td>
-          <td style={S.tdR}>{fmt(p.eliminate)}</td>
-          <td style={S.td}>{statusBadge(p.status)}{p.same_direction&&<span style={{marginLeft:6}}><IcBadge kind="warn">same direction</IcBadge></span>}</td></tr>
-        {isOpen&&<tr><td colSpan={8} style={{padding:'0 0 0 28px',background:T.bgElevated,borderBottom:'1px solid '+T.border}}>
-          <table style={{...S.table,marginBottom:6}}><thead><tr>
-            <th style={S.th}>Entity</th><th style={S.th}>Account</th><th style={S.th}>Type</th><th style={S.thR}>Balance</th></tr></thead>
-          <tbody>{[...p.a_legs,...p.b_legs].map(l=><tr key={l.mapping_id}>
-            <td style={S.td}>{l.entity_name}</td>
-            <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{l.account_code}</span> <span style={{color:T.textMuted}}>{l.account_name}</span></td>
-            <td style={S.td}>{IC_TYPE_LABEL[l.ic_type]||l.ic_type}</td>
-            <td style={S.tdR}>{fmt(l.amount)}</td></tr>)}</tbody></table></td></tr>}
-        </Fragment>;})}
-        <tr style={S.grandTotalRow}><td style={S.td}></td><td style={S.tdBold}>{filter?'Shown':'Total'}</td><td style={S.tdR}></td><td style={S.td}></td><td style={S.tdR}></td>
-          <td style={{...S.tdBold,textAlign:'right',color:visible(due.pairs).some(p=>p.status==='mismatch')?T.red:T.green}}>{fmt(visible(due.pairs).reduce((s,p)=>s+p.difference,0))}</td>
-          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(visible(due.pairs).reduce((s,p)=>s+p.eliminate,0))}</td><td style={S.td}></td></tr>
-      </tbody></table></div>}
+    {!loading&&data&&<>
+      <StatusLine t={side.totals}/>
 
-      <IcExternalPanel rows={due.external}/>
-      <IcUnmappedPanel rows={due.unmapped} entities={entities} onGoToMapping={()=>setPage&&setPage('ic_mapping')}/>
-    </>}
+      {/* The investment tab says so plainly when the entity simply has none,
+          rather than showing an empty table that reads like a failure. */}
+      {tab==='investment'&&!data.investment.has_any
+        ?<IcEmpty><b>{data.entity.name}</b> has no investment or contributed-capital accounts.<br/>
+          <span style={{fontSize:12}}>Nothing to reconcile on this tab for this entity.</span></IcEmpty>
+      :side.rows.length===0&&(tab==='due'||!data.investment.findings.length)
+        ?<IcEmpty>No mapped {tab==='due'?'due from / due to':'investment'} account on <b>{data.entity.name}</b> carries a balance at {data.as_of||asOf}.
+          {' '}Map its accounts on the <button style={S.link} onClick={()=>setPage&&setPage('ic_mapping')}>IC Mapping</button> page.</IcEmpty>
+      :null}
 
-    {!loading&&tab==='investment'&&inv&&<>
+      {tab==='investment'&&data.investment.findings.length>0&&
+        <div style={{...S.cardFlush,border:'1px solid '+T.red+'40',overflow:'hidden'}}>
+          <div style={{padding:'12px 16px',background:T.redDim,borderBottom:'1px solid '+T.border}}>
+            <span style={{fontWeight:700,color:T.red,fontSize:13}}>Investment in itself ({data.investment.findings.length})</span>
+            <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>Inflates this entity's own assets and equity by the same amount.</span></div>
+          <table style={S.table}><tbody>{data.investment.findings.map(f=><tr key={f.account_code}>
+            <td style={{...S.td,fontWeight:600,color:T.textBright,width:88}}>{f.account_code}</td>
+            <td style={{...S.td,whiteSpace:'normal'}}>{f.account_name}</td>
+            <td style={{...S.tdR,fontWeight:700,color:T.red,width:150}}>{fmt(f.amount)}</td></tr>)}</tbody></table></div>}
 
-      {inv.findings.length>0&&<div className="cl-scroll" style={scrollBox({border:'1px solid '+T.red+'40'})}>
-        <div style={{padding:'12px 16px',background:T.redDim,borderBottom:'1px solid '+T.border}}>
-          <span style={{fontWeight:700,color:T.red,fontSize:13}}>Investment in itself ({inv.findings.length})</span>
-          <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>An entity holding an investment in itself inflates both its own assets and its own equity. A parent holding an investment in a child is normal and is not flagged.</span></div>
-        <table style={S.table}><thead><tr>
-          <th style={S.th}>Entity</th><th style={S.th}>Account</th><th style={S.thR}>Amount</th><th style={S.th}>What it means</th></tr></thead>
-        <tbody>{inv.findings.map(f=><tr key={f.mapping_id} style={{background:f.severity==='error'?T.redDim:T.orangeDim}}>
-          <td style={{...S.td,fontWeight:600,color:T.textBright}}>{f.entity_name}</td>
-          <td style={S.td}><span style={{fontWeight:600,color:T.textBright}}>{f.account_code}</span> <span style={{color:T.textMuted}}>{f.account_name}</span></td>
-          <td style={{...S.tdR,fontWeight:700,color:f.severity==='error'?T.red:T.orange}}>{fmt(f.amount)}</td>
-          <td style={{...S.td,whiteSpace:'normal'}}>{f.severity==='error'?<IcBadge kind="bad">error</IcBadge>:<IcBadge kind="warn">check</IcBadge>} <span style={{marginLeft:6}}>{f.message}</span></td></tr>)}</tbody></table></div>}
+      {side.rows.length>0&&<div className="cl-scroll" style={scrollBox()}>
+        <table style={S.table}>
+          <thead><tr>
+            <th colSpan={3} style={{...S.th,borderRight:'2px solid '+T.border}}>{us}</th>
+            <th colSpan={3} style={S.th}>Counterparty</th>
+            <th style={S.thR}>Difference</th></tr></thead>
+          <tbody>{side.rows.map(r=>{
+            const pairs=zipLegs(r.our_legs,r.their_legs);
+            const bad=r.status==='mismatch'||r.status==='self';
+            const warn=r.status==='one_sided';
+            return<Fragment key={(r.counterparty_entity_id||r.counterparty_node_id||r.counterparty_name)+'-'+r.status}>
+              <tr style={{background:bad?T.redDim:(warn?T.orangeDim:T.bgElevated)}}>
+                <td colSpan={6} style={{...S.td,fontWeight:700,color:T.textBright}}>
+                  {r.counterparty_name}
+                  {r.is_external&&<span style={{marginLeft:8}}><IcBadge kind="warn">external</IcBadge></span>}
+                  {r.off_ledger&&<span style={{marginLeft:8}}><IcBadge kind="info">no ledger</IcBadge></span>}
+                  <span style={{marginLeft:8}}><IcStatus status={r.status}/></span></td>
+                <td style={{...S.tdR,fontWeight:700,color:bad?T.red:(warn?T.orange:T.green)}}>{fmt(r.difference)}</td></tr>
+              {pairs.map(([a,b],i)=><tr key={i}>
+                {legCells(a)}
+                <td style={{...S.td,borderLeft:'2px solid '+T.border,width:88,color:T.textBright,fontWeight:600}}>{b?b.account_code:''}</td>
+                <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{b?b.account_name:
+                  (i===0&&!r.their_legs.length?<span style={{color:T.textDim,fontStyle:'italic'}}>
+                    {r.is_external||r.off_ledger?'no ledger in CloudLedger':'this entity has not mapped its side'}</span>:'')}
+                  {b&&b.ic_type&&<span style={{marginLeft:6,fontSize:10,color:T.textDim}}>{IC_TYPE_LABEL[b.ic_type]}</span>}</td>
+                <td style={{...S.tdR,width:130}}>{b?fmt(b.amount):''}</td>
+                <td style={S.tdR}></td></tr>)}
+              {tab==='due'&&<tr style={{background:T.bgElevated}}>
+                <td style={S.td}></td>
+                <td style={{...S.td,fontWeight:600,color:T.textMuted}}>Net receivable</td>
+                <td style={{...S.tdR,fontWeight:700}}>{fmt(r.our_net)}</td>
+                <td style={{...S.td,borderLeft:'2px solid '+T.border}}></td>
+                <td style={{...S.td,fontWeight:600,color:T.textMuted}}>Net receivable</td>
+                <td style={{...S.tdR,fontWeight:700}}>{fmt(r.their_net)}</td>
+                <td style={S.tdR}></td></tr>}
+              {tab==='investment'&&<tr style={{background:T.bgElevated}}>
+                <td style={S.td}></td>
+                <td style={{...S.td,fontWeight:600,color:T.textMuted}}>Investment / Capital</td>
+                <td style={{...S.tdR,fontWeight:700}}>{fmt(r.our_investment)} / {fmt(r.our_capital)}</td>
+                <td style={{...S.td,borderLeft:'2px solid '+T.border}}></td>
+                <td style={{...S.td,fontWeight:600,color:T.textMuted}}>Investment / Capital</td>
+                <td style={{...S.tdR,fontWeight:700}}>{fmt(r.their_investment)} / {fmt(r.their_capital)}</td>
+                <td style={S.tdR}></td></tr>}
+            </Fragment>;})}</tbody></table></div>}
 
-      {inv.pairs.length===0?<IcEmpty>No mapped investment relationship carries a balance at {inv.as_of||asOf}.</IcEmpty>
-      :visible(inv.pairs).length===0?<IcEmpty>No pair has that status. <button style={S.link} onClick={()=>setFilter('')}>Show all</button></IcEmpty>
-      :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
-        <th style={S.th}>Parent (holds the investment)</th><th style={S.th}>Child</th>
-        <th style={S.thR}>Investment</th><th style={S.thR}>Contributed capital</th>
-        <th style={S.thR}>Difference</th><th style={S.thR}>Eliminates</th><th style={S.th}>Status</th></tr></thead>
-      <tbody>{visible(inv.pairs).map(p=><tr key={p.parent_id+'>'+p.child_id} style={{background:p.status==='mismatch'?T.redDim:(p.status!=='matched'?T.orangeDim:'transparent')}}>
-        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.parent_name}</td>
-        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.child_name}</td>
-        <td style={S.tdR}>{fmt(p.investment)}</td><td style={S.tdR}>{fmt(p.contributed_capital)}</td>
-        <td style={{...S.tdR,fontWeight:700,color:Math.abs(p.difference)>=inv.tolerance?T.red:T.green}}>{fmt(p.difference)}</td>
-        <td style={S.tdR}>{fmt(p.eliminate)}</td><td style={S.td}>{statusBadge(p.status)}</td></tr>)}</tbody></table></div>}
-
-      <IcExternalPanel rows={inv.external}/>
-      <IcUnmappedPanel rows={inv.unmapped} entities={entities} onGoToMapping={()=>setPage&&setPage('ic_mapping')}/>
+      {side.unmapped&&side.unmapped.length>0&&<div className="cl-scroll" style={scrollBox()}>
+        <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border}}>
+          <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>Not mapped yet ({side.unmapped.length})</span>
+          <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>These accounts on {data.entity.name} carry a balance and look intercompany, but no mapping says who they face.</span>
+          <button style={{...S.link,marginLeft:10}} onClick={()=>setPage&&setPage('ic_mapping')}>Open IC Mapping</button></div>
+        <table style={S.table}><tbody>{side.unmapped.map(u=><tr key={u.account_code}>
+          <td style={{...S.td,fontWeight:600,color:T.textBright,width:88}}>{u.account_code}</td>
+          <td style={{...S.td,whiteSpace:'normal'}}>{u.account_name}</td>
+          <td style={{...S.tdR,width:150}}>{fmt(u.balance)}</td></tr>)}</tbody></table></div>}
     </>}
   </div>);
 }
@@ -6432,14 +6424,13 @@ function IntercompanyReconciliation({entities,setPage}){
 function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[tab,setTab]=useState('mappings');
   const[eid,setEid]=useState(activeEntity||'');
-  const[rows,setRows]=useState([]);const[groups,setGroups]=useState([]);
+  const[rows,setRows]=useState([]);
   const[loading,setLoading]=useState(false);const[err,setErr]=useState('');const[msg,setMsg]=useState('');
   const[sugg,setSugg]=useState(null);const[picked,setPicked]=useState({});
   const[hiddenIndiv,setHiddenIndiv]=useState(0);const[showIndiv,setShowIndiv]=useState(false);
   const[editId,setEditId]=useState(null);const[editForm,setEditForm]=useState({});
   const[showAdd,setShowAdd]=useState(false);
   const[form,setForm]=useState({account_code:'',account_name:'',ic_type:'due_from',counterparty_entity_id:'',counterparty_node_id:'',is_external:false,notes:''});
-  const[gEdit,setGEdit]=useState(null);// {id,name,notes,entity_ids:[]}
   const[companies,setCompanies]=useState([]);
   const[people,setPeople]=useState([]);
   // Sorted by the name shown, not by the entity code the API sorts on — see the
@@ -6465,9 +6456,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
     setLoading(true);setErr('');
     try{setRows(await api.getIcMappings({entity_id:eid}));}catch(e){setErr(e.message);}finally{setLoading(false);}
   },[eid]);
-  const loadGroups=useCallback(async()=>{try{setGroups(await api.getIcGroups());}catch(e){setErr(e.message);}},[]);
   useEffect(()=>{loadRows();},[loadRows]);
-  useEffect(()=>{loadGroups();},[loadGroups]);
   useEffect(()=>{loadCompanies();},[loadCompanies]);
   useEffect(()=>{loadPeople();},[loadPeople]);
 
@@ -6515,17 +6504,6 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const del=async r=>{if(!confirm('Remove the mapping for '+r.account_code+' '+(r.account_name||'')+'?'))return;
     try{await api.deleteIcMapping(r.id);loadRows();}catch(e){setErr(e.message);}};
 
-  const saveGroup=async()=>{
-    if(!gEdit||!gEdit.name.trim()){setErr('Group name is required.');return;}
-    if(!gEdit.entity_ids.length){setErr('Pick at least one entity for the group.');return;}
-    try{
-      if(gEdit.id)await api.updateIcGroup(gEdit.id,{name:gEdit.name,notes:gEdit.notes||null,entity_ids:gEdit.entity_ids});
-      else await api.createIcGroup({name:gEdit.name,notes:gEdit.notes||null,entity_ids:gEdit.entity_ids});
-      setGEdit(null);setErr('');loadGroups();
-    }catch(e){setErr(e.message);}
-  };
-  const delGroup=async g=>{if(!confirm('Delete the group "'+g.name+'"? Mappings are not affected.'))return;
-    try{await api.deleteIcGroup(g.id);loadGroups();}catch(e){setErr(e.message);}};
 
   // Counterparty = a CloudLedger entity, a registered company (a name on the org
   // charts with no ledger here), or "external". Encoded as 'e<id>' / 'n<id>' /
@@ -6569,7 +6547,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         <div style={S.sub}>Tells the reconciliation which account faces which entity. Account names are only a suggestion — a person confirms every row.</div></div></div>
 
     <div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
-      {[['mappings','Account mappings'],['companies','Companies ('+offLedgerCompanies.length+')'],['groups','Groups ('+groups.length+')']].map(([k,l])=>
+      {[['mappings','Account mappings'],['companies','Companies ('+offLedgerCompanies.length+')']].map(([k,l])=>
         <button key={k} onClick={()=>{setTab(k);setErr('');setMsg('');}} style={{background:'none',border:'none',borderBottom:'2px solid '+(tab===k?T.accent:'transparent'),color:tab===k?T.accent:T.textMuted,fontWeight:tab===k?700:500,fontSize:13,padding:'9px 16px',cursor:'pointer',marginBottom:-1}}>{l}</button>)}</div>
 
     {err&&<div style={{...S.card,borderColor:T.red+'40',padding:14}}><div style={S.err}>{err}</div></div>}
@@ -6709,39 +6687,6 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         {companies.filter(c=>c.entity_id!=null).length} more compan{companies.filter(c=>c.entity_id!=null).length===1?'y is':'ies are'} recorded on the Org Structure page and backed by a CloudLedger entity, so they are offered under “CloudLedger entities” instead.</div>}
     </>}
 
-    {tab==='groups'&&<>
-      <div style={{marginBottom:16,color:T.textMuted,fontSize:13}}>
-        A group is the set of entities being consolidated. It is what decides elimination: a balance between two members eliminates; a balance facing anyone else is tagged <IcBadge kind="warn">no elim</IcBadge> and stays on the consolidated statements.
-        {canEdit&&<button style={{...S.btnP,marginLeft:12}} onClick={()=>{setGEdit({name:'',notes:'',entity_ids:[]});setErr('');}}>+ New group</button>}</div>
-
-      {gEdit&&<div style={{...S.card,borderColor:T.green+'40'}}>
-        <div style={S.row}>
-          <div style={{...S.col,flex:2}}><label style={S.label}>Group name</label>
-            <input style={S.input} value={gEdit.name} onChange={e=>setGEdit(g=>({...g,name:e.target.value}))} placeholder='County Line Rail Fund I'/></div>
-          <div style={{...S.col,flex:3}}><label style={S.label}>Notes</label>
-            <input style={S.input} value={gEdit.notes||''} onChange={e=>setGEdit(g=>({...g,notes:e.target.value}))} placeholder='(optional)'/></div></div>
-        <label style={S.label}>Entities in the group ({gEdit.entity_ids.length})</label>
-        <div style={{maxHeight:260,overflowY:'auto',border:'1px solid '+T.border,borderRadius:T.radiusXs,padding:'8px 12px',marginBottom:12,display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(260px,1fr))',gap:'2px 12px'}}>
-          {entityOpts.map(x=><label key={x.id} style={{display:'flex',alignItems:'center',gap:8,padding:'4px 0',cursor:'pointer',fontSize:12.5}}>
-            <input type='checkbox' style={S.checkbox} checked={gEdit.entity_ids.includes(x.id)}
-              onChange={e=>setGEdit(g=>({...g,entity_ids:e.target.checked?[...g.entity_ids,x.id]:g.entity_ids.filter(i=>i!==x.id)}))}/>
-            <span>{x.name}</span></label>)}</div>
-        <div style={{display:'flex',gap:8}}>
-          <button style={S.btnP} onClick={saveGroup}>{gEdit.id?'Save group':'Create group'}</button>
-          <button style={S.btnS} onClick={()=>{setGEdit(null);setErr('');}}>Cancel</button></div></div>}
-
-      {groups.length===0&&!gEdit?<IcEmpty>No groups yet. Create one to run the reconciliation.</IcEmpty>
-      :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
-        <th style={S.th}>Group</th><th style={S.th}>Entities</th><th style={S.th}>Notes</th>{canEdit&&<th style={{...S.th,width:110}}>Actions</th>}</tr></thead>
-      <tbody>{groups.map(g=><tr key={g.id}>
-        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{g.name}</td>
-        <td style={{...S.td,whiteSpace:'normal'}}>{g.members.map(m=>m.name).join(', ')||<span style={{color:T.textDim}}>none</span>}</td>
-        <td style={{...S.td,color:T.textMuted}}>{g.notes||''}</td>
-        {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}>
-          <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{setGEdit({id:g.id,name:g.name,notes:g.notes||'',entity_ids:g.members.map(m=>m.entity_id)});setErr('');}}>Edit</button>
-          <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={()=>delGroup(g)}>x</button></div></td>}</tr>)}
-      </tbody></table></div>}
-    </>}
   </div>);
 }
 
