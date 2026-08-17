@@ -670,7 +670,7 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   const accounts = db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ? ORDER BY code').all(eid);
 
   const out = [];
-  let skippedOther = 0, skippedShellCapital = 0;
+  let skippedOther = 0, skippedShellCapital = 0, skippedZero = 0;
   for (const a of accounts) {
     if (mapped.has(String(a.code))) continue;
     const parsed = parseAccountName(a.name);
@@ -682,8 +682,14 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
     // names an expense account like a receivable.
     if (!parsed || isPnlAccount(a.type, a.code)) { skippedOther++; continue; }
     if (shell && parsed.ic_type === 'contributed_capital') { skippedShellCapital++; continue; }
-    const match = matchCompany(parsed.label, entities, companies);
     const bal = balByCode.get(String(a.code));
+    // A zero balance has nothing for a counterparty ledger to disagree with.
+    // Mapping one changes no reconciliation, so it is not work — and on Banyan
+    // Residential it was 38 of them, which is what made this list look full
+    // when there was nothing in it to do. Same rule the reconciliation's own
+    // "Not mapped yet" has always applied.
+    if (Math.abs(bal ? Number(bal.balance) || 0 : 0) < DEFAULT_TOLERANCE) { skippedZero++; continue; }
+    const match = matchCompany(parsed.label, entities, companies);
     const row = {
       entity_id: eid,
       account_code: String(a.code),
@@ -713,11 +719,11 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
     shell_entity: shell,
     as_of: as_of || null,
     count: out.length,
-    with_balance: out.filter(r => Math.abs(r.balance) >= DEFAULT_TOLERANCE).length,
     // Reported, not silently dropped — the page says why an account someone
     // went looking for is not in the list.
     skipped_other: skippedOther,
     skipped_shell_capital: skippedShellCapital,
+    skipped_zero_balance: skippedZero,
     accounts: out,
   };
 }

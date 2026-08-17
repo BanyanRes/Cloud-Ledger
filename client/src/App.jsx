@@ -6454,7 +6454,6 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
   const[data,setData]=useState(null);
   const[loading,setLoading]=useState(false);
   const[q,setQ]=useState('');
-  const[withBal,setWithBal]=useState(true);
   const[mapping,setMapping]=useState(null);
 
   const load=useCallback(async()=>{
@@ -6472,7 +6471,6 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
 
   const n=q.trim().toLowerCase();
   const shown=(data?data.accounts:[]).filter(a=>{
-    if(withBal&&Math.abs(a.balance)<0.005)return false;
     if(!n)return true;
     return String(a.account_code).toLowerCase().includes(n)
       ||String(a.account_name||'').toLowerCase().includes(n)
@@ -6490,32 +6488,27 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
       <span style={{color:T.textDim,fontSize:11.5}} title='These are the only balances a counterparty ledger states back, so they are the only ones the reconciliation can match.'>
         Due from / Due to · Investment / Contributed capital only</span>
       {data&&data.count>shown.length&&<span style={{color:T.textDim,fontSize:11.5}}>
-        · {data.count-shown.length} more hidden by the filters</span>}
+        · {data.count-shown.length} more hidden by the search</span>}
+      {data&&data.skipped_zero_balance>0&&<span style={{color:T.textDim,fontSize:11.5}}
+        title='A zero balance has nothing for a counterparty ledger to disagree with, so mapping it would change no reconciliation.'>
+        · {data.skipped_zero_balance} at zero not listed</span>}
       {data&&data.shell_entity&&<IcBadge kind="info">shell entity — contributed capital left out</IcBadge>}
       <IcSearch value={q} onChange={setQ} placeholder='Account code or name…' width={220}/>
-      <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.textMuted,cursor:'pointer'}}>
-        <input type='checkbox' style={S.checkbox} checked={withBal} onChange={e=>setWithBal(e.target.checked)}/>
-        only with a balance</label>
       <button style={{...S.btnGhost,fontSize:12,marginLeft:'auto'}} onClick={load} disabled={loading}>
         {loading?'Loading…':'Refresh'}</button></div>
 
     {loading&&!data?<div style={{textAlign:'center',padding:30,color:T.textMuted}}>Reading the chart of accounts…</div>
     :!data||data.count===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
-      Every due from / due to, investment and contributed-capital account on {entityName||'this entity'} is mapped.
-      {data&&data.skipped_other>0&&<div style={{fontSize:11.5,marginTop:6}}>
-        {data.skipped_other} other account{data.skipped_other===1?'':'s'} on this entity {data.skipped_other===1?'is':'are'} not
-        the kind the reconciliation matches, so {data.skipped_other===1?'it is':'they are'} not listed.</div>}</div>
+      <b style={{color:T.textBright}}>Nothing here needs mapping.</b><br/>
+      <span style={{fontSize:12}}>Every due from / due to, investment and contributed-capital account
+      on {entityName||'this entity'} that carries a balance is mapped.</span>
+      {data&&(data.skipped_zero_balance>0||data.skipped_other>0)&&<div style={{fontSize:11.5,marginTop:8}}>
+        {data.skipped_zero_balance>0&&<div>{data.skipped_zero_balance} unmapped account{data.skipped_zero_balance===1?'':'s'} sit
+          {data.skipped_zero_balance===1?'s':''} at a zero balance — nothing to reconcile, so nothing to map.</div>}
+        {data.skipped_other>0&&<div>{data.skipped_other} other account{data.skipped_other===1?'':'s'} {data.skipped_other===1?'is':'are'} not
+          the kind the reconciliation matches.</div>}</div>}</div>
     :shown.length===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
-      {n
-        ? <>No unmapped account matches “{q}”. {data.count} {data.count===1?'is':'are'} unmapped in total.</>
-        : withBal
-        ? <><b style={{color:T.textBright}}>Nothing here needs mapping right now.</b><br/>
-            <span style={{fontSize:12}}>All {data.count} unmapped account{data.count===1?'':'s'} on {entityName||'this entity'} carr{data.count===1?'ies':'y'} a
-            {' '}zero balance, so {data.count===1?'it has':'they have'} nothing for a counterparty ledger to disagree with.
-            {' '}Mapping {data.count===1?'it':'them'} would change no reconciliation.</span><br/>
-            <button style={{...S.link,marginTop:8}} onClick={()=>setWithBal(false)}>
-              List them anyway ({data.count})</button></>
-        : <>No unmapped account matches these filters.</>}</div>
+      No unmapped account matches “{q}”. {data.count} {data.count===1?'is':'are'} unmapped in total.</div>
     :<div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(300px, calc(100vh - 460px))'}}>
       <table style={S.table}><thead><tr>
         <th style={S.th}>Account</th><th style={S.th}>Type</th><th style={S.thR}>Balance</th>
