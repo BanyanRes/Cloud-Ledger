@@ -1476,16 +1476,15 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       // column gets one consistent width that still fits fund-scale figures.
       const GUTTER = 12;
       const RULE_MIN_W = 34;
-      let widestCell = 0;
-      (cells || []).forEach(c => {
-        if (c == null || c === '') return;
-        const w = font.widthOfTextAtSize(String(c), FS.row);
-        if (w > widestCell) widestCell = w;
-      });
-      const ruleSpan = Math.min(
-        Math.max(RULE_MIN_W, ruleBoxW - GUTTER),
-        Math.max(RULE_MIN_W, widestCell + 8),
-      );
+      // UNIFORM rule width for every subtotal/total row, so the underlines line
+      // up vertically column-to-column across the whole statement (CLA/Jimmy
+      // 8/17). The old behavior sized each rule to that ROW's widest value, so a
+      // small-number row (e.g. "Total Other Development", 10,735.54) drew shorter
+      // rules than a big-number row ("Total Other Assets", 2,000,289.13) and the
+      // two didn't align. Width is the numeric column box minus a gutter, so
+      // adjacent columns still read as separate underlines rather than one
+      // continuous line across the row.
+      const ruleSpan = Math.max(RULE_MIN_W, ruleBoxW - GUTTER);
       const drawRule = (yy) => {
         if (colRules) {
           cols.forEach((cx) => {
