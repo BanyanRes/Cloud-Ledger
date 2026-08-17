@@ -6727,8 +6727,11 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
                 <input style={{...S.inputSm,width:270,borderStyle:'dashed',borderColor:T.accent}}
                   value={st.acct!=null?st.acct:(r.suggested_new.account_code+' '+r.suggested_new.account_name)}
                   onChange={e=>setSt(r,{mode:'new',acct:e.target.value})}/>
-                <IcBadge kind="info">will be created</IcBadge>
-                <button style={S.link} onClick={()=>setSt(r,{mode:'pick'})}>pick existing…</button></div>
+                <IcBadge kind="info">will be created when confirmed</IcBadge>
+                <button style={S.link} onClick={()=>setSt(r,{mode:'pick'})}>pick existing…</button>
+                <div style={{flexBasis:'100%',fontSize:11,color:T.textDim}}>
+                  This account does not exist yet. Confirm adds it to the counterparty{'’'}s chart of accounts
+                  (at a zero balance) and saves the mapping in one step.</div></div>
             :mode==='existing'?<div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
                 <span style={{display:'inline-flex',gap:6,alignItems:'center',border:'1px solid '+T.border,borderRadius:7,padding:'6px 10px'}}>
                   <span style={{fontWeight:600,color:T.textBright}}>{r.suggested_existing.account_code}</span>
