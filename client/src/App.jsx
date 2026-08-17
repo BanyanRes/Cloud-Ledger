@@ -6354,16 +6354,20 @@ function IcMapForm({entityId,acct,entityOpts,companies,onCompanyAdded,onSaved,on
   </div>;
 }
 
-// Every account on the entity that carries no mapping, whether or not the name
-// parser can read it. "Suggest from account names" can only offer what it
-// recognises; an account called "Loan receivable - CLIP" or "Advances - Buna"
-// faces another entity just as much and is invisible to that list. This is the
-// list you open when the account you are looking for is not in the suggestions.
+// The unmapped worklist: every account on the entity that the reconciliation
+// COULD match but no mapping covers yet. Only the four kinds it can match are
+// here — due from, due to, investment, contributed capital — because those are
+// the only balances a counterparty ledger states back. On a shell entity,
+// contributed capital is left out as well: it is the fund's money passing
+// through, and reconciling it only ever produces a one-sided row.
+//
+// This is not the same list as "Suggest from account names": that one skips
+// individuals and pre-resolves matches, and it will not show you an account with
+// no balance or one whose counterparty it could not work out.
 function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,onCompanyAdded,onMapped,onMsg,onErr}){
   const[data,setData]=useState(null);
   const[loading,setLoading]=useState(false);
   const[q,setQ]=useState('');
-  const[icOnly,setIcOnly]=useState(false);
   const[withBal,setWithBal]=useState(true);
   const[mapping,setMapping]=useState(null);
 
@@ -6378,7 +6382,6 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,on
 
   const n=q.trim().toLowerCase();
   const shown=(data?data.accounts:[]).filter(a=>{
-    if(icOnly&&!a.looks_ic)return false;
     if(withBal&&Math.abs(a.balance)<0.005)return false;
     if(!n)return true;
     return String(a.account_code).toLowerCase().includes(n)
@@ -6391,12 +6394,10 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,on
       display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
       <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>
         Unmapped accounts{data?' ('+shown.length+' of '+data.count+')':''}</span>
-      <span style={{color:T.textDim,fontSize:11.5}} title='An intercompany balance can only sit on the balance sheet. A revenue or expense account has nothing for a counterparty ledger to agree with.'>
-        balance sheet only{data&&data.excluded_pnl>0?' — '+data.excluded_pnl+' P&L account'+(data.excluded_pnl===1?'':'s')+' not shown':''}</span>
+      <span style={{color:T.textDim,fontSize:11.5}} title='These are the only balances a counterparty ledger states back, so they are the only ones the reconciliation can match.'>
+        Due from / Due to · Investment / Contributed capital only</span>
+      {data&&data.shell_entity&&<IcBadge kind="info">shell entity — contributed capital left out</IcBadge>}
       <IcSearch value={q} onChange={setQ} placeholder='Account code or name…' width={220}/>
-      <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.textMuted,cursor:'pointer'}}>
-        <input type='checkbox' style={S.checkbox} checked={icOnly} onChange={e=>setIcOnly(e.target.checked)}/>
-        only names that read as intercompany</label>
       <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.textMuted,cursor:'pointer'}}>
         <input type='checkbox' style={S.checkbox} checked={withBal} onChange={e=>setWithBal(e.target.checked)}/>
         only with a balance</label>
@@ -6405,13 +6406,16 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,on
 
     {loading&&!data?<div style={{textAlign:'center',padding:30,color:T.textMuted}}>Reading the chart of accounts…</div>
     :!data||data.count===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
-      Every account on {entityName||'this entity'} already has a mapping.</div>
+      Every due from / due to, investment and contributed-capital account on {entityName||'this entity'} is mapped.
+      {data&&data.skipped_other>0&&<div style={{fontSize:11.5,marginTop:6}}>
+        {data.skipped_other} other account{data.skipped_other===1?'':'s'} on this entity {data.skipped_other===1?'is':'are'} not
+        the kind the reconciliation matches, so {data.skipped_other===1?'it is':'they are'} not listed.</div>}</div>
     :shown.length===0?<div style={{padding:'22px 16px',textAlign:'center',color:T.textDim}}>
       No unmapped account matches these filters. {data.count} {data.count===1?'is':'are'} unmapped in total.</div>
     :<div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(300px, calc(100vh - 460px))'}}>
       <table style={S.table}><thead><tr>
         <th style={S.th}>Account</th><th style={S.th}>Type</th><th style={S.thR}>Balance</th>
-        <th style={S.th}>What the name reads as</th>{canEdit&&<th style={{...S.th,width:90}}></th>}</tr></thead>
+        <th style={S.th}>Reads as</th>{canEdit&&<th style={{...S.th,width:90}}></th>}</tr></thead>
       <tbody>{shown.map(a=><Fragment key={a.account_code}>
         <tr style={mapping===a.account_code?{background:T.accentDim}:null}>
           <td style={{...S.td,whiteSpace:'normal',minWidth:240}}>
@@ -6421,11 +6425,10 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,on
           <td style={{...S.tdR,width:140,fontWeight:Math.abs(a.balance)>0.005?600:400,
             color:Math.abs(a.balance)>0.005?T.textBright:T.textDim}}>{fmt(a.balance)}</td>
           <td style={{...S.td,whiteSpace:'normal'}}>
-            {a.individual?<IcBadge kind="mute">individual</IcBadge>
-            :a.looks_ic?<><IcBadge kind={(a.counterparty_entity_id||a.counterparty_node_id)?'ok':'mute'}>
-                {IC_TYPE_LABEL[a.ic_type]||a.ic_type}</IcBadge>
-              <span style={{color:T.textDim,fontSize:11,marginLeft:6}}>{a.reason}</span></>
-            :<span style={{color:T.textDim,fontSize:11}}>not an intercompany name — map it by hand if it is one</span>}</td>
+            <IcBadge kind={(a.counterparty_entity_id||a.counterparty_node_id)?'ok':'mute'}>
+              {IC_TYPE_LABEL[a.ic_type]||a.ic_type}</IcBadge>
+            {a.individual&&<span style={{marginLeft:6}}><IcBadge kind="mute">individual</IcBadge></span>}
+            <span style={{color:T.textDim,fontSize:11,marginLeft:6}}>{a.reason}</span></td>
           {canEdit&&<td style={{...S.td,textAlign:'right'}}>
             <button style={{...S.btnGhost,color:T.accent,fontSize:11}}
               onClick={()=>setMapping(mapping===a.account_code?null:a.account_code)}>

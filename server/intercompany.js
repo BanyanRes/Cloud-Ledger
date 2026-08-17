@@ -482,6 +482,20 @@ function suggestMappings(db, entityId, { computeBalances, as_of, includeIndividu
   return { suggestions: out, hidden_individuals: hiddenIndividuals.length, hidden_examples: hiddenIndividuals.slice(0, 5) };
 }
 
+// A shell entity holds no operations — it exists to sit between a fund and the
+// company that owns the asset. Its contributed capital is the fund's money
+// passing through, not a balance any counterparty ledger in CloudLedger states
+// back. Reconciling it produces a permanent one-sided row, so those accounts are
+// left out of the unmapped worklist for shells specifically. Due-from / due-to
+// and investment accounts on a shell are still reconciled normally.
+//
+// `entities.entity_type` is one of development / accounting / shell / operating.
+// The column arrives by migration, so a database restored without it degrades to
+// "not a shell" rather than throwing.
+function isShellEntity(entity) {
+  return String((entity && entity.entity_type) || '').trim().toLowerCase() === 'shell';
+}
+
 // An intercompany balance can only live on the BALANCE SHEET. A revenue or
 // expense account has no balance for a counterparty ledger to agree with, so
 // mapping one would put a row in the reconciliation that can never reconcile —
@@ -518,6 +532,11 @@ function isPnlAccount(type, code) {
 function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   ensureSchema(db);
   const eid = Number(entityId);
+  // SELECT * rather than naming entity_type: the column is added by migration,
+  // and naming a column that does not exist throws instead of degrading.
+  const entity = db.prepare('SELECT * FROM entities WHERE id = ?').get(eid);
+  if (!entity) { const e = new Error('Entity not found'); e.status = 404; throw e; }
+  const shell = isShellEntity(entity);
   const entities = db.prepare('SELECT id, name, code FROM entities').all();
   const companies = listCompanies(db);
   const people = listPeople(db);
@@ -527,13 +546,19 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   const accounts = db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ? ORDER BY code').all(eid);
 
   const out = [];
-  let excludedPnl = 0;
+  let skippedOther = 0, skippedShellCapital = 0;
   for (const a of accounts) {
     if (mapped.has(String(a.code))) continue;
-    // Balance sheet only. Counted rather than silently dropped, so the page can
-    // say why an expense account someone was looking for is not in the list.
-    if (isPnlAccount(a.type, a.code)) { excludedPnl++; continue; }
     const parsed = parseAccountName(a.name);
+    // This list is a RECONCILIATION worklist, not a chart of accounts. Only the
+    // four kinds the reconciliation can match belong in it — due from, due to,
+    // investment, contributed capital. Anything else has no counterparty balance
+    // to agree with, so putting it here would only invite a mapping that can
+    // never reconcile. The P&L test stays as a second guard for a chart that
+    // names an expense account like a receivable.
+    if (!parsed || isPnlAccount(a.type, a.code)) { skippedOther++; continue; }
+    if (shell && parsed.ic_type === 'contributed_capital') { skippedShellCapital++; continue; }
+    const match = matchCompany(parsed.label, entities, companies);
     const bal = balByCode.get(String(a.code));
     const row = {
       entity_id: eid,
@@ -541,40 +566,34 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
       account_name: a.name,
       account_type: a.type || null,
       balance: bal ? round2(bal.balance) : 0,
-      looks_ic: !!parsed,
-      individual: parsed ? (isIndividualInvestor(parsed) || isMarkedPerson(people, parsed.label)) : false,
-      ic_type: parsed ? parsed.ic_type : null,
-      counterparty_label: parsed ? parsed.label : null,
-      counterparty_entity_id: null,
-      counterparty_node_id: null,
-      is_external: 0,
-      confidence: null,
-      reason: null,
-      can_register: false,
+      individual: isIndividualInvestor(parsed) || isMarkedPerson(people, parsed.label),
+      ic_type: parsed.ic_type,
+      counterparty_label: parsed.label,
+      counterparty_entity_id: match.entity_id,
+      counterparty_node_id: match.node_id || null,
+      is_external: match.confidence === 'external' ? 1 : 0,
+      confidence: match.confidence,
+      reason: match.reason,
+      can_register: match.entity_id == null && !match.node_id && match.confidence !== 'external',
     };
-    if (parsed) {
-      const match = matchCompany(parsed.label, entities, companies);
-      row.counterparty_entity_id = match.entity_id;
-      row.counterparty_node_id = match.node_id || null;
-      row.is_external = match.confidence === 'external' ? 1 : 0;
-      row.confidence = match.confidence;
-      row.reason = match.reason;
-      row.can_register = match.entity_id == null && !match.node_id && match.confidence !== 'external';
-    }
     out.push(row);
   }
-  // Recognised accounts first, then by the money they carry. An account nobody
-  // named intercompany, holding nothing, is the least likely to matter.
-  out.sort((a, b) => (Number(b.looks_ic) - Number(a.looks_ic))
-    || (Math.abs(b.balance) - Math.abs(a.balance))
+  // By the money each account carries. A zero-balance shell account is the
+  // least likely to matter, whatever its name says.
+  out.sort((a, b) => (Math.abs(b.balance) - Math.abs(a.balance))
     || a.account_code.localeCompare(b.account_code));
   return {
     entity_id: eid,
+    entity: { id: entity.id, name: entity.name, code: entity.code,
+      entity_type: entity.entity_type || null },
+    shell_entity: shell,
     as_of: as_of || null,
     count: out.length,
-    ic_like: out.filter(r => r.looks_ic && !r.individual).length,
     with_balance: out.filter(r => Math.abs(r.balance) >= DEFAULT_TOLERANCE).length,
-    excluded_pnl: excludedPnl,
+    // Reported, not silently dropped — the page says why an account someone
+    // went looking for is not in the list.
+    skipped_other: skippedOther,
+    skipped_shell_capital: skippedShellCapital,
     accounts: out,
   };
 }
@@ -634,8 +653,9 @@ function reconcileForEntity(db, entityId, opts) {
   const tol = Number(opts.tolerance) > 0 ? Number(opts.tolerance) : DEFAULT_TOLERANCE;
   const { computeBalances, as_of } = opts;
 
-  const entity = db.prepare('SELECT id, name, code FROM entities WHERE id = ?').get(eid);
+  const entity = db.prepare('SELECT * FROM entities WHERE id = ?').get(eid);
   if (!entity) { const e = new Error('Entity not found'); e.status = 404; throw e; }
+  const shell = isShellEntity(entity);
 
   const all = resolveCounterparties(db, listMappings(db, {}));
   const forEntity = all.filter(m => Number(m.entity_id) === eid);
@@ -772,6 +792,9 @@ function reconcileForEntity(db, entityId, opts) {
       if (isPnlAccount(a.type, a.code)) return false;
       const p = parseAccountName(a.name);
       if (!p || !types.includes(p.ic_type)) return false;
+      // A shell entity's contributed capital is the fund's money passing
+      // through, not something a counterparty ledger here states back.
+      if (shell && p.ic_type === 'contributed_capital') return false;
       if (isIndividualInvestor(p) || isMarkedPerson(people, p.label)) return false;
       return Math.abs(amountsFor(balances, eid, a.code)) >= tol;
     })
@@ -1029,6 +1052,7 @@ module.exports = {
   listPeople,
   isMarkedPerson,
   isPnlAccount,
+  isShellEntity,
   resolveCounterparties,
   matchCompany,
   looksIndividual,
