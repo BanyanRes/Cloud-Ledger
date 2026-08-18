@@ -4915,11 +4915,9 @@ function TrailingTwelveMonths({entityId,entityName}){
   const[data,setData]=useState(null);
   const[busy,setBusy]=useState(false);
   const[err,setErr]=useState('');
-  const[analysis,setAnalysis]=useState(null);
-  const[analyzing,setAnalyzing]=useState(false);
-  const[analysisErr,setAnalysisErr]=useState('');
+  const[exporting,setExporting]=useState(false);
   const fmt=n=>{const v=Number(n)||0;const t=Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});return v<0?'('+t+')':(v===0?'-':t);};
-  useEffect(()=>{let cancelled=false;setData(null);setErr('');setAnalysis(null);setAnalysisErr('');
+  useEffect(()=>{let cancelled=false;setData(null);setErr('');
     if(!entityId||!/^\d{4}-\d{2}-\d{2}$/.test(asOf))return;
     setBusy(true);
     api.getTtmPL(entityId,asOf)
@@ -4962,29 +4960,24 @@ function TrailingTwelveMonths({entityId,entityName}){
     line('Net Income (Loss)',data.netIncome.vals,data.netIncome.total,{bold:true,rule:true,dbl:true});
     return rows;
   };
-  const runAnalysis=async()=>{
-    if(!data)return;setAnalyzing(true);setAnalysisErr('');
-    try{const a=await api.analyzeTtmPL(entityId,asOf);if(a)setAnalysis(a);}
-    catch(e){setAnalysisErr(e.message);}finally{setAnalyzing(false);}
-  };
   const rows=buildRows();
   // Download the styled workbook from the server (ExcelJS): comma-formatted
   // amounts, underlined month header, and underlined subtotal/grand-total rows.
   const doExport=async()=>{
     if(!data)return;
-    setErr('');
+    setErr('');setExporting(true);
     try{
-      const out=await api.getTtmPLXlsx(entityId,asOf,analysis);
+      const out=await api.getTtmPLXlsx(entityId,asOf);
       if(!out)return;
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
-    }catch(e){setErr(e.message);}
+    }catch(e){setErr(e.message);}finally{setExporting(false);}
   };
   return(<div>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
       <div><div style={S.h1}>Trailing 12 Months</div><div style={S.sub}>P&amp;L activity by month for the trailing twelve months &middot; {entityName||'this entity'}</div></div>
       <div style={{display:'flex',gap:8,alignItems:'flex-end'}}>
         <div><label style={S.label}>As of date</label><input type='date' value={asOf} onChange={e=>setAsOf(e.target.value)} style={{...S.input,width:160}}/></div>
-        {data&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}
+        {data&&<button style={{...S.btnExport,opacity:exporting?0.6:1}} disabled={exporting} onClick={doExport}>{exporting?'Exporting\u2026':'Export Excel'}</button>}
       </div>
     </div>
     {err&&<div style={S.err}>{err}</div>}
@@ -5011,25 +5004,6 @@ function TrailingTwelveMonths({entityId,entityName}){
         </tbody>
       </table>
     </div>}
-    {data&&(()=>{
-      return(<div style={{...S.card,marginTop:16}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:12,flexWrap:'wrap'}}>
-          <div><div style={S.h2}>Items Needing Attention</div><div style={{fontSize:12,color:T.textMuted,marginTop:2}}>AI review of the trailing-twelve-month trends, in order of importance.</div></div>
-          <button style={{...S.btnP,opacity:analyzing?0.6:1}} disabled={analyzing} onClick={runAnalysis}>{analyzing?'Analyzing…':analysis?'Re-analyze with Claude':'Analyze with Claude'}</button>
-        </div>
-        {analysisErr&&<div style={{...S.err,marginTop:12}}>{analysisErr}</div>}
-        {!analysis&&!analyzing&&!analysisErr&&<div style={{fontSize:13,color:T.textMuted,marginTop:12}}>Click “Analyze with Claude” to generate a review of items needing attention. It reads the 12-month P&amp;L and lists the accounts worth a closer look.</div>}
-        {analyzing&&<div style={{fontSize:13,color:T.textMuted,marginTop:12}}>Claude is reviewing the trailing twelve months…</div>}
-        {analysis&&<div style={{marginTop:12}}>
-          {analysis.summary&&<div style={{fontSize:13,color:T.text,marginBottom:analysis.findings.length?14:0,lineHeight:1.5}}>{analysis.summary}</div>}
-          {analysis.findings.length>0?analysis.findings.map((it,i)=>(<div key={i} style={{display:'flex',gap:10,alignItems:'flex-start',padding:'9px 0',borderTop:i?'1px solid '+T.border:'none'}}>
-            <span style={{flexShrink:0,width:20,textAlign:'right',fontSize:13,fontWeight:700,color:T.textDim}}>{i+1}.</span>
-            <div style={{fontSize:13,color:T.text,lineHeight:1.5}}><span style={{fontWeight:600,color:T.textBright}}>{it.account||it.title}</span>{(it.account||it.title)&&(it.reason||it.detail)?' — ':''}{it.reason||it.detail}</div>
-          </div>)):<div style={{fontSize:13,color:T.green||'#2a9d5a',marginTop:4}}>Nothing flagged for this period.</div>}
-          <div style={{fontSize:11,color:T.textDim,marginTop:12,fontStyle:'italic'}}>Generated by Claude · review before relying on it.</div>
-        </div>}
-      </div>);
-    })()}
   </div>);
 }
 

@@ -159,12 +159,14 @@ export const api = {
     if (!res.ok) throw new Error(data.error || 'Analysis failed');
     return data;
   },
-  getTtmPLXlsx: async (eid, asOf, analysis) => {
+  // The server generates the "Items Needing Attention" analysis itself and
+  // appends it to the workbook — no client-side analysis payload is sent.
+  getTtmPLXlsx: async (eid, asOf) => {
     const token = getToken();
     const res = await fetch(API_BASE + '/entities/' + eid + '/ttm-pl.xlsx', {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
-      body: JSON.stringify({ as_of: asOf, analysis: analysis || null }),
+      body: JSON.stringify({ as_of: asOf }),
     });
     if (res.status === 401) { clearToken(); window.location.reload(); return null; }
     const ctype = res.headers.get('content-type') || '';

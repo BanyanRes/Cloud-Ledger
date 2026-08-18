@@ -8710,6 +8710,113 @@ app.get('/api/entities/:eid/ttm-pl', auth, requireEntityAccess(), requireRole('A
   }
 });
 
+// Trailing 12 Months — Claude-powered "Items Needing Attention" analysis.
+// Takes an already-built TTM P&L matrix and returns { generatedBy, lastMonthLabel,
+// summary, findings[], hasFindings }. Throws on a missing key or an API/parse
+// failure so callers can decide whether to surface or swallow the error.
+async function buildTtmAnalysis(d, entityName, asOf) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    const e = new Error('Analysis is not configured (ANTHROPIC_API_KEY missing on the server).');
+    e.code = 'NO_API_KEY';
+    throw e;
+  }
+
+  // Compact, model-friendly rendering of the matrix: one line per account with
+  // its 12 monthly values and the trailing-12 total, grouped by section.
+  const monthLabels = d.meta.months.map(m => m.label);
+  const fmtRow = (name, vals, total) => name + ' | ' + vals.map(v => Math.round(Number(v) || 0)).join(', ') + ' | TTM: ' + Math.round(Number(total) || 0);
+  const lines = [];
+  lines.push('Months (oldest to newest): ' + monthLabels.join(', '));
+  lines.push('');
+  lines.push('REVENUE:');
+  d.revenue.forEach(l => lines.push('  ' + fmtRow(l.name, l.vals, l.total)));
+  lines.push('  ' + fmtRow('TOTAL REVENUE', d.totRev.vals, d.totRev.total));
+  if (d.hasCogs) {
+    lines.push('COST OF REVENUE:');
+    d.cogs.forEach(l => lines.push('  ' + fmtRow(l.name, l.vals, l.total)));
+    lines.push('  ' + fmtRow('TOTAL COST OF REVENUE', d.totCogs.vals, d.totCogs.total));
+    lines.push('  ' + fmtRow('GROSS PROFIT', d.grossProfit.vals, d.grossProfit.total));
+  }
+  lines.push('OPERATING EXPENSES:');
+  d.opexGroups.forEach(g => {
+    lines.push(' ' + g.title + ':');
+    g.lines.forEach(l => lines.push('    ' + fmtRow(l.name, l.vals, l.total)));
+    lines.push('    ' + fmtRow('Total ' + g.title, g.subtotal.vals, g.subtotal.total));
+  });
+  lines.push('  ' + fmtRow('TOTAL OPERATING EXPENSES', d.totOpex.vals, d.totOpex.total));
+  lines.push('  ' + fmtRow('NET INCOME (LOSS)', d.netIncome.vals, d.netIncome.total));
+  const matrixText = lines.join('\n');
+
+  const instruction =
+    'You are a senior accountant reviewing a Trailing 12 Months profit-and-loss report for ' + entityName +
+    ', ending ' + asOf + '. Each line shows 12 monthly amounts (oldest to newest) then the trailing-12-month total. ' +
+    'Revenue and expenses are shown as positive magnitudes; Net Income is revenue minus expenses.\n\n' +
+    'Identify the items that NEED ATTENTION — focus on UNFAVORABLE things a CAO would want flagged: ' +
+    'expenses trending or spiking up, revenue declining or dropping to zero, unusual one-off movements, ' +
+    'volatile lines, negative gross profit or net losses, and anything that looks like a possible posting gap ' +
+    '(e.g. a normally-active account suddenly at zero in the latest month). Ignore trivially small amounts. ' +
+    'Do NOT flag favorable movements as problems (e.g. expenses going down or revenue going up are good).\n\n' +
+    'Return ONLY a JSON object, no prose, no markdown fences, in exactly this shape:\n' +
+    '{"summary": string, "findings": [{"account": string, "reason": string}]}\n' +
+    '- summary: 1-2 sentence plain-English overview of the entity\'s trailing-12 performance and the main concern.\n' +
+    '- findings: the items needing attention, ORDERED BY IMPORTANCE (most important/material first). ' +
+    'Each finding has "account" (the account or line-item name exactly as shown) and "reason" (one concise ' +
+    'sentence saying why it needs attention, citing the specific numbers/months). ' +
+    'Aim for the 3-8 most material items; return an empty array if nothing warrants attention.\n\n' +
+    'THE REPORT:\n' + matrixText;
+
+  const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1500,
+      messages: [{ role: 'user', content: [{ type: 'text', text: instruction }] }],
+    }),
+  });
+  if (!apiRes.ok) {
+    const t = await apiRes.text();
+    const e = new Error('Analysis failed (Anthropic ' + apiRes.status + '): ' + t.slice(0, 300));
+    e.code = 'ANTHROPIC_ERROR';
+    e.status = apiRes.status;
+    throw e;
+  }
+  const data = await apiRes.json();
+  const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+  let clean = text.replace(/```json|```/g, '').trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(clean);
+  } catch (firstErr) {
+    const start = clean.indexOf('{');
+    if (start === -1) throw firstErr;
+    let depth = 0, end = -1, inStr = false, esc = false;
+    for (let i = start; i < clean.length; i++) {
+      const ch = clean[i];
+      if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; }
+      else if (ch === '"') inStr = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}') { depth--; if (depth === 0) { end = i; break; } }
+    }
+    if (end === -1) throw firstErr;
+    parsed = JSON.parse(clean.slice(start, end + 1));
+  }
+  const findings = Array.isArray(parsed.findings) ? parsed.findings.map(f => {
+    const account = String(f.account || f.title || '').slice(0, 200);
+    const reason = String(f.reason || f.detail || '').slice(0, 500);
+    // title/detail retained for the Excel export and older clients.
+    return { account, reason, title: account, detail: reason };
+  }) : [];
+  return {
+    generatedBy: 'claude-haiku-4-5-20251001',
+    lastMonthLabel: monthLabels[monthLabels.length - 1] || '',
+    summary: String(parsed.summary || '').slice(0, 1000),
+    findings,
+    hasFindings: findings.length > 0,
+  };
+}
+
 // Trailing 12 Months P&L — styled Excel export (12 monthly columns + Total).
 // Amounts are comma-styled; the month-header row and every subtotal/grand-total
 // row are underlined (bottom border). Built with ExcelJS server-side because the
@@ -8719,7 +8826,6 @@ app.post('/api/entities/:eid/ttm-pl.xlsx', auth, requireEntityAccess(), requireR
     const eid = req.params.eid;
     const asOf = (req.body && req.body.as_of) || (req.query && req.query.as_of);
     if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
-    const clientAnalysis = (req.body && req.body.analysis) || null;
     const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
     const entityName = ent ? ent.name : ('Entity ' + eid);
     const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
@@ -8802,8 +8908,16 @@ app.post('/api/entities/:eid/ttm-pl.xlsx', auth, requireEntityAccess(), requireR
     emit('Total Operating Expenses', d.totOpex.vals, d.totOpex.total, { bold: true, underline: 'single' });
     // Net Income (grand total) — double underline.
     emit('Net Income (Loss)', d.netIncome.vals, d.netIncome.total, { bold: true, underline: 'double' });
-    // -- Analysis: Items Needing Attention (Claude, if supplied by client) ------
-    const a = clientAnalysis;
+    // -- Analysis: Items Needing Attention (generated automatically) -----------
+    // The on-screen section was removed; the export now always asks Claude for
+    // the review and appends it below the report. A failure here must not break
+    // the export, so it is swallowed and the workbook ships without the block.
+    let a = null;
+    try {
+      a = await buildTtmAnalysis(d, entityName, asOf);
+    } catch (e) {
+      console.error('TTM export analysis skipped: ' + e.message);
+    }
     if (a && (a.summary || (a.findings && a.findings.length))) {
       const DASH = String.fromCharCode(8212);  // em dash
       r += 1; // blank spacer row
@@ -8865,105 +8979,14 @@ app.post('/api/entities/:eid/ttm-pl/analyze', auth, requireEntityAccess(), requi
     const eid = req.params.eid;
     const asOf = (req.body && req.body.as_of) || (req.query && req.query.as_of);
     if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
-    const apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) return res.status(503).json({ error: 'Analysis is not configured (ANTHROPIC_API_KEY missing on the server).' });
-
     const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
     const entityName = ent ? ent.name : ('Entity ' + eid);
     const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
     const d = await financials.buildTtmPL(getBalances, { asOf, entityName });
-
-    // Compact, model-friendly rendering of the matrix: one line per account with
-    // its 12 monthly values and the trailing-12 total, grouped by section.
-    const monthLabels = d.meta.months.map(m => m.label);
-    const fmtRow = (name, vals, total) => name + ' | ' + vals.map(v => Math.round(Number(v) || 0)).join(', ') + ' | TTM: ' + Math.round(Number(total) || 0);
-    const lines = [];
-    lines.push('Months (oldest to newest): ' + monthLabels.join(', '));
-    lines.push('');
-    lines.push('REVENUE:');
-    d.revenue.forEach(l => lines.push('  ' + fmtRow(l.name, l.vals, l.total)));
-    lines.push('  ' + fmtRow('TOTAL REVENUE', d.totRev.vals, d.totRev.total));
-    if (d.hasCogs) {
-      lines.push('COST OF REVENUE:');
-      d.cogs.forEach(l => lines.push('  ' + fmtRow(l.name, l.vals, l.total)));
-      lines.push('  ' + fmtRow('TOTAL COST OF REVENUE', d.totCogs.vals, d.totCogs.total));
-      lines.push('  ' + fmtRow('GROSS PROFIT', d.grossProfit.vals, d.grossProfit.total));
-    }
-    lines.push('OPERATING EXPENSES:');
-    d.opexGroups.forEach(g => {
-      lines.push(' ' + g.title + ':');
-      g.lines.forEach(l => lines.push('    ' + fmtRow(l.name, l.vals, l.total)));
-      lines.push('    ' + fmtRow('Total ' + g.title, g.subtotal.vals, g.subtotal.total));
-    });
-    lines.push('  ' + fmtRow('TOTAL OPERATING EXPENSES', d.totOpex.vals, d.totOpex.total));
-    lines.push('  ' + fmtRow('NET INCOME (LOSS)', d.netIncome.vals, d.netIncome.total));
-    const matrixText = lines.join('\n');
-
-    const instruction =
-      'You are a senior accountant reviewing a Trailing 12 Months profit-and-loss report for ' + entityName +
-      ', ending ' + asOf + '. Each line shows 12 monthly amounts (oldest to newest) then the trailing-12-month total. ' +
-      'Revenue and expenses are shown as positive magnitudes; Net Income is revenue minus expenses.\n\n' +
-      'Identify the items that NEED ATTENTION — focus on UNFAVORABLE things a CAO would want flagged: ' +
-      'expenses trending or spiking up, revenue declining or dropping to zero, unusual one-off movements, ' +
-      'volatile lines, negative gross profit or net losses, and anything that looks like a possible posting gap ' +
-      '(e.g. a normally-active account suddenly at zero in the latest month). Ignore trivially small amounts. ' +
-      'Do NOT flag favorable movements as problems (e.g. expenses going down or revenue going up are good).\n\n' +
-      'Return ONLY a JSON object, no prose, no markdown fences, in exactly this shape:\n' +
-      '{"summary": string, "findings": [{"account": string, "reason": string}]}\n' +
-      '- summary: 1-2 sentence plain-English overview of the entity\'s trailing-12 performance and the main concern.\n' +
-      '- findings: the items needing attention, ORDERED BY IMPORTANCE (most important/material first). ' +
-      'Each finding has "account" (the account or line-item name exactly as shown) and "reason" (one concise ' +
-      'sentence saying why it needs attention, citing the specific numbers/months). ' +
-      'Aim for the 3-8 most material items; return an empty array if nothing warrants attention.\n\n' +
-      'THE REPORT:\n' + matrixText;
-
-    const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1500,
-        messages: [{ role: 'user', content: [{ type: 'text', text: instruction }] }],
-      }),
-    });
-    if (!apiRes.ok) {
-      const t = await apiRes.text();
-      return res.status(502).json({ error: 'Analysis failed (Anthropic ' + apiRes.status + '): ' + t.slice(0, 300) });
-    }
-    const data = await apiRes.json();
-    const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
-    let clean = text.replace(/```json|```/g, '').trim();
-    let parsed;
-    try {
-      parsed = JSON.parse(clean);
-    } catch (firstErr) {
-      const start = clean.indexOf('{');
-      if (start === -1) throw firstErr;
-      let depth = 0, end = -1, inStr = false, esc = false;
-      for (let i = start; i < clean.length; i++) {
-        const ch = clean[i];
-        if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; }
-        else if (ch === '"') inStr = true;
-        else if (ch === '{') depth++;
-        else if (ch === '}') { depth--; if (depth === 0) { end = i; break; } }
-      }
-      if (end === -1) throw firstErr;
-      parsed = JSON.parse(clean.slice(start, end + 1));
-    }
-    const findings = Array.isArray(parsed.findings) ? parsed.findings.map(f => {
-      const account = String(f.account || f.title || '').slice(0, 200);
-      const reason = String(f.reason || f.detail || '').slice(0, 500);
-      // title/detail retained for the Excel export and older clients.
-      return { account, reason, title: account, detail: reason };
-    }) : [];
-    res.json({
-      generatedBy: 'claude-haiku-4-5-20251001',
-      lastMonthLabel: monthLabels[monthLabels.length - 1] || '',
-      summary: String(parsed.summary || '').slice(0, 1000),
-      findings,
-      hasFindings: findings.length > 0,
-    });
+    res.json(await buildTtmAnalysis(d, entityName, asOf));
   } catch (e) {
+    if (e.code === 'NO_API_KEY') return res.status(503).json({ error: e.message });
+    if (e.code === 'ANTHROPIC_ERROR') return res.status(502).json({ error: e.message });
     res.status(500).json({ error: 'Analysis error: ' + e.message });
   }
 });
