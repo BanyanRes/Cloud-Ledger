@@ -1070,6 +1070,46 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
     });
   }
 
+  // ── External mappings whose party has since gained an uploaded TB ──
+  // "External" was the truth when nothing answered for the party. The moment
+  // its company is registered and a trial balance is uploaded, there IS a
+  // ledger to compare against — so the mapping comes back as work, pre-answered
+  // from the TB, and one Confirm re-points it at the TB line. A mapping the
+  // user leaves unconfirmed simply stays external.
+  for (const m of listMappings(db, { entity_id: eid })) {
+    if (!m.is_external) continue;
+    const b = balByCode.get(String(m.account_code));
+    const balance = b ? round2(b.balance) : 0;
+    if (Math.abs(balance) < DEFAULT_TOLERANCE) { skippedZero++; continue; }
+    const parsed = parseAccountName(m.account_name || '');
+    const label = (parsed && parsed.label) || m.notes || null;
+    if (!label) continue;
+    const match = matchCompany(label, entities, companies);
+    if (match.entity_id != null || !match.node_id) continue; // CL entities never land here; unregistered stays external
+    const tb = externalTbFor(db, match.node_id, as_of);
+    if (!tb) continue;
+    out.push({
+      source: 'mapping',
+      mapping_id: m.id,
+      entity_id: eid,
+      account_code: String(m.account_code),
+      account_name: m.account_name,
+      account_type: b ? b.type : null,
+      balance,
+      individual: false,
+      ic_type: m.ic_type || (parsed && parsed.ic_type) || 'due_from',
+      counterparty_label: label,
+      counterparty_entity_id: null,
+      counterparty_name: null,
+      counterparty_node_id: match.node_id,
+      is_external: 0,
+      confidence: 'tb',
+      reason: 'was external — ' + label + ' now has an uploaded TB',
+      can_register: false,
+      notes: m.notes || null,
+    });
+  }
+
   // ── Pre-answer each row from the counterparty's own ledger ──
   // Best EXISTING account first: one whose name resolves back to us, then the
   // closest offsetting balance. A near miss by amount alone is NOT offered —
