@@ -5288,6 +5288,18 @@ function ReconciliationReportModal({entityId,rec,onClose}){
 }
 
 // ═══ Bank Reconciliation ═══
+// A statement ending balance that was TYPED as 0.00 is a real balance, not a
+// missing one: an account that sat at zero all month still has to be reconciled
+// and signed off. So the ending-balance box is parsed to null when it is blank
+// (or unparseable) and to a number otherwise — blank is what blocks finalizing,
+// never the value zero. Tolerant of "$", thousands commas and (parentheses) for
+// negatives, which is how a balance arrives when pasted off a statement.
+function parseStmtBalance(s){
+  const t=String(s??'').trim(); if(!t) return null;
+  const neg=/^\(.*\)$/.test(t);
+  const n=parseFloat(t.replace(/[()$,\s]/g,''));
+  return Number.isFinite(n)?(neg?-Math.abs(n):n):null;
+}
 function BankReconciliation({entityId,user,canEdit=true}){const[accounts,setAccounts]=useState([]);const[entries,setEntries]=useState([]);const[recs,setRecs]=useState([]);
   const[view,setView]=useState('list');const[selAcct,setSelAcct]=useState('');const[stmtDate,setStmtDate]=useState(today());const[stmtBal,setStmtBal]=useState('');
   const[cleared,setCleared]=useState({});const[checked,setChecked]=useState({});
@@ -5302,9 +5314,9 @@ function BankReconciliation({entityId,user,canEdit=true}){const[accounts,setAcco
   // before the statement date participate (book balance, uncleared list, outstanding
   // items). Later-dated activity belongs to the next reconciliation.
   const txnsAll=selAcct?getTxns(selAcct):[];const txns=stmtDate?txnsAll.filter(t=>t.date<=stmtDate):txnsAll;
-  const uncl=txns.filter(t=>!cleared[t.key]);const bookBal=txns.reduce((s,t)=>s+t.amount,0);const stmtNum=parseFloat(stmtBal)||0;
+  const uncl=txns.filter(t=>!cleared[t.key]);const bookBal=txns.reduce((s,t)=>s+t.amount,0);const stmtVal=parseStmtBalance(stmtBal);const hasStmt=stmtVal!==null;const stmtNum=hasStmt?stmtVal:0;
   const outDep=uncl.filter(t=>!checked[t.key]&&t.amount>0).reduce((s,t)=>s+t.amount,0);const outPay=uncl.filter(t=>!checked[t.key]&&t.amount<0).reduce((s,t)=>s+t.amount,0);
-  const diff=bookBal-(stmtNum+outDep+outPay);const isRec=Math.abs(diff)<0.005&&stmtNum!==0;
+  const diff=bookBal-(stmtNum+outDep+outPay);const isRec=hasStmt&&Math.abs(diff)<0.005;
   const finalize=async()=>{if(!isRec)return;const inScope=new Set(uncl.map(t=>t.key));await api.createReconciliation(entityId,{account_code:selAcct,statement_date:stmtDate,statement_balance:stmtNum,book_balance:bookBal,cleared_keys:Object.keys(checked).filter(k=>checked[k]&&inScope.has(k))});setChecked({});setStmtBal('');setView('list');load();};
   if(view==='new')return(<div><button style={{...S.btnS,marginBottom:20}} onClick={()=>{setView('list');setSelAcct('');setChecked({});}}>&larr; Back</button>
     <div style={S.h1}>New Bank Reconciliation</div><div style={S.card}><div style={S.row}>
@@ -5323,7 +5335,7 @@ function BankReconciliation({entityId,user,canEdit=true}){const[accounts,setAcco
           <tbody>{uncl.map(t=><tr key={t.key} style={{cursor:'pointer',background:checked[t.key]?T.greenDim:'transparent'}} onClick={()=>setChecked(p=>({...p,[t.key]:!p[t.key]}))}>
             <td style={S.tdC}><input type="checkbox" style={S.checkbox} checked={!!checked[t.key]} readOnly/></td><td style={{...S.td,color:T.textMuted}}>{t.date}</td><td style={S.td} onClick={e=>{e.stopPropagation();const ent=entries.find(x=>x.id===t.jeId);if(ent)setViewEntry(ent);}}><button style={{background:'none',border:0,padding:0,color:T.accent,fontWeight:600,cursor:'pointer',fontSize:'inherit',fontFamily:'inherit'}}>JE-{String(t.jeNum).padStart(4,'0')}</button></td><td style={S.td}>{t.memo}</td>
             <td style={S.tdR}>{t.debit>0?fmt(t.debit):''}</td><td style={S.tdR}>{t.credit>0?fmt(t.credit):''}</td><td style={{...S.tdR,fontWeight:700,color:t.amount>=0?T.green:T.red}}>{fmt(t.amount)}</td></tr>)}</tbody></table>}</div>
-      <div style={{display:'flex',justifyContent:'flex-end',marginTop:16}}><button style={{...S.btnP,padding:'10px 28px',fontSize:14,opacity:isRec?1:.5,cursor:isRec?'pointer':'not-allowed'}} onClick={finalize}>{isRec?'Finalize Reconciliation':'Difference must be $0.00'}</button></div></>}
+      <div style={{display:'flex',justifyContent:'flex-end',marginTop:16}}><button style={{...S.btnP,padding:'10px 28px',fontSize:14,opacity:isRec?1:.5,cursor:isRec?'pointer':'not-allowed'}} onClick={finalize}>{isRec?'Finalize Reconciliation':(hasStmt?'Difference must be $0.00':'Enter the statement ending balance')}</button></div></>}
     {viewEntry&&<EditJEModal entityId={entityId} entry={viewEntry} accounts={accounts} onClose={()=>setViewEntry(null)} onSaved={()=>{setViewEntry(null);load();}}/>}
     </div>);
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
