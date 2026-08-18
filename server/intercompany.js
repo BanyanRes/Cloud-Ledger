@@ -263,6 +263,34 @@ function matchEntity(label, entities) {
   if (exact.length === 1) return { entity_id: exact[0].id, confidence: 'exact', reason: 'exact name match' };
   if (exact.length > 1) return { entity_id: null, confidence: 'ambiguous', reason: exact.length + ' entities share this name' };
 
+  // Containment: every word of the label appears in ONE entity's name, series
+  // markers agreeing. Account names routinely drop a family prefix — "Due to
+  // NCG Fund I, LLC" for the entity "Banyan Residential NCG Fund I, LLC" — and
+  // the symmetric overlap score below under-rates that (0.60) while rating
+  // "BROZ Fund I" higher (0.67) on the generic tokens alone. Containment is
+  // accepted only when it is UNIQUE: a label swallowed by several entity names
+  // ("Fund I", "Banyan Residential") stays unresolved for a person to decide.
+  const wantTokens = new Set(n.split(' ').filter(Boolean));
+  const wantSer = seriesTokens(n);
+  if (wantTokens.size) {
+    const contains = entities.filter(e => {
+      const en = normName(e.name);
+      // Every series marker the LABEL carries must appear in the entity —
+      // "QOZB III" never swallows into "HP QOZB" — but the entity may carry
+      // extra numbers the account name dropped ("Kannapolis" for the entity
+      // "4671 Kannapolis", where 4671 is an address, not a series).
+      const haveSer = seriesTokens(en);
+      for (const s of wantSer) if (!haveSer.has(s)) return false;
+      const have = new Set(en.split(' ').filter(Boolean));
+      for (const w of wantTokens) if (!have.has(w)) return false;
+      return true;
+    });
+    if (contains.length === 1) {
+      return { entity_id: contains[0].id, confidence: 'contained',
+        reason: '"' + raw + '" is contained in ' + contains[0].name };
+    }
+  }
+
   // Token overlap, accepted only when a single entity clearly wins.
   const want = new Set(n.split(' ').filter(Boolean));
   if (!want.size) return { entity_id: null, confidence: 'none', reason: 'no usable tokens' };
@@ -1085,7 +1113,35 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
     const label = (parsed && parsed.label) || m.notes || null;
     if (!label) continue;
     const match = matchCompany(label, entities, companies);
-    if (match.entity_id != null || !match.node_id) continue; // CL entities never land here; unregistered stays external
+    // The label matches a CloudLedger ENTITY — the external classification was
+    // made when the matcher could not see it (e.g. "NCG Fund I, LLC" for
+    // "Banyan Residential NCG Fund I, LLC"). A real ledger exists to answer,
+    // so the row comes back pre-answered from it like any entity row.
+    if (match.entity_id != null) {
+      if (Number(match.entity_id) === eid) continue; // self-referential — a finding, not work
+      out.push({
+        source: 'mapping',
+        mapping_id: m.id,
+        entity_id: eid,
+        account_code: String(m.account_code),
+        account_name: m.account_name,
+        account_type: b ? b.type : null,
+        balance,
+        individual: false,
+        ic_type: m.ic_type || (parsed && parsed.ic_type) || 'due_from',
+        counterparty_label: label,
+        counterparty_entity_id: Number(match.entity_id),
+        counterparty_name: entName.get(Number(match.entity_id)) || null,
+        counterparty_node_id: null,
+        is_external: 0,
+        confidence: match.confidence,
+        reason: 'was external — "' + label + '" matches the entity ' + (entName.get(Number(match.entity_id)) || ''),
+        can_register: false,
+        notes: m.notes || null,
+      });
+      continue;
+    }
+    if (!match.node_id) continue; // unregistered stays external
     const tb = externalTbFor(db, match.node_id, as_of);
     if (!tb) continue;
     out.push({
