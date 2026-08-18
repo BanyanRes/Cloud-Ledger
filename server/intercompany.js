@@ -186,13 +186,22 @@ function resolveCounterparties(db, mappings) {
 
 // Strip the noise that stops "County Line Rail Fund I LP" from matching the
 // entity "County Line Rail Fund".
+// Roman numerals and their arabic forms are the SAME series marker: NCG's
+// ledger says "Due from BROZ Fund 1" while the entity is "BROZ FUND I LLC",
+// and treating 1 and I as different words made them strangers. Standalone
+// tokens only — letters inside words are untouched.
+const ROMAN_TO_NUM = { i:'1', ii:'2', iii:'3', iv:'4', v:'5', vi:'6',
+  vii:'7', viii:'8', ix:'9', x:'10', xi:'11', xii:'12' };
 function normName(s) {
   return String(s || '')
     .toLowerCase()
     .replace(/[.,'"()]/g, ' ')
     .replace(/\b(llc|l\.l\.c|lp|l\.p|llp|inc|incorporated|corp|corporation|co|company|ltd|limited|the)\b/g, ' ')
     .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
+    .trim()
+    .split(' ')
+    .map(t => ROMAN_TO_NUM[t] || t)
+    .join(' ');
 }
 
 // Hand-maintained aliases for the County Line family, where GL account names
@@ -1175,7 +1184,18 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   // per counterparty, not once per row.
   const cpBal = new Map(), cpAccts = new Map();
   const balsFor = id => { if (!cpBal.has(id)) cpBal.set(id, computeBalances(id, as_of ? { as_of } : {})); return cpBal.get(id); };
-  const acctsFor = id => { if (!cpAccts.has(id)) cpAccts.set(id, db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ?').all(id)); return cpAccts.get(id); };
+  const acctsFor = id => { if (!cpAccts.has(id)) cpAccts.set(id, db.prepare('SELECT code, name, type, bank_acct FROM accounts WHERE entity_id = ?').all(id)); return cpAccts.get(id); };
+  // The counterparty's WHOLE chart with balances merged in (0 when an account
+  // has no postings) — computeBalances alone hides a zero-activity account
+  // whose name is exactly the answer.
+  const chartFor = id => {
+    const bmap = new Map(balsFor(id).map(x => [String(x.code), x]));
+    return acctsFor(id).map(a => {
+      const held = bmap.get(String(a.code));
+      return { code: a.code, name: a.name, type: a.type, bank_acct: a.bank_acct,
+        balance: held ? held.balance : 0 };
+    });
+  };
   // Answer a row from an UPLOADED trial balance the same way the entity path
   // answers from a ledger: the line whose name points back at us first, then
   // the closest offsetting balance. No drafts — a TB is a statement someone
@@ -1262,7 +1282,7 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
     // is a plain difference, not the receivable-signed sum the due accounts use.
     const answerType = row.ic_type === 'investment' ? 'Equity' : 'Asset';
     let best = null;
-    for (const b of balsFor(cid)) {
+    for (const b of chartFor(cid)) {
       if (b.bank_acct || isPnlAccount(b.type, b.code)) continue;
       const p = parseAccountName(b.name);
       if (p && COMPAT_ANSWER[row.ic_type] && COMPAT_ANSWER[row.ic_type].indexOf(p.ic_type) === -1) continue;
