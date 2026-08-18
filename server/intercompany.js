@@ -102,6 +102,19 @@ function ensureSchema(db) {
     db.exec("ALTER TABLE intercompany_accounts ADD COLUMN counterparty_account_code TEXT");
     console.log('[db migrate] intercompany_accounts.counterparty_account_code added');
   }
+  // The other side of an EXTERNAL mapping keeps no ledger here, but its
+  // statement still names a number. Entered by hand on the reconciliation
+  // page, kept per as-of date so each period stands alone.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS intercompany_manual_balances (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      mapping_id INTEGER NOT NULL,
+      as_of TEXT NOT NULL DEFAULT '',
+      balance REAL NOT NULL,
+      updated_at TEXT, updated_by TEXT,
+      UNIQUE(mapping_id, as_of)
+    );
+  `);
 }
 
 // org_nodes is created by server/orgstructure.js. Both modules register at boot,
@@ -962,7 +975,17 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
       row.investor_capital = true;
       continue;
     }
-    if (row.is_external || row.counterparty_entity_id == null) continue;
+    if (row.is_external) continue;
+    // Any other kind facing a party with no CL entity is EXTERNAL: there is no
+    // ledger here to name an account on, so the mapping completes without one.
+    // The reconciliation offers a manually entered value to compare against.
+    if (row.counterparty_entity_id == null) {
+      if (!row.individual) {
+        row.is_external = 1;
+        row.reason = 'no ledger in CloudLedger — classified external';
+      }
+      continue;
+    }
     const cid = Number(row.counterparty_entity_id);
     const ourRow = balByCode.get(String(row.account_code));
     const ourSigned = receivableSigned(ourRow);
@@ -1304,12 +1327,24 @@ function reconcileForEntity(db, entityId, opts) {
 
   // Not reconciled, but shown as a one-line note so the balance is accounted
   // for. Only accounts that actually carry one are worth mentioning.
+  const manualFor = (mid) => {
+    const r = db.prepare('SELECT balance FROM intercompany_manual_balances WHERE mapping_id = ? AND as_of = ?')
+      .get(mid, as_of || '');
+    return r ? Number(r.balance) : null;
+  };
   const excludedFor = (types) => external
     .filter(m => types.includes(m.ic_type))
     .map(m => legOf(m, balances))
     .filter(l => Math.abs(l.amount) >= tol)
-    .map(l => ({ account_code: l.account_code, account_name: l.account_name,
-      ic_type: l.ic_type, amount: l.amount }))
+    .map(l => {
+      // The counterparty's books are outside CloudLedger, but a person can
+      // still state what they say. Positive, in the account's natural terms;
+      // the difference is a plain subtraction against our balance.
+      const manual = manualFor(l.mapping_id);
+      return { mapping_id: l.mapping_id, account_code: l.account_code, account_name: l.account_name,
+        ic_type: l.ic_type, amount: l.amount, manual_balance: manual,
+        difference: manual == null ? null : round2(l.amount - manual) };
+    })
     .sort((x, y) => Math.abs(y.amount) - Math.abs(x.amount));
 
   const dueUnmapped = unmappedFor(['due_from', 'due_to']);
@@ -1502,6 +1537,30 @@ function registerIntercompanyRoutes(app, deps) {
       if (/UNIQUE/i.test(e.message)) return res.status(400).json({ error: 'That account is already mapped for this entity' });
       fail(res, e);
     }
+  });
+
+  // Manual counterparty value for an EXTERNAL mapping, keyed by as-of date.
+  // A null / blank balance clears the entry.
+  app.put('/api/intercompany/manual-balance', ...gate, (req, res) => {
+    try {
+      const { mapping_id, as_of, balance } = req.body || {};
+      const m = db.prepare('SELECT * FROM intercompany_accounts WHERE id = ?').get(Number(mapping_id));
+      if (!m) return res.status(404).json({ error: 'Mapping not found' });
+      assertEntityAccess(req, [m.entity_id]);
+      const key = /^\d{4}-\d{2}-\d{2}$/.test(String(as_of || '')) ? String(as_of) : '';
+      if (balance == null || balance === '') {
+        db.prepare('DELETE FROM intercompany_manual_balances WHERE mapping_id = ? AND as_of = ?').run(m.id, key);
+        return res.json({ success: true, cleared: true });
+      }
+      const val = Number(balance);
+      if (!Number.isFinite(val)) return res.status(400).json({ error: 'balance must be a number' });
+      const now = new Date().toISOString();
+      db.prepare(`INSERT INTO intercompany_manual_balances (mapping_id, as_of, balance, updated_at, updated_by)
+        VALUES (?,?,?,?,?)
+        ON CONFLICT(mapping_id, as_of) DO UPDATE SET balance=excluded.balance, updated_at=excluded.updated_at, updated_by=excluded.updated_by`)
+        .run(m.id, key, val, now, who(req));
+      res.json({ success: true, balance: val });
+    } catch (e) { fail(res, e); }
   });
 
   app.put('/api/intercompany/mappings/:id', ...gate, (req, res) => {

@@ -603,6 +603,10 @@ export const api = {
       + (q.as_of ? '&as_of=' + q.as_of : '')),
   // Accepts one mapping object or an array of them (the "accept suggestions" path).
   createIcMapping: (b) => request('/intercompany/mappings', { method: 'POST', body: b }),
+  // Manual counterparty value for an external mapping (their books are outside
+  // CloudLedger). Keyed by as-of date; null balance clears it.
+  setIcManualBalance: (mapping_id, as_of, balance) =>
+    request('/intercompany/manual-balance', { method: 'PUT', body: { mapping_id, as_of, balance } }),
   updateIcMapping: (id, b) => request('/intercompany/mappings/' + id, { method: 'PUT', body: b }),
   deleteIcMapping: (id) => request('/intercompany/mappings/' + id, { method: 'DELETE' }),
   // Reconciliation is run for ONE entity, so every row can carry the account

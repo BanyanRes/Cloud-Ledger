@@ -6661,7 +6661,7 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
         counterparty_entity_id:r.is_external?null:cpEff,
         counterparty_node_id:null,
         counterparty_account_code:r.is_external?null:cpCode,
-        is_external:r.is_external?1:0,notes:r.notes||null};
+        is_external:r.is_external?1:0,notes:r.notes||(r.is_external?(r.counterparty_label||null):null)};
     if(r.mapping_id)await api.updateIcMapping(r.mapping_id,payload);
     else await api.createIcMapping({...payload,entity_id:Number(entityId)});
     return{mode,cpCode};
@@ -6866,9 +6866,10 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
     dump('INVESTMENT / CONTRIBUTED CAPITAL',data.investment.rows,false);
     const ext=[...data.due.external,...data.investment.external];
     if(ext.length){
-      d.push(['OUTSIDE THE GROUP — NOT RECONCILED']);
-      d.push(['Account','Account name','Type','Amount']);
-      ext.forEach(x=>d.push([x.account_code,x.account_name,IC_TYPE_LABEL[x.ic_type]||x.ic_type,x.amount]));
+      d.push(['OUTSIDE THE GROUP']);
+      d.push(['Account','Account name','Type','Our balance','Their value (entered)','Difference']);
+      ext.forEach(x=>d.push([x.account_code,x.account_name,IC_TYPE_LABEL[x.ic_type]||x.ic_type,x.amount,
+        x.manual_balance==null?'':x.manual_balance,x.difference==null?'':x.difference]));
       d.push([]);
     }
     exportToExcel(d,'IC_Recon_'+String(data.entity.code||data.entity.id)+'_'+String(data.as_of||asOf).replace(/-/g,'')+'.xlsx');
@@ -7018,17 +7019,36 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
       {/* Not reconciled — there is no counterparty ledger to agree with, so a
           difference would be meaningless. Listed anyway so the balance is not
           silently missing from the page. */}
-      {shownExternal.length>0&&<details style={{...S.cardFlush,marginTop:14,padding:'10px 16px'}}>
+      {shownExternal.length>0&&<details open={shownExternal.some(x=>x.manual_balance!=null)} style={{...S.cardFlush,marginTop:14,padding:'10px 16px'}}>
         <summary style={{cursor:'pointer',color:T.textMuted,fontSize:12.5}}>
           <b style={{color:T.textBright}}>{shownExternal.length}</b> account{shownExternal.length>1?'s':''} face
-          {shownExternal.length>1?'':'s'} a party outside the group — not reconciled
+          {shownExternal.length>1?'':'s'} a party outside the group
           <span style={{marginLeft:8,fontVariantNumeric:'tabular-nums'}}>({fmt(shownExternal.reduce((s,x)=>s+Math.abs(x.amount),0))})</span>
+          <span style={{marginLeft:8,color:T.textDim}}>— no ledger here; enter their value to compare</span>
         </summary>
-        <table style={{...S.table,marginTop:8}}><tbody>{shownExternal.map(x=><tr key={x.account_code}>
+        <table style={{...S.table,marginTop:8}}>
+          <thead><tr><th style={S.th}>Account</th><th style={S.th}></th>
+            <th style={S.thR}>Our balance</th><th style={S.thR}>Their value (entered)</th><th style={S.thR}>Difference</th></tr></thead>
+          <tbody>{shownExternal.map(x=><tr key={x.account_code}>
           <td style={{...S.td,fontWeight:600,color:T.textBright,width:88}}>{x.account_code}</td>
           <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{x.account_name}
             <span style={{marginLeft:6,fontSize:10,color:T.textDim}}>{IC_TYPE_LABEL[x.ic_type]}</span></td>
-          <td style={{...S.tdR,width:150}}>{fmt(x.amount)}</td></tr>)}</tbody></table></details>}
+          <td style={{...S.tdR,width:130}}>{fmt(x.amount)}</td>
+          <td style={{...S.tdR,width:170}}>
+            {canEdit?<input key={x.mapping_id+':'+(x.manual_balance==null?'':x.manual_balance)}
+              style={{...S.inputSm,width:140,textAlign:'right'}} placeholder='from their books…'
+              defaultValue={x.manual_balance==null?'':x.manual_balance}
+              onKeyDown={e=>{if(e.key==='Enter')e.target.blur();}}
+              onBlur={async e=>{
+                const v=e.target.value.trim().replace(/[,$\s]/g,'');
+                const cur=x.manual_balance==null?'':String(x.manual_balance);
+                if(v===cur)return;
+                if(v!==''&&!isFinite(Number(v))){setErr('Enter a number for '+x.account_code+'.');return;}
+                try{await api.setIcManualBalance(x.mapping_id,(data.as_of||asOf)||null,v===''?null:Number(v));setErr('');await run();}
+                catch(e2){setErr(e2.message);}}}/>
+              :(x.manual_balance==null?<span style={{color:T.textDim}}>—</span>:fmt(x.manual_balance))}</td>
+          <td style={{...S.tdR,width:120,fontWeight:700,color:x.difference==null?T.textDim:(Math.abs(x.difference)<0.01?T.green:T.red)}}>
+            {x.difference==null?'':fmt(x.difference)}</td></tr>)}</tbody></table></details>}
     </>}
   </div>);
 }
