@@ -781,6 +781,7 @@ export default function App(){
     {key:'INTERCOMPANY',label:'Intercompany',icon:'🔗',items:[
       {id:'ic_recon',label:'IC Reconciliation',icon:'⚖️',section:'intercompany'},
       {id:'ic_mapping',label:'IC Mapping',icon:'🗺️',section:'intercompany'},
+      {id:'external_tb',label:'External Entities TB',icon:'📥',section:'intercompany'},
       {id:'org_structure',label:'Org Structure',icon:'🏛️',section:'intercompany'},
     ]},
     {key:'REPORTS',label:'Reports',icon:'📊',items:[
@@ -877,6 +878,7 @@ export default function App(){
         {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='customdetail'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='pivot'&&activeEntity&&dimsEnabled&&<PivotReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='pivot'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='ic_recon'&&canAccess('intercompany')&&<IntercompanyReconciliation entities={entities} activeEntity={activeEntity} setPage={setPage} key={'icr-'+rk}/>}
+        {page==='external_tb'&&canAccess('intercompany')&&<ExternalTbPage canEdit={canEdit} key={'etb-'+rk}/>}
         {page==='org_structure'&&canAccess('intercompany')&&<OrgStructurePage entities={entities} canEdit={canEdit} key={'org-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
@@ -6503,10 +6505,12 @@ function IcMappedAccounts({entityId,entityName,canEdit,reloadKey,onMapped,onMsg,
               ?<div style={{marginTop:3}}><IcBadge kind="ok">investor capital — account not required</IcBadge></div>
               :<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>
                 <b style={{color:T.textBright}}>{r.their_account_code}</b> {r.their_account_name||''}
-                {r.their_account_missing&&<span style={{marginLeft:6}}><IcBadge kind="bad">not in their ledger</IcBadge></span>}</div>}</td>
+                {r.from_tb&&r.tb_as_of&&<span style={{marginLeft:6}}><IcBadge kind="info">their TB · {r.tb_as_of}</IcBadge></span>}
+                {r.from_tb&&r.tb_missing&&<span style={{marginLeft:6}}><IcBadge kind="bad">TB deleted — re-upload it</IcBadge></span>}
+                {r.their_account_missing&&<span style={{marginLeft:6}}><IcBadge kind="bad">{r.from_tb?'not in the uploaded TB':'not in their ledger'}</IcBadge></span>}</div>}</td>
           <td style={{...S.tdR,width:130}}>{r.investor_capital?<span style={{color:T.textDim}}>—</span>:(r.their_balance==null?'':fmt(r.their_balance))}</td>
           {canEdit&&<td style={{...S.td,textAlign:'right'}}>
-            {!r.self&&!r.investor_capital&&<button style={{...S.btnGhost,color:T.accent,fontSize:11}}
+            {!r.self&&!r.investor_capital&&!r.from_tb&&<button style={{...S.btnGhost,color:T.accent,fontSize:11}}
               onClick={()=>setPinning(pinning===r.id?null:r.id)}>
               {pinning===r.id?'Close':'Change'}</button>}
             <button style={{...S.btnGhost,color:T.red,fontSize:11}} title='Remove the mapping. The account returns to the unmapped worklist.'
@@ -6619,6 +6623,8 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
     if(r.individual)return false;
     if(r.is_external||r.investor_capital)return true;
     const st=ov[rowKey(r)]||{},mode=modeOf(r);
+    // Answered from an uploaded TB: ready once a line is chosen (or pre-filled).
+    if(r.tb_as_of)return mode==='existing'||!!st.pickCode;
     const cpEff=st.cpOverride||r.counterparty_entity_id;
     if(!cpEff||!mode)return false;
     if(mode==='pick'&&!st.pickCode)return false;
@@ -6633,7 +6639,12 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
     const cpEff=st.cpOverride||r.counterparty_entity_id;
     let cpCode=null;
     if(!r.is_external&&!r.investor_capital){
-      if(mode==='new'){
+      if(r.tb_as_of){
+        // The counterparty's ledger is an uploaded TB — a line is picked,
+        // never drafted: a TB is a statement someone issued, not a chart.
+        cpCode=(mode==='existing'&&r.suggested_existing)?r.suggested_existing.account_code:(st.pickCode||null);
+        if(!cpCode)throw new Error('Pick the counterparty account from the uploaded TB for '+r.account_code+' first.');
+      }else if(mode==='new'){
         // ONE box: leading token is the code, the rest is the name.
         const raw=String(st.acct!=null?st.acct:(r.suggested_new.account_code+' '+r.suggested_new.account_name)).trim();
         const m2=raw.match(/^(\S+)\s+(.+)$/);
@@ -6658,8 +6669,8 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
         is_external:r.counterparty_node_id?0:1,
         notes:r.notes||r.counterparty_label||null}
       :{account_code:r.account_code,account_name:r.account_name,ic_type:r.ic_type,
-        counterparty_entity_id:r.is_external?null:cpEff,
-        counterparty_node_id:null,
+        counterparty_entity_id:r.is_external?null:(r.tb_as_of?null:cpEff),
+        counterparty_node_id:r.tb_as_of?(r.counterparty_node_id||null):null,
         counterparty_account_code:r.is_external?null:cpCode,
         is_external:r.is_external?1:0,notes:r.notes||(r.is_external?(r.counterparty_label||null):null)};
     if(r.mapping_id)await api.updateIcMapping(r.mapping_id,payload);
@@ -6740,7 +6751,8 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
         // The accountant may re-point the counterparty; the account lookup on
         // the right then runs against the newly chosen entity.
         const cpEff=st.cpOverride||r.counterparty_entity_id;
-        const confirmable=!r.individual&&(r.is_external||r.investor_capital||(cpEff&&mode));
+        const confirmable=!r.individual&&(r.is_external||r.investor_capital
+          ||(r.tb_as_of?(mode==='existing'||!!st.pickCode):(cpEff&&mode)));
         return<Fragment key={k}>
         <tr style={mapping===k?{background:T.accentDim}:null}>
           <td style={{...S.td,whiteSpace:'normal',minWidth:220}}>
@@ -6755,12 +6767,24 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
             :r.counterparty_entity_id?<select style={{...S.selectSm,minWidth:210}} value={String(cpEff)}
                 onChange={e=>setSt(r,{cpOverride:Number(e.target.value),mode:'pick',pickCode:''})}>
                 {entityOpts.map(x=><option key={x.id} value={String(x.id)}>{x.name}</option>)}</select>
+            :r.tb_as_of?<>{r.counterparty_label||r.counterparty_name} <IcBadge kind="info">their TB · {r.tb_as_of}</IcBadge></>
             :r.counterparty_node_id?<>{r.counterparty_label} <IcBadge kind="info">no ledger</IcBadge></>
             :<span style={{color:T.textDim,fontStyle:'italic'}}>{r.counterparty_label||'not recognised'}</span>}</td>
           <td style={{...S.td,whiteSpace:'normal',minWidth:280}}>
             {r.investor_capital?<span style={{color:T.green,fontSize:12.5,fontWeight:600}}>No counterparty account needed
                 <span style={{display:'block',fontWeight:400,color:T.textMuted,fontSize:11.5}}>This investor keeps no ledger in CloudLedger, so there is no investment account to match.</span></span>
             :r.is_external?<span style={{color:T.textDim}}>outside the group — nothing to map to</span>
+            :r.tb_as_of?(mode==='existing'&&r.suggested_existing
+              ?<div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                <span style={{display:'inline-flex',gap:6,alignItems:'center',border:'1px solid '+T.border,borderRadius:7,padding:'6px 10px'}}>
+                  <span style={{fontWeight:600,color:T.textBright}}>{r.suggested_existing.account_code}</span>
+                  <span style={{color:T.textMuted}}>{r.suggested_existing.account_name}</span></span>
+                <IcBadge kind="info">from uploaded TB</IcBadge>
+                <button style={S.link} onClick={()=>setSt(r,{mode:'pick',pickCode:''})}>change…</button></div>
+              :<div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
+                <IcTbAccountSelect nodeId={r.counterparty_node_id} asOf={r.tb_as_of}
+                  value={st.pickCode||''} onChange={v=>setSt(r,{mode:'pick',pickCode:v})}/>
+                {r.suggested_existing&&<button style={S.link} onClick={()=>setSt(r,{mode:'existing'})}>back to suggestion</button>}</div>)
             :!cpEff?<span style={{color:T.textDim}}>—</span>
             :mode==='pick'?<div style={{display:'flex',gap:6,alignItems:'center',flexWrap:'wrap'}}>
                 <IcCpAccountSelect entityId={entityId} accountCode={r.account_code}
@@ -6957,7 +6981,8 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
               <tr style={{background:bad?T.redDim:(warn?T.orangeDim:T.bgElevated)}}>
                 <td colSpan={6} style={{...S.td,fontWeight:700,color:T.textBright}}>
                   {r.counterparty_name}
-                  {r.off_ledger&&<span style={{marginLeft:8}}><IcBadge kind="info">no ledger</IcBadge></span>}
+                  {r.tb_as_of?<span style={{marginLeft:8}}><IcBadge kind="info">their TB · {r.tb_as_of}</IcBadge></span>
+                    :r.off_ledger&&<span style={{marginLeft:8}}><IcBadge kind="info">no ledger</IcBadge></span>}
                   <span style={{marginLeft:8}}><IcStatus status={r.status}/></span></td>
                 <td style={{...S.tdR,fontWeight:700,color:bad?T.red:(warn?T.orange:T.green)}}>{fmt(r.difference)}</td></tr>
               {pairs.map(([a,b],i)=><tr key={i}>
@@ -6968,7 +6993,9 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
                     {r.off_ledger?'no ledger in CloudLedger':'this entity has not mapped its side'}</span>:'')}
                   {b&&b.ic_type&&<span style={{marginLeft:6,fontSize:10,color:T.textDim}}>{IC_TYPE_LABEL[b.ic_type]}</span>}
                   {b&&b.from_pin&&<span style={{marginLeft:6}} title={'Read straight from '+r.counterparty_name+'\u2019s ledger because the mapping on this side names this account. '+r.counterparty_name+' has not mapped it.'}>
-                    <IcBadge kind="info">their GL</IcBadge></span>}</td>
+                    <IcBadge kind="info">their GL</IcBadge></span>}
+                  {b&&b.from_tb&&<span style={{marginLeft:6}} title={'Read from the uploaded trial balance as of '+(r.tb_as_of||'')+'.'}>
+                    <IcBadge kind="info">their TB</IcBadge></span>}</td>
                 <td style={{...S.tdR,width:130}}>{b?fmt(b.amount):''}</td>
                 <td style={S.tdR}></td></tr>)}
               {tab==='due'&&<tr style={{background:T.bgElevated}}>
@@ -7051,6 +7078,129 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
             {x.difference==null?'':fmt(x.difference)}</td></tr>)}</tbody></table></details>}
     </>}
   </div>);
+}
+
+// ── External Entities TB ──
+// Counterparties with no ledger in CloudLedger (JVs, outside ventures) still
+// issue trial balances. Uploaded here per company + month, a TB stands in for
+// the missing ledger: IC Mapping answers from its lines and the
+// reconciliation compares against it like an in-ledger pair.
+function ExternalTbPage({canEdit=true}){
+  const[companies,setCompanies]=useState([]);
+  const[tbs,setTbs]=useState([]);
+  const[nodeId,setNodeId]=useState('');
+  const[asOf,setAsOf]=useState(today());
+  const[file,setFile]=useState(null);
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');const[msg,setMsg]=useState('');
+  const[newCo,setNewCo]=useState('');const[showNew,setShowNew]=useState(false);
+  const[view,setView]=useState(null);
+  const[lines,setLines]=useState([]);
+  const fileRef=useRef(null);
+  const load=useCallback(async()=>{
+    try{const[c,t]=await Promise.all([api.getIcCompanies(),api.getExternalTbs()]);
+      setCompanies(c);setTbs(t);}catch(e){setErr(e.message);}},[]);
+  useEffect(()=>{load();},[load]);
+  const coName=id=>{const c=companies.find(x=>String(x.id)===String(id));return c?c.name:('Company '+id);};
+  const upload=async()=>{
+    if(!nodeId){setErr('Pick the external company the TB belongs to.');return;}
+    if(!asOf){setErr('Set the as-of date (month end).');return;}
+    if(!file){setErr('Choose the TB file (.xlsx or .csv).');return;}
+    setBusy(true);setErr('');setMsg('');
+    try{const r=await api.uploadExternalTb(Number(nodeId),asOf,file);
+      setMsg(r.count+' lines saved for '+r.node_name+' as of '+r.as_of+'. Its intercompany accounts can now be mapped and reconciled.');
+      setFile(null);if(fileRef.current)fileRef.current.value='';
+      await load();}
+    catch(e){setErr(e.message);}finally{setBusy(false);}};
+  const registerCo=async()=>{
+    const name=newCo.trim();if(!name)return;
+    try{const r=await api.createIcCompany({name});setNewCo('');setShowNew(false);
+      await load();setNodeId(String(r.id));
+      setMsg(r.existing?(r.name+' was already registered — selected.'):('Registered '+name+'.'));}
+    catch(e){setErr(e.message);}};
+  const openLines=async t=>{
+    if(view&&view.node_id===t.node_id&&view.as_of===t.as_of){setView(null);return;}
+    try{setView(t);setLines(await api.getExternalTbLines(t.node_id,t.as_of));}
+    catch(e){setErr(e.message);setView(null);}};
+  // Companies that are actual CL entities keep their ledger here — no upload.
+  const uploadable=companies.filter(c=>!c.entity_id);
+  return(<div>
+    <div style={S.h1}>External Entities TB</div>
+    <div style={S.sub}>Monthly trial balances for counterparties that keep no ledger in CloudLedger.
+      {' '}Once a TB is uploaded, IC Mapping pre-fills the counterparty account from its lines and the
+      {' '}reconciliation compares against it — the recon reads the latest TB on or before its as-of date.</div>
+    {err&&<div style={{...S.card,borderColor:T.red+'40'}}><div style={S.err}>{err}</div></div>}
+    {msg&&<div style={{...S.card,borderColor:T.green+'40',padding:14}}><div style={S.success}>{msg}</div></div>}
+
+    {canEdit&&<div style={{...S.card,padding:16,marginBottom:18}}>
+      <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div><label style={S.label}>External company</label>
+          <select style={{...S.selectSm,minWidth:260}} value={nodeId} onChange={e=>setNodeId(e.target.value)}>
+            <option value=''>Select a company…</option>
+            {uploadable.map(c=><option key={c.id} value={String(c.id)}>{c.name}</option>)}</select></div>
+        <button style={S.btnS} onClick={()=>setShowNew(!showNew)}>{showNew?'cancel':'+ Register new'}</button>
+        <div><label style={S.label}>As of (month end)</label>
+          <input style={S.inputSm} type='date' value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
+        <div><label style={S.label}>Trial balance file</label>
+          <input ref={fileRef} type='file' accept='.xlsx,.xls,.csv' style={{fontSize:12.5}}
+            onChange={e=>setFile(e.target.files&&e.target.files[0]?e.target.files[0]:null)}/></div>
+        <button style={S.btnP} onClick={upload} disabled={busy}>{busy?'Uploading…':'Upload TB'}</button></div>
+      {showNew&&<div style={{display:'flex',gap:8,alignItems:'center',marginTop:10}}>
+        <input style={{...S.inputSm,width:300}} placeholder='Company name — e.g. CPI/BYN South Mountain SFR Venture'
+          value={newCo} onChange={e=>setNewCo(e.target.value)}
+          onKeyDown={e=>{if(e.key==='Enter')registerCo();}}/>
+        <button style={S.btnS} onClick={registerCo}>Register</button></div>}
+      <div style={{fontSize:11.5,color:T.textDim,marginTop:10}}>
+        Columns detected automatically: account number + name, then either Debit/Credit columns or one
+        {' '}Balance column. Re-uploading the same company + date replaces that TB in full.</div></div>}
+
+    <div style={S.cardFlush}>
+      <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border}}>
+        <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>Uploaded TBs ({tbs.length})</span></div>
+      {tbs.length===0?<div style={{padding:24,color:T.textDim,fontSize:12.5,textAlign:'center'}}>
+        Nothing uploaded yet. Upload a counterparty's monthly TB above to start reconciling against it.</div>
+      :<table style={S.table}>
+        <thead><tr><th style={S.th}>Company</th><th style={S.th}>As of</th>
+          <th style={S.thR}>Lines</th><th style={S.th}>File</th><th style={S.th}>Uploaded</th>
+          <th style={{...S.th,width:130}}></th></tr></thead>
+        <tbody>{tbs.map(t=><Fragment key={t.node_id+'-'+t.as_of}>
+          <tr>
+            <td style={{...S.td,fontWeight:600,color:T.textBright,whiteSpace:'normal'}}>{t.node_name}</td>
+            <td style={S.td}>{t.as_of}</td>
+            <td style={S.tdR}>{t.line_count}</td>
+            <td style={{...S.td,color:T.textMuted,fontSize:11.5,whiteSpace:'normal'}}>{t.filename||''}</td>
+            <td style={{...S.td,color:T.textMuted,fontSize:11.5}}>{String(t.uploaded_at||'').slice(0,10)}{t.uploaded_by?' · '+t.uploaded_by:''}</td>
+            <td style={{...S.td,textAlign:'right'}}>
+              <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>openLines(t)}>
+                {view&&view.node_id===t.node_id&&view.as_of===t.as_of?'Close':'View'}</button>
+              {canEdit&&<button style={{...S.btnGhost,color:T.red,fontSize:11}}
+                onClick={async()=>{if(!window.confirm('Delete the '+t.as_of+' TB for '+t.node_name+'? Mappings that point at it will show as missing until a TB is re-uploaded.'))return;
+                  try{await api.deleteExternalTb(t.node_id,t.as_of);setMsg('Deleted.');await load();if(view&&view.node_id===t.node_id&&view.as_of===t.as_of)setView(null);}
+                  catch(e){setErr(e.message);}}}>x</button>}</td></tr>
+          {view&&view.node_id===t.node_id&&view.as_of===t.as_of&&<tr style={{background:T.accentDim}}>
+            <td colSpan={6} style={{...S.td,whiteSpace:'normal',padding:0}}>
+              <table style={S.table}><tbody>{lines.map(l=><tr key={l.account_code}>
+                <td style={{...S.td,fontWeight:600,color:T.textBright,width:100}}>{l.account_code}</td>
+                <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{l.account_name}
+                  <span style={{marginLeft:6,fontSize:10,color:T.textDim}}>{l.type}</span></td>
+                <td style={{...S.tdR,width:150}}>{fmt(l.balance)}</td></tr>)}</tbody></table></td></tr>}
+        </Fragment>)}</tbody></table>}</div>
+  </div>);
+}
+
+// Pick a counterparty account from an UPLOADED trial balance — the TB
+// equivalent of the ledger-backed account picker.
+function IcTbAccountSelect({nodeId,asOf,value,onChange,width=300}){
+  const[lines,setLines]=useState(null);
+  useEffect(()=>{let ok=true;
+    api.getExternalTbLines(nodeId,asOf).then(l=>{if(ok)setLines(l);}).catch(()=>{if(ok)setLines([]);});
+    return()=>{ok=false;};},[nodeId,asOf]);
+  if(lines===null)return<span style={{color:T.textDim,fontSize:12}}>reading the uploaded TB…</span>;
+  if(!lines.length)return<span style={{color:T.textDim,fontSize:12}}>the uploaded TB has no lines</span>;
+  return<select style={{...S.selectSm,maxWidth:width}} value={value} onChange={e=>onChange(e.target.value)}>
+    <option value=''>— pick from the uploaded TB —</option>
+    {lines.map(l=><option key={l.account_code} value={l.account_code}>
+      {l.account_code+' '+(l.account_name||'')+' ('+fmt(l.balance)+')'}</option>)}</select>;
 }
 
 // ── IC Mapping: the setup page a person owns ──

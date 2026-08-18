@@ -607,6 +607,18 @@ export const api = {
   // CloudLedger). Keyed by as-of date; null balance clears it.
   setIcManualBalance: (mapping_id, as_of, balance) =>
     request('/intercompany/manual-balance', { method: 'PUT', body: { mapping_id, as_of, balance } }),
+  // External entity trial balances: uploaded monthly for counterparties with
+  // no ledger in CloudLedger, then read by mapping and reconciliation.
+  getExternalTbs: () => request('/intercompany/external-tbs'),
+  getExternalTbLines: (node_id, as_of) =>
+    request('/intercompany/external-tb-lines?node_id=' + node_id + '&as_of=' + as_of),
+  deleteExternalTb: (node_id, as_of) =>
+    request('/intercompany/external-tbs?node_id=' + node_id + '&as_of=' + as_of, { method: 'DELETE' }),
+  uploadExternalTb: (node_id, as_of, file) => {
+    const fd = new FormData();
+    fd.append('file', file); fd.append('node_id', node_id); fd.append('as_of', as_of);
+    return request('/intercompany/external-tbs', { method: 'POST', body: fd });
+  },
   updateIcMapping: (id, b) => request('/intercompany/mappings/' + id, { method: 'PUT', body: b }),
   deleteIcMapping: (id) => request('/intercompany/mappings/' + id, { method: 'DELETE' }),
   // Reconciliation is run for ONE entity, so every row can carry the account

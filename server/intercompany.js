@@ -49,6 +49,9 @@
 // Property Owner" of 53,980,295.39, and County Line Rail Silsbee (52)
 // legitimately holds 17001 of 11,760,052.36.
 
+const multer = require('multer');
+const XLSX = require('xlsx');
+
 const IC_TYPES = ['due_from', 'due_to', 'investment', 'contributed_capital'];
 const DEFAULT_TOLERANCE = 0.005;
 
@@ -114,6 +117,25 @@ function ensureSchema(db) {
       updated_at TEXT, updated_by TEXT,
       UNIQUE(mapping_id, as_of)
     );
+  `);
+  // Uploaded trial balances for counterparties that keep no ledger in
+  // CloudLedger (JVs, sponsor holdcos registered as org nodes). One TB per
+  // (company, as-of date); re-uploading replaces. Balances stored in NATURAL
+  // terms — asset/expense debit-positive, liability/equity credit-positive —
+  // so a line reads exactly like a computeBalances row.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS external_tb_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      node_id INTEGER NOT NULL,
+      as_of TEXT NOT NULL,
+      account_code TEXT NOT NULL,
+      account_name TEXT,
+      type TEXT,
+      balance REAL NOT NULL DEFAULT 0,
+      uploaded_at TEXT, uploaded_by TEXT, filename TEXT,
+      UNIQUE(node_id, as_of, account_code)
+    );
+    CREATE INDEX IF NOT EXISTS idx_etb_node ON external_tb_lines(node_id, as_of);
   `);
 }
 
@@ -652,6 +674,22 @@ function counterpartyCandidates(db, opts) {
 //
 // The counterparty's balance is read straight from its own ledger, so a pair is
 // checkable whether or not the counterparty has mapped anything itself.
+// The uploaded trial balance that answers for a ledger-less counterparty at a
+// date: the latest one on or before as_of (a June recon reads the June TB; if
+// only May exists, May answers and the date is said out loud). Null when the
+// company has no TB at all.
+function externalTbFor(db, nodeId, as_of) {
+  try {
+    const r = as_of
+      ? db.prepare('SELECT as_of FROM external_tb_lines WHERE node_id = ? AND as_of <= ? ORDER BY as_of DESC LIMIT 1').get(Number(nodeId), String(as_of))
+      : db.prepare('SELECT as_of FROM external_tb_lines WHERE node_id = ? ORDER BY as_of DESC LIMIT 1').get(Number(nodeId));
+    if (!r) return null;
+    const lines = db.prepare('SELECT account_code, account_name, type, balance FROM external_tb_lines WHERE node_id = ? AND as_of = ? ORDER BY account_code')
+      .all(Number(nodeId), r.as_of);
+    return { as_of: r.as_of, lines, byCode: new Map(lines.map(l => [String(l.account_code), l])) };
+  } catch (e) { return null; }
+}
+
 function listMappedPairs(db, entityId, { computeBalances, as_of }) {
   ensureSchema(db);
   const eid = Number(entityId);
@@ -749,7 +787,46 @@ function listMappedPairs(db, entityId, { computeBalances, as_of }) {
         notes: m.notes || null,
       };
     });
-  const rows = pairRows.concat(investorRows)
+  // Counterparties answered by an UPLOADED trial balance: the mapping names a
+  // company node and one of its TB lines. Their balance is read from the
+  // latest TB on or before as_of, and the date used is said on the row.
+  const tbRows = all
+    .filter(m => !m.is_external && m.counterparty_entity_id == null
+      && m.counterparty_node_id != null && m.counterparty_account_code)
+    .map(m => {
+      const ours = mine.get(String(m.account_code)) || null;
+      const ourSigned = receivableSigned(ours);
+      const tb = externalTbFor(db, m.counterparty_node_id, as_of);
+      const line = tb ? tb.byCode.get(String(m.counterparty_account_code)) || null : null;
+      const theirSigned = receivableSigned(line);
+      const gap = (ourSigned != null && theirSigned != null)
+        ? round2(Math.abs(ourSigned + theirSigned)) : null;
+      return {
+        id: m.id,
+        account_code: String(m.account_code),
+        account_name: m.account_name,
+        ic_type: m.ic_type,
+        balance: ours ? round2(ours.balance) : 0,
+        signed: ourSigned == null ? null : round2(ourSigned),
+        counterparty_entity_id: null,
+        counterparty_node_id: m.counterparty_node_id,
+        counterparty_name: m.counterparty_name || null,
+        self: false,
+        from_tb: true,
+        tb_as_of: tb ? tb.as_of : null,
+        tb_missing: !tb,
+        their_account_code: m.counterparty_account_code || null,
+        their_account_name: line ? line.account_name : null,
+        their_type: line ? line.type : null,
+        their_balance: line ? round2(line.balance) : null,
+        their_signed: theirSigned == null ? null : round2(theirSigned),
+        their_account_missing: !!(tb && !line),
+        gap,
+        offsets: gap != null && gap < tol,
+        notes: m.notes || null,
+      };
+    });
+  const rows = pairRows.concat(investorRows).concat(tbRows)
     .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance)
       || String(a.account_code).localeCompare(String(b.account_code)));
 
@@ -762,7 +839,7 @@ function listMappedPairs(db, entityId, { computeBalances, as_of }) {
     // Named an account that is not in the counterparty's ledger — renamed,
     // renumbered or deleted since. Still listed, flagged, because a broken
     // pin that disappeared would be worse than one that is wrong out loud.
-    broken: pairRows.filter(r => r.their_account_missing).length,
+    broken: pairRows.concat(tbRows).filter(r => r.their_account_missing).length,
     investor_capital_count: investorRows.length,
     // Mappable, but not finished: names the entity, not the account.
     incomplete_count: all.filter(m => !m.is_external
@@ -771,7 +848,8 @@ function listMappedPairs(db, entityId, { computeBalances, as_of }) {
     // Investor capital is carved out: those are complete by rule and listed above.
     external_count: all.filter(m => m.is_external && m.ic_type !== 'contributed_capital').length,
     off_ledger_count: all.filter(m => !m.is_external && m.counterparty_entity_id == null
-      && !(m.ic_type === 'contributed_capital' && m.counterparty_node_id != null)).length,
+      && !(m.ic_type === 'contributed_capital' && m.counterparty_node_id != null)
+      && !(m.counterparty_node_id != null && m.counterparty_account_code)).length,
     rows,
   };
 }
@@ -963,6 +1041,46 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   const cpBal = new Map(), cpAccts = new Map();
   const balsFor = id => { if (!cpBal.has(id)) cpBal.set(id, computeBalances(id, as_of ? { as_of } : {})); return cpBal.get(id); };
   const acctsFor = id => { if (!cpAccts.has(id)) cpAccts.set(id, db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ?').all(id)); return cpAccts.get(id); };
+  // Answer a row from an UPLOADED trial balance the same way the entity path
+  // answers from a ledger: the line whose name points back at us first, then
+  // the closest offsetting balance. No drafts — a TB is a statement someone
+  // issued, not a chart to add accounts to.
+  const bestTbAnswer = (row, tb) => {
+    const ourRow = balByCode.get(String(row.account_code));
+    const ourSigned = receivableSigned(ourRow);
+    const ourBal = ourRow ? (Number(ourRow.balance) || 0) : 0;
+    const capital = row.ic_type === 'investment' || row.ic_type === 'contributed_capital';
+    const mir = MIRROR_ACCOUNT[row.ic_type];
+    let best = null;
+    for (const b of tb.lines) {
+      if (isPnlAccount(b.type, b.account_code)) continue;
+      const p = parseAccountName(b.account_name);
+      if (p && COMPAT_ANSWER[row.ic_type] && COMPAT_ANSWER[row.ic_type].indexOf(p.ic_type) === -1) continue;
+      let nameMatch = false;
+      if (p) {
+        const m2 = matchCompany(p.label, entities, companies);
+        nameMatch = m2.entity_id != null && Number(m2.entity_id) === eid;
+      }
+      let gap = null;
+      if (capital) {
+        if (mir && b.type === mir.type) gap = round2(Math.abs((Number(b.balance) || 0) - ourBal));
+        else if (!nameMatch) continue;
+      } else {
+        const signed = receivableSigned(b);
+        if (signed == null) continue;
+        gap = ourSigned == null ? null : round2(Math.abs(signed + ourSigned));
+      }
+      const offsets = gap != null && gap < DEFAULT_TOLERANCE;
+      if (!nameMatch && !offsets) continue;
+      const cand = { account_code: String(b.account_code), account_name: b.account_name, type: b.type,
+        balance: round2(b.balance), gap, offsets, name_match: nameMatch, from_tb: true };
+      if (!best) { best = cand; continue; }
+      const rc = cand.name_match ? 0 : 1, rb = best.name_match ? 0 : 1;
+      const gc = cand.gap == null ? Infinity : cand.gap, gb = best.gap == null ? Infinity : best.gap;
+      if (rc < rb || (rc === rb && gc < gb)) best = cand;
+    }
+    return best;
+  };
   for (const row of out) {
     // Contributed capital whose contributor is NOT set up in CloudLedger needs
     // no counterparty account. Per the org charts those contributors are
@@ -971,6 +1089,19 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
     // contributor IS a CL entity (Odyssey → Banyan Residential, a link the
     // charts don't even draw), the normal lookup below finds its Investment
     // account and pre-fills it.
+    // A company node with an UPLOADED trial balance is answerable after all:
+    // pre-answer from its lines exactly as if its ledger were here. Checked
+    // before the investor-capital and external rules, so uploading a TB is
+    // what upgrades a counterparty from "outside" to "reconciled".
+    const nodeTb = (row.counterparty_entity_id == null && row.counterparty_node_id && !row.individual)
+      ? externalTbFor(db, row.counterparty_node_id, as_of) : null;
+    if (nodeTb) {
+      row.tb_as_of = nodeTb.as_of;
+      const bestTb = bestTbAnswer(row, nodeTb);
+      if (bestTb) row.suggested_existing = bestTb;
+      row.reason = 'answered from the uploaded TB as of ' + nodeTb.as_of;
+      continue;
+    }
     if (row.ic_type === 'contributed_capital' && row.counterparty_entity_id == null && !row.individual) {
       row.investor_capital = true;
       continue;
@@ -1215,6 +1346,31 @@ function reconcileForEntity(db, entityId, opts) {
         if (pin) { g.their_legs.push(pin); have.add(String(code)); }
       }
     }
+    // A counterparty with an UPLOADED trial balance gets a real other side:
+    // the TB lines its mappings name become legs, so the pair reconciles like
+    // any in-ledger relationship instead of sitting at no_ledger forever. The
+    // leg's kind mirrors ours so the investment tab sums it correctly.
+    for (const g of groups.values()) {
+      if (g.counterparty_entity_id != null || g.counterparty_node_id == null) continue;
+      const tb = externalTbFor(db, g.counterparty_node_id, as_of || null);
+      if (!tb) continue;
+      g.tb_as_of = tb.as_of;
+      const have = new Set();
+      for (const l of g.our_legs) {
+        const code = l.counterparty_account_code;
+        if (!code || have.has(String(code))) continue;
+        const line = tb.byCode.get(String(code));
+        if (!line) continue;
+        have.add(String(code));
+        const amount = Number(line.balance) || 0;
+        const mir = MIRROR_ACCOUNT[l.ic_type];
+        const signed = receivableSigned(line);
+        g.their_legs.push({ mapping_id: null, account_code: String(line.account_code),
+          account_name: line.account_name, ic_type: mir ? mir.ic_type : l.ic_type,
+          amount, signed: signed == null ? 0 : signed, notes: null,
+          counterparty_account_code: null, from_tb: true });
+      }
+    }
     return [...groups.values()];
   };
 
@@ -1225,7 +1381,7 @@ function reconcileForEntity(db, entityId, opts) {
     const difference = our_net + their_net;
     const bothEmpty = Math.abs(our_net) < tol && Math.abs(their_net) < tol;
     let status;
-    if (g.off_ledger || g.counterparty_entity_id == null) status = 'no_ledger';
+    if ((g.off_ledger || g.counterparty_entity_id == null) && !g.tb_as_of) status = 'no_ledger';
     else if (bothEmpty) status = 'settled';
     else if (!g.their_legs.length) status = 'one_sided';
     else if (Math.abs(difference) < tol) status = 'matched';
@@ -1248,7 +1404,7 @@ function reconcileForEntity(db, entityId, opts) {
     const hasCap = Math.abs(our_capital) >= tol || Math.abs(their_investment) >= tol;
     let status;
     if (g.self) status = 'self';
-    else if (g.off_ledger || g.counterparty_entity_id == null) status = 'no_ledger';
+    else if ((g.off_ledger || g.counterparty_entity_id == null) && !g.tb_as_of) status = 'no_ledger';
     else if (!hasInv && !hasCap) status = 'settled';
     else if (!g.their_legs.length) status = 'one_sided';
     else if ((!hasInv || Math.abs(inv_difference) < tol) && (!hasCap || Math.abs(cap_difference) < tol)) status = 'matched';
@@ -1418,6 +1574,143 @@ function registerIntercompanyRoutes(app, deps) {
           name, eid, eid ? 'company' : 'shell', (req.body.notes || null),
           now, who(req), now, who(req));
       res.json({ id: r.lastInsertRowid, existing: false, name });
+    } catch (e) { fail(res, e); }
+  });
+
+  // ── External entity trial balances ──
+  // A counterparty with no ledger in CloudLedger can still be reconciled once
+  // someone uploads its trial balance. One TB per (company, as-of date);
+  // re-uploading the same pair replaces it in full.
+  const tbUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+  app.get('/api/intercompany/external-tbs', ...gate, (req, res) => {
+    try {
+      res.json(db.prepare(`SELECT l.node_id, l.as_of, COUNT(*) AS line_count,
+          ROUND(SUM(ABS(l.balance)), 2) AS abs_total,
+          MAX(l.uploaded_at) AS uploaded_at, MAX(l.uploaded_by) AS uploaded_by, MAX(l.filename) AS filename,
+          n.name AS node_name
+        FROM external_tb_lines l JOIN org_nodes n ON n.id = l.node_id
+        GROUP BY l.node_id, l.as_of
+        ORDER BY n.name COLLATE NOCASE, l.as_of DESC`).all());
+    } catch (e) { fail(res, e); }
+  });
+
+  app.get('/api/intercompany/external-tb-lines', ...gate, (req, res) => {
+    try {
+      const node_id = Number(req.query.node_id);
+      const as_of = String(req.query.as_of || '');
+      if (!node_id || !as_of) return res.status(400).json({ error: 'node_id and as_of are required' });
+      res.json(db.prepare(`SELECT account_code, account_name, type, balance FROM external_tb_lines
+        WHERE node_id = ? AND as_of = ? ORDER BY account_code`).all(node_id, as_of));
+    } catch (e) { fail(res, e); }
+  });
+
+  app.delete('/api/intercompany/external-tbs', ...gate, (req, res) => {
+    try {
+      const node_id = Number(req.query.node_id);
+      const as_of = String(req.query.as_of || '');
+      if (!node_id || !as_of) return res.status(400).json({ error: 'node_id and as_of are required' });
+      const r = db.prepare('DELETE FROM external_tb_lines WHERE node_id = ? AND as_of = ?').run(node_id, as_of);
+      res.json({ success: true, deleted: r.changes });
+    } catch (e) { fail(res, e); }
+  });
+
+  app.post('/api/intercompany/external-tbs', ...gate, tbUpload.single('file'), (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+      const node_id = Number(req.body.node_id);
+      const as_of = String(req.body.as_of || '');
+      if (!node_id) return res.status(400).json({ error: 'node_id is required' });
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(as_of)) return res.status(400).json({ error: 'as_of must be YYYY-MM-DD' });
+      const node = db.prepare('SELECT id, name, entity_id FROM org_nodes WHERE id = ?').get(node_id);
+      if (!node) return res.status(404).json({ error: 'Company not found — register it first' });
+      if (node.entity_id) return res.status(400).json({ error: node.name + ' is set up as a CloudLedger entity — its ledger is already here, no TB upload needed.' });
+
+      // Same column detection as the entity TB import: code + name columns,
+      // then either debit/credit columns or one signed amount column.
+      const wb = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: true });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const raw = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      if (!raw.length) return res.status(400).json({ error: 'No data rows found in file' });
+      const cols = Object.keys(raw[0]);
+      const norm = c => String(c).toLowerCase().trim();
+      const findCol = (patterns, exclude = []) => {
+        const pool = cols.filter(c => !exclude.includes(c));
+        for (const pat of patterns) { const hit = pool.find(c => norm(c) === pat); if (hit) return hit; }
+        for (const pat of patterns) { const hit = pool.find(c => norm(c).includes(pat)); if (hit) return hit; }
+        return null;
+      };
+      const codeCol = findCol(['account number','account #','account code','acct number','acct code','acct','code','number']);
+      const nameCol = findCol(['account name','account description','acct name','description','name'], [codeCol]);
+      const amtCol  = findCol(['balance','ending balance','amount','total'], [codeCol, nameCol].filter(Boolean));
+      const drCol   = findCol(['debit'], [codeCol, nameCol, amtCol].filter(Boolean));
+      const crCol   = findCol(['credit'], [codeCol, nameCol, amtCol].filter(Boolean));
+      if (!codeCol) return res.status(400).json({ error: 'Could not find an account number/code column. Found: ' + cols.join(', ') });
+      if (!nameCol) return res.status(400).json({ error: 'Could not find an account name column. Found: ' + cols.join(', ') });
+      if (!amtCol && !drCol && !crCol) return res.status(400).json({ error: 'Could not find amount or debit/credit columns. Found: ' + cols.join(', ') });
+
+      const typeFromCode = (codeStr) => {
+        const n = parseInt(String(codeStr).replace(/[^0-9]/g, ''), 10);
+        if (isNaN(n)) return null;
+        if (n <= 19999) return 'Asset';
+        if (n <= 29999) return 'Liability';
+        if (n <= 39999) return 'Equity';
+        if (n <= 49999) return 'Revenue';
+        if (n <= 69999) return 'Expense';
+        return 'Revenue';
+      };
+      const parsed = [];
+      for (const row of raw) {
+        const code = String(row[codeCol] || '').trim();
+        const name = String(row[nameCol] || '').trim();
+        if (!code || !name) continue;
+        const type = typeFromCode(code);
+        if (!type) continue;
+        let dr = 0, cr = 0, amt = null;
+        if (drCol || crCol) {
+          dr = parseFloat(String(row[drCol] || '0').replace(/[,$()]/g, '')) || 0;
+          cr = parseFloat(String(row[crCol] || '0').replace(/[,$()]/g, '')) || 0;
+        } else {
+          const rawAmt = String(row[amtCol] || '').trim();
+          const isParen = /^\(.*\)$/.test(rawAmt);
+          let v = parseFloat(rawAmt.replace(/[,$()]/g, '')) || 0;
+          if (isParen) v = -v;
+          amt = v;
+        }
+        parsed.push({ code, name, type, dr, cr, amt });
+      }
+      if (!parsed.length) return res.status(400).json({ error: 'No valid rows found. Check that account codes are numeric.' });
+
+      // Single-amount files: debit-positive when the column sums to zero,
+      // natural-side otherwise (positive = the account's normal side).
+      let signMode = 'debit-positive';
+      if (parsed.some(p => p.amt !== null)) {
+        const sumSigned = parsed.reduce((s, p) => s + (p.amt || 0), 0);
+        signMode = Math.abs(sumSigned) < 0.01 ? 'debit-positive' : 'natural';
+      }
+      const isDrNatural = t => t === 'Asset' || t === 'Expense';
+      const byCode = new Map();
+      for (const p of parsed) {
+        let natural;
+        if (p.amt === null) natural = isDrNatural(p.type) ? (p.dr - p.cr) : (p.cr - p.dr);
+        else if (signMode === 'debit-positive') natural = isDrNatural(p.type) ? p.amt : -p.amt;
+        else natural = p.amt;
+        const cur = byCode.get(p.code);
+        if (cur) cur.balance += natural;
+        else byCode.set(p.code, { code: p.code, name: p.name, type: p.type, balance: natural });
+      }
+      const lines = [...byCode.values()];
+
+      const now = new Date().toISOString();
+      const tx = db.transaction(() => {
+        db.prepare('DELETE FROM external_tb_lines WHERE node_id = ? AND as_of = ?').run(node_id, as_of);
+        const ins = db.prepare(`INSERT INTO external_tb_lines
+          (node_id, as_of, account_code, account_name, type, balance, uploaded_at, uploaded_by, filename)
+          VALUES (?,?,?,?,?,?,?,?,?)`);
+        for (const l of lines) ins.run(node_id, as_of, l.code, l.name, l.type, round2(l.balance), now, who(req), req.file.originalname || null);
+      });
+      tx();
+      res.json({ success: true, node_id, node_name: node.name, as_of, count: lines.length, sign_mode: signMode });
     } catch (e) { fail(res, e); }
   });
 
