@@ -64,8 +64,25 @@ function entityProfile(opts) {
   // Income Taxes, and a development-cost-heavy balance sheet (Soft Costs / Land
   // / Other Development under Other Assets). Distinct from both srn and bsfrgp.
   if (/banyan\s*residential/i.test(name) || code === 'BANYANRE1') return 'banyan';
+  // County Line Rail Fund I, LP (entity 40) — the fund itself. Its regular
+  // statement package keeps the ORIGINAL srn balance-sheet shape: no separate
+  // Intercompany Receivable / Intercompany Payable subsections (Jimmy, 2026-08-18).
+  // Scope is the fund only — CLRFI Midco I and the operating companies below it
+  // are ordinary srn entities and DO get the intercompany sections.
+  if (/^county\s*line\s*rail\s*fund/i.test(name) || code === 'COUNTYLI1') return 'clrf';
   return 'srn';
 }
+
+// Which profiles present the intercompany balances as their own balance-sheet
+// subsections — Current Assets › Intercompany Receivable (immediately before
+// Other Current Assets) and Current Liabilities › Intercompany Payable
+// (immediately after Accounts Payable).
+//
+// Everything on the default chart does. The three profiles that do NOT are
+// banyan and bsfrgp (their CPA reference packages already define their own
+// intercompany presentation) and clrf (excluded by request). Those keep the
+// classification they had before 2026-08-18, byte for byte.
+function usesIntercompanySections(profile) { return profile === 'srn'; }
 
 // Balance-sheet section map for the Banyan SFR GP Investors (holding-company)
 // profile. Same shape as BS_ACCOUNT_MAP; selected only for that entity.
@@ -118,7 +135,7 @@ function bsClassifyFor(profile, row) {
     }
     return { section: 'Other', sub: 'Other' };
   }
-  return bsClassify(row);
+  return bsClassify(row, { intercompany: usesIntercompanySections(profile) });
 }
 
 // Sub-order for the bsfrgp Investments section (its only extra subsection name).
@@ -489,7 +506,8 @@ function isCashAccount(r) {
 //   Intangible Assets, Net → Intangible Assets / Amortization (contra)
 //   Investments         → Long Term Investments
 //   Other Assets        → Other Assets
-//   Current Liabilities → Accounts Payable / Other Current Liabilities
+//   Current Liabilities → Accounts Payable / Intercompany Payable
+//                         / Other Current Liabilities
 //   Long Term Liabilities → Loans
 //   Members Equity      → Members Equity / Retained Earnings
 const BS_ACCOUNT_MAP = {
@@ -552,11 +570,29 @@ const BS_ACCOUNT_MAP = {
 // Contra accounts shown as a subtraction within their section (amortization).
 const BS_CONTRA_CODES = new Set(['16600']);
 
-function bsClassify(row) {
+// opts.intercompany routes "Due from ..." / "Due to ..." accounts into their own
+// balance-sheet subsections. It is ON for the default (srn) profile and OFF for
+// clrf, which keeps the pre-2026-08-18 shape. banyan/bsfrgp never reach here.
+function bsClassify(row, opts = {}) {
+  const ic = !!(opts && opts.intercompany);
+  const nm = (row.name || '').toLowerCase();
+  // The intercompany test runs BEFORE the explicit code map on purpose. A few
+  // codes are pinned by the SRN reference package (18002 -> Other Current
+  // Assets); if such an account is in fact named "Due from <affiliate>" it
+  // belongs in Intercompany Receivable, and the name is the better evidence.
+  if (ic && row.type === 'Asset' && /due from|intercompany/.test(nm)) {
+    return { section: 'Current Assets', sub: 'Intercompany Receivable' };
+  }
+  // Liabilities: a genuine note/loan keeps its Long Term Liabilities home even
+  // when the name also says "due to <affiliate>" (Jimmy, 2026-08-18) - that
+  // avoids pulling real debt off the statements already issued.
+  if (ic && row.type === 'Liability' && /due to|intercompany/.test(nm) && !/loan|note payable|bot|bond/.test(nm)) {
+    return { section: 'Current Liabilities', sub: 'Intercompany Payable' };
+  }
   const explicit = BS_ACCOUNT_MAP[String(row.code)];
   if (explicit) return { section: explicit[0], sub: explicit[1] };
   // Heuristic fallback for accounts not in the map, so nothing is dropped.
-  const name = (row.name || '').toLowerCase();
+  const name = nm;
   if (row.type === 'Asset') {
     if (/cash|checking|savings|bank|clearing/.test(name)) return { section: 'Current Assets', sub: 'Cash and Cash Equivalents' };
     if (/receivable/.test(name) && /due from|intercompany/.test(name)) return { section: 'Current Assets', sub: 'Intercompany Receivable' };
@@ -591,6 +627,14 @@ const BS_SUB_ORDER = {
   'Current Liabilities': ['Accounts Payable', 'Other Current Liabilities'],
   'Long Term Liabilities': ['Loans'],
 };
+
+// Default (srn) presentation order. Identical to BS_SUB_ORDER except that
+// Current Liabilities carries Intercompany Payable immediately after Accounts
+// Payable. BS_SUB_ORDER itself is left untouched so the clrf profile keeps the
+// exact order it had before.
+const BS_SUB_ORDER_SRN = Object.assign({}, BS_SUB_ORDER, {
+  'Current Liabilities': ['Accounts Payable', 'Intercompany Payable', 'Other Current Liabilities'],
+});
 
 // ── P&L operating-expense classification ────────────────────────────────────
 // Per the CLR operating-expense restructure (Will Myers / Jimmy Yun, Jun 2026),
@@ -703,6 +747,7 @@ async function buildStatements(getBalances, opts) {
   const profile = entityProfile(opts);
   const bsSub = (profile === 'bsfrgp') ? BS_SUB_ORDER_BSFRGP
     : (profile === 'banyan') ? BS_SUB_ORDER_BANYAN
+    : usesIntercompanySections(profile) ? BS_SUB_ORDER_SRN
     : BS_SUB_ORDER;
   // Contra subsections (accumulated depreciation/amortization) are profile-
   // specific: Banyan's are the 165xx accumulated-depreciation accounts.
