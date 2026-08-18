@@ -7120,7 +7120,9 @@ function ExternalTbPage({canEdit=true}){
     if(!file){setErr('Choose the TB file (.xlsx or .csv).');return;}
     setBusy(true);setErr('');setMsg('');
     try{const r=await api.uploadExternalTb(Number(nodeId),asOf,file);
-      setMsg(r.count+' lines saved for '+r.node_name+' as of '+r.as_of+'. Its intercompany accounts can now be mapped and reconciled.');
+      setMsg(r.count+' lines saved for '+r.node_name+' as of '+r.as_of+'.'
+        +(r.workpaper?(' Original filed under Shell Entities Accounting workpapers \u2192 '+r.workpaper.folder_path+' / '+r.workpaper.file_name+'.'):'')
+        +(r.balanced===false?(' \u26a0 This TB does not balance \u2014 debits and credits are off by '+r.residual+'. Open the filed copy and check for subtotal rows or a misread column.'):''));
       setFile(null);if(fileRef.current)fileRef.current.value='';
       await load();}
     catch(e){setErr(e.message);}finally{setBusy(false);}};

@@ -8640,6 +8640,7 @@ require('./intercompany').registerIntercompanyRoutes(app, {
   requireRole,
   userHasEntityAccess,
   computeBalances: (eid, opts) => computeBalances(eid, opts),
+  workpapersDir: WORKPAPERS_DIR,
 });
 
 // === Org structure (ownership tree) ===

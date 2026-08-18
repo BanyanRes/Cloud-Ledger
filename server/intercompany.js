@@ -51,6 +51,8 @@
 
 const multer = require('multer');
 const XLSX = require('xlsx');
+const fs = require('fs');
+const path = require('path');
 
 const IC_TYPES = ['due_from', 'due_to', 'investment', 'contributed_capital'];
 const DEFAULT_TOLERANCE = 0.005;
@@ -1565,7 +1567,7 @@ function reconcileForEntity(db, entityId, opts) {
 // ══════════════════════════════ Routes ══════════════════════════════
 
 function registerIntercompanyRoutes(app, deps) {
-  const { db, auth, requireRole, computeBalances, userHasEntityAccess } = deps;
+  const { db, auth, requireRole, computeBalances, userHasEntityAccess, workpapersDir } = deps;
   ensureSchema(db);
 
   const who = req => (req.user && (req.user.name || req.user.email)) || null;
@@ -1689,9 +1691,18 @@ function registerIntercompanyRoutes(app, deps) {
       };
       const codeCol = findCol(['account number','account #','account code','acct number','acct code','acct','code','number']);
       const nameCol = findCol(['account name','account description','acct name','description','name'], [codeCol]);
-      const amtCol  = findCol(['balance','ending balance','amount','total'], [codeCol, nameCol].filter(Boolean));
-      const drCol   = findCol(['debit'], [codeCol, nameCol, amtCol].filter(Boolean));
-      const crCol   = findCol(['credit'], [codeCol, nameCol, amtCol].filter(Boolean));
+      // Project managers export from different systems, so the ENDING balance
+      // hides under different names — and an activity-format TB (Beginning /
+      // Debit / Credit / Ending) must read the Ending column, not the period
+      // activity. Beginning/opening/prior/budget columns are never candidates.
+      const notEnding = cols.filter(c => /beginn|opening|prior|budget|activity|change/i.test(String(c)));
+      const amtCol  = findCol(['ending balance','end balance','closing balance','current balance','balance','net amount','amount','total'],
+        [codeCol, nameCol].filter(Boolean).concat(notEnding));
+      const drCol   = findCol(['debit'], [codeCol, nameCol, amtCol].filter(Boolean).concat(notEnding));
+      const crCol   = findCol(['credit'], [codeCol, nameCol, amtCol].filter(Boolean).concat(notEnding));
+      // An explicit ending/closing column outranks debit/credit columns, which
+      // in an activity-format export are the month's movement, not the balance.
+      const preferAmt = !!(amtCol && /end|closing|current/i.test(String(amtCol)));
       if (!codeCol) return res.status(400).json({ error: 'Could not find an account number/code column. Found: ' + cols.join(', ') });
       if (!nameCol) return res.status(400).json({ error: 'Could not find an account name column. Found: ' + cols.join(', ') });
       if (!amtCol && !drCol && !crCol) return res.status(400).json({ error: 'Could not find amount or debit/credit columns. Found: ' + cols.join(', ') });
@@ -1714,7 +1725,7 @@ function registerIntercompanyRoutes(app, deps) {
         const type = typeFromCode(code);
         if (!type) continue;
         let dr = 0, cr = 0, amt = null;
-        if (drCol || crCol) {
+        if ((drCol || crCol) && !preferAmt) {
           dr = parseFloat(String(row[drCol] || '0').replace(/[,$()]/g, '')) || 0;
           cr = parseFloat(String(row[crCol] || '0').replace(/[,$()]/g, '')) || 0;
         } else {
@@ -1748,6 +1759,12 @@ function registerIntercompanyRoutes(app, deps) {
       }
       const lines = [...byCode.values()];
 
+      // A TB should balance. In debit-positive terms the whole file sums to
+      // zero; a residual usually means a subtotal row was read or the ending
+      // column was misdetected — said out loud, never swallowed.
+      const isDr2 = t => t === 'Asset' || t === 'Expense';
+      const residual = round2(lines.reduce((s, l) => s + (isDr2(l.type) ? l.balance : -l.balance), 0));
+
       const now = new Date().toISOString();
       const tx = db.transaction(() => {
         db.prepare('DELETE FROM external_tb_lines WHERE node_id = ? AND as_of = ?').run(node_id, as_of);
@@ -1757,7 +1774,40 @@ function registerIntercompanyRoutes(app, deps) {
         for (const l of lines) ins.run(node_id, as_of, l.code, l.name, l.type, round2(l.balance), now, who(req), req.file.originalname || null);
       });
       tx();
-      res.json({ success: true, node_id, node_name: node.name, as_of, count: lines.length, sign_mode: signMode });
+
+      // File the ORIGINAL upload in Shell Entities Accounting's workpapers so
+      // the source document sits next to what was parsed from it. Folder per
+      // as-of date, company + date in the file name; re-upload replaces.
+      let workpaper = null;
+      try {
+        const shell = db.prepare(`SELECT id FROM entities WHERE name LIKE '%Shell Entities Accounting%' ORDER BY id LIMIT 1`).get();
+        if (shell && workpapersDir) {
+          const folder = 'External TBs/' + as_of;
+          const by = who(req) || 'system';
+          for (const fp of ['External TBs', folder]) {
+            try { db.prepare('INSERT INTO entity_folders (entity_id, folder_path, created_by) VALUES (?,?,?)').run(shell.id, fp, by); }
+            catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
+          }
+          const ext = (String(req.file.originalname || '').match(/\.[A-Za-z0-9]+$/) || ['.xlsx'])[0];
+          const originalName = as_of + ' ' + node.name + ' TB' + ext;
+          const dir = path.join(workpapersDir, String(shell.id));
+          fs.mkdirSync(dir, { recursive: true });
+          // Replace an earlier copy of the same TB rather than piling up versions.
+          for (const old of db.prepare('SELECT id, stored_filename FROM entity_files WHERE entity_id = ? AND folder_path = ? AND original_name = ?')
+            .all(shell.id, folder, originalName)) {
+            try { fs.unlinkSync(path.join(dir, old.stored_filename)); } catch (e) {}
+            db.prepare('DELETE FROM entity_files WHERE id = ?').run(old.id);
+          }
+          const stored = Date.now() + '_' + Math.floor(Math.random() * 1e6) + '_' + originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
+          fs.writeFileSync(path.join(dir, stored), req.file.buffer);
+          db.prepare('INSERT INTO entity_files (entity_id, folder_path, stored_filename, original_name, size, mime_type, uploaded_by) VALUES (?,?,?,?,?,?,?)')
+            .run(shell.id, folder, stored, originalName, req.file.size, req.file.mimetype || null, by);
+          workpaper = { entity_id: shell.id, folder_path: folder, file_name: originalName };
+        }
+      } catch (e) { console.error('[ic] TB workpaper filing failed:', e.message); }
+
+      res.json({ success: true, node_id, node_name: node.name, as_of, count: lines.length,
+        sign_mode: signMode, residual, balanced: Math.abs(residual) < 0.02, workpaper });
     } catch (e) { fail(res, e); }
   });
 
