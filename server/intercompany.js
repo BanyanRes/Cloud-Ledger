@@ -1729,7 +1729,7 @@ function registerIntercompanyRoutes(app, deps) {
         for (const pat of patterns) { const hit = pool.find(c => norm(c).includes(pat)); if (hit) return hit; }
         return null;
       };
-      const codeCol = findCol(['account number','account #','account code','acct number','acct code','acct','code','number']);
+      const codeCol = findCol(['account number','account #','account code','acct number','acct code','acct','code','number','account']);
       const nameCol = findCol(['account name','account description','acct name','description','name'], [codeCol]);
       // Project managers export from different systems, so the ENDING balance
       // hides under different names — and an activity-format TB (Beginning /
