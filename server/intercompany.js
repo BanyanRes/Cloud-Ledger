@@ -626,12 +626,19 @@ function counterpartyCandidates(db, opts) {
   const theirMaps = new Map(listMappings(db, { entity_id: cid })
     .map(m => [String(m.account_code), m]));
 
-  const rows = computeBalances(cid, as_of ? { as_of } : {})
-    .filter(b => !b.bank_acct)
-    .filter(b => !isPnlAccount(b.type, b.code))
-    .map(b => {
-      const signed = receivableSigned(b);
-      if (signed == null) return null;
+  // EVERY balance-sheet account on the counterparty's chart is offered —
+  // zero-activity, equity, bank accounts included: any of them can be the one
+  // a person needs to point at. Only P&L stays out (no balance for a
+  // counterparty ledger to agree with). Ranking still puts the accounts that
+  // name us or offset first, so completeness costs nothing at the top.
+  const cpBalances = new Map(computeBalances(cid, as_of ? { as_of } : {}).map(x => [String(x.code), x]));
+  const rows = db.prepare('SELECT code, name, type, bank_acct FROM accounts WHERE entity_id = ? ORDER BY code').all(cid)
+    .filter(a => !isPnlAccount(a.type, a.code))
+    .map(a => {
+      const held = cpBalances.get(String(a.code));
+      const b = { code: a.code, name: a.name, type: a.type, bank_acct: a.bank_acct,
+        balance: held ? held.balance : 0 };
+      const signed = receivableSigned(b); // null for equity — kept, just unranked by gap
       const parsed = parseAccountName(b.name);
       // Does THEIR account name point back at US? Reuses the same matcher the
       // suggestions use, so aliases ("Due to SRN", "Due from Buna") resolve.
@@ -640,11 +647,11 @@ function counterpartyCandidates(db, opts) {
         const m = matchCompany(parsed.label, entities, companies);
         nameMatch = m.entity_id != null && Number(m.entity_id) === eid;
       }
-      const gap = ourSigned == null ? null : round2(Math.abs(signed + ourSigned));
+      const gap = (ourSigned == null || signed == null) ? null : round2(Math.abs(signed + ourSigned));
       const mapped = theirMaps.get(String(b.code));
       return {
         account_code: String(b.code), account_name: b.name, type: b.type,
-        balance: round2(b.balance), signed: round2(signed),
+        balance: round2(b.balance), signed: signed == null ? null : round2(signed),
         ic_type: parsed ? parsed.ic_type : null,
         counterparty_label: parsed ? parsed.label : null,
         name_match: nameMatch,
@@ -656,9 +663,7 @@ function counterpartyCandidates(db, opts) {
         already_mapped_to_us: !!(mapped && Number(mapped.counterparty_entity_id) === eid),
       };
     })
-    .filter(Boolean)
-    // Worth offering: it names us, or it carries a balance that could offset.
-    .filter(r => r.name_match || r.already_mapped_to_us || Math.abs(r.signed) >= tol);
+    .filter(Boolean);
 
   // Name first, then how close the offset is. An account that both names us and
   // ties to the penny is the only thing that gets pre-selected without doubt,
@@ -686,7 +691,7 @@ function counterpartyCandidates(db, opts) {
       : { account_code: String(accountCode), account_name: null, type: null, balance: 0, signed: 0 },
     best,
     exact_count: rows.filter(r => r.offsets).length,
-    candidates: rows.slice(0, 40),
+    candidates: rows,
   };
 }
 
