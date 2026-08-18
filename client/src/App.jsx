@@ -6841,6 +6841,8 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
 function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}){
   const[tab,setTab]=useState('due');
   const[eid,setEid]=useState(activeEntity||'');
+  // Follow the header's entity picker, same as IC Mapping.
+  useEffect(()=>{if(activeEntity)setEid(activeEntity);},[activeEntity]);
   const[asOf,setAsOf]=useState(today());
   const[data,setData]=useState(null);
   const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
@@ -7224,6 +7226,9 @@ function IcTbAccountSelect({nodeId,asOf,value,onChange,width=300}){
 function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[tab,setTab]=useState('mappings');
   const[eid,setEid]=useState(activeEntity||'');
+  // Follow the header's entity picker: switching entities up top switches this
+  // page too, instead of leaving a stale selection from when it first mounted.
+  useEffect(()=>{if(activeEntity)setEid(activeEntity);},[activeEntity]);
   const[rows,setRows]=useState([]);
   const[loading,setLoading]=useState(false);const[err,setErr]=useState('');const[msg,setMsg]=useState('');
   const[showAdd,setShowAdd]=useState(false);
