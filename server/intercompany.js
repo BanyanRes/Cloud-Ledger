@@ -468,6 +468,38 @@ function deleteMapping(db, id) {
   db.prepare('DELETE FROM intercompany_accounts WHERE id = ?').run(id);
 }
 
+// One person confirms a pair ONCE. A mapping that names a CL counterparty and
+// that counterparty's GL account fully determines the row the counterparty
+// would write — same two accounts, kinds mirrored — so it is written here
+// automatically. The other entity's worklist must never ask a second person
+// to confirm a fact the first already stated. An account the counterparty has
+// already mapped itself is never touched: their own decision wins.
+function ensureMirrorMapping(db, mappingId, who) {
+  const m = db.prepare('SELECT * FROM intercompany_accounts WHERE id = ?').get(mappingId);
+  if (!m || m.is_external || m.counterparty_entity_id == null || !m.counterparty_account_code) return null;
+  const cpEid = Number(m.counterparty_entity_id);
+  if (cpEid === Number(m.entity_id)) return null;
+  const mir = MIRROR_ACCOUNT[m.ic_type];
+  if (!mir) return null;
+  const acct = db.prepare('SELECT code, name FROM accounts WHERE entity_id = ? AND code = ?')
+    .get(cpEid, String(m.counterparty_account_code));
+  if (!acct) return null; // broken pin — nothing real to mirror onto
+  const existing = db.prepare('SELECT id FROM intercompany_accounts WHERE entity_id = ? AND account_code = ?')
+    .get(cpEid, String(m.counterparty_account_code));
+  if (existing) return null;
+  const src = db.prepare('SELECT name FROM entities WHERE id = ?').get(Number(m.entity_id));
+  const now = new Date().toISOString();
+  const r = db.prepare(`INSERT INTO intercompany_accounts
+    (entity_id, account_code, account_name, counterparty_entity_id, counterparty_node_id, counterparty_account_code, ic_type, is_external, notes, created_at, created_by, updated_at, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      cpEid, String(m.counterparty_account_code), acct.name,
+      Number(m.entity_id), null, String(m.account_code),
+      mir.ic_type, 0,
+      'mirrored automatically — the pair was confirmed on ' + ((src && src.name) || ('entity ' + m.entity_id)),
+      now, who || 'auto-mirror', now, who || 'auto-mirror');
+  return r.lastInsertRowid;
+}
+
 // Propose mappings for one entity by reading its chart of accounts. Every
 // proposal carries the account's current balance and the reason the
 // counterparty was chosen, so a reviewer can see what actually matters (a
@@ -1534,6 +1566,16 @@ function registerIntercompanyRoutes(app, deps) {
   const who = req => (req.user && (req.user.name || req.user.email)) || null;
   const gate = [auth, requireRole('Admin', 'Accountant')];
 
+  // Pairs confirmed before auto-mirroring existed get their mirrors at boot.
+  // Re-running is a no-op: an account already mapped is never touched.
+  try {
+    const candidates = db.prepare(`SELECT id FROM intercompany_accounts
+      WHERE is_external = 0 AND counterparty_entity_id IS NOT NULL AND counterparty_account_code IS NOT NULL`).all();
+    let made = 0;
+    for (const c of candidates) { if (ensureMirrorMapping(db, c.id, 'auto-mirror')) made++; }
+    if (made) console.log('[ic] auto-mirrored ' + made + ' mapping(s) from already-confirmed pairs');
+  } catch (e) { console.error('[ic] mirror backfill:', e.message); }
+
   // Every intercompany read spans several entities at once, so entity access is
   // checked per entity rather than by the usual single-:eid middleware. A user
   // who cannot see one member of the group cannot run the group's report.
@@ -1825,7 +1867,11 @@ function registerIntercompanyRoutes(app, deps) {
       const ids = [];
       const tx = db.transaction(() => { for (const it of items) ids.push(createMapping(db, it, who(req))); });
       tx();
-      res.json({ ids, count: ids.length, success: true });
+      // The other half of each pair is written for the counterparty, so its
+      // worklist never asks for a confirmation this person just gave.
+      let mirrored = 0;
+      for (const id of ids) { try { if (ensureMirrorMapping(db, id, who(req))) mirrored++; } catch (e) { console.error('[ic] mirror:', e.message); } }
+      res.json({ ids, count: ids.length, mirrored, success: true });
     } catch (e) {
       if (/UNIQUE/i.test(e.message)) return res.status(400).json({ error: 'That account is already mapped for this entity' });
       fail(res, e);
@@ -1865,7 +1911,9 @@ function registerIntercompanyRoutes(app, deps) {
       if (bad) return res.status(400).json({ error: bad });
       assertEntityAccess(req, [cur.entity_id]);
       updateMapping(db, Number(req.params.id), body, who(req));
-      res.json({ success: true });
+      let mirrored = 0;
+      try { if (ensureMirrorMapping(db, Number(req.params.id), who(req))) mirrored++; } catch (e) { console.error('[ic] mirror:', e.message); }
+      res.json({ success: true, mirrored });
     } catch (e) {
       if (/UNIQUE/i.test(e.message)) return res.status(400).json({ error: 'That account is already mapped for this entity' });
       fail(res, e);
