@@ -328,13 +328,14 @@ const ACCT_FMT = '_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)';
 // `.style` object instead forces exceljs to register a DISTINCT style for this
 // one cell, so the border/format never aliases. Font and fill are preserved from
 // the cell's current style so we only change numFmt/alignment/border.
-function styleAmountCell(ws, r, { underline = false } = {}) {
+function styleAmountCell(ws, r, { underline = false, doubleBelow = false } = {}) {
   const c = ws.getCell(r, COL.amount);
   const prev = c.style || {};
   c.style = {
     numFmt: ACCT_FMT,
     alignment: { horizontal: 'right', vertical: 'middle' },
-    border: underline ? { top: { style: 'thin' } } : {},
+    border: doubleBelow ? { top: { style: 'thin' }, bottom: { style: 'double' } }
+      : underline ? { top: { style: 'thin' } } : {},
     font: prev.font ? { ...prev.font } : undefined,
     fill: prev.fill ? { ...prev.fill } : undefined,
   };
@@ -538,6 +539,25 @@ function tieDevFeeDueLine({ devFeeWs, b2aWs, priorWs, devFeeInfo, payeeLabel }) 
 //   A14 Due to <payee>        B14 =B10*<rate>   (the calculated dev fee)
 // The Current Invoice Log's dev-fee line is repointed at B14. Gated to collapse
 // entities; best-effort (wrapped by caller).
+// True when a Dev Fee tab uses the SIMPLE single-column layout that
+// buildSimpleDevFeeTab writes (one "Project costs" column). The multi-column
+// schedule some properties use — Silsbee's runs Incurred-to-date / Incurred-month
+// -of / Prior-month across columns B, C and D, with a hard-vs-soft cost split, a
+// Total-per-GL line and a Discrepancy check — must never be overwritten by it.
+// That is what happened on the Silsbee July report: the fee came out right
+// ($10,049.82) but the whole schedule and its GL tie-out were replaced with a
+// four-line block, and CLA had to restore it by hand.
+function isSimpleDevFeeLayout(ws) {
+  if (!ws) return false;
+  const cols = new Set();
+  for (let r = 1; r <= 14; r++) {
+    for (let c = 2; c <= 6; c++) {
+      if (/project costs|incurred/i.test(cellStr(ws.getCell(r, c)))) cols.add(c);
+    }
+  }
+  return cols.size <= 1;
+}
+
 function buildSimpleDevFeeTab({ devFeeWs, curWs, devFeeInfo, asOfDate, payeeLabel }) {
   if (!devFeeWs || !devFeeInfo) return;
   const round2 = (n) => Math.round(n * 100) / 100;
@@ -1113,7 +1133,17 @@ async function rollForward(workbook, newCurrent, meta = {}) {
       if (bg) inv.budgetcode = bg;
     }
   }
-  const curInfo = replaceCurrentLog(curWs, effectiveCurrent, meta);
+  // Deterministic Current-Invoice-Log order (see orderLogGroupKeys): the
+  // Budget-to-Actual's own row order first, the prior log's group order second.
+  // Without this the log came out in whatever order the invoices were uploaded.
+  const _logCodes = new Set([...curByCode.keys()]);
+  for (const inv of effectiveCurrent) if (inv && inv.code != null) _logCodes.add(String(inv.code));
+  const _priorOrder = new Map();
+  { let _i = 0; for (const k of curByCode.keys()) _priorOrder.set(k, _i++); }
+  const curInfo = replaceCurrentLog(curWs, effectiveCurrent, meta, {
+    codeOrder: b2aCodeOrder(b2a, _logCodes),
+    priorOrder: _priorOrder,
+  });
 
   // 3.1 Repoint those dev-fee tabs' fixed Current-Invoice-Log references to the
   //     new Grand Total / Development Fee Total rows. If there is no dev fee this
@@ -1263,18 +1293,36 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   // 4c. Roll the Hard/Soft Cost Contingency Tables forward: each row's
   //     "Requested Herein" (col E) folds into "Previously Requested" (col D) and
   //     E clears. The "Total Requested" (F=D+E) and allocation rows recompute.
-  const hardCt = findSheet(workbook, 'Hard Cost Contingency Table');
-  const softCt = findSheet(workbook, 'Soft Cost Contingency Table');
+  const contingencyWarnings = [];
+  const _b2aName = b2a && b2a.name;
+  const hardCt = findContingencyTable(workbook, 'hard', _b2aName) || findSheet(workbook, 'Hard Cost Contingency Table');
+  const softCt = findContingencyTable(workbook, 'soft', _b2aName) || findSheet(workbook, 'Soft Cost Contingency Table');
   const contingencyTables = {
     hard: rollForwardContingencyTable(hardCt),
     soft: rollForwardContingencyTable(softCt),
+    hardSheet: hardCt && hardCt.name,
+    softSheet: softCt && softCt.name,
   };
+  // A contingency table that exists but rolled NOTHING is how the Silsbee miss
+  // went unnoticed for a month: the roll ran against the wrong tab, found no
+  // rows, and returned quietly. Say so instead of passing silently.
+  for (const kind of ['hard', 'soft']) {
+    const ws = kind === 'hard' ? hardCt : softCt;
+    if (ws && contingencyTables[kind] && !contingencyTables[kind].moved) {
+      contingencyWarnings.push(kind + ' cost contingency table ("' + ws.name + '"): 0 rows rolled forward');
+    } else if (!ws) {
+      contingencyWarnings.push(kind + ' cost contingency table: not found in this workbook');
+    }
+  }
 
   // 4d. Collapse the Dev Fee tab's Hard/Soft rows into one "Project costs" line
   //     sourced from the invoice-log totals, so this month's costs populate
   //     without needing each invoice tagged Hard vs Soft. Best-effort.
   try {
-    if (meta.collapseDevFeeCosts) {
+    if (meta.collapseDevFeeCosts && !isSimpleDevFeeLayout(devFee)) {
+      console.warn('[requisition rollForward] collapseDevFeeCosts was requested but "'
+        + (devFee && devFee.name) + '" uses the multi-column dev-fee schedule — leaving it alone');
+    } else if (meta.collapseDevFeeCosts) {
       const payee = meta.devFeePayee ? String(meta.devFeePayee) : '';
       const label = /county\s*line\s*rail\s*interest/i.test(payee) ? 'Due to CLRI' : (payee ? 'Due to ' + payee : null);
       buildSimpleDevFeeTab({ devFeeWs: devFee, curWs, devFeeInfo, asOfDate: meta.asOfDate, payeeLabel: label });
@@ -1320,7 +1368,10 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   // this-period, To-Date/Incurred-to, As-of). Best-effort cosmetic; never block.
   try { if (meta.asOfDate) advanceB2AHeaderDates(b2a, meta.asOfDate); } catch (e) { /* cosmetic */ }
 
-  return { landmarks, devFee: devFeeInfo, contingency, contingencyTables };
+  if (contingencyWarnings.length) {
+    for (const w of contingencyWarnings) console.warn('[requisition rollForward] ' + w);
+  }
+  return { landmarks, devFee: devFeeInfo, contingency, contingencyTables, warnings: contingencyWarnings };
 }
 
 // Advance the date-bearing TEXT headers on the Budget-to-Actual tab. Columns
@@ -1379,8 +1430,42 @@ function advanceB2AHeaderDates(b2a, asOfDate) {
     }
   }
   if (!cells.length) return 0;
-  let prevEnd = null;                                              // latest current-period date = prior period-end
-  for (const x of cells) if (!x.isPrev && x.cur && (!prevEnd || x.cur > prevEnd)) prevEnd = x.cur;
+  // The prior period-end is the latest CURRENT-period date already on the sheet.
+  // A cell that already reads the NEW as-of date is not evidence of anything: it
+  // is either the title date this roll just stamped, or a header a previous run
+  // already advanced.
+  //
+  // Both cases were live bugs. rollForward writes the new as-of into B4 (a
+  // date-typed title cell inside the scanned band) immediately before calling
+  // this, so prevEnd came back as the NEW period end and the "Previous
+  // Application / Inception to <date>" header advanced with it — the Silsbee July
+  // report went out reading "Inception to 07/31/2026" where June correctly read
+  // "Inception to 05/31/2026". Skipping same-day cells also makes the pass
+  // IDEMPOTENT: re-running a roll-forward on an already-rolled workbook now
+  // leaves the inception header alone instead of walking it forward again.
+  // Compare on the calendar DAY, and read each cell in the convention it was
+  // stored in: a date-TYPED cell is held at UTC midnight (so it is timezone-stable
+  // in the file), while a date parsed out of a text label was built with local
+  // Y/M/D parts. Mixing the two is a silent off-by-one west of UTC — it is what
+  // made B4, freshly stamped 2026-07-31, read back as 7/30 and become the winning
+  // "prior period end".
+  const _dayTriple = (x) => {
+    const d = x.cur;
+    if (!d) return null;
+    return x.kind === 'date'
+      ? [d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()]
+      : [d.getFullYear(), d.getMonth(), d.getDate()];
+  };
+  const _asOfT = Date.UTC(newAsOf.getFullYear(), newAsOf.getMonth(), newAsOf.getDate());
+  let prevEnd = null, prevEndT = -Infinity;      // latest current-period date = prior period-end
+  for (const x of cells) {
+    if (x.isPrev || !x.cur) continue;
+    const t3 = _dayTriple(x);
+    if (!t3) continue;
+    const t = Date.UTC(t3[0], t3[1], t3[2]);
+    if (t === _asOfT) continue;                  // already the new period end — proves nothing
+    if (t > prevEndT) { prevEndT = t; prevEnd = new Date(t3[0], t3[1], t3[2]); }
+  }
   let changed = 0;
   for (const x of cells) {
     const target = x.isPrev ? (prevEnd || x.cur) : newAsOf;
@@ -1403,9 +1488,101 @@ function advanceB2AHeaderDates(b2a, asOfDate) {
   return changed;
 }
 
+// Map cost code -> the row it occupies on the Budget-to-Actual, so the Current
+// Invoice Log can be ordered the way the reader sees the budget on the facing
+// page. The B2A's code column is DETECTED rather than assumed: every column from
+// 1..8 is scored by how many of its cells parse as a cost code the invoice logs
+// actually use, and the best-scoring column wins. Templates differ (Silsbee keeps
+// GL Coding in B, others do not), and guessing a letter is how this kind of code
+// silently reads the wrong column.
+function b2aCodeOrder(b2a, knownCodes) {
+  const out = new Map();
+  if (!b2a || !knownCodes || !knownCodes.size) return out;
+  const last = Math.max(b2a.rowCount || 0, b2a.actualRowCount || 0);
+  let bestCol = 0, bestHits = 0;
+  for (let c = 1; c <= 8; c++) {
+    let hits = 0;
+    for (let r = 1; r <= last; r++) {
+      const code = cellCode(b2a.getCell(r, c));
+      if (code != null && knownCodes.has(String(code))) hits++;
+    }
+    if (hits > bestHits) { bestHits = hits; bestCol = c; }
+  }
+  if (!bestCol) return out;
+  for (let r = 1; r <= last; r++) {
+    const code = cellCode(b2a.getCell(r, bestCol));
+    if (code == null || String(code) === '') continue;
+    const k = String(code);
+    if (!out.has(k)) out.set(k, r);
+  }
+  return out;
+}
+
+// Deterministic group order for the Current Invoice Log.
+//
+// The log used to be grouped in "first-seen order" — the order the invoices
+// happened to be dropped into the uploader — so the SAME invoices produced a
+// different report on every run. CLA received two versions of the Silsbee July
+// report that differed only in that order (Brad Tarter, 2026-08-19): v1 ran
+// 12230 -> 12321 -> 12594, v2 ran 12594 -> 12321 -> 12230.
+//
+// Order now comes from the report itself, most authoritative source first:
+//   1. the Budget-to-Actual's own row order for that cost code — the order the
+//      reader already sees on the facing page;
+//   2. the PRIOR Current Invoice Log's group order, for any code the B2A does
+//      not carry;
+//   3. numeric cost-code order, for anything still unplaced.
+// The output is therefore a function of the invoice SET, never of upload order.
+function orderLogGroupKeys(keys, opts = {}) {
+  const codeOrder = opts.codeOrder || new Map();
+  const priorOrder = opts.priorOrder || new Map();
+  const rank = (k) => {
+    if (codeOrder.has(k)) return [0, codeOrder.get(k)];
+    if (priorOrder.has(k)) return [1, priorOrder.get(k)];
+    return [2, 0];
+  };
+  const numOf = (k) => { const m = String(k).match(/^(\d+)/); return m ? Number(m[1]) : Number.MAX_SAFE_INTEGER; };
+  return keys.slice().sort((a, b) => {
+    const ra = rank(a), rb = rank(b);
+    if (ra[0] !== rb[0]) return ra[0] - rb[0];
+    if (ra[1] !== rb[1]) return ra[1] - rb[1];
+    const na = numOf(a), nb = numOf(b);
+    if (na !== nb) return na - nb;
+    return String(a).localeCompare(String(b), undefined, { numeric: true });
+  });
+}
+
+// Order the lines WITHIN one cost-code group: invoice date, then vendor, then
+// bill number, with the original order preserved as the final tie-break so the
+// sort is stable. Undated lines sort last rather than first — an invoice with no
+// date is the exception and belongs at the bottom of its group, not the top.
+function sortLogGroupRows(rows) {
+  const str = (v) => (v == null || typeof v === 'object') ? '' : String(v);
+  const dnum = (d) => {
+    if (d == null || d === '') return null;
+    if (d instanceof Date) return d.getTime();
+    const t = Date.parse(String(d));
+    return isNaN(t) ? null : t;
+  };
+  return rows
+    .map((row, idx) => ({ row, idx }))
+    .sort((a, b) => {
+      const da = dnum(a.row.date), db = dnum(b.row.date);
+      if ((da == null) !== (db == null)) return da == null ? 1 : -1;
+      if (da != null && db != null && da !== db) return da - db;
+      const va = str(a.row.vendor), vb = str(b.row.vendor);
+      if (va !== vb) return va.localeCompare(vb);
+      const ba = str(a.row.bill), bb = str(b.row.bill);
+      if (ba !== bb) return ba.localeCompare(bb, undefined, { numeric: true });
+      return a.idx - b.idx;
+    })
+    .map(x => x.row);
+}
+
 // Write the new period invoices into the Current Log, grouped by cost code with
 // SUBTOTAL rows and a Grand Total, mirroring the sheet's existing layout.
-function replaceCurrentLog(ws, rows, meta) {
+// opts.codeOrder / opts.priorOrder drive the deterministic group order above.
+function replaceCurrentLog(ws, rows, meta, opts = {}) {
   const _ds = logDataStart(ws);
   const last = Math.max(ws.rowCount || 0, ws.actualRowCount || 0);
 
@@ -1437,17 +1614,20 @@ function replaceCurrentLog(ws, rows, meta) {
 
   for (let r = _ds; r <= last; r++) for (let c = 1; c <= 11; c++) ws.getCell(r, c).value = null;
 
-  // group incoming rows by code, preserving first-seen order
-  const order = [];
+  // Group incoming rows by cost code, then order the GROUPS deterministically
+  // (Budget-to-Actual order, then the prior log's order, then numeric code) and
+  // the lines within each group by date/vendor/bill. Upload order no longer
+  // reaches the report.
   const byCode = new Map();
   for (const row of rows) {
     const key = row.code == null ? '__none__' : String(row.code);
-    if (!byCode.has(key)) { byCode.set(key, []); order.push(key); }
+    if (!byCode.has(key)) byCode.set(key, []);
     byCode.get(key).push(row);
   }
+  const order = orderLogGroupKeys([...byCode.keys()], opts);
   let r = _ds;
   for (const key of order) {
-    const grp = byCode.get(key);
+    const grp = sortLogGroupRows(byCode.get(key));
     const dataStart = r;
     for (const row of grp) {
       writeRowCells(ws, r, {
@@ -1479,8 +1659,38 @@ function replaceCurrentLog(ws, rows, meta) {
   ws.getCell(gtRow, COL.name).value = 'Grand Total';
   ws.getCell(gtRow, COL.amount).value = { formula: `SUBTOTAL(9,${colLetter(COL.amount)}${_ds}:${colLetter(COL.amount)}${gtRow - 1})` };
   for (const d of derivedCols) ws.getCell(gtRow, d.col).value = { formula: `SUBTOTAL(9,${colLetter(d.col)}${_ds}:${colLetter(d.col)}${gtRow - 1})` };
-  styleAmountCell(ws, gtRow, { underline: true });
+  // Grand Total carries the template's thin-over-double rule, not a lone top rule.
+  styleAmountCell(ws, gtRow, { underline: true, doubleBelow: true });
   ws.getRow(gtRow).height = DATA_ROW_HEIGHT;
+
+  // Clear leftover formatting BELOW the new Grand Total.
+  //
+  // This function wipes cell VALUES from the data start to the old last row but
+  // never the BORDERS, so when a period's log is shorter than the last one the
+  // old subtotal rules stay behind as stray horizontal lines under the Grand
+  // Total. CLA saw exactly that on the Silsbee July report (Brad Tarter,
+  // 2026-08-19): the log ended at the Grand Total on row 22 with orphaned rules
+  // still drawn at rows 24 and 28.
+  //
+  // Assign a complete fresh `.style` rather than mutating properties — exceljs
+  // de-duplicates styles through a shared registry, so mutating one cell's border
+  // bleeds onto every sibling pointing at the same style record.
+  for (let rr = gtRow + 1; rr <= last; rr++) {
+    for (let c = 1; c <= 11; c++) {
+      const cell = ws.getCell(rr, c);
+      const prev = cell.style || {};
+      const hasBorder = prev.border && ['top', 'bottom', 'left', 'right']
+        .some(e => prev.border[e] && prev.border[e].style);
+      if (!hasBorder) continue;
+      cell.style = {
+        numFmt: prev.numFmt,
+        alignment: prev.alignment ? { ...prev.alignment } : undefined,
+        font: prev.font ? { ...prev.font } : undefined,
+        fill: prev.fill ? { ...prev.fill } : undefined,
+        border: {},
+      };
+    }
+  }
 
   // Un-hide every row we just wrote. replaceCurrentLog clears the region's
   // VALUES but not each row's hidden flag, so rows the prior period hid (e.g.
@@ -1626,6 +1836,65 @@ function round2(n) { return Math.round(n * 100) / 100; }
 // formula result like ='Budget to Actual'!F27 -> 9160); the herein cross-refs to
 // the B2A current-period draw resolve to numbers and fold in correctly. Rows with
 // no E activity are already historical and are skipped.
+// True when a worksheet is laid out the way rollForwardContingencyTable expects:
+// "Contingency Previously Requested" in column D and "Contingency Requested
+// Herein" in column E. This is a STRUCTURAL test, deliberately checking the exact
+// columns the roll writes to, so a sheet that merely name-matches can never be
+// rolled by mistake.
+function hasContingencyTableLayout(ws) {
+  if (!ws) return false;
+  let prevInD = false, hereinInE = false;
+  for (let r = 1; r <= 12; r++) {
+    if (/previous/i.test(cellStr(ws.getCell(r, 4)))) prevInD = true;
+    if (/herein/i.test(cellStr(ws.getCell(r, 5)))) hereinInE = true;
+  }
+  return prevInD && hereinInE;
+}
+
+// Resolve the Hard / Soft Cost Contingency Table for the Budget-to-Actual being
+// rolled.
+//
+// This replaces a plain name lookup that picked the WRONG TAB on Silsbee and
+// silently rolled nothing (Brad Tarter, 2026-08-19: "Hard cost contingency tab
+// not moving to previously requested column"). That workbook carries two hard-cost
+// tabs — a legacy, empty "Hard cost contingency" laid out in columns B/C/D, and
+// the live "Hard Cost Contigency P1", whose name is MISSPELLED. The alias list
+// matched the legacy tab exactly, so it won every time, while the live tab
+// normalised to "hard cost contigency" and matched nothing. The Soft table has
+// neither a twin nor a typo, which is why only the hard side failed.
+//
+// Candidates are now scored rather than name-matched:
+//   +4  the sheet actually has the D/E Previously-Requested / Requested-Herein
+//       layout the roll writes to (the decisive signal);
+//   +2  its phase suffix matches the B2A being rolled ("P1" with "... P1");
+//   +1  neither carries a phase suffix.
+// The name test tolerates the "contigency" misspelling.
+function findContingencyTable(workbook, kind, b2aName) {
+  const want = kind === 'hard' ? /hard/i : /soft/i;
+  const norm = (x) => String(x == null ? '' : x).trim().toLowerCase().replace(/\s+/g, ' ');
+  const phaseOf = (x) => { const m = String(x == null ? '' : x).match(/[\s-]+(?:p|phase)\s*(\d+)\s*$/i); return m ? m[1] : null; };
+  const wantPhase = phaseOf(b2aName);
+  const cands = (workbook.worksheets || []).filter(ws => {
+    const n = norm(ws.name);
+    return want.test(n) && /contin?gency/i.test(n);   // tolerates "contigency"
+  });
+  if (!cands.length) return undefined;
+  const score = (ws) => {
+    let sc = 0;
+    if (hasContingencyTableLayout(ws)) sc += 4;
+    const p = phaseOf(ws.name);
+    if (wantPhase && p === wantPhase) sc += 2;
+    else if (!wantPhase && !p) sc += 1;
+    return sc;
+  };
+  let best = cands[0], bestScore = score(cands[0]);
+  for (const ws of cands.slice(1)) {
+    const sc = score(ws);
+    if (sc > bestScore) { best = ws; bestScore = sc; }
+  }
+  return bestScore > 0 ? best : undefined;
+}
+
 function rollForwardContingencyTable(ws) {
   if (!ws) return { moved: 0 };
   const COL_C = 3, COL_D = 4, COL_E = 5;
