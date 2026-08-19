@@ -6044,6 +6044,11 @@ app.put('/api/billcom/dimension-maps/:entity_id', auth, requireEntityAccess('ent
 // Only fills gaps - a line that already carries a project, or an entry that
 // already has a doc number, is left alone - so it is safe to re-run.
 app.post('/api/billcom/retag-projects/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+ try {
+  // `pick` is a local helper in every function that uses it, not a module-level
+  // one. Reaching for it here without declaring it threw ReferenceError, and an
+  // unhandled rejection in an async handler kills the process.
+  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
   const eid = parseInt(req.params.entity_id);
   const dryRun = !!(req.body && req.body.dry_run);
   const from = (req.body && req.body.from) || null;
@@ -6131,6 +6136,10 @@ app.post('/api/billcom/retag-projects/:entity_id', auth, requireEntityAccess('en
     }
   }
   res.json(result);
+ } catch (e) {
+  console.error('retag-projects failed: ' + (e && e.stack || e));
+  if (!res.headersSent) res.status(500).json({ error: e.message });
+ }
 });
 
 // Phase 5: Push CloudLedger COA to Bill.com and auto-create mappings.
