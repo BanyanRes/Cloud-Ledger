@@ -486,8 +486,18 @@ function isCashCode(code) {
   const c = String(code || '');
   return /^10[01]\d/.test(c) || /^107\d/.test(c);
 }
+// Bill.com / bank CLEARING accounts are cash-equivalent pass-throughs and belong
+// with cash. They are spread across the 10xxx asset block on these charts (10500,
+// 107xx, 108xx), so the code block alone does not find them and the word alone is
+// not safe: CLR Silsbee Property Owner's 11213 "Track Clearing Repair" is a
+// construction cost, and a name-only test swept it into Cash and Cash Equivalents.
+// Requiring BOTH the word and a 10xxx code keeps every real clearing account and
+// drops that false positive.
+function isClearingAccount(r) {
+  return /clearing/i.test(r.name || '') && /^10\d{3}$/.test(String(r.code || ''));
+}
 function isCashAccount(r) {
-  return r.type === 'Asset' && (isCashCode(r.code) || /cash|checking|savings|money market|operating acct|bank/i.test(r.name || '') || r.bank_acct);
+  return r.type === 'Asset' && (isCashCode(r.code) || isClearingAccount(r) || /cash|checking|savings|money market|operating acct|bank/i.test(r.name || '') || r.bank_acct);
 }
 
 // ── Balance-sheet classification ───────────────────────────────────────────
@@ -594,7 +604,20 @@ function bsClassify(row, opts = {}) {
   // Heuristic fallback for accounts not in the map, so nothing is dropped.
   const name = nm;
   if (row.type === 'Asset') {
-    if (/cash|checking|savings|bank|clearing/.test(name)) return { section: 'Current Assets', sub: 'Cash and Cash Equivalents' };
+    // Cash detection uses the SAME predicate as the Statement of Cash Flows
+    // (isCashAccount), so the balance sheet can never report a different cash
+    // figure than the cash-flow statement reconciles to.
+    //
+    // The old test looked only for the words cash/checking/savings/bank/clearing
+    // in the account NAME. Most of this portfolio's bank accounts are named for
+    // their bank and account number instead — "MapleMark Entity 120 Odyssey
+    // Holdings - 8850", "MapleMark_Odyssey_8505ICS", "CLRO - MM x4817" — so they
+    // fell through to Other Assets while the cash-flow statement counted them as
+    // cash. On Odyssey Holdings that hid 100% of cash ($2,875,616.38 at
+    // 6/30/2026): the balance sheet showed no Cash and Cash Equivalents section
+    // at all. isCashAccount adds the account-code block (100xx-101xx, 107xx) and
+    // the `bank_acct` flag, which is what actually identifies these.
+    if (isCashAccount(row)) return { section: 'Current Assets', sub: 'Cash and Cash Equivalents' };
     if (/receivable/.test(name) && /due from|intercompany/.test(name)) return { section: 'Current Assets', sub: 'Intercompany Receivable' };
     if (/receivable/.test(name)) return { section: 'Current Assets', sub: 'Accounts Receivable, Net' };
     if (/prepaid|reserve|deposit/.test(name)) return { section: 'Current Assets', sub: 'Other Current Assets' };
@@ -1433,6 +1456,37 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       // pages. Only record on the FIRST (body-driven) call, not during replay.
       if (!_replaying) _hdrSpec = { labels, hopts };
       const LH = 9;                 // header line height
+      // Column pitch (smallest gap between adjacent column right-edges). Computed
+      // BEFORE the labels are measured, because a long date heading is wrapped
+      // against it.
+      let pitch = Infinity;
+      for (let i = 1; i < cols.length; i++) pitch = Math.min(pitch, cols[i] - cols[i - 1]);
+      // Keep a readable gutter between adjacent column headings.
+      //
+      // Headings are right-aligned on each column edge, so a label wider than
+      // (pitch - MIN_HDR_GUTTER) runs back into the heading to its left. At the
+      // balance sheet's 75pt pitch "December 31, 2025" is 71.7pt wide (3.3pt of
+      // air) and "September 30, 2026" is 74.4pt (0.6pt) - they read as one run of
+      // text; on the Statements of Operations' 72pt pitch the September label
+      // actually overlaps its neighbour. Rather than widen the numeric columns
+      // (which would squeeze the account-name column), wrap a long "Month D,
+      // YYYY" heading after the comma: "September 30," is 54.7pt, leaving a 20pt
+      // gutter. Multi-line labels are already bottom-aligned, so the year sits on
+      // the same baseline as any single-line heading beside it.
+      //
+      // All-or-nothing per header row: if ANY date label needs wrapping, every
+      // date label wraps, so a June/December pair can never render half-wrapped.
+      const MIN_HDR_GUTTER = 10;
+      const DATE_LABEL = /^([A-Z][a-z]+ \d{1,2},) (\d{4})$/;
+      if (Number.isFinite(pitch)) {
+        const avail = pitch - MIN_HDR_GUTTER;
+        const anyTooWide = labels.some(l => DATE_LABEL.test(String(l))
+          && bold.widthOfTextAtSize(String(l), FS.head) > avail);
+        if (anyTooWide) labels = labels.map(l => {
+          const dm = DATE_LABEL.exec(String(l));
+          return dm ? dm[1] + '\n' + dm[2] : l;
+        });
+      }
       const nLines = Math.max(1, ...labels.map(l => String(l).split('\n').length));
       // Reserve height for the tallest label block + the underline + the two-row
       // trailing gap, so a header never lands at the very bottom of a page with
@@ -1448,8 +1502,6 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       // adjacent underlines are separated. Use the smallest pitch so no two
       // boxes overlap.
       const GUTTER = 14; // blank points between adjacent underline boxes
-      let pitch = Infinity;
-      for (let i = 1; i < cols.length; i++) pitch = Math.min(pitch, cols[i] - cols[i - 1]);
       const boxW = Number.isFinite(pitch) ? Math.max(20, pitch - GUTTER) : null;
       // Underline sits just BELOW the last line's baseline for every column, at a
       // single common y so all column rules line up on one row at the bottom of
