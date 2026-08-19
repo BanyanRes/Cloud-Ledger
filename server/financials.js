@@ -593,6 +593,24 @@ function bsClassify(row, opts = {}) {
   if (ic && row.type === 'Asset' && /due from|intercompany/.test(nm)) {
     return { section: 'Current Assets', sub: 'Intercompany Receivable' };
   }
+  // An ASSET account whose name starts "Due to ..." is a payable that was coded
+  // on the wrong side of the chart, and it carries a credit balance to prove it.
+  // Odyssey Holdings 18397 "Due to Phil Brosseau" (-7,736.96 at 6/30/2026) is the
+  // only such account in the portfolio, and it was printing inside Other Assets.
+  // Present it where it belongs, under Current Liabilities.
+  //
+  // Other Current Liabilities rather than Intercompany Payable: the counterparty
+  // is an individual with no ledger and no org node, so there is nothing to
+  // eliminate against. Map the code explicitly if a real affiliate ever lands
+  // here. The match is anchored so it can only ever catch an account whose name
+  // BEGINS with "Due to", never a phrase buried mid-name.
+  //
+  // bsSideOf / bsBal in buildStatements move the row to the liability side and
+  // negate it, so it reads credit-positive like every other liability. The tie-out
+  // is unchanged: assets rise by 7,736.96 and liabilities rise by the same amount.
+  if (row.type === 'Asset' && /^\s*due\s+to\b/.test(nm)) {
+    return { section: 'Current Liabilities', sub: 'Other Current Liabilities' };
+  }
   // Liabilities: a genuine note/loan keeps its Long Term Liabilities home even
   // when the name also says "due to <affiliate>" (Jimmy, 2026-08-18) - that
   // avoids pulling real debt off the statements already issued.
@@ -641,6 +659,14 @@ function bsSection(row) { return bsClassify(row).section; }
 // Presentation order for sections and, within each, their subsections.
 const BS_ASSET_ORDER = ['Current Assets', 'Fixed Assets, Net', 'Intangible Assets, Net', 'Investments', 'Other Assets'];
 const BS_LIAB_ORDER = ['Current Liabilities', 'Long Term Liabilities'];
+// Which side of the balance sheet each classified section prints on. The
+// CLASSIFICATION decides the side, not the account's type: a chart can code a
+// payable as an asset (see the "Due to ..." rule in bsClassify), and the
+// statement should still show it as a liability.
+const BS_SIDE = new Map([
+  ...BS_ASSET_ORDER.map(sec => [sec, 'Asset']),
+  ...BS_LIAB_ORDER.map(sec => [sec, 'Liability']),
+]);
 const BS_SUB_ORDER = {
   'Current Assets': ['Cash and Cash Equivalents', 'Accounts Receivable, Net', 'Intercompany Receivable', 'Other Current Assets'],
   'Fixed Assets, Net': ['Fixed Assets'],
@@ -777,6 +803,18 @@ async function buildStatements(getBalances, opts) {
   const contraSet = (profile === 'banyan') ? BS_CONTRA_CODES_BANYAN : BS_CONTRA_CODES;
   const bsCls = (row) => bsClassifyFor(profile, row);
   const bsSec = (row) => bsClassifyFor(profile, row).section;
+  // The side a row PRINTS on, which is the side its classification puts it on —
+  // not always the side its account type implies.
+  const bsSideOf = (row) => BS_SIDE.get(bsCls(row).section)
+    || (row.type === 'Liability' ? 'Liability' : 'Asset');
+  // Balances arrive signed by account type (Asset debit-positive, Liability
+  // credit-positive). A row that crosses sides has to be negated so it reads in
+  // the receiving side's convention. Because the same amount leaves one side and
+  // arrives on the other, Assets = Liabilities + Equity is untouched.
+  const bsBal = (row, v) => {
+    const natural = row.type === 'Liability' ? 'Liability' : 'Asset';
+    return bsSideOf(row) === natural ? v : -v;
+  };
   const ys = yearStart(asOf);
   const period = resolvePeriod(asOf, opts.period);
   const priorBsDate = period.bsPriorDate;
@@ -829,10 +867,11 @@ async function buildStatements(getBalances, opts) {
       .map(code => {
         const rc = colCur.map.get(code), rp = colPri.map.get(code);
         const ref = rc || rp;
-        if (!ref || ref.type !== type) return null;
+        if (!ref || ref.type === 'Equity') return null;
+        if (bsSideOf(ref) !== type) return null;
         const cls = bsCls(ref);
         if (cls.section !== section || cls.sub !== sub) return null;
-        const cur = rc ? bal(rc) : 0, pri = rp ? bal(rp) : 0;
+        const cur = rc ? bsBal(ref, bal(rc)) : 0, pri = rp ? bsBal(ref, bal(rp)) : 0;
         if (isZero(cur) && isZero(pri)) return null;
         return { code, name: ref.name, cur: r2(cur), pri: r2(pri), change: r2(cur - pri), contra: contraSet.has(String(code)) };
       })
@@ -849,7 +888,8 @@ async function buildStatements(getBalances, opts) {
     const extraSubs = [];
     for (const code of bsCodes) {
       const ref = colCur.map.get(code) || colPri.map.get(code);
-      if (!ref || ref.type !== type) continue;
+      if (!ref || ref.type === 'Equity') continue;
+      if (bsSideOf(ref) !== type) continue;
       const cls = bsCls(ref);
       if (cls.section === section && !seen.has(cls.sub)) { seen.add(cls.sub); extraSubs.push(cls.sub); }
     }
@@ -1512,10 +1552,17 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
         let maxW = 0;
         parts.forEach(pl => { const w = bold.widthOfTextAtSize(pl, FS.head); if (w > maxW) maxW = w; });
         // Bottom-align: the last line sits on baseY; earlier lines stack above it.
+        // Lines are CENTRED within the heading block rather than each one right-
+        // aligned on the column edge, so a wrapped year ("2025") sits in the middle
+        // under its month/day line ("December 31,") instead of hugging the edge.
+        // The block's right edge is still cols[i] and its width is still the widest
+        // line, so the widest line lands exactly where it always did and a
+        // single-line heading does not move at all.
+        const blockLeft = cols[i] - maxW;
         parts.forEach((pl, pi) => {
           const w = bold.widthOfTextAtSize(pl, FS.head);
           const lineY = baseY + (parts.length - 1 - pi) * LH;
-          page.drawText(pl, { x: cols[i] - w, y: lineY, size: FS.head, font: bold });
+          page.drawText(pl, { x: blockLeft + (maxW - w) / 2, y: lineY, size: FS.head, font: bold });
         });
         if (hopts.underline) {
           // colBox → fixed per-column span (with a gutter) so the rule reads as
