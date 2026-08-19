@@ -3821,7 +3821,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
         const txns=[];
         // project_name / doc_number were never picked up here, so the drill-down
         // export CLA ran had no Project and no Doc column (item 6).
-        entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code)txns.push({date:e.date,entry_num:e.entry_num,jeId:e.id,memo:e.memo,offset:offsetOf(e),vendor:e.vendor||'',debit:l.debit||0,credit:l.credit||0,created_by:e.created_by,created_at:e.created_at,class_name:l.class_name||'',location_name:l.location_name||'',project_name:(l.project_code&&l.project_code!==l.project_name?(l.project_code+(l.project_name?' — '+l.project_name:'')):(l.project_name||'')),doc_number:e.doc_number||''});});});
+        entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code)txns.push({date:e.date,entry_num:e.entry_num,jeId:e.id,memo:e.memo,offset:offsetOf(e),vendor:e.vendor||'',debit:l.debit||0,credit:l.credit||0,created_by:e.created_by,created_at:e.created_at,class_name:l.class_name||'',location_name:l.location_name||'',description:l.description||'',project_name:(l.project_code&&l.project_code!==l.project_name?(l.project_code+(l.project_name?' — '+l.project_name:'')):(l.project_name||'')),doc_number:e.doc_number||''});});});
         txns.sort((a,b)=>a.date.localeCompare(b.date)||a.entry_num-b.entry_num);
         const bb=(begBalances||[]).find(x=>x.code===acct.code);
         setBegBal(bb?bb.balance:0);
@@ -3852,7 +3852,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
     const STY={titleRows:[0,1],metaRows:[2],headerRows:[4],underlineRows:[],doubleUnderlineRows:[],amountCols:[cDr,cCr,cBal]};
     const F=[];
     d.push([...bl(4+nD),'Beginning Balance',...bl(4),begBal]);let prevRow=d.length-1;const begRow=prevRow;
-    let r=begBal;const first=d.length;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),l.doc_number||'',acctLabel,...dimOf(l),l.memo,l.offset||'',l.vendor||'',l.debit||'',l.credit||'',r]);const cur=d.length-1,rr=cur+1;const delta=isDr?(LDr+rr+'-'+LCr+rr):(LCr+rr+'-'+LDr+rr);F.push({r:cur,c:cBal,f:LBal+(prevRow+1)+'+'+delta});prevRow=cur;});const last=d.length-1;
+    let r=begBal;const first=d.length;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),l.doc_number||'',acctLabel,...dimOf(l),l.description||l.memo,l.offset||'',l.vendor||'',l.debit||'',l.credit||'',r]);const cur=d.length-1,rr=cur+1;const delta=isDr?(LDr+rr+'-'+LCr+rr):(LCr+rr+'-'+LDr+rr);F.push({r:cur,c:cBal,f:LBal+(prevRow+1)+'+'+delta});prevRow=cur;});const last=d.length-1;
     STY.underlineRows.push(last);
     const tr=d.length;d.push([...bl(4+nD),'Totals',...bl(2),totalDr,totalCr,r]);
     STY.doubleUnderlineRows.push(tr);
@@ -3889,7 +3889,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
                  <td style={S.td} title={tip}><button style={{background:'none',border:0,padding:0,color:T.accent,fontWeight:600,cursor:'pointer',fontSize:'inherit',fontFamily:'inherit'}} onClick={()=>openJE(l.jeId)}>JE-{String(l.entry_num).padStart(4,'0')}</button></td>
                  <td style={{...S.td,whiteSpace:'nowrap'}}>{l.doc_number||''}</td>
                  <td style={S.td}>{l.project_name||''}</td>
-                 <td style={S.td}>{l.memo}</td>
+                 <td style={S.td}>{l.description||l.memo}</td>
                  <td style={S.td}>{l.offset}</td>
                  <td style={S.td}>{l.vendor}</td>
                  <td style={S.tdR}>{l.debit>0?fmt(l.debit):''}</td>
