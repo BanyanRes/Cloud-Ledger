@@ -3723,16 +3723,27 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
       const lbl=scopeLabel?(' — '+scopeLabel):'';
       // Doc # sits beside the JE number, and Project now actually populates: the
       // /gl-detail response used to drop project_name/project_code (CLA item 6).
-      const d=[[entityName||'General Ledger'],['GL Detail'+lbl],['Through '+asOf],[],['Date','Entry #','Doc #','Account','Account Name','Memo / Description','Project','Location',classTerm(),'Debit','Credit','Running Bal']];
-      const STY={titleRows:[0,1],metaRows:[2],headerRows:[4],underlineRows:[],doubleUnderlineRows:[],amountCols:[9,10,11]};
+      // Class and Location are printed only if some row uses them — Banyan
+      // Residential tags projects and nothing else, so those columns were two
+      // permanently empty columns in the middle of the report (CLA, 8/19/2026).
+      const _ln=r.lines||[];
+      const _hasCls=_ln.some(l=>l.class_name),_hasLoc=_ln.some(l=>l.location_name);
+      const _projLbl=l=>l.project_code&&l.project_code!==l.project_name?(l.project_code+(l.project_name?' — '+l.project_name:'')):(l.project_name||'');
+      const _dimHdr=['Project',...(_hasLoc?['Location']:[]),...(_hasCls?[classTerm()]:[])];
+      const _dimOf=l=>[_projLbl(l),...(_hasLoc?[l.location_name||'']:[]),...(_hasCls?[l.class_name||'']:[])];
+      const nD=_dimHdr.length;               // 1..3 dimension columns
+      const cDr=6+nD,cCr=7+nD,cBal=8+nD;     // 6 fixed columns, then dims, then amounts
+      const bl=n=>Array.from({length:n},()=>'');
+      const d=[[entityName||'General Ledger'],['GL Detail'+lbl],['Through '+asOf],[],['Date','Entry #','Doc #','Account','Account Name','Memo / Description',..._dimHdr,'Debit','Credit','Running Bal']];
+      const STY={titleRows:[0,1],metaRows:[2],headerRows:[4],underlineRows:[],doubleUnderlineRows:[],amountCols:[cDr,cCr,cBal]};
       const first=d.length;
-      (r.lines||[]).forEach(l=>d.push([l.date,l.entry_num,l.doc_number||'',l.account_code,l.account_name,l.description||l.memo||'',l.project_code&&l.project_code!==l.project_name?(l.project_code+(l.project_name?' — '+l.project_name:'')):(l.project_name||''),l.location_name,l.class_name,l.debit||'',l.credit||'',l.running_balance]));
+      _ln.forEach(l=>d.push([l.date,l.entry_num,l.doc_number||'',l.account_code,l.account_name,l.description||l.memo||'',..._dimOf(l),l.debit||'',l.credit||'',l.running_balance]));
       const last=d.length-1;
       STY.underlineRows.push(last);
-      d.push([]);d.push(['','','','','','','','','','Total Dr','Total Cr','']);
-      const tr=d.length;d.push(['','','','','','','','','',r.total_debit,r.total_credit,'']);
+      d.push([]);d.push([...bl(cDr),'Total Dr','Total Cr','']);
+      const tr=d.length;d.push([...bl(cDr),r.total_debit,r.total_credit,'']);
       STY.doubleUnderlineRows.push(tr);
-      const F=[];sumCols(F,tr,[9,10],first,last);
+      const F=[];sumCols(F,tr,[cDr,cCr],first,last);
       exportToExcel(d,'GL'+(fnameTag?'_'+fnameTag:'')+'_'+asOf+'.xlsx',{formulas:F,style:STY});
     }catch(e){alert('GL export failed: '+e.message);}
   };
@@ -3825,17 +3836,27 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
   const totalCr=lines.reduce((s,l)=>s+l.credit,0);
   const matchQ=(l)=>{if(!q)return true;const s=q.toLowerCase();return (l.memo||'').toLowerCase().includes(s)||(l.offset||'').toLowerCase().includes(s)||(l.vendor||'').toLowerCase().includes(s)||('je-'+String(l.entry_num).padStart(4,'0')).includes(s)||(l.date||'').includes(s)||String(l.debit).includes(s)||String(l.credit).includes(s);};
   const doExport=()=>{const acctLabel=acct.code+' - '+acct.name;
-    // Doc # and Project added (CLA item 6). Debit/Credit/Balance are now columns
-    // K/L/M (0-based 10/11/12), so the running-balance formulas move with them.
-    const d=[[entityName||'Account Detail'],[acctLabel],['Period: '+from+' to '+to],[],['Date','JE','Doc #','Account',classTerm(),'Location','Project','Memo','Offset Account','Vendor/Payee','Debit','Credit','Balance']];
-    const STY={titleRows:[0,1],metaRows:[2],headerRows:[4],underlineRows:[],doubleUnderlineRows:[],amountCols:[10,11,12]};
+    // Columns: Date | JE | Doc # | Account | <dimensions> | Memo | Offset |
+    // Vendor | Debit | Credit | Balance. Class and Location appear only if some
+    // row uses them — for Banyan Residential both are always empty, so they were
+    // two dead columns (CLA, 8/19/2026). Amount positions and the running-balance
+    // formula letters are derived from the column count rather than hardcoded.
+    const hasCls=lines.some(l=>l.class_name),hasLoc=lines.some(l=>l.location_name);
+    const dimHdr=[...(hasCls?[classTerm()]:[]),...(hasLoc?['Location']:[]),'Project'];
+    const dimOf=l=>[...(hasCls?[l.class_name||'']:[]),...(hasLoc?[l.location_name||'']:[]),l.project_name||''];
+    const nD=dimHdr.length;
+    const cDr=7+nD,cCr=8+nD,cBal=9+nD;      // 4 fixed, dims, Memo/Offset/Vendor, amounts
+    const LDr=XLC(cDr),LCr=XLC(cCr),LBal=XLC(cBal);
+    const bl=n=>Array.from({length:n},()=>'');
+    const d=[[entityName||'Account Detail'],[acctLabel],['Period: '+from+' to '+to],[],['Date','JE','Doc #','Account',...dimHdr,'Memo','Offset Account','Vendor/Payee','Debit','Credit','Balance']];
+    const STY={titleRows:[0,1],metaRows:[2],headerRows:[4],underlineRows:[],doubleUnderlineRows:[],amountCols:[cDr,cCr,cBal]};
     const F=[];
-    d.push(['','','','','','','','Beginning Balance','','','','',begBal]);let prevRow=d.length-1;const begRow=prevRow;
-    let r=begBal;const first=d.length;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),l.doc_number||'',acctLabel,l.class_name||'',l.location_name||'',l.project_name||'',l.memo,l.offset||'',l.vendor||'',l.debit||'',l.credit||'',r]);const cur=d.length-1,rr=cur+1;const delta=isDr?('K'+rr+'-L'+rr):('L'+rr+'-K'+rr);F.push({r:cur,c:12,f:'M'+(prevRow+1)+'+'+delta});prevRow=cur;});const last=d.length-1;
+    d.push([...bl(4+nD),'Beginning Balance',...bl(4),begBal]);let prevRow=d.length-1;const begRow=prevRow;
+    let r=begBal;const first=d.length;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),l.doc_number||'',acctLabel,...dimOf(l),l.memo,l.offset||'',l.vendor||'',l.debit||'',l.credit||'',r]);const cur=d.length-1,rr=cur+1;const delta=isDr?(LDr+rr+'-'+LCr+rr):(LCr+rr+'-'+LDr+rr);F.push({r:cur,c:cBal,f:LBal+(prevRow+1)+'+'+delta});prevRow=cur;});const last=d.length-1;
     STY.underlineRows.push(last);
-    const tr=d.length;d.push(['','','','','','','','Totals','','',totalDr,totalCr,r]);
+    const tr=d.length;d.push([...bl(4+nD),'Totals',...bl(2),totalDr,totalCr,r]);
     STY.doubleUnderlineRows.push(tr);
-    sumCols(F,tr,[10,11],first,last);F.push({r:tr,c:12,f:'M'+(begRow+1)+'+'+(isDr?('K'+(tr+1)+'-L'+(tr+1)):('L'+(tr+1)+'-K'+(tr+1)))});
+    sumCols(F,tr,[cDr,cCr],first,last);F.push({r:tr,c:cBal,f:LBal+(begRow+1)+'+'+(isDr?(LDr+(tr+1)+'-'+LCr+(tr+1)):(LCr+(tr+1)+'-'+LDr+(tr+1)))});
     exportToExcel(d,'GL_'+acct.code+'_'+to+'.xlsx',{formulas:F,style:STY});};
   return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,width:'min(1100px,96vw)',maxWidth:'98vw',height:'88vh',maxHeight:'96vh',minWidth:'min(680px,96vw)',minHeight:420,resize:'both',overflow:'hidden',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
