@@ -23,6 +23,7 @@ const { computeAllocation, buildAllocationWorkbook } = require('./insurance_allo
 const financials = require('./financials');
 const execSummaries = require('./execSummaries');
 const ExcelJS = require('exceljs');
+const xlsxStyledReport = require('./xlsxStyledReport.js');
 const JSZip = require('jszip');
 
 const app = express();
@@ -301,6 +302,23 @@ db.exec(`
     FOREIGN KEY (entity_id) REFERENCES entities(id)
   );
   CREATE INDEX IF NOT EXISTS idx_bclm_entity ON billcom_location_map(entity_id);
+  -- departmentId -> CL project. Banyan enters the PROJECT (e.g. "Van Buren") in
+  -- Bill.com's Department field, so department is what carries the project onto a
+  -- synced JE line. Confirmed by Jimmy 2026-08-19 after CLA (Dennis Arada) found
+  -- July/August bills invisible to the project-scoped Custom Detail report: the
+  -- sync wrote class_id and location_id only, so every synced line had a NULL
+  -- project and was filtered out of any report scoped to a project.
+  CREATE TABLE IF NOT EXISTS billcom_project_map (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL,
+    billcom_dept_id TEXT NOT NULL,
+    billcom_dept_name TEXT,
+    cl_project_id INTEGER NOT NULL,
+    created_at TEXT,
+    UNIQUE(entity_id, billcom_dept_id),
+    FOREIGN KEY (entity_id) REFERENCES entities(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_bcpm_entity ON billcom_project_map(entity_id);
   CREATE TABLE IF NOT EXISTS billcom_sync_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id INTEGER NOT NULL,
@@ -462,6 +480,10 @@ if (!jeCols.includes('updated_at')) db.exec("ALTER TABLE journal_entries ADD COL
 // Vendor/payee name for the entry (e.g. Bill.com bill JEs), so account detail can
 // show who an A/P transaction is with. Populated at Bill.com sync.
 if (!jeCols.includes('vendor')) db.exec("ALTER TABLE journal_entries ADD COLUMN vendor TEXT");
+// Document / invoice number for the entry (CLA request, 8/2026): the source
+// document's own number - a Bill.com invoiceNumber, a check number, an AR invoice
+// number - so every detail report can show a Doc column beside the JE number.
+if (!jeCols.includes('doc_number')) { db.exec("ALTER TABLE journal_entries ADD COLUMN doc_number TEXT"); console.log('[db migrate] journal_entries.doc_number added'); }
 
 // Entity type: 'accounting' (default, standard ledger entity) | 'development' | 'shell' (tracks location + investor/class dimensions)
 // (real-estate development project; unlocks Requisition Report / Invoice Packet features)
@@ -3201,6 +3223,7 @@ app.get('/api/entities/:eid/gl-detail', auth, requireEntityAccess(), (req, res) 
   if (account_code) { where += ' AND jl.account_code = ?'; params.push(account_code); }
   const rows = db.prepare(`
     SELECT jl.id AS line_id, je.id AS entry_id, je.entry_num, je.date, je.memo,
+           je.doc_number, je.vendor,
            jl.account_code, a.name AS account_name, a.type AS account_type,
            jl.debit, jl.credit, jl.description,
            dc.name AS class_name, dl.name AS location_name, dp.name AS project_name, dp.code AS project_code
@@ -3256,6 +3279,11 @@ app.get('/api/entities/:eid/gl-detail', auth, requireEntityAccess(), (req, res) 
       account_code: r.account_code, account_name: r.account_name, account_type: r.account_type,
       debit: +(r.debit || 0).toFixed(2), credit: +(r.credit || 0).toFixed(2),
       description: r.description || '', class_name: r.class_name || '', location_name: r.location_name || '',
+      // project_name / project_code were selected but never returned, so every
+      // downstream "Project" column (TB GL Detail export, Custom Detail
+      // group-by-project) read blank. CLA item 6, 8/2026.
+      project_name: r.project_name || '', project_code: r.project_code || '',
+      doc_number: r.doc_number || '', vendor: r.vendor || '',
       running_balance: +bal.toFixed(2),
     };
   });
@@ -3265,12 +3293,12 @@ app.get('/api/entities/:eid/gl-detail', auth, requireEntityAccess(), (req, res) 
 });
 
 app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
-  const { date, memo, lines } = req.body; if (!date||!memo||!lines||lines.length<2) return res.status(400).json({ error: 'Invalid' });
+  const { date, memo, lines, doc_number } = req.body; if (!date||!memo||!lines||lines.length<2) return res.status(400).json({ error: 'Invalid' });
   const tDr = lines.reduce((s,l) => s+(l.debit||0), 0); const tCr = lines.reduce((s,l) => s+(l.credit||0), 0);
   if (Math.abs(tDr-tCr) > 0.005) return res.status(400).json({ error: 'Must balance' });
   const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id=?').get(req.params.eid).m||0)+1;
   const result = db.transaction(() => {
-    const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)').run(req.params.eid, num, date, memo, req.user.name);
+    const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, doc_number, created_by) VALUES (?,?,?,?,?,?)').run(req.params.eid, num, date, memo, (doc_number || '').trim() || null, req.user.name);
     for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?,?)').run(r.lastInsertRowid, l.account_code, l.debit||0, l.credit||0, l.description||'', l.project_id||null, l.class_id||null, l.location_id||null);
     return r.lastInsertRowid;
   })();
@@ -3460,6 +3488,47 @@ app.post('/api/entities/:eid/entries/bulk', auth, requireEntityAccess(), require
   res.json({ posted: posted.length, entries: posted });
 });
 
+// Backfill journal_entries.doc_number for entries created before the column
+// existed. Source of truth is billcom_sync_log.invoice_number; the memo pattern
+// "Bill.com bill #<n>" is the fallback for rows the log does not cover. Body:
+// { dry_run?: true }. Idempotent - only fills rows where doc_number IS NULL.
+app.post('/api/entities/:eid/backfill-doc-numbers', auth, requireEntityAccess(), requireRole('Admin'), (req, res) => {
+  const eid = req.params.eid;
+  const dryRun = !!(req.body && req.body.dry_run);
+  const fromLog = db.prepare(
+    "SELECT je.id, je.entry_num, bl.invoice_number AS doc " +
+    "FROM billcom_sync_log bl JOIN journal_entries je ON je.id = bl.cl_entry_id " +
+    "WHERE bl.entity_id = ? AND bl.status = 'success' AND bl.invoice_number IS NOT NULL " +
+    "AND bl.invoice_number <> '' AND (je.doc_number IS NULL OR je.doc_number = '')"
+  ).all(eid);
+  const fromMemo = db.prepare(
+    "SELECT id, entry_num, memo FROM journal_entries " +
+    "WHERE entity_id = ? AND (doc_number IS NULL OR doc_number = '') AND memo LIKE 'Bill.com bill #%'"
+  ).all(eid);
+  const seen = new Set();
+  const plan = [];
+  for (const r of fromLog) { if (seen.has(r.id)) continue; seen.add(r.id); plan.push({ id: r.id, entry_num: r.entry_num, doc_number: String(r.doc).trim(), source: 'sync_log' }); }
+  for (const r of fromMemo) {
+    if (seen.has(r.id)) continue;
+    const m = String(r.memo || '').match(/^Bill\.com bill #(.+)$/);
+    if (!m) continue;
+    seen.add(r.id);
+    plan.push({ id: r.id, entry_num: r.entry_num, doc_number: m[1].trim(), source: 'memo' });
+  }
+  if (!dryRun && plan.length) {
+    const upd = db.prepare('UPDATE journal_entries SET doc_number = ? WHERE id = ? AND entity_id = ?');
+    db.transaction(() => { for (const p of plan) upd.run(p.doc_number, p.id, eid); })();
+  }
+  res.json({
+    dry_run: dryRun,
+    would_update: plan.length,
+    updated: dryRun ? 0 : plan.length,
+    from_sync_log: plan.filter(p => p.source === 'sync_log').length,
+    from_memo: plan.filter(p => p.source === 'memo').length,
+    sample: plan.slice(0, 25),
+  });
+});
+
 app.delete('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const atts = db.prepare('SELECT filename FROM journal_attachments WHERE entry_id=?').all(req.params.id);
   atts.forEach(a => { try { fs.unlinkSync(path.join(UPLOAD_DIR, a.filename)); } catch {} });
@@ -3468,7 +3537,7 @@ app.delete('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requir
 });
 
 app.put('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
-  const { date, memo, lines } = req.body;
+  const { date, memo, lines, doc_number } = req.body;
   if (!date || !memo || !lines || lines.length < 2) return res.status(400).json({ error: 'Invalid entry' });
   const tDr = lines.reduce((s, l) => s + (l.debit || 0), 0);
   const tCr = lines.reduce((s, l) => s + (l.credit || 0), 0);
@@ -3476,8 +3545,15 @@ app.put('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requireRo
   const entry = db.prepare('SELECT * FROM journal_entries WHERE id=? AND entity_id=?').get(req.params.id, req.params.eid);
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
   db.transaction(() => {
-    db.prepare("UPDATE journal_entries SET date=?, memo=?, updated_by=?, updated_at=datetime('now') WHERE id=?")
-      .run(date, memo, req.user.name || req.user.email, req.params.id);
+    // doc_number is only touched when the caller sends the key, so an older client
+    // that does not know about the field cannot blank an existing document number.
+    if (Object.prototype.hasOwnProperty.call(req.body, 'doc_number')) {
+      db.prepare("UPDATE journal_entries SET date=?, memo=?, doc_number=?, updated_by=?, updated_at=datetime('now') WHERE id=?")
+        .run(date, memo, String(doc_number || '').trim() || null, req.user.name || req.user.email, req.params.id);
+    } else {
+      db.prepare("UPDATE journal_entries SET date=?, memo=?, updated_by=?, updated_at=datetime('now') WHERE id=?")
+        .run(date, memo, req.user.name || req.user.email, req.params.id);
+    }
     db.prepare('DELETE FROM journal_lines WHERE entry_id=?').run(req.params.id);
     for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?,?)').run(req.params.id, l.account_code, l.debit || 0, l.credit || 0, l.description || '', l.project_id || null, l.class_id || null, l.location_id || null);
   })();
@@ -5807,7 +5883,8 @@ app.get('/api/billcom/dimension-maps/:entity_id', auth, requireEntityAccess('ent
   const eid = parseInt(req.params.entity_id);
   const classes = db.prepare('SELECT billcom_class_id, billcom_class_name, cl_class_id FROM billcom_class_map WHERE entity_id = ? ORDER BY id').all(eid);
   const locations = db.prepare('SELECT billcom_job_id, billcom_job_name, cl_location_id FROM billcom_location_map WHERE entity_id = ? ORDER BY id').all(eid);
-  res.json({ classes, locations });
+  const projects = db.prepare('SELECT billcom_dept_id, billcom_dept_name, cl_project_id FROM billcom_project_map WHERE entity_id = ? ORDER BY id').all(eid);
+  res.json({ classes, locations, projects });
 });
 
 app.post('/api/billcom/dimension-maps/:entity_id/auto', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
@@ -5822,23 +5899,39 @@ app.post('/api/billcom/dimension-maps/:entity_id/auto', auth, requireEntityAcces
   } catch (e) { return res.status(502).json({ error: 'Bill.com login failed: ' + e.message }); }
   const args = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
 
-  let bcClasses, bcJobs;
+  let bcClasses, bcJobs, bcDepts;
   try { bcClasses = await billcomListClassification({ ...args, resource: 'accounting-classes' }); }
   catch (e) { return res.status(502).json({ error: 'fetch classes failed: ' + e.message }); }
   try { bcJobs = await billcomListClassification({ ...args, resource: 'jobs' }); }
   catch (e) { return res.status(502).json({ error: 'fetch jobs failed: ' + e.message }); }
+  // Departments carry the PROJECT for Banyan (confirmed by Jimmy 2026-08-19).
+  // Tolerate a department fetch failure: an org that does not use departments
+  // should still be able to auto-map its classes and jobs.
+  try { bcDepts = await billcomListClassification({ ...args, resource: 'departments' }); }
+  catch (e) { bcDepts = null; }
 
   // CL dimensions for this entity (class = investor, location = deal).
   const clClasses = db.prepare('SELECT id, name FROM dim_classes WHERE entity_id = ?').all(eid);
   const clLocs = db.prepare('SELECT id, name FROM dim_locations WHERE entity_id = ?').all(eid);
+  const clProjs = db.prepare('SELECT id, code, name FROM dim_projects WHERE entity_id = ?').all(eid);
   const norm = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
   const clClassByName = new Map(clClasses.map(c => [norm(c.name), c.id]));
   const clLocByName = new Map(clLocs.map(l => [norm(l.name), l.id]));
+  // A project matches on its name, its code, or the combined "code - name"
+  // label, and on the name with a leading % stripped (Bill.com departments come
+  // through as e.g. "%Van Buren"). Earlier keys win over later ones.
+  const clProjByKey = new Map();
+  const addProjKey = (k, id) => { const kk = norm(String(k || '').replace(/^%+/, '')); if (kk && !clProjByKey.has(kk)) clProjByKey.set(kk, id); };
+  for (const p of clProjs) {
+    addProjKey(p.name, p.id);
+    addProjKey(p.code, p.id);
+    if (p.code && p.name) { addProjKey(p.code + ' - ' + p.name, p.id); addProjKey(p.code + ' ' + p.name, p.id); }
+  }
   const nameOf = (o) => o.name || o.shortName || o.description || '';
   const idOf = (o) => String(o.id || '');
 
   const now = new Date().toISOString();
-  const result = { classes: { matched: [], unmatched: [] }, locations: { matched: [], unmatched: [] } };
+  const result = { classes: { matched: [], unmatched: [] }, locations: { matched: [], unmatched: [] }, projects: { matched: [], unmatched: [] } };
 
   const tx = db.transaction(() => {
     // Workflow-status classes are not investors. Skip them even when CL happens
@@ -5860,6 +5953,18 @@ app.post('/api/billcom/dimension-maps/:entity_id/auto', auth, requireEntityAcces
       if (clId) { insL.run(eid, idOf(j), nm, clId, now); result.locations.matched.push({ billcom: nm, cl_location_id: clId }); }
       else result.locations.unmatched.push({ billcom_job_id: idOf(j), name: nm });
     }
+    // Departments -> projects. Only rebuild the map when the fetch succeeded; a
+    // failed fetch must not wipe mappings the user already has.
+    if (Array.isArray(bcDepts)) {
+      db.prepare('DELETE FROM billcom_project_map WHERE entity_id = ?').run(eid);
+      const insP = db.prepare('INSERT INTO billcom_project_map (entity_id, billcom_dept_id, billcom_dept_name, cl_project_id, created_at) VALUES (?,?,?,?,?)');
+      for (const d of bcDepts) {
+        const nm = nameOf(d);
+        const clId = clProjByKey.get(norm(String(nm).replace(/^%+/, '')));
+        if (clId) { insP.run(eid, idOf(d), nm, clId, now); result.projects.matched.push({ billcom: nm, cl_project_id: clId }); }
+        else result.projects.unmatched.push({ billcom_dept_id: idOf(d), name: nm });
+      }
+    }
   });
   try { tx(); } catch (e) { return res.status(500).json({ error: e.message }); }
   res.json(result);
@@ -5874,6 +5979,7 @@ app.put('/api/billcom/dimension-maps/:entity_id', auth, requireEntityAccess('ent
   const eid = parseInt(req.params.entity_id);
   const classes = Array.isArray(req.body && req.body.classes) ? req.body.classes : [];
   const locations = Array.isArray(req.body && req.body.locations) ? req.body.locations : [];
+  const projects = Array.isArray(req.body && req.body.projects) ? req.body.projects : [];
   const now = new Date().toISOString();
   try {
     const tx = db.transaction(() => {
@@ -5891,12 +5997,106 @@ app.put('/api/billcom/dimension-maps/:entity_id', auth, requireEntityAccess('ent
         if (l.cl_location_id == null) delL.run(eid, String(l.billcom_job_id));
         else upL.run(eid, String(l.billcom_job_id), l.billcom_job_name || null, parseInt(l.cl_location_id), now);
       }
+      const upP = db.prepare('INSERT INTO billcom_project_map (entity_id, billcom_dept_id, billcom_dept_name, cl_project_id, created_at) VALUES (?,?,?,?,?) ON CONFLICT(entity_id, billcom_dept_id) DO UPDATE SET cl_project_id=excluded.cl_project_id, billcom_dept_name=excluded.billcom_dept_name');
+      const delP = db.prepare('DELETE FROM billcom_project_map WHERE entity_id = ? AND billcom_dept_id = ?');
+      for (const p of projects) {
+        if (!p.billcom_dept_id) continue;
+        if (p.cl_project_id == null) delP.run(eid, String(p.billcom_dept_id));
+        else upP.run(eid, String(p.billcom_dept_id), p.billcom_dept_name || null, parseInt(p.cl_project_id), now);
+      }
     });
     tx();
     const classCount = db.prepare('SELECT COUNT(*) c FROM billcom_class_map WHERE entity_id = ?').get(eid).c;
     const locCount = db.prepare('SELECT COUNT(*) c FROM billcom_location_map WHERE entity_id = ?').get(eid).c;
-    res.json({ ok: true, class_map_rows: classCount, location_map_rows: locCount });
+    const projCount = db.prepare('SELECT COUNT(*) c FROM billcom_project_map WHERE entity_id = ?').get(eid).c;
+    res.json({ ok: true, class_map_rows: classCount, location_map_rows: locCount, project_map_rows: projCount });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Retag synced Bill.com entries with the project their Bill.com DEPARTMENT maps
+// to. Body: { from?: 'YYYY-MM-DD', to?: 'YYYY-MM-DD', dry_run?: true }.
+// Only fills gaps - a line that already carries a project, or an entry that
+// already has a doc number, is left alone - so it is safe to re-run.
+app.post('/api/billcom/retag-projects/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const dryRun = !!(req.body && req.body.dry_run);
+  const from = (req.body && req.body.from) || null;
+  const to = (req.body && req.body.to) || null;
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(eid);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+  const projMap = new Map(db.prepare('SELECT billcom_dept_id, cl_project_id FROM billcom_project_map WHERE entity_id = ?').all(eid).map(r => [String(r.billcom_dept_id), r.cl_project_id]));
+  if (!projMap.size) return res.status(400).json({ error: 'No department -> project mappings yet. Run POST /api/billcom/dimension-maps/' + eid + '/auto first.' });
+
+  let where = '';
+  const params = [eid];
+  if (from) { where += ' AND je.date >= ?'; params.push(from); }
+  if (to) { where += ' AND je.date <= ?'; params.push(to); }
+  const synced = db.prepare(
+    "SELECT bl.billcom_id, bl.cl_entry_id, bl.invoice_number, je.date, je.entry_num, je.doc_number " +
+    "FROM billcom_sync_log bl JOIN journal_entries je ON je.id = bl.cl_entry_id " +
+    "WHERE bl.entity_id = ? AND bl.sync_type = 'bill' AND bl.status = 'success' " +
+    "AND bl.cl_entry_id IS NOT NULL" + where + " ORDER BY je.date, je.entry_num"
+  ).all(...params);
+  if (!synced.length) return res.json({ dry_run: dryRun, examined: 0, entries_tagged: 0, lines_tagged: 0, details: [] });
+
+  let session, devKey;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'Bill.com login failed: ' + e.message }); }
+  const args = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+
+  const result = { dry_run: dryRun, examined: synced.length, entries_tagged: 0, lines_tagged: 0, docs_filled: 0, skipped_no_department: 0, errors: [], details: [] };
+  const untaggedLines = db.prepare('SELECT id, account_code, debit, credit, project_id, description FROM journal_lines WHERE entry_id = ? ORDER BY id');
+  const setProject = db.prepare('UPDATE journal_lines SET project_id = ? WHERE id = ?');
+  const setDesc = db.prepare('UPDATE journal_lines SET description = ? WHERE id = ?');
+  const setDoc = db.prepare('UPDATE journal_entries SET doc_number = ? WHERE id = ? AND entity_id = ?');
+
+  for (const row of synced) {
+    let detail;
+    try {
+      detail = await billcomGetById({ ...args, resourcePath: '/bills', id: row.billcom_id });
+    } catch (e) { result.errors.push({ billcom_id: row.billcom_id, entry_num: row.entry_num, error: e.message }); continue; }
+    const lineItems = pick(detail, 'lineItems', 'line_items', 'billLineItems') || [];
+    if (!Array.isArray(lineItems) || !lineItems.length) { result.errors.push({ billcom_id: row.billcom_id, entry_num: row.entry_num, error: 'no line items' }); continue; }
+    // Bill.com line order is stable and the sync wrote one debit line per line
+    // item in that order, so pair them positionally over the DEBIT lines only.
+    // The AP credit line is deliberately left undimensioned.
+    const clLines = untaggedLines.all(row.cl_entry_id).filter(l => (l.debit || 0) > 0);
+    const plan = [];
+    let sawDept = false;
+    lineItems.forEach((li, i) => {
+      const cls = pick(li, 'classifications') || {};
+      const deptId = String(pick(cls, 'departmentId', 'deptId', 'department') || pick(li, 'departmentId', 'deptId') || '');
+      if (deptId) sawDept = true;
+      const projId = deptId ? (projMap.get(deptId) || null) : null;
+      const clLine = clLines[i];
+      if (!clLine) return;
+      const desc = String(pick(li, 'description', 'memo', 'lineItemDescription') || '').trim();
+      if (projId && !clLine.project_id) plan.push({ line_id: clLine.id, project_id: projId, description: (!clLine.description && desc) ? desc : null });
+      else if (desc && !clLine.description) plan.push({ line_id: clLine.id, project_id: null, description: desc });
+    });
+    if (!sawDept) result.skipped_no_department++;
+    const docToFill = (!row.doc_number && row.invoice_number) ? String(row.invoice_number).trim() : null;
+    if (!plan.length && !docToFill) continue;
+    if (!dryRun) {
+      db.transaction(() => {
+        for (const p of plan) {
+          if (p.project_id) setProject.run(p.project_id, p.line_id);
+          if (p.description) setDesc.run(p.description, p.line_id);
+        }
+        if (docToFill) setDoc.run(docToFill, row.cl_entry_id, eid);
+      })();
+    }
+    const tagged = plan.filter(p => p.project_id).length;
+    if (tagged) { result.entries_tagged++; result.lines_tagged += tagged; }
+    if (docToFill) result.docs_filled++;
+    if (result.details.length < 100) {
+      result.details.push({ entry_num: row.entry_num, date: row.date, billcom_id: row.billcom_id, invoice_number: row.invoice_number, lines_tagged: tagged, doc_number_set: docToFill || null });
+    }
+  }
+  res.json(result);
 });
 
 // Phase 5: Push CloudLedger COA to Bill.com and auto-create mappings.
@@ -6361,6 +6561,14 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // onto the synced line; unmapped ids (incl. workflow-status classes) -> null.
   const classMap = new Map(db.prepare('SELECT billcom_class_id, cl_class_id FROM billcom_class_map WHERE entity_id = ?').all(entityId).map(r => [String(r.billcom_class_id), r.cl_class_id]));
   const locMap = new Map(db.prepare('SELECT billcom_job_id, cl_location_id FROM billcom_location_map WHERE entity_id = ?').all(entityId).map(r => [String(r.billcom_job_id), r.cl_location_id]));
+  // departmentId -> CL project. Banyan enters the project as the Bill.com
+  // Department (confirmed by Jimmy 2026-08-19), so this is what puts a synced
+  // bill line onto a project-scoped report.
+  const projMap = new Map(db.prepare('SELECT billcom_dept_id, cl_project_id FROM billcom_project_map WHERE entity_id = ?').all(entityId).map(r => [String(r.billcom_dept_id), r.cl_project_id]));
+  // Departments seen on synced lines that have no project mapping, so the sync
+  // report can say "map this department to a project" instead of silently
+  // posting an untagged line. Keyed by department id.
+  const unmappedDepts = new Map();
 
   let session;
   try {
@@ -6686,10 +6894,18 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
         billMissing.push({ id: acctId, name, ambiguous });
         continue;
       }
+      const deptId = String(pick(cls, 'departmentId', 'deptId', 'department') || pick(li, 'departmentId', 'deptId') || '');
+      const projId = deptId ? (projMap.get(deptId) || null) : null;
+      if (deptId && !projId && !unmappedDepts.has(deptId)) unmappedDepts.set(deptId, { billcom_dept_id: deptId, affected_bills: 0 });
+      if (deptId && !projId) unmappedDepts.get(deptId).affected_bills++;
       debitLines.push({
         account_code: mapping.cl_account_code, debit: amt, credit: 0,
         class_id: classMap.get(String(pick(cls, 'accountingClassId', 'classId') || '')) || null,
         location_id: locMap.get(String(pick(cls, 'jobId', 'locationId') || '')) || null,
+        project_id: projId,
+        // The line's own text, so the report's Description column reads like the
+        // pre-sync imported entries did rather than repeating the bill number.
+        description: String(pick(li, 'description', 'memo', 'lineItemDescription') || '').trim(),
       });
       totalDr += amt;
     }
@@ -6735,18 +6951,24 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       continue;
     }
 
-    const lines = [...debitLines, { account_code: apAccount, debit: 0, credit: totalDr, class_id: null, location_id: null }];
-    const memo = 'Bill.com bill #' + billNumber;
+    const lines = [...debitLines, { account_code: apAccount, debit: 0, credit: totalDr, class_id: null, location_id: null, project_id: null, description: '' }];
     const billVendor = vendorOf(detail);
+    // Memo reads like the entries the GL import produced: "Bill - <vendor>: <what it was for>".
+    // The bill number itself now lives on journal_entries.doc_number, which is
+    // what the reports show in their Doc column (CLA request, 8/2026).
+    const _lineDesc = (debitLines.find(l => l.description) || {}).description || '';
+    const memo = billVendor
+      ? ('Bill - ' + billVendor + (_lineDesc ? ': ' + _lineDesc : ''))
+      : ('Bill.com bill #' + billNumber);
 
     try {
       const insertedId = db.transaction(() => {
         const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
-        const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, vendor, created_by) VALUES (?,?,?,?,?,?)')
-          .run(entityId, num, postingDate, memo, billVendor, 'Bill.com sync');
+        const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, vendor, doc_number, created_by) VALUES (?,?,?,?,?,?,?)')
+          .run(entityId, num, postingDate, memo, billVendor, String(billNumber || '') || null, 'Bill.com sync');
         for (const l of lines) {
-          db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, class_id, location_id) VALUES (?,?,?,?,?,?)')
-            .run(r.lastInsertRowid, l.account_code, l.debit, l.credit, l.class_id || null, l.location_id || null);
+          db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, class_id, location_id, project_id, description) VALUES (?,?,?,?,?,?,?,?)')
+            .run(r.lastInsertRowid, l.account_code, l.debit, l.credit, l.class_id || null, l.location_id || null, l.project_id || null, l.description || '');
         }
         logSync.run(entityId, 'bill', billId, r.lastInsertRowid, 'success', 'created JE #' + num + ' (posted ' + String(postingDate).slice(0, 10) + ' by ' + postingBasis + ')', now, billNumber);
         return r.lastInsertRowid;
@@ -6774,6 +6996,11 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // [windowFrom, windowTo] and is absent from the live window has truly been
   // deleted in Bill.com. A synced bill dated outside the window simply wasn't
   // fetched this run and must NOT be treated as deleted.
+  // Unmapped departments are reported the same way unmapped GL accounts are, so
+  // an untagged project is visible work rather than a silent omission.
+  if (unmappedDepts.size) {
+    result.bills.unmapped_departments = [...unmappedDepts.values()];
+  }
   result.bills.deleted = 0;
   const liveIds = new Set(bills.map(b => String(pick(b, 'id') || '')).filter(Boolean));
   {
@@ -8821,6 +9048,29 @@ async function buildTtmAnalysis(d, entityName, asOf) {
 // Amounts are comma-styled; the month-header row and every subtotal/grand-total
 // row are underlined (bottom border). Built with ExcelJS server-side because the
 // client SheetJS community build cannot write cell borders/styles.
+// Styled workbook for any client report. The client keeps building its rows and
+// live formulas exactly as before and adds a style spec naming the subtotal and
+// grand-total rows; this returns the .xlsx with the underlines drawn. Needed
+// because the community SheetJS build the client exports with cannot write cell
+// borders (CLA items 2-4, 8/2026).
+app.post('/api/xlsx-styled', auth, async (req, res) => {
+  try {
+    const spec = req.body || {};
+    if (!Array.isArray(spec.rows) || !spec.rows.length) return res.status(400).json({ error: 'rows required' });
+    // A report is a few hundred rows; anything far larger is a client bug, and
+    // building it would tie up the process.
+    if (spec.rows.length > 50000) return res.status(413).json({ error: 'too many rows' });
+    const buf = await xlsxStyledReport.buildStyledWorkbookBuffer(spec);
+    const fn = String(spec.filename || 'Report.xlsx').replace(/[^A-Za-z0-9._-]+/g, '_');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + fn + '"');
+    res.send(Buffer.from(buf));
+  } catch (e) {
+    console.error('xlsx-styled failed: ' + e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/entities/:eid/ttm-pl.xlsx', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), async (req, res) => {
   try {
     const eid = req.params.eid;

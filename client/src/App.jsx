@@ -97,7 +97,20 @@ let _activeEntityCode = null;
 let _activeEntityFileTag = '';
 const CLASS_DIM_LABELS = { TURNKEYR: 'Pay Application' };
 const classTerm = () => CLASS_DIM_LABELS[_activeEntityCode] || 'Class';
-function exportToExcel(data, fn, opts) { opts = opts || {}; const moneyFmt = opts.numFmt || '#,##0.00;(#,##0.00)'; const plain = new Set(opts.plainCols || []); const ws = XLSX.utils.aoa_to_sheet(data); const range = XLSX.utils.decode_range(ws['!ref']); for (let R = range.s.r; R <= range.e.r; R++) { for (let C = range.s.c; C <= range.e.c; C++) { if (plain.has(C)) continue; const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })]; if (cell && cell.t === 'n') cell.z = moneyFmt; } } const fmtLen = v => (typeof v === 'number' ? v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).length : String(v == null ? '' : v).length); const nCols = data.reduce((m, r) => Math.max(m, (r ? r.length : 0)), 0); const colW = []; for (let c = 0; c < nCols; c++) { let w = 8; for (const r of data) { if (r && r[c] != null && r[c] !== '') w = Math.max(w, fmtLen(r[c])); } colW.push({ wch: Math.min(w + 2, 60) }); } ws['!cols'] = colW; if (opts.formulas) { for (const g of (opts.formulas || [])) { if (!g || !g.f) continue; const addr = XLSX.utils.encode_cell({ r: g.r, c: g.c }); const prev = ws[addr]; const cell = { t: 'n', f: g.f, z: moneyFmt }; if (prev && prev.v != null && !isNaN(prev.v)) cell.v = prev.v; ws[addr] = cell; } } const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); const _pfx = String(_activeEntityFileTag || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, ''); const _out = (_pfx && fn.indexOf(_pfx + '_') !== 0) ? (_pfx + '_' + fn) : fn; XLSX.writeFile(wb, _out); }
+// `opts.style` routes the build through the server (ExcelJS) so the workbook can
+// carry real underlines: a rule under the last amount in each account, a rule
+// under every subtotal, a double rule under the grand total. The community
+// SheetJS build used below cannot write cell borders at all, so a report that
+// wants them has no other path. Without `opts.style` nothing changes.
+function exportToExcel(data, fn, opts) { opts = opts || {}; const moneyFmt = opts.numFmt || '#,##0.00;(#,##0.00)';
+  if (opts.style) {
+    const _p = String(_activeEntityFileTag || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const _name = (_p && fn.indexOf(_p + '_') !== 0) ? (_p + '_' + fn) : fn;
+    api.postStyledXlsx({ filename: _name, rows: data, formulas: opts.formulas || [], numFmt: moneyFmt, plainCols: opts.plainCols || [], style: opts.style })
+      .then(out => { if (!out) return; const url = URL.createObjectURL(out.blob); const a = document.createElement('a'); a.href = url; a.download = out.filename || _name; a.click(); URL.revokeObjectURL(url); })
+      .catch(e => { console.error('styled export failed', e); alert('Excel export failed: ' + e.message); });
+    return;
+  } const plain = new Set(opts.plainCols || []); const ws = XLSX.utils.aoa_to_sheet(data); const range = XLSX.utils.decode_range(ws['!ref']); for (let R = range.s.r; R <= range.e.r; R++) { for (let C = range.s.c; C <= range.e.c; C++) { if (plain.has(C)) continue; const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })]; if (cell && cell.t === 'n') cell.z = moneyFmt; } } const fmtLen = v => (typeof v === 'number' ? v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).length : String(v == null ? '' : v).length); const nCols = data.reduce((m, r) => Math.max(m, (r ? r.length : 0)), 0); const colW = []; for (let c = 0; c < nCols; c++) { let w = 8; for (const r of data) { if (r && r[c] != null && r[c] !== '') w = Math.max(w, fmtLen(r[c])); } colW.push({ wch: Math.min(w + 2, 60) }); } ws['!cols'] = colW; if (opts.formulas) { for (const g of (opts.formulas || [])) { if (!g || !g.f) continue; const addr = XLSX.utils.encode_cell({ r: g.r, c: g.c }); const prev = ws[addr]; const cell = { t: 'n', f: g.f, z: moneyFmt }; if (prev && prev.v != null && !isNaN(prev.v)) cell.v = prev.v; ws[addr] = cell; } } const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'Report'); const _pfx = String(_activeEntityFileTag || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, ''); const _out = (_pfx && fn.indexOf(_pfx + '_') !== 0) ? (_pfx + '_' + fn) : fn; XLSX.writeFile(wb, _out); }
 // ── Excel formula helpers (used by every report's Export Excel) ──
 // 0-based column index → A1 letter (0→A, 1→B, … 26→AA).
 const XLC = n => { let s = ''; n = n + 1; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
@@ -1944,7 +1957,7 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
   useEffect(()=>{api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
   const showLocation=(dimsEnabled&&locations.length>0)||(entry.lines||[]).some(l=>l.location_id);const showClass=(dimsEnabled&&classes.length>0)||(entry.lines||[]).some(l=>l.class_id);
-  const[form,setForm]=useState({date:entry.date,memo:entry.memo,lines:(entry.lines||[]).map(l=>({account_code:l.account_code,project_id:l.project_id||'',location_id:l.location_id||'',class_id:l.class_id||'',description:l.description||'',debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
+  const[form,setForm]=useState({date:entry.date,memo:entry.memo,doc_number:entry.doc_number||'',lines:(entry.lines||[]).map(l=>({account_code:l.account_code,project_id:l.project_id||'',location_id:l.location_id||'',class_id:l.class_id||'',description:l.description||'',debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
   const[attachments,setAttachments]=useState(entry.attachments||[]);
   const[attUploading,setAttUploading]=useState(false);
   const attInputRef=useRef(null);
@@ -1970,7 +1983,7 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
   };
   const tDr=form.lines.reduce((s,l)=>s+parseAmt(l.debit),0);const tCr=form.lines.reduce((s,l)=>s+parseAmt(l.credit),0);const bal=Math.abs(tDr-tCr)<0.005&&tDr>0;
   const save=async()=>{if(!form.date||!form.memo.trim()){setErr('Date and memo required');return;}if(form.lines.some(l=>!l.account_code)){setErr('All lines need an account');return;}if(!bal){setErr('Must balance');return;}
-    setSaving(true);setErr('');try{await api.updateEntry(entityId,entry.id,{date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null}))});
+    setSaving(true);setErr('');try{await api.updateEntry(entityId,entry.id,{date:form.date,memo:form.memo.trim(),doc_number:(form.doc_number||'').trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null}))});
       onSaved();onClose();}catch(e){setErr(e.message);}finally{setSaving(false);}};
   const del=async()=>{if(!confirm('Delete JE-'+String(entry.entry_num).padStart(4,'0')+'? This permanently removes the entry and all its lines. This cannot be undone.'))return;
     setSaving(true);setErr('');try{await api.deleteEntry(entityId,entry.id);onSaved();onClose();}catch(e){setErr(e.message);setSaving(false);}};
@@ -1994,6 +2007,7 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
     {!(entry.updated_by&&entry.updated_at)&&<div style={{marginBottom:16}}/>}
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
+        <div style={{...S.col,maxWidth:170}}><label style={S.label}>Doc / Invoice #</label><input style={S.input} value={form.doc_number} placeholder="optional" onChange={e=>setForm(f=>({...f,doc_number:e.target.value}))}/></div>
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo</label><input style={S.input} value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
     <div style={{...S.cardFlush,marginBottom:16,maxHeight:'52vh',overflowY:'auto'}}><table className="cl-colresize" style={S.table}><thead style={{position:'sticky',top:0,zIndex:2,background:T.bgElevated}}><tr><th style={{...S.th,minWidth:300}}>Account</th>{showDims&&<th style={{...S.th,width:140}}>Dimension</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
@@ -3707,14 +3721,19 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
     try{
       const r=await api.getGLDetail(entityId,{to:validAsOf,...(locId?{location_id:locId}:{}),...(classId?{class_id:classId}:{}),...(projId?{project_id:projId}:{})});
       const lbl=scopeLabel?(' — '+scopeLabel):'';
-      const d=[[entityName||'General Ledger'],['GL Detail'+lbl],['Through '+asOf],[],['Date','Entry #','Account','Account Name','Memo / Description','Project','Location',classTerm(),'Debit','Credit','Running Bal']];
+      // Doc # sits beside the JE number, and Project now actually populates: the
+      // /gl-detail response used to drop project_name/project_code (CLA item 6).
+      const d=[[entityName||'General Ledger'],['GL Detail'+lbl],['Through '+asOf],[],['Date','Entry #','Doc #','Account','Account Name','Memo / Description','Project','Location',classTerm(),'Debit','Credit','Running Bal']];
+      const STY={titleRows:[0,1],metaRows:[2],headerRows:[4],underlineRows:[],doubleUnderlineRows:[],amountCols:[9,10,11]};
       const first=d.length;
-      (r.lines||[]).forEach(l=>d.push([l.date,l.entry_num,l.account_code,l.account_name,l.description||l.memo||'',l.project_code&&l.project_code!==l.project_name?l.project_code:(l.project_name||''),l.location_name,l.class_name,l.debit||'',l.credit||'',l.running_balance]));
+      (r.lines||[]).forEach(l=>d.push([l.date,l.entry_num,l.doc_number||'',l.account_code,l.account_name,l.description||l.memo||'',l.project_code&&l.project_code!==l.project_name?(l.project_code+(l.project_name?' — '+l.project_name:'')):(l.project_name||''),l.location_name,l.class_name,l.debit||'',l.credit||'',l.running_balance]));
       const last=d.length-1;
-      d.push([]);d.push(['','','','','','','','','Total Dr','Total Cr','']);
-      const tr=d.length;d.push(['','','','','','','','',r.total_debit,r.total_credit,'']);
-      const F=[];sumCols(F,tr,[8,9],first,last);
-      exportToExcel(d,'GL'+(fnameTag?'_'+fnameTag:'')+'_'+asOf+'.xlsx',{formulas:F});
+      STY.underlineRows.push(last);
+      d.push([]);d.push(['','','','','','','','','','Total Dr','Total Cr','']);
+      const tr=d.length;d.push(['','','','','','','','','',r.total_debit,r.total_credit,'']);
+      STY.doubleUnderlineRows.push(tr);
+      const F=[];sumCols(F,tr,[9,10],first,last);
+      exportToExcel(d,'GL'+(fnameTag?'_'+fnameTag:'')+'_'+asOf+'.xlsx',{formulas:F,style:STY});
     }catch(e){alert('GL export failed: '+e.message);}
   };
   return(<div><div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
@@ -3789,7 +3808,9 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
         // One distinct other account -> its label; more than one -> "-Split-".
         const offsetOf=(e)=>{const others=[...new Set((e.lines||[]).filter(x=>x.account_code!==acct.code).map(x=>x.account_code))];if(others.length===0)return '';if(others.length===1)return others[0]+' - '+(nameMap[others[0]]||'');return '-Split-';};
         const txns=[];
-        entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code)txns.push({date:e.date,entry_num:e.entry_num,jeId:e.id,memo:e.memo,offset:offsetOf(e),vendor:e.vendor||'',debit:l.debit||0,credit:l.credit||0,created_by:e.created_by,created_at:e.created_at,class_name:l.class_name||'',location_name:l.location_name||''});});});
+        // project_name / doc_number were never picked up here, so the drill-down
+        // export CLA ran had no Project and no Doc column (item 6).
+        entries.forEach(e=>{e.lines.forEach(l=>{if(l.account_code===acct.code)txns.push({date:e.date,entry_num:e.entry_num,jeId:e.id,memo:e.memo,offset:offsetOf(e),vendor:e.vendor||'',debit:l.debit||0,credit:l.credit||0,created_by:e.created_by,created_at:e.created_at,class_name:l.class_name||'',location_name:l.location_name||'',project_name:(l.project_code&&l.project_code!==l.project_name?(l.project_code+(l.project_name?' — '+l.project_name:'')):(l.project_name||'')),doc_number:e.doc_number||''});});});
         txns.sort((a,b)=>a.date.localeCompare(b.date)||a.entry_num-b.entry_num);
         const bb=(begBalances||[]).find(x=>x.code===acct.code);
         setBegBal(bb?bb.balance:0);
@@ -3804,13 +3825,18 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
   const totalCr=lines.reduce((s,l)=>s+l.credit,0);
   const matchQ=(l)=>{if(!q)return true;const s=q.toLowerCase();return (l.memo||'').toLowerCase().includes(s)||(l.offset||'').toLowerCase().includes(s)||(l.vendor||'').toLowerCase().includes(s)||('je-'+String(l.entry_num).padStart(4,'0')).includes(s)||(l.date||'').includes(s)||String(l.debit).includes(s)||String(l.credit).includes(s);};
   const doExport=()=>{const acctLabel=acct.code+' - '+acct.name;
-    const d=[[entityName||'Account Detail'],[acctLabel],['Period: '+from+' to '+to],[],['Date','JE','Account',classTerm(),'Location','Memo','Offset Account','Vendor/Payee','Debit','Credit','Balance']];
+    // Doc # and Project added (CLA item 6). Debit/Credit/Balance are now columns
+    // K/L/M (0-based 10/11/12), so the running-balance formulas move with them.
+    const d=[[entityName||'Account Detail'],[acctLabel],['Period: '+from+' to '+to],[],['Date','JE','Doc #','Account',classTerm(),'Location','Project','Memo','Offset Account','Vendor/Payee','Debit','Credit','Balance']];
+    const STY={titleRows:[0,1],metaRows:[2],headerRows:[4],underlineRows:[],doubleUnderlineRows:[],amountCols:[10,11,12]};
     const F=[];
-    d.push(['','','','','','Beginning Balance','','','','',begBal]);let prevRow=d.length-1;const begRow=prevRow;
-    let r=begBal;const first=d.length;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),acctLabel,l.class_name||'',l.location_name||'',l.memo,l.offset||'',l.vendor||'',l.debit||'',l.credit||'',r]);const cur=d.length-1,rr=cur+1;const delta=isDr?('I'+rr+'-J'+rr):('J'+rr+'-I'+rr);F.push({r:cur,c:10,f:'K'+(prevRow+1)+'+'+delta});prevRow=cur;});const last=d.length-1;
-    const tr=d.length;d.push(['','','','','','Totals','','',totalDr,totalCr,r]);
-    sumCols(F,tr,[8,9],first,last);F.push({r:tr,c:10,f:'K'+(begRow+1)+'+'+(isDr?('I'+(tr+1)+'-J'+(tr+1)):('J'+(tr+1)+'-I'+(tr+1)))});
-    exportToExcel(d,'GL_'+acct.code+'_'+to+'.xlsx',{formulas:F});};
+    d.push(['','','','','','','','Beginning Balance','','','','',begBal]);let prevRow=d.length-1;const begRow=prevRow;
+    let r=begBal;const first=d.length;lines.forEach(l=>{r+=isDr?(l.debit-l.credit):(l.credit-l.debit);d.push([l.date,'JE-'+String(l.entry_num).padStart(4,'0'),l.doc_number||'',acctLabel,l.class_name||'',l.location_name||'',l.project_name||'',l.memo,l.offset||'',l.vendor||'',l.debit||'',l.credit||'',r]);const cur=d.length-1,rr=cur+1;const delta=isDr?('K'+rr+'-L'+rr):('L'+rr+'-K'+rr);F.push({r:cur,c:12,f:'M'+(prevRow+1)+'+'+delta});prevRow=cur;});const last=d.length-1;
+    STY.underlineRows.push(last);
+    const tr=d.length;d.push(['','','','','','','','Totals','','',totalDr,totalCr,r]);
+    STY.doubleUnderlineRows.push(tr);
+    sumCols(F,tr,[10,11],first,last);F.push({r:tr,c:12,f:'M'+(begRow+1)+'+'+(isDr?('K'+(tr+1)+'-L'+(tr+1)):('L'+(tr+1)+'-K'+(tr+1)))});
+    exportToExcel(d,'GL_'+acct.code+'_'+to+'.xlsx',{formulas:F,style:STY});};
   return(<div style={S.modal}><div className="cl-modal-box" style={{...S.modalBox,width:'min(1100px,96vw)',maxWidth:'98vw',height:'88vh',maxHeight:'96vh',minWidth:'min(680px,96vw)',minHeight:420,resize:'both',overflow:'hidden',display:'flex',flexDirection:'column'}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:14,gap:16}}>
@@ -3825,21 +3851,23 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
      <div style={{flex:1,overflowY:'auto',border:'1px solid '+T.border,borderRadius:T.radiusSm}}>
        <table className="cl-colresize" style={S.table}>
          <thead style={{position:'sticky',top:0,background:T.bgCard,zIndex:1}}><tr>
-           <th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Memo</th><th style={S.th}>Offset Account</th><th style={S.th}>Vendor/Payee</th>
+           <th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Doc #</th><th style={S.th}>Project</th><th style={S.th}>Memo</th><th style={S.th}>Offset Account</th><th style={S.th}>Vendor/Payee</th>
            <th style={S.thR}>Debit</th><th style={S.thR}>Credit</th><th style={S.thR}>Balance</th></tr></thead>
          <tbody>
            <tr style={{background:T.bgElevated}}>
-             <td style={{...S.td,color:T.textMuted,fontStyle:'italic'}} colSpan={5}>Beginning balance as of {from}</td>
+             <td style={{...S.td,color:T.textMuted,fontStyle:'italic'}} colSpan={7}>Beginning balance as of {from}</td>
              <td style={S.tdR}></td><td style={S.tdR}></td>
              <td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(begBal)}</td></tr>
            {lines.length===0?
-             <tr><td colSpan={8} style={{...S.td,textAlign:'center',padding:30,color:T.textDim}}>No activity in this period{from>'2015-01-01'&&<div style={{marginTop:10}}><button onClick={()=>{setFromDraft('2015-01-01');setFrom('2015-01-01');}} style={{...S.btnS,fontSize:12,padding:'6px 14px'}}>View all activity</button><div style={{fontSize:11,color:T.textMuted,marginTop:6}}>The default view shows the last 12 months. This account's activity may be older \u2014 e.g. an investment purchase.</div></div>}</td></tr>
+             <tr><td colSpan={10} style={{...S.td,textAlign:'center',padding:30,color:T.textDim}}>No activity in this period{from>'2015-01-01'&&<div style={{marginTop:10}}><button onClick={()=>{setFromDraft('2015-01-01');setFrom('2015-01-01');}} style={{...S.btnS,fontSize:12,padding:'6px 14px'}}>View all activity</button><div style={{fontSize:11,color:T.textMuted,marginTop:6}}>The default view shows the last 12 months. This account's activity may be older \u2014 e.g. an investment purchase.</div></div>}</td></tr>
              :lines.map((l,i)=>{running+=isDr?(l.debit-l.credit):(l.credit-l.debit);
                if(!matchQ(l))return null;
                const tip=(l.created_by?'Posted by '+l.created_by:'')+(l.created_at?(l.created_by?' on ':'Posted on ')+new Date(l.created_at+(l.created_at.includes('Z')||l.created_at.includes('+')?'':'Z')).toLocaleString('en-US',{timeZone:'America/Los_Angeles',year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true,timeZoneName:'short'}):'');
                return<tr key={i}>
                  <td style={{...S.td,color:T.textMuted,whiteSpace:'nowrap'}}>{l.date}</td>
                  <td style={S.td} title={tip}><button style={{background:'none',border:0,padding:0,color:T.accent,fontWeight:600,cursor:'pointer',fontSize:'inherit',fontFamily:'inherit'}} onClick={()=>openJE(l.jeId)}>JE-{String(l.entry_num).padStart(4,'0')}</button></td>
+                 <td style={{...S.td,whiteSpace:'nowrap'}}>{l.doc_number||''}</td>
+                 <td style={S.td}>{l.project_name||''}</td>
                  <td style={S.td}>{l.memo}</td>
                  <td style={S.td}>{l.offset}</td>
                  <td style={S.td}>{l.vendor}</td>
@@ -3847,7 +3875,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
                  <td style={S.tdR}>{l.credit>0?fmt(l.credit):''}</td>
                  <td style={{...S.tdR,fontWeight:600,color:T.textBright}}>{fmt(running)}</td></tr>;})}
            <tr style={S.grandTotalRow}>
-             <td style={{...S.tdBold}} colSpan={5}>Period Totals</td>
+             <td style={{...S.tdBold}} colSpan={7}>Period Totals</td>
              <td style={{...S.tdBold,textAlign:'right'}}>${fmt(totalDr)}</td>
              <td style={{...S.tdBold,textAlign:'right'}}>${fmt(totalCr)}</td>
              <td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>${fmt(running)}</td></tr>
@@ -4119,7 +4147,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
   const sumByCol=(lines)=>{const arr=cols.map(()=>0);let tot=0;(lines||[]).forEach(l=>{const a=amt(l);tot+=a;const ci=colIdxOf(l.date);if(ci>=0)arr[ci]+=a;});return{arr,tot};};
   const priorGroupMap=(()=>{const m=new Map();priorRows.forEach(l=>{const k=groupKey(l);m.set(k,(m.get(k)||0)+amt(l));});return m;})();
   const priorGrand=priorRows.reduce((s,l)=>s+amt(l),0);
-  const descCols=4;
+  const descCols=5; // Account | Date | Doc # | JE | Description  (Doc #: CLA item 1)
   const totalColCount=descCols+cols.length+(showTotal?1:0)+(compare?3:0);
   const pctTxt=p=>p==null?'—':(p>=0?'+':'')+p.toFixed(1)+'%';
   const cmpCells=(cur,pri)=>{const d=cur-pri;const p=pri!==0?(d/Math.abs(pri))*100:null;return[<td key="pp" style={{...S.tdR,fontWeight:700}}>{fmt(pri)}</td>,<td key="dd" style={{...S.tdR,fontWeight:700,color:d>=0?T.green:T.red}}>{fmt(d)}</td>,<td key="pc" style={{...S.tdR,fontWeight:700,color:d>=0?T.green:T.red}}>{pctTxt(p)}</td>];};
@@ -4127,38 +4155,53 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
     const _projObj=projFilter?projects.find(p=>String(p.id)===String(projFilter)):null;
     const _projLabel=_projObj?(_projObj.code?_projObj.code+' — '+_projObj.name:_projObj.name):'';
     const d=[[entityName||'Custom Detail Report'],['Custom Detail Report'],...(_projLabel?[['Project: '+_projLabel]]:[]),['Period: '+(from||'Begin')+' to '+(to||today())],[]];
+    // Row bookkeeping for the underlines CLA asked for (items 2-4): the last
+    // detail row of each account and every subtotal get a single rule; the grand
+    // total gets a double rule. Collected as the rows are pushed.
+    const STY={titleRows:[0,1],metaRows:[],headerRows:[],boldRows:[],underlineRows:[],doubleUnderlineRows:[],amountCols:[]};
+    for(let _i=2;_i<d.length-1;_i++)STY.metaRows.push(_i);
     const F=[];// account subtotals SUM detail rows; group totals SUM account subtotals; PERIOD ACTIVITY SUMs group totals.
     if(begRows.length>0){
       d.push(['Beginning Balances — Balance Sheet accounts as of '+from]);
-      d.push(['','Account','','','','','Balance']);
+      d.push(['','Account','','','','','Balance']);STY.headerRows.push(d.length-1);
       const bF=d.length;begRows.forEach(b=>d.push(['',b.code+' '+b.name,'','','','',b.balance]));const bL=d.length-1;
+      STY.underlineRows.push(bL);
       const bT=d.length;d.push(['','','','','','Total Beginning Balance',begTotal]);d.push([]);
+      STY.underlineRows.push(bT);if(STY.amountCols.indexOf(6)<0)STY.amountCols.push(6);
       sumCols(F,bT,[6],bF,bL);
     }
     const amtHdr=cols.map(c=>c.label);const cmpHdr=compare?['Prev Period','$ Change','% Change']:[];
     const pctN=(cur,pri)=>pri!==0?+(((cur-pri)/Math.abs(pri))*100).toFixed(1):'';
-    const pcols=[];for(let k=0;k<cols.length;k++)pcols.push(4+k);if(showTotal)pcols.push(4+cols.length);
+    // Amount columns start after the 5 description columns (Doc # added, CLA item 1).
+    const pcols=[];for(let k=0;k<cols.length;k++)pcols.push(descCols+k);if(showTotal)pcols.push(descCols+cols.length);
+    // Rules are drawn under every numeric column, comparison columns included.
+    pcols.forEach(c=>{if(STY.amountCols.indexOf(c)<0)STY.amountCols.push(c);});
+    if(compare)for(let k=0;k<3;k++){const c=descCols+cols.length+(showTotal?1:0)+k;if(STY.amountCols.indexOf(c)<0)STY.amountCols.push(c);}
     const groupTotRows=[];
     groups.forEach(([g,lines])=>{
       if(groupBy!=='none')d.push([g]);
-      d.push(['Account','Date','JE','Description',...amtHdr,...(showTotal?['Total']:[]),...cmpHdr]);
+      d.push(['Account','Date','Doc #','JE','Description',...amtHdr,...(showTotal?['Total']:[]),...cmpHdr]);STY.headerRows.push(d.length-1);
       const _byA=[];const _im=new Map();lines.forEach(l=>{const k=l.account_code;if(!_im.has(k)){_im.set(k,_byA.length);_byA.push([k,l.account_name,[]]);}_byA[_im.get(k)][2].push(l);});
       const acctTotRows=[];
       _byA.forEach(([acode,aname,alines])=>{
         const aF=d.length;
-        alines.forEach(l=>{const a=amt(l);const ci=colIdxOf(l.date);const cells=cols.map((c,k)=>(colMode==='total'||k===ci)?a:'');d.push([l.account_code+' '+l.account_name,l.date,'JE-'+String(l.entry_num).padStart(4,'0'),l.description||l.memo||'',...cells,...(showTotal?[a]:[]),...(compare?['','','']:[])]);});
-        const aL=d.length-1;const as=sumByCol(alines);const aT=d.length;d.push(['Total '+acode+' '+aname,'','','',...as.arr,...(showTotal?[as.tot]:[]),...(compare?['','','']:[])]);
+        alines.forEach(l=>{const a=amt(l);const ci=colIdxOf(l.date);const cells=cols.map((c,k)=>(colMode==='total'||k===ci)?a:'');d.push([l.account_code+' '+l.account_name,l.date,l.doc_number||'','JE-'+String(l.entry_num).padStart(4,'0'),l.description||l.memo||'',...cells,...(showTotal?[a]:[]),...(compare?['','','']:[])]);});
+        const aL=d.length-1;const as=sumByCol(alines);const aT=d.length;d.push(['Total '+acode+' '+aname,'','','','',...as.arr,...(showTotal?[as.tot]:[]),...(compare?['','','']:[])]);
+        // Rule under the account's LAST transaction amount, then under its total.
+        STY.underlineRows.push(aL);STY.underlineRows.push(aT);
         sumCols(F,aT,pcols,aF,aL);acctTotRows.push(aT);
       });
       const {arr,tot}=sumByCol(lines);const pri=priorGroupMap.get(g)||0;
-      const gT=d.length;d.push(['Total'+(groupBy!=='none'?' for '+g:''),'','','',...arr,...(showTotal?[tot]:[]),...(compare?[pri,tot-pri,pctN(tot,pri)]:[])]);d.push([]);
+      const gT=d.length;d.push(['Total'+(groupBy!=='none'?' for '+g:''),'','','','',...arr,...(showTotal?[tot]:[]),...(compare?[pri,tot-pri,pctN(tot,pri)]:[])]);d.push([]);
+      STY.underlineRows.push(gT);
       sumRows(F,gT,pcols,acctTotRows);groupTotRows.push(gT);
     });
     const gg=sumByCol(rows||[]);
-    const pa=d.length;d.push(['PERIOD ACTIVITY','','','',...gg.arr,...(showTotal?[gg.tot]:[]),...(compare?[priorGrand,gg.tot-priorGrand,pctN(gg.tot,priorGrand)]:[])]);
+    const pa=d.length;d.push(['PERIOD ACTIVITY','','','','',...gg.arr,...(showTotal?[gg.tot]:[]),...(compare?[priorGrand,gg.tot-priorGrand,pctN(gg.tot,priorGrand)]:[])]);
+    STY.doubleUnderlineRows.push(pa);// grand total: double rule (CLA item 4)
     sumRows(F,pa,pcols,groupTotRows);
-    if(begRows.length>0)d.push(['ENDING BALANCE (BS accts: beginning + activity)','','','',...(colMode==='total'?[begTotal+grand]:[...cols.map(()=>''),begTotal+grand]),...(compare?['','','']:[])]);
-    exportToExcel(d,'Custom_Detail_'+(to||today())+'.xlsx',{formulas:F});
+    if(begRows.length>0){d.push(['ENDING BALANCE (BS accts: beginning + activity)','','','','',...(colMode==='total'?[begTotal+grand]:[...cols.map(()=>''),begTotal+grand]),...(compare?['','','']:[])]);STY.doubleUnderlineRows.push(d.length-1);}
+    exportToExcel(d,'Custom_Detail_'+(to||today())+'.xlsx',{formulas:F,style:STY});
   };
   useEffect(()=>{if(runToken>0)doExport();},[runToken]); // auto-export after each Run Report
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>Custom Detail Report</div><div style={S.sub}>Pick accounts, optionally group by class or location</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='customdetail' currentConfig={{sel,from,to,groupBy,colMode,compare}} onApply={(c)=>{setSel(c.sel||[]);setFrom(c.from||'');setTo(c.to||'');if(c.groupBy)setGroupBy(c.groupBy);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/>{rows&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
@@ -4191,7 +4234,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
           <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600}} colSpan={4}>Total Beginning Balance</td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(begTotal)}</td></tr></tbody></table>}
       {groups.length===0&&begRows.length===0?<div style={{padding:24,color:T.textDim}}>No activity for the selected accounts/period.</div>:
       <div style={{overflowX:'auto'}}><table className="cl-colresize" style={S.table}><thead><tr>
-        <th style={S.th}>Account</th><th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Description</th>
+        <th style={S.th}>Account</th><th style={S.th}>Date</th><th style={S.th}>Doc #</th><th style={S.th}>JE</th><th style={S.th}>Description</th>
         {cols.map((c,i)=><th key={i} style={S.thR}>{c.label}</th>)}
         {showTotal&&<th style={S.thR}>Total</th>}
         {compare&&<><th style={S.thR}>Prev Period</th><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}
@@ -4199,8 +4242,8 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
       <tbody>{groups.map(([g,lines])=>{const {arr,tot}=sumByCol(lines);const pri=priorGroupMap.get(g)||0;return<Fragment key={g}>
         {groupBy!=='none'&&<tr style={{background:T.bgElevated}}><td style={{...S.tdBold,color:T.textBright}} colSpan={totalColCount}>{g}</td></tr>}
         {(()=>{const byA=[];const im=new Map();lines.forEach(l=>{const k=l.account_code;if(!im.has(k)){im.set(k,byA.length);byA.push([k,l.account_name,[]]);}byA[im.get(k)][2].push(l);});return byA.map(([acode,aname,alines])=>{const as=sumByCol(alines);return<Fragment key={'acct'+acode}>
-          {alines.map((l,i)=>{const a=amt(l);const ci=colIdxOf(l.date);return<tr key={acode+'-'+i}>
-            <td style={S.td}>{l.account_code} {l.account_name}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.date}</td><td style={S.td}>JE-{String(l.entry_num).padStart(4,'0')}</td><td style={S.td}>{l.description||l.memo||''}</td>
+          {alines.map((l,i)=>{const a=amt(l);const ci=colIdxOf(l.date);const _lastOfAcct=i===alines.length-1;return<tr key={acode+'-'+i} style={_lastOfAcct?{borderBottom:'1px solid '+T.textMuted}:undefined}>
+            <td style={S.td}>{l.account_code} {l.account_name}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.date}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.doc_number||''}</td><td style={S.td}>JE-{String(l.entry_num).padStart(4,'0')}</td><td style={S.td}>{l.description||l.memo||''}</td>
             {cols.map((c,k)=><td key={k} style={{...S.tdR,color:a<0?T.red:T.textBright}}>{(colMode==='total'||k===ci)?fmt(a):''}</td>)}
             {showTotal&&<td style={{...S.tdR,color:a<0?T.red:T.textBright}}>{fmt(a)}</td>}
             {compare&&<><td style={S.tdR}></td><td style={S.tdR}></td><td style={S.tdR}></td></>}

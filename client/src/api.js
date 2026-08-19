@@ -177,6 +177,28 @@ export const api = {
     const blob = await res.blob();
     return { blob, filename };
   },
+  // Styled workbook build (ExcelJS, server-side). The client still assembles the
+  // rows and live formulas; `style` names the header / subtotal / grand-total rows
+  // so the server can draw the underlines SheetJS cannot.
+  postStyledXlsx: async (spec) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/xlsx-styled', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: JSON.stringify(spec),
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) { let d = {}; try { d = await res.json(); } catch {} throw new Error(d.error || 'Export failed'); }
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    return { blob: await res.blob(), filename: m ? m[1] : (spec.filename || 'Report.xlsx') };
+  },
+  backfillDocNumbers: (eid, dryRun) => request('/entities/' + eid + '/backfill-doc-numbers', { method: 'POST', body: { dry_run: !!dryRun } }),
+  getBillcomDimensionMaps: (eid) => request('/billcom/dimension-maps/' + eid),
+  autoBillcomDimensionMaps: (eid) => request('/billcom/dimension-maps/' + eid + '/auto', { method: 'POST', body: {} }),
+  saveBillcomDimensionMaps: (eid, body) => request('/billcom/dimension-maps/' + eid, { method: 'PUT', body }),
+  retagBillcomProjects: (eid, body) => request('/billcom/retag-projects/' + eid, { method: 'POST', body: body || {} }),
   getGLDetail: (eid, opts = {}) => {
     const p = [];
     if (opts.from) p.push('from=' + opts.from);
