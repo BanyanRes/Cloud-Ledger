@@ -5917,11 +5917,21 @@ app.post('/api/billcom/dimension-maps/:entity_id/auto', auth, requireEntityAcces
   const norm = (s) => String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
   const clClassByName = new Map(clClasses.map(c => [norm(c.name), c.id]));
   const clLocByName = new Map(clLocs.map(l => [norm(l.name), l.id]));
-  // A project matches on its name, its code, or the combined "code - name"
-  // label, and on the name with a leading % stripped (Bill.com departments come
-  // through as e.g. "%Van Buren"). Earlier keys win over later ones.
+  // A project matches on its name, its code, or the combined "code - name" label,
+  // each with a leading % stripped (Bill.com departments arrive as e.g. "%Van
+  // Buren"). A key that two different projects both answer to is AMBIGUOUS and
+  // maps to nothing - Banyan has "%Van Buren" and "Van Buren" as separate
+  // projects, and silently picking one by query order is how a bill lands on the
+  // wrong job. Ambiguous names are reported for a human to resolve, exactly as the
+  // chart-of-accounts auto-map does.
   const clProjByKey = new Map();
-  const addProjKey = (k, id) => { const kk = norm(String(k || '').replace(/^%+/, '')); if (kk && !clProjByKey.has(kk)) clProjByKey.set(kk, id); };
+  const addProjKey = (k, id) => {
+    const kk = norm(String(k || '').replace(/^%+/, ''));
+    if (!kk) return;
+    const cur = clProjByKey.get(kk);
+    if (cur === undefined) clProjByKey.set(kk, id);
+    else if (cur !== id && cur !== '(AMBIGUOUS)') clProjByKey.set(kk, '(AMBIGUOUS)');
+  };
   for (const p of clProjs) {
     addProjKey(p.name, p.id);
     addProjKey(p.code, p.id);
@@ -5956,13 +5966,29 @@ app.post('/api/billcom/dimension-maps/:entity_id/auto', auth, requireEntityAcces
     // Departments -> projects. Only rebuild the map when the fetch succeeded; a
     // failed fetch must not wipe mappings the user already has.
     if (Array.isArray(bcDepts)) {
+      // Snapshot what is mapped today so a hand-made mapping is not lost to a
+      // re-run: anything the auto pass cannot match is restored below.
+      const priorP = new Map(db.prepare('SELECT billcom_dept_id, billcom_dept_name, cl_project_id FROM billcom_project_map WHERE entity_id = ?').all(eid).map(r => [String(r.billcom_dept_id), r]));
       db.prepare('DELETE FROM billcom_project_map WHERE entity_id = ?').run(eid);
       const insP = db.prepare('INSERT INTO billcom_project_map (entity_id, billcom_dept_id, billcom_dept_name, cl_project_id, created_at) VALUES (?,?,?,?,?)');
+      const validProj = new Set(clProjs.map(p => p.id));
       for (const d of bcDepts) {
         const nm = nameOf(d);
-        const clId = clProjByKey.get(norm(String(nm).replace(/^%+/, '')));
-        if (clId) { insP.run(eid, idOf(d), nm, clId, now); result.projects.matched.push({ billcom: nm, cl_project_id: clId }); }
-        else result.projects.unmatched.push({ billcom_dept_id: idOf(d), name: nm });
+        const did = idOf(d);
+        const hit = clProjByKey.get(norm(String(nm).replace(/^%+/, '')));
+        if (hit && hit !== '(AMBIGUOUS)') {
+          insP.run(eid, did, nm, hit, now);
+          result.projects.matched.push({ billcom: nm, cl_project_id: hit });
+          continue;
+        }
+        // No confident match. Keep whatever a human had set for this department.
+        const kept = priorP.get(did);
+        if (kept && validProj.has(kept.cl_project_id)) {
+          insP.run(eid, did, nm || kept.billcom_dept_name, kept.cl_project_id, now);
+          result.projects.matched.push({ billcom: nm, cl_project_id: kept.cl_project_id, kept_manual: true });
+          continue;
+        }
+        result.projects.unmatched.push({ billcom_dept_id: did, name: nm, ambiguous: hit === '(AMBIGUOUS)' });
       }
     }
   });
