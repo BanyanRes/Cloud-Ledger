@@ -1,0 +1,14 @@
+{
+  "name": "cloudledger-docx-tools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "House-style Word file tooling for CloudLedger. Not part of the server build - tools/ is not copied into the Docker image.",
+  "main": "docs.js",
+  "scripts": {
+    "verify": "node verify.js",
+    "selftest": "node examples/selftest.js"
+  },
+  "dependencies": {
+    "docx": "^9.0.0"
+  }
+}

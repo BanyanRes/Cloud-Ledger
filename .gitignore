@@ -5,3 +5,5 @@ data/
 *.db
 *.db-wal
 *.db-shm
+tools/docx/examples/_selftest_*.docx
+_verify_*/
