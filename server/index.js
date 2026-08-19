@@ -6048,6 +6048,11 @@ app.post('/api/billcom/retag-projects/:entity_id', auth, requireEntityAccess('en
   const dryRun = !!(req.body && req.body.dry_run);
   const from = (req.body && req.body.from) || null;
   const to = (req.body && req.body.to) || null;
+  // Each bill costs one sequential Bill.com round trip, so a month's worth blows
+  // through Railway's gateway timeout. Work in bounded batches and hand back a
+  // cursor; the caller loops until remaining is 0.
+  const limit = Math.max(1, Math.min(parseInt((req.body && req.body.limit) || 20, 10) || 20, 100));
+  const offset = Math.max(0, parseInt((req.body && req.body.offset) || 0, 10) || 0);
   const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(eid);
   if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
   const projMap = new Map(db.prepare('SELECT billcom_dept_id, cl_project_id FROM billcom_project_map WHERE entity_id = ?').all(eid).map(r => [String(r.billcom_dept_id), r.cl_project_id]));
@@ -6057,13 +6062,15 @@ app.post('/api/billcom/retag-projects/:entity_id', auth, requireEntityAccess('en
   const params = [eid];
   if (from) { where += ' AND je.date >= ?'; params.push(from); }
   if (to) { where += ' AND je.date <= ?'; params.push(to); }
-  const synced = db.prepare(
+  const allSynced = db.prepare(
     "SELECT bl.billcom_id, bl.cl_entry_id, bl.invoice_number, je.date, je.entry_num, je.doc_number " +
     "FROM billcom_sync_log bl JOIN journal_entries je ON je.id = bl.cl_entry_id " +
     "WHERE bl.entity_id = ? AND bl.sync_type = 'bill' AND bl.status = 'success' " +
     "AND bl.cl_entry_id IS NOT NULL" + where + " ORDER BY je.date, je.entry_num"
   ).all(...params);
-  if (!synced.length) return res.json({ dry_run: dryRun, examined: 0, entries_tagged: 0, lines_tagged: 0, details: [] });
+  const total = allSynced.length;
+  const synced = allSynced.slice(offset, offset + limit);
+  if (!synced.length) return res.json({ dry_run: dryRun, total_in_window: total, offset, examined: 0, entries_tagged: 0, lines_tagged: 0, docs_filled: 0, next_offset: null, remaining: 0, details: [] });
 
   let session, devKey;
   try {
@@ -6073,7 +6080,8 @@ app.post('/api/billcom/retag-projects/:entity_id', auth, requireEntityAccess('en
   } catch (e) { return res.status(502).json({ error: 'Bill.com login failed: ' + e.message }); }
   const args = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
 
-  const result = { dry_run: dryRun, examined: synced.length, entries_tagged: 0, lines_tagged: 0, docs_filled: 0, skipped_no_department: 0, errors: [], details: [] };
+  const nextOffset = offset + synced.length;
+  const result = { dry_run: dryRun, total_in_window: total, offset, examined: synced.length, next_offset: nextOffset < total ? nextOffset : null, remaining: Math.max(0, total - nextOffset), entries_tagged: 0, lines_tagged: 0, docs_filled: 0, skipped_no_department: 0, errors: [], details: [] };
   const untaggedLines = db.prepare('SELECT id, account_code, debit, credit, project_id, description FROM journal_lines WHERE entry_id = ? ORDER BY id');
   const setProject = db.prepare('UPDATE journal_lines SET project_id = ? WHERE id = ?');
   const setDesc = db.prepare('UPDATE journal_lines SET description = ? WHERE id = ?');
