@@ -2436,6 +2436,22 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled,isBanyanRes}){
   useEffect(()=>{loadRefs();},[loadRefs]);
   useEffect(()=>{load();},[load]);
   const resetForm=()=>{setForm({customer_id:'',invoice_num:'',invoice_date:today(),due_date:'',memo:''});setLines([{...blankLine}]);};
+  // Duplicate: prefill the New Invoice form from an existing invoice's lines, with
+  // a fresh date and a blank invoice # (auto-generates a new number). Nothing posts
+  // until the user reviews and clicks Create, so it is a safe starting point rather
+  // than a silent clone. Credit memos are not duplicated through this path.
+  const duplicate=async(src)=>{
+    setErr('');setShowCM(false);
+    try{
+      const full=await api.getArInvoice(entityId,src.id);
+      setForm({customer_id:String(full.customer_id||''),invoice_num:'',invoice_date:today(),due_date:'',memo:full.memo||''});
+      setLines((full.lines||[]).map(l=>({description:l.description||'',qty:Number(l.qty)||1,rate:Math.abs(Number(l.rate))||'',
+        revenue_account_code:l.revenue_account_code||'',class_id:l.class_id?String(l.class_id):'',
+        location_id:l.location_id?String(l.location_id):'',project_id:l.project_id?String(l.project_id):''})));
+      setShowNew(true);
+      window.scrollTo({top:0,behavior:'smooth'});
+    }catch(e){alert('Could not duplicate: '+e.message);}
+  };
   const resetCm=()=>{setCmForm({customer_id:'',invoice_date:today(),memo:''});setCmLines([{...blankLine}]);};
   const createCm=async()=>{
     setErr('');
@@ -2510,17 +2526,18 @@ function ArInvoices({entityId,entityName,canEdit,dimsEnabled,isBanyanRes}){
     {err&&!showNew&&<div style={S.err}>{err}</div>}
     <div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
       <th style={S.th}>Invoice #</th><th style={S.th}>Date</th><th style={S.th}>Customer</th><th style={S.th}>Memo</th>
-      <th style={S.th}>Due</th><th style={{...S.th,width:100}}>Status</th><th style={S.thR}>Total</th><th style={S.thR}>Open</th></tr></thead>
+      <th style={S.th}>Due</th><th style={{...S.th,width:100}}>Status</th><th style={S.thR}>Total</th><th style={S.thR}>Open</th><th style={{...S.th,width:90}}></th></tr></thead>
       <tbody>
-        {loading&&<tr><td colSpan={8} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>Loading…</td></tr>}
-        {!loading&&invoices.length===0&&<tr><td colSpan={8} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>No invoices yet.</td></tr>}
+        {loading&&<tr><td colSpan={9} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>Loading…</td></tr>}
+        {!loading&&invoices.length===0&&<tr><td colSpan={9} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>No invoices yet.</td></tr>}
         {!loading&&invoices.map(i=><tr key={i.id} style={{cursor:'pointer',...(i.status==='void'?{opacity:0.55}:{})}} onClick={()=>open(i)}>
           <td style={{...S.td,color:T.textBright,fontWeight:600}}>{i.invoice_num}</td>
           <td style={S.td}>{i.invoice_date}</td><td style={S.td}>{i.customer_name}</td>
           <td style={{...S.td,color:T.textMuted}}>{i.memo||''}</td><td style={S.td}>{i.due_date||''}</td>
           <td style={S.td}><ArBadge inv={i}/></td>
           <td style={{...S.td,textAlign:'right'}}>{fmt(i.total)}</td>
-          <td style={{...S.td,textAlign:'right',color:i.open_amount>0.005?T.textBright:T.textMuted}}>{fmt(i.open_amount)}</td></tr>)}
+          <td style={{...S.td,textAlign:'right',color:i.open_amount>0.005?T.textBright:T.textMuted}}>{fmt(i.open_amount)}</td>
+          <td style={{...S.td,textAlign:'right'}}>{canEdit&&i.doc_type!=='credit_memo'&&<button style={{...S.btnGhost,padding:'3px 8px',fontSize:12}} title="Copy this invoice into a new draft" onClick={e=>{e.stopPropagation();duplicate(i);}}>Duplicate</button>}</td></tr>)}
       </tbody></table></div>
     {detail&&<ArInvoiceDetail entityId={entityId} invoice={detail} bankAccts={bankAccts} canEdit={canEdit} busy={busy} act={act}
       onClose={()=>setDetail(null)} onChanged={load}/>}
@@ -2854,7 +2871,11 @@ function ArAgingReport({entityId,entityName}){
                 <td style={{...S.td,textAlign:'right'}}></td>
                 <td style={{...S.td,textAlign:'right',fontWeight:600}}>{fmt(r.total)}</td></tr>
               {showDetail&&data.detail.filter(d=>d.customer===r.customer).map(d=><tr key={d.invoice_id}>
-                <td style={{...S.td,paddingLeft:26,color:T.textMuted,fontSize:12}}>{d.invoice_num} · {d.invoice_date} · due {d.due_date||'—'}{d.days_past_due>0?' · '+d.days_past_due+'d late':''}</td>
+                <td style={{...S.td,paddingLeft:26,color:T.textMuted,fontSize:12}}>
+                  <span onClick={()=>{if(d.je_id)openEntry(d.je_id);else window.open(api.arInvoicePdfUrl(entityId,d.invoice_id),'_blank');}}
+                    title={d.je_id?'Open journal entry':'Open invoice PDF'}
+                    style={{color:T.accent,cursor:'pointer',textDecoration:'underline'}}>{d.invoice_num}</span>
+                  <span> · {d.invoice_date} · due {d.due_date||'—'}{d.days_past_due>0?' · '+d.days_past_due+'d late':''}</span></td>
                 {BK.map(b=><td key={b[0]} style={{...S.td,textAlign:'right',fontSize:12,color:T.textMuted}}>{d.bucket===b[0]?fmt(d.open):''}</td>)}
                 <td style={{...S.td,textAlign:'right'}}></td>
                 <td style={{...S.td,textAlign:'right',fontSize:12,color:T.textMuted}}>{fmt(d.open)}</td></tr>)}
