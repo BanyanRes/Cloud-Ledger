@@ -750,6 +750,10 @@ export default function App(){
   _activeEntityFileTag = _activeEnt ? (_activeEnt.display_id || _activeEnt.name || '') : '';
   const isTurnkeyEntity = !!(_activeEnt && (_activeEnt.code==='TURNKEYR' || /turnkey\s*rail/i.test(_activeEnt.name||'')));
   const isDevEntity = !!(_activeEnt && _activeEnt.entity_type==='development');
+  // Rail-assets entities get the same requisition-driven menu as development
+  // entities (Requisitions page, requisition report in the financials package),
+  // and may pair TWO requisition reports in that package.
+  const isReqEntity = !!(_activeEnt && (_activeEnt.entity_type==='development' || _activeEnt.entity_type==='rail_assets'));
   // County Line Rail Fund — the only entity with the Management Fee workpaper for now.
   const isCLRF = !!(_activeEnt && (_activeEnt.code==='CLRF' || /county\s*line\s*rail\s*fund/i.test(_activeEnt.name||'')));
   // Banyan Residential — pays the health-insurance premium and prepares the
@@ -769,7 +773,7 @@ export default function App(){
   // flyout to its right listing that category's pages. Entity-conditional pages
   // live inside a permanent category so switching entities never reshuffles the
   // rail, and a category with nothing visible to this user is dropped entirely.
-  const hasWorkpapers = isDevEntity || isCLRF || isBanyanRes;
+  const hasWorkpapers = isReqEntity || isCLRF || isBanyanRes;
   const navTree=[
     {key:'ACCOUNTING',label:'Accounting',icon:'📘',items:[
       {id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
@@ -813,7 +817,7 @@ export default function App(){
       {id:'memorized',label:'Memorized Reports',icon:'★',section:'reports'},
     ]},
     ...(hasWorkpapers?[{key:'WORKPAPERS',label:'Workpapers',icon:'📄',items:[
-      ...(isDevEntity?[{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
+      ...(isReqEntity?[{id:'requisitions',label:'Requisitions',icon:'🏗️',section:'reports'}]:[]),
       ...(isCLRF?[{id:'wp_mgmtfee',label:'Management Fee',icon:'📄',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_gpfees',label:'GP Fees & Expenses',icon:'🤝',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_valuation',label:'Investment & Valuation',icon:'🏦',section:'workpapers'}]:[]),
@@ -903,12 +907,12 @@ export default function App(){
         {page==='users'&&<UserManagement currentUser={user}/>}
         {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='billcom_sync'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity} initialTab='sync'/>}
-        {page==='requisitions'&&activeEntity&&isDevEntity&&<Requisitions entityId={activeEntity} entityName={entityName} canEdit={canEdit} reqState={reqState} setReqState={setReqState}/>}
+        {page==='requisitions'&&activeEntity&&isReqEntity&&<Requisitions entityId={activeEntity} entityName={entityName} canEdit={canEdit} reqState={reqState} setReqState={setReqState}/>}
         {page==='wp_mgmtfee'&&activeEntity&&isCLRF&&<MgmtFeeWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_gpfees'&&activeEntity&&isCLRF&&<GpFeesWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_valuation'&&activeEntity&&isCLRF&&<ValuationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} isDevEntity={isDevEntity} key={activeEntity+'-'+rk}/>}
+        {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} isDevEntity={isReqEntity} key={activeEntity+'-'+rk}/>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='fundrep'&&activeEntity&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
       </>})()}</div></div>
@@ -5107,6 +5111,7 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
   const[period,setPeriod]=useState('monthly');
   const[execFile,setExecFile]=useState(null);
   const[reqFile,setReqFile]=useState(null);
+  const[reqFile2,setReqFile2]=useState(null);
   const[preview,setPreview]=useState(null);
   const[busy,setBusy]=useState(false);
   const[gen,setGen]=useState(false);
@@ -5126,7 +5131,7 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
   const generate=async()=>{
     setErr('');setGen(true);setResult(null);
     try{
-      const out=await api.financialStatementsGenerate(entityId,asOf,period,execFile,isDevEntity?reqFile:null);
+      const out=await api.financialStatementsGenerate(entityId,asOf,period,execFile,isDevEntity?[reqFile,reqFile2]:null);
       if(!out)return;
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
       setResult(out.summary||{});
@@ -5184,6 +5189,11 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
           <input type="file" accept=".pdf,.xlsx,.xls" disabled={!canEdit} onChange={e=>setReqFile(e.target.files[0]||null)} style={{fontSize:13}}/>
           {reqFile&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{reqFile.name}</span>}
         </div>}
+        {isDevEntity&&<div>
+          <label style={S.label}>Second requisition report <span style={{fontWeight:400,color:T.textMuted}}>(optional &mdash; adds a second Budget to Actual to the package)</span></label>
+          <input type="file" accept=".pdf,.xlsx,.xls" disabled={!canEdit} onChange={e=>setReqFile2(e.target.files[0]||null)} style={{fontSize:13}}/>
+          {reqFile2&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{reqFile2.name}</span>}
+        </div>}
       </div>
     </div>
 
@@ -5196,7 +5206,9 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
       <div style={{fontSize:13,color:T.text}}>
         {(result.sections||[]).map((s,i)=><span key={i} style={{marginRight:14}}>{s.label}: <b>{s.pages}</b>p</span>)}
       </div>
-      {result.reqTotal!=null&&<div style={{marginTop:8,fontSize:12,color:T.textMuted}}>Requisition report{result.reqConvertedFromXlsx?(' (converted from Excel'+(result.reqSheetUsed?', sheet "'+result.reqSheetUsed+'"':'')+')'):''}: kept {result.reqKept} of {result.reqTotal} pages{(result.reqRemoved&&result.reqRemoved.length)?(' (removed '+result.reqRemoved.length+' invoice-log page'+(result.reqRemoved.length>1?'s':'')+')'):''}.</div>}
+      {result.reqReports&&result.reqReports.length>1
+        ? result.reqReports.map((rr,i)=><div key={i} style={{marginTop:8,fontSize:12,color:T.textMuted}}>{rr.label||('Requisition report '+(i+1))}{rr.convertedFromXlsx?(' (converted from Excel'+(rr.sheetUsed?', sheet "'+rr.sheetUsed+'"':'')+')'):''}: kept {rr.kept} of {rr.total} pages{(rr.removed&&rr.removed.length)?(' (removed '+rr.removed.length+' invoice-log page'+(rr.removed.length>1?'s':'')+')'):''}.</div>)
+        : (result.reqTotal!=null&&<div style={{marginTop:8,fontSize:12,color:T.textMuted}}>Requisition report{result.reqConvertedFromXlsx?(' (converted from Excel'+(result.reqSheetUsed?', sheet "'+result.reqSheetUsed+'"':'')+')'):''}: kept {result.reqKept} of {result.reqTotal} pages{(result.reqRemoved&&result.reqRemoved.length)?(' (removed '+result.reqRemoved.length+' invoice-log page'+(result.reqRemoved.length>1?'s':'')+')'):''}.</div>)}
       {(result.warnings||[]).length>0&&<div style={{marginTop:8,fontSize:12,color:T.orange}}>{result.warnings.map((w,i)=><div key={i}>⚠ {w}</div>)}</div>}
       <div style={{marginTop:8,fontSize:12,color:T.textMuted}}>The PDF has downloaded. Review before distributing.</div>
     </div>}

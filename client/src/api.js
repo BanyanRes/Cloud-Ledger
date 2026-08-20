@@ -549,7 +549,9 @@ export const api = {
     fd.append('as_of', asOf);
     fd.append('period', period || 'monthly');
     if (execSummaryFile) fd.append('execSummary', execSummaryFile);
-    if (reqReportFile) fd.append('reqReport', reqReportFile);
+    // reqReportFile may be a single File or an array of up to two Files.
+    const reqFiles = Array.isArray(reqReportFile) ? reqReportFile.filter(Boolean) : (reqReportFile ? [reqReportFile] : []);
+    for (const f of reqFiles) fd.append('reqReport', f);
     const token = getToken();
     const res = await fetch(API_BASE + '/workpapers/financial-statements/' + eid + '/generate', {
       method: 'POST', headers: token ? { Authorization: 'Bearer ' + token } : {}, body: fd,

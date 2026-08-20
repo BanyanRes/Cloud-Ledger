@@ -1376,7 +1376,7 @@ function requireDevelopmentEntity(paramName) {
     if (!eid) return res.status(400).json({ error: 'Invalid entity id' });
     const ent = db.prepare('SELECT entity_type FROM entities WHERE id = ?').get(eid);
     if (!ent) return res.status(404).json({ error: 'Entity not found' });
-    if (ent.entity_type !== 'development') return res.status(403).json({ error: 'Requisition features are only available for development-project entities' });
+    if (ent.entity_type !== 'development' && ent.entity_type !== 'rail_assets') return res.status(403).json({ error: 'Requisition features are only available for development-project and rail-assets entities' });
     next();
   };
 }
@@ -8937,7 +8937,7 @@ require('./orgstructure').registerOrgStructureRoutes(app, {
 //   cover -> executive summary (uploaded) -> GL statements -> requisition report
 //   (uploaded, with Current/Prior Invoice Log pages stripped).
 const finStmtUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
-const finStmtFields = finStmtUpload.fields([{ name: 'execSummary', maxCount: 1 }, { name: 'reqReport', maxCount: 1 }]);
+const finStmtFields = finStmtUpload.fields([{ name: 'execSummary', maxCount: 1 }, { name: 'reqReport', maxCount: 2 }]);
 
 // Preview endpoint: returns the numeric statements + tie-out checks as JSON,
 // so the UI can show balance-sheet / cash-flow tie-outs before generating.
@@ -9322,10 +9322,21 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
 
       const files = req.files || {};
       const execSummaryBytes = files.execSummary && files.execSummary[0] ? files.execSummary[0].buffer : null;
-      const reqReportFile = files.reqReport && files.reqReport[0] ? files.reqReport[0] : null;
-      const reqReportBytes = reqReportFile ? reqReportFile.buffer : null;
-      const reqReportName = reqReportFile ? reqReportFile.originalname : null;
-      const reqSheetName = req.body.req_sheet || undefined; // optional override; default "Budget to Actual"
+      // Up to two requisition reports (rail-assets entities may pair two). Each
+      // becomes its own section + Table-of-Contents entry, auto-numbered when
+      // more than one is present.
+      const reqFiles = (files.reqReport || []);
+      const reqSheetNames = [].concat(req.body.req_sheet || []); // optional per-file sheet override(s)
+      const reqReports = reqFiles.map((f, i) => ({
+        bytes: f.buffer,
+        name: f.originalname,
+        sheet: reqSheetNames[i] || undefined,
+      }));
+      // Back-compat single-report fields (first file), kept so an older client
+      // or any other caller of generatePackage still works.
+      const reqReportBytes = reqReports[0] ? reqReports[0].bytes : null;
+      const reqReportName = reqReports[0] ? reqReports[0].name : null;
+      const reqSheetName = reqReports[0] ? reqReports[0].sheet : undefined;
 
       // When the user uploads an exec summary with this generate call, it both
       // goes into THIS package and becomes the entity's new stored default.
@@ -9339,7 +9350,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
         storedDefaultBytes = readStoredExecSummary(eid);
       }
 
-      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReportBytes, reqReportName, reqSheetName });
+      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName });
 
       const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
       const safeName = entityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
@@ -9349,6 +9360,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       res.setHeader('X-Financials-Summary', JSON.stringify({
         pages: info.pages, sections: info.sections, warnings: info.warnings,
         reqRemoved: info.reqRemoved || [], reqKept: info.reqKept, reqTotal: info.reqTotal,
+        reqReports: info.reqReports || null,
         reqConvertedFromXlsx: info.reqConvertedFromXlsx || false, reqSheetUsed: info.reqSheetUsed,
         balanceSheetTies: info.balanceSheetTies, cashFlowTies: info.cashFlowTies, cashFlowDiff: info.cashFlowDiff,
         execSummarySource: info.execSummarySource,

@@ -2495,7 +2495,11 @@ async function renderCoverPdf(meta, tocEntries) {
 // args: {
 //   statements,                 // result of buildStatements
 //   execSummaryBytes (optional) // uploaded exec-summary PDF
-//   reqReportBytes (optional)   // uploaded requisition report — PDF or .xlsx
+//   reqReports (optional)       // array of { bytes, name, sheet } — up to two
+//                               //   requisition reports (rail-assets pairs two).
+//                               //   Each becomes its own section + TOC entry,
+//                               //   auto-numbered when more than one is present.
+//   reqReportBytes (optional)   // single-report back-compat — PDF or .xlsx
 //   reqReportName (optional)    // original filename, used to detect .xlsx
 //   reqSheetName (optional)     // worksheet to extract when .xlsx (default
 //                               //   "Budget to Actual", case-insensitive; falls
@@ -2503,7 +2507,7 @@ async function renderCoverPdf(meta, tocEntries) {
 // }
 // Returns { bytes, info: { pages, reqRemoved, reqKept, cashFlowTies, ... } }.
 // ═══════════════════════════════════════════════════════════════════════════
-async function generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReportBytes, reqReportName, reqSheetName }) {
+async function generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName }) {
   const merged = await PDFDocument.create();
   const info = { sections: [], warnings: [] };
 
@@ -2571,51 +2575,76 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
   for (const off of stmtOffsets) {
     tocEntries.push({ label: off.label, page: stmtBodyStart + off.page + COVER_TOC_PAGES + 1 });
   }
-  // 4. Requisition report (uploaded). Accepts a PDF or an .xlsx workbook. When a
-  //    workbook is uploaded, extract the requested sheet (default "Budget to
-  //    Actual") and render it to a PDF page first — the rendered PDF carries a
-  //    real text layer, so invoice-log stripping runs on it identically.
-  if (reqReportBytes) {
-    let reqPdfBytes = reqReportBytes;
-    let fromXlsx = false;
-    if (looksLikeXlsx(reqReportBytes, reqReportName)) {
-      try {
-        const wantSheet = reqSheetName || 'Budget to Actual';
-        // No injected title: the requisition sheet carries its own header block
-        // ("Project Funding Requisition" / entity / period / report #), and the
-        // converter fits the whole sheet onto one landscape page as-is.
-        const conv = await xlsxSheetToPdf(reqReportBytes, wantSheet, {});
-        reqPdfBytes = Buffer.from(conv.bytes);
-        fromXlsx = true;
-        info.reqConvertedFromXlsx = true;
-        info.reqSheetUsed = conv.sheetUsed;
-        info.reqAvailableSheets = conv.availableSheets;
-        if (conv.sheetUsed.toLowerCase() !== wantSheet.toLowerCase()) {
-          info.warnings.push('Requisition workbook had no "' + wantSheet + '" sheet; used "' + conv.sheetUsed + '" instead.');
+  // 4. Requisition report(s) (uploaded). Accepts a PDF or an .xlsx workbook.
+  //    Rail-assets entities may pair TWO reports; each becomes its own body
+  //    section and Table-of-Contents entry. Labels are auto-numbered
+  //    ("Budget to Actual (1)", "(2)") only when more than one is present, so a
+  //    single report still reads plainly as "Budget to Actual". Because every
+  //    section is appended through appendToBody (which records its absolute
+  //    start page) and page numbers are stamped by absolute position later,
+  //    the TOC and page numbers update themselves with no extra bookkeeping.
+  //    When a workbook is uploaded, extract the requested sheet (default
+  //    "Budget to Actual") and render it to a PDF page first — the rendered PDF
+  //    carries a real text layer, so invoice-log stripping runs on it identically.
+  const reqList = (Array.isArray(reqReports) && reqReports.length)
+    ? reqReports
+    : (reqReportBytes ? [{ bytes: reqReportBytes, name: reqReportName, sheet: reqSheetName }] : []);
+  if (reqList.length) {
+    info.reqReports = [];
+    const multi = reqList.length > 1;
+    for (let ri = 0; ri < reqList.length; ri++) {
+      const r = reqList[ri];
+      if (!r || !r.bytes) continue;
+      const label = multi ? ('Budget to Actual (' + (ri + 1) + ')') : 'Budget to Actual';
+      const rInfo = { label };
+      let reqPdfBytes = r.bytes;
+      let fromXlsx = false;
+      if (looksLikeXlsx(r.bytes, r.name)) {
+        try {
+          const wantSheet = r.sheet || 'Budget to Actual';
+          // No injected title: the requisition sheet carries its own header block
+          // ("Project Funding Requisition" / entity / period / report #), and the
+          // converter fits the whole sheet onto one landscape page as-is.
+          const conv = await xlsxSheetToPdf(r.bytes, wantSheet, {});
+          reqPdfBytes = Buffer.from(conv.bytes);
+          fromXlsx = true;
+          rInfo.convertedFromXlsx = true;
+          rInfo.sheetUsed = conv.sheetUsed;
+          rInfo.availableSheets = conv.availableSheets;
+          if (conv.sheetUsed.toLowerCase() !== wantSheet.toLowerCase()) {
+            info.warnings.push(label + ': workbook had no "' + wantSheet + '" sheet; used "' + conv.sheetUsed + '" instead.');
+          }
+        } catch (e) {
+          info.warnings.push(label + ': could not convert requisition workbook to PDF: ' + e.message);
+          reqPdfBytes = null;
         }
-      } catch (e) {
-        info.warnings.push('Could not convert requisition workbook to PDF: ' + e.message);
-        reqPdfBytes = null;
       }
+      if (reqPdfBytes && fromXlsx) {
+        // xlsx path: we already extracted exactly the requested sheet (the Budget
+        // to Actual report), so there is no invoice log to strip. Append the
+        // converted page directly and skip stripInvoiceLogPages — that heuristic
+        // is for multi-page PDF packets and could wrongly drop the one B2A page.
+        const kept = await appendToBody(reqPdfBytes, label, true);
+        rInfo.removed = []; rInfo.kept = kept; rInfo.total = kept;
+      } else if (reqPdfBytes) {
+        const stripped = await stripInvoiceLogPages(reqPdfBytes);
+        rInfo.removed = stripped.removed; rInfo.kept = stripped.kept; rInfo.total = stripped.total;
+        if (!stripped.textDetected) info.warnings.push(label + ': ' + (stripped.parseFailed
+          ? 'requisition PDF could not be parsed for invoice-log detection; all pages were kept.'
+          : 'requisition PDF had no extractable text; invoice-log pages could not be detected and were left in.'));
+        await appendToBody(stripped.bytes, label, true);
+      }
+      info.reqReports.push(rInfo);
     }
-    if (reqPdfBytes && fromXlsx) {
-      // xlsx path: we already extracted exactly the requested sheet (the Budget
-      // to Actual report), so there is no invoice log to strip. Append the
-      // converted page directly and skip stripInvoiceLogPages — that heuristic
-      // is for multi-page PDF packets and could wrongly drop the one B2A page.
-      const kept = await appendToBody(reqPdfBytes, 'Budget to Actual', true);
-      info.reqRemoved = [];
-      info.reqKept = kept;
-      info.reqTotal = kept;
-    } else if (reqPdfBytes) {
-      const stripped = await stripInvoiceLogPages(reqPdfBytes);
-      info.reqRemoved = stripped.removed;
-      info.reqKept = stripped.kept;
-      info.reqTotal = stripped.total;
-      if (!stripped.textDetected) info.warnings.push(stripped.parseFailed
-        ? 'Requisition PDF could not be parsed for invoice-log detection; all pages were kept.'
-        : 'Requisition PDF had no extractable text; invoice-log pages could not be detected and were left in.');
-      await appendToBody(stripped.bytes, 'Budget to Actual', true);
+    // Back-compat: the first report's figures remain on the flat info fields the
+    // existing client summary line reads.
+    if (info.reqReports.length) {
+      const first = info.reqReports[0];
+      info.reqConvertedFromXlsx = !!first.convertedFromXlsx;
+      info.reqSheetUsed = first.sheetUsed;
+      info.reqRemoved = first.removed || [];
+      info.reqKept = first.kept;
+      info.reqTotal = first.total;
     }
   } else {
     info.warnings.push('No requisition report uploaded.');
