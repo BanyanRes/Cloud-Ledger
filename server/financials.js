@@ -46,6 +46,11 @@ const ENTITY_DISPLAY_NAMES = [
   // statement package prints that name even though the ledger entity is still
   // "CLIP Property Owner". (The ledger entity is NOT renamed.)
   { match: /clip\s*property\s*owner|county\s*line\s*industrial\s*park/i, display: 'County Line Industrial Park, LLC' },
+  // CLR Silsbee Property Owner (entity 39) — same push-down situation as CLIP.
+  // Its CPA package is titled "County Line Rail Silsbee, LLC", so the statement
+  // package prints that name; the ledger entity stays "CLR Silsbee Property
+  // Owner".
+  { match: /clr\s*silsbee\s*property\s*owner|county\s*line\s*rail\s*silsbee/i, display: 'County Line Rail Silsbee, LLC' },
 ];
 function displayEntityName(name) {
   const n = String(name || '').trim();
@@ -86,6 +91,15 @@ function entityProfile(opts) {
   // (19041) and matching contributed capital (34164) are eliminated. Distinct
   // from srn — pinned by entity name/code so no other entity is affected.
   if (/clip\s*property\s*owner/i.test(name) || code === 'CLIPPROP' || code === 'CLIPPRO1') return 'clip';
+  // CLR Silsbee Property Owner (entity 39). Same CPA-mirrored shape as clip:
+  // Allowance for Credit Losses nets inside Accounts Receivable, Net; PP&E is
+  // split into gross Fixed Assets + a separate Accumulated Depreciation
+  // subtotal; land/construction costs form a Long Term Investments section; and
+  // the pushed-down parent investment (17001) and matching contributed capital
+  // (34063) are eliminated. Silsbee has no Earnest Money / Due from Outside
+  // Vendor, so nothing extra moves into Other Current Assets. Pinned by entity
+  // name/code so no other entity is affected.
+  if (/clr\s*silsbee\s*property\s*owner/i.test(name) || code === 'CLRSILSB2' || code === 'CLRSILSB') return 'silsbee';
   return 'srn';
 }
 
@@ -168,6 +182,34 @@ function bsClassifyFor(profile, row) {
       return { section: 'Other Assets', sub: 'Other Assets' };
     }
     if (row.type === 'Liability') {
+      if (/loan|note payable|bot|bond/.test(name)) return { section: 'Long Term Liabilities', sub: 'Loans' };
+      if (/payable/.test(name)) return { section: 'Current Liabilities', sub: 'Accounts Payable' };
+      return { section: 'Current Liabilities', sub: 'Other Current Liabilities' };
+    }
+    if (row.type === 'Equity') {
+      if (/retained earning/.test(name)) return { section: 'Members Equity', sub: 'Retained Earnings' };
+      return { section: 'Members Equity', sub: 'Members Equity' };
+    }
+    return { section: 'Other', sub: 'Other' };
+  }
+  if (profile === 'silsbee') {
+    const explicit = BS_ACCOUNT_MAP_SILSBEE[String(row.code)];
+    if (explicit) return { section: explicit[0], sub: explicit[1] };
+    // Defensive fallback (every Silsbee account is pinned above). Mirror the CPA
+    // groupings: allowance nets into AR, prepaid/reserve to Other Current
+    // Assets, land/construction to Long Term Investments, remaining capitalized
+    // costs to Other Assets.
+    const name = (row.name || '').toLowerCase();
+    if (row.type === 'Asset') {
+      if (isCashAccount(row)) return { section: 'Current Assets', sub: 'Cash and Cash Equivalents' };
+      if (/due from|intercompany/.test(name)) return { section: 'Current Assets', sub: 'Intercompany Receivable' };
+      if (/receivable|allowance/.test(name)) return { section: 'Current Assets', sub: 'Accounts Receivable, Net' };
+      if (/prepaid|reserve|deposit/.test(name)) return { section: 'Current Assets', sub: 'Other Current Assets' };
+      if (/accum|depreciation/.test(name)) return { section: 'Fixed Assets, Net', sub: 'Accumulated Depreciation' };
+      return { section: 'Other Assets', sub: 'Other Assets' };
+    }
+    if (row.type === 'Liability') {
+      if (/due to|intercompany/.test(name)) return { section: 'Current Liabilities', sub: 'Intercompany Payable' };
       if (/loan|note payable|bot|bond/.test(name)) return { section: 'Long Term Liabilities', sub: 'Loans' };
       if (/payable/.test(name)) return { section: 'Current Liabilities', sub: 'Accounts Payable' };
       return { section: 'Current Liabilities', sub: 'Other Current Liabilities' };
@@ -713,6 +755,97 @@ const BS_CONTRA_CODES_CLIP = new Set(['16160', '16500']);
 // flow all tied by construction while removing the self-referential gross-up.
 const CLIP_ELIMINATE_CODES = new Set(['19041', '34164']);
 
+// ── CLR Silsbee Property Owner (entity 39) balance-sheet map ────────────────
+// Reproduces the CPA reference package (County Line Rail Silsbee, LLC) exactly.
+// Same shape family as the clip map. Notable points:
+//   • 12002 Allowance for Credit Losses → Accounts Receivable, Net (contra).
+//   • No Earnest Money / Due from Outside Vendor here, so Other Current Assets
+//     is just prepaid insurance + interest reserve.
+//   • PP&E gross accounts → Fixed Assets, Net › Fixed Assets, with 16160/16500
+//     accumulated depreciation split into their own Accumulated Depreciation
+//     subsection (contra).
+//   • Land/construction cost accounts → Investments › Long Term Investments.
+//   • Development/soft-cost accounts (incl. 11020 Scrap Metal) → Other Assets.
+//   • Intercompany Receivable (18310/18311/18378) and Intercompany Payable
+//     (23370/23375) present as their own subsections.
+// 17001 (Investment - CLR Silsbee Property Owner LLC) and 34063 (Contributed
+// Capital - County Line Rail Silsbee LLC) are the pushed-down parent
+// investment/equity pair; they are ELIMINATED before classification (see
+// SILSBEE_ELIMINATE_CODES) and are intentionally absent from this map.
+const BS_ACCOUNT_MAP_SILSBEE = {
+  // Current Assets → Cash and Cash Equivalents
+  '10010': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10040': ['Current Assets', 'Cash and Cash Equivalents'],
+  // Current Assets → Accounts Receivable, Net (12002 is a contra within it)
+  '12000': ['Current Assets', 'Accounts Receivable, Net'],
+  '12002': ['Current Assets', 'Accounts Receivable, Net'],
+  // Current Assets → Intercompany Receivable
+  '18310': ['Current Assets', 'Intercompany Receivable'],
+  '18311': ['Current Assets', 'Intercompany Receivable'],
+  '18378': ['Current Assets', 'Intercompany Receivable'],
+  // Current Assets → Other Current Assets
+  '13001': ['Current Assets', 'Other Current Assets'],
+  '13100': ['Current Assets', 'Other Current Assets'],
+  // Fixed Assets, Net → Fixed Assets (gross)
+  '15100': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15150': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15165': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15175': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15200': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15210': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15220': ['Fixed Assets, Net', 'Fixed Assets'],
+  // Fixed Assets, Net → Accumulated Depreciation (contra)
+  '16160': ['Fixed Assets, Net', 'Accumulated Depreciation'],
+  '16500': ['Fixed Assets, Net', 'Accumulated Depreciation'],
+  // Investments → Long Term Investments
+  '11040': ['Investments', 'Long Term Investments'],
+  '11211': ['Investments', 'Long Term Investments'],
+  '11215': ['Investments', 'Long Term Investments'],
+  '11230': ['Investments', 'Long Term Investments'],
+  // Other Assets (capitalized development / soft costs; 11020 scrap metal)
+  '11020': ['Other Assets', 'Other Assets'],
+  '11970': ['Other Assets', 'Other Assets'],
+  '12115': ['Other Assets', 'Other Assets'],
+  '12230': ['Other Assets', 'Other Assets'],
+  '12315': ['Other Assets', 'Other Assets'],
+  '12321': ['Other Assets', 'Other Assets'],
+  '12343': ['Other Assets', 'Other Assets'],
+  '12421': ['Other Assets', 'Other Assets'],
+  '12594': ['Other Assets', 'Other Assets'],
+  '12596': ['Other Assets', 'Other Assets'],
+  '12720': ['Other Assets', 'Other Assets'],
+  '12913': ['Other Assets', 'Other Assets'],
+  '13420': ['Other Assets', 'Other Assets'],
+  // Current Liabilities → Accounts Payable
+  '20000': ['Current Liabilities', 'Accounts Payable'],
+  '20100': ['Current Liabilities', 'Accounts Payable'],
+  // Current Liabilities → Intercompany Payable
+  '23370': ['Current Liabilities', 'Intercompany Payable'],
+  '23375': ['Current Liabilities', 'Intercompany Payable'],
+  // Current Liabilities → Other Current Liabilities
+  '21006': ['Current Liabilities', 'Other Current Liabilities'],
+  '24000': ['Current Liabilities', 'Other Current Liabilities'],
+  // Long Term Liabilities → Loans (22100 short-term CLRF I loan + 25063 BOT)
+  '22100': ['Long Term Liabilities', 'Loans'],
+  '25063': ['Long Term Liabilities', 'Loans'],
+  // Members Equity (34063 eliminated; not listed). 34006 correctly reads
+  // "Contributed Capital - CLRFI Silsbee Sponsor" in the CoA.
+  '34006': ['Members Equity', 'Members Equity'],
+  '34144': ['Members Equity', 'Members Equity'],
+  '34151': ['Members Equity', 'Members Equity'],
+  '34161': ['Members Equity', 'Members Equity'],
+  '34171': ['Members Equity', 'Members Equity'],
+  '34261': ['Members Equity', 'Members Equity'],
+  '39000': ['Members Equity', 'Retained Earnings'],
+};
+
+// Accumulated-depreciation contras for the Silsbee profile.
+const BS_CONTRA_CODES_SILSBEE = new Set(['16160', '16500']);
+
+// Codes eliminated on Silsbee before classification: the pushed-down parent
+// investment (17001, asset) and matching contributed capital (34063, equity).
+const SILSBEE_ELIMINATE_CODES = new Set(['17001', '34063']);
+
 // opts.intercompany routes "Due from ..." / "Due to ..." accounts into their own
 // balance-sheet subsections. It is ON for the default (srn) profile and OFF for
 // clrf, which keeps the pre-2026-08-18 shape. banyan/bsfrgp never reach here.
@@ -829,6 +962,16 @@ const BS_SUB_ORDER_CLIP = Object.assign({}, BS_SUB_ORDER, {
   'Investments': ['Long Term Investments'],
 });
 
+// Silsbee (entity 39) presentation order — same as CLIP, plus Intercompany
+// Payable in Current Liabilities (immediately after Accounts Payable), which
+// Silsbee has and CLIP does not.
+const BS_SUB_ORDER_SILSBEE = Object.assign({}, BS_SUB_ORDER, {
+  'Current Assets': ['Cash and Cash Equivalents', 'Accounts Receivable, Net', 'Intercompany Receivable', 'Other Current Assets'],
+  'Fixed Assets, Net': ['Fixed Assets', 'Accumulated Depreciation'],
+  'Investments': ['Long Term Investments'],
+  'Current Liabilities': ['Accounts Payable', 'Intercompany Payable', 'Other Current Liabilities'],
+});
+
 // ── P&L operating-expense classification ────────────────────────────────────
 // Per the CLR operating-expense restructure (Will Myers / Jimmy Yun, Jun 2026),
 // the old broad P&L sections (G&A, Payroll, Utilities & Facilities, Taxes &
@@ -938,29 +1081,38 @@ function plExpenseCategory(row) {
 async function buildStatements(getBalances, opts) {
   const asOf = opts.asOf;
   const profile = entityProfile(opts);
-  // CLIP push-down elimination: County Line Industrial Park, LLC owns 100% of
-  // CLIP Property Owner and its investment/contributed-capital is pushed down to
-  // CLIP's books, creating a self-referential gross-up. Drop the offsetting pair
-  // (19041 Investment in CLIP Property Owner, asset; 34164 Contributed Capital -
-  // County Line Industrial Park LLC, equity) from EVERY balance snapshot before
-  // any classification runs, so the elimination flows uniformly to the balance
-  // sheet, the statement of changes in members' equity, and the cash-flow
-  // statement. The two are equal and opposite and net out of every window, so
-  // Assets = Liabilities + Equity stays tied by construction.
-  const getBalancesEff = (profile === 'clip')
+  // Push-down elimination (clip / silsbee): the parent owns 100% of the entity
+  // and its investment/contributed-capital is pushed down to the entity's books,
+  // creating a self-referential gross-up. Drop the offsetting pair from EVERY
+  // balance snapshot before any classification runs, so the elimination flows
+  // uniformly to the balance sheet, the statement of changes in members' equity,
+  // and the cash-flow statement. The two codes are equal and opposite and net
+  // out of every window, so Assets = Liabilities + Equity stays tied by
+  // construction.
+  //   clip:    19041 Investment in CLIP Property Owner / 34164 Contributed
+  //            Capital - County Line Industrial Park LLC
+  //   silsbee: 17001 Investment - CLR Silsbee Property Owner LLC / 34063
+  //            Contributed Capital - County Line Rail Silsbee LLC
+  const eliminateCodes = (profile === 'clip') ? CLIP_ELIMINATE_CODES
+    : (profile === 'silsbee') ? SILSBEE_ELIMINATE_CODES
+    : null;
+  const getBalancesEff = eliminateCodes
     ? (o => Promise.resolve(getBalances(o)).then(rows =>
-        (rows || []).filter(r => !CLIP_ELIMINATE_CODES.has(String(r.code)))))
+        (rows || []).filter(r => !eliminateCodes.has(String(r.code)))))
     : getBalances;
   const bsSub = (profile === 'bsfrgp') ? BS_SUB_ORDER_BSFRGP
     : (profile === 'banyan') ? BS_SUB_ORDER_BANYAN
     : (profile === 'clip') ? BS_SUB_ORDER_CLIP
+    : (profile === 'silsbee') ? BS_SUB_ORDER_SILSBEE
     : usesIntercompanySections(profile) ? BS_SUB_ORDER_SRN
     : BS_SUB_ORDER;
   // Contra subsections (accumulated depreciation/amortization) are profile-
   // specific: Banyan's are the 165xx accumulated-depreciation accounts; CLIP's
-  // are 16160/16500 in its own Accumulated Depreciation subsection.
+  // and Silsbee's are 16160/16500 in their own Accumulated Depreciation
+  // subsection.
   const contraSet = (profile === 'banyan') ? BS_CONTRA_CODES_BANYAN
     : (profile === 'clip') ? BS_CONTRA_CODES_CLIP
+    : (profile === 'silsbee') ? BS_CONTRA_CODES_SILSBEE
     : BS_CONTRA_CODES;
   const bsCls = (row) => bsClassifyFor(profile, row);
   const bsSec = (row) => bsClassifyFor(profile, row).section;
