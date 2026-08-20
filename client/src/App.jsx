@@ -119,7 +119,7 @@ const XLC = n => { let s = ''; n = n + 1; while (n > 0) { const m = (n - 1) % 26
 const sumCols = (F, tr, dcols, first, last) => { if (last < first || tr == null) return; for (const c of dcols) F.push({ r: tr, c, f: 'SUM(' + XLC(c) + (first + 1) + ':' + XLC(c) + (last + 1) + ')' }); };
 // Push SUM() formulas that add a specific, explicit set of rows (e.g. a grand total
 // that sums subtotal rows rather than a contiguous block). `rows` = 0-based row idxs.
-const sumRows = (F, tr, dcols, rows) => { if (!rows || !rows.length || tr == null) return; for (const c of dcols) { const L = XLC(c); F.push({ r: tr, c, f: rows.map(r => L + (r + 1)).join('+') }); } };
+const sumRows = (F, tr, dcols, rows) => { if (!rows || !rows.length || tr == null) return; for (const c of dcols) { const L = XLC(c); F.push({ r: tr, c, f: 'SUM(' + rows.map(r => L + (r + 1)).join(',') + ')' }); } };
 const BLANK_JE = () => ({date:today(),memo:'',lines:[{account_code:'',debit:'',credit:'',description:''},{account_code:'',debit:'',credit:'',description:''}]});
 const SIDEBAR_KEY = 'cl_sidebar';
 
@@ -2824,7 +2824,11 @@ function ArAgingReport({entityId,entityName}){
     sumRows(F,totRow,[5,6,7,8,9,10,11],[...custTotRows,...(glTotRow!=null?[glTotRow]:[])]);
     d.push(['Reconciliation vs GL '+arLabel+' ('+fmt(data.gl_ar_balance)+')','','','','','','','','','','',data.recon_diff]);
     if(Number(data.opening_residual||0)>=0.005)d.push(['Of which not itemized on the subledger','','','','','','','','','','',data.opening_residual]);
-    exportToExcel(d,'AR_Aging_'+data.as_of+'.xlsx',{plainCols:[4],formulas:F});
+    exportToExcel(d,'AR_Aging_'+data.as_of+'.xlsx',{plainCols:[4],formulas:F,style:{
+      titleRows:[0],metaRows:[1,2],headerRows:[4],amountCols:[5,6,7,8,9,10,11],
+      underlineRows:[...custTotRows,...(glTotRow!=null?[glTotRow]:[])],
+      doubleUnderlineRows:[totRow],
+    }});
   };
   const hasGL=data&&data.gl_rows&&data.gl_rows.length>0;
   const hasAnything=data&&(data.rows.length>0||hasGL);
@@ -4474,7 +4478,11 @@ function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPend
     const totRow=d.length;d.push(['TOTAL','','','','','',gt.current,gt.d1_30,gt.d31_60,gt.d61_90,gt.d91_plus,gt.gl,gt.total]);
     sumRows(F,totRow,[6,7,8,9,10,11,12],[...venTotRows,...(glTotRow!=null?[glTotRow]:[])]);
     d.push(['Reconciliation vs GL '+(data.ap_account||'202000')+' ('+fmt(data.gl_balance)+')','','','','','','','','','','','',data.recon_diff]);
-    exportToExcel(d,'AP_Aging_'+data.as_of+'.xlsx',{plainCols:[5],formulas:F});
+    exportToExcel(d,'AP_Aging_'+data.as_of+'.xlsx',{plainCols:[5],formulas:F,style:{
+      titleRows:[0],metaRows:[1,2],headerRows:[4],amountCols:[6,7,8,9,10,11,12],
+      underlineRows:[...venTotRows,...(glTotRow!=null?[glTotRow]:[])],
+      doubleUnderlineRows:[totRow],
+    }});
   };
   const hasAnything=data&&(data.bill_count>0||(data.gl_rows&&data.gl_rows.length>0));
   return(<div>{showUpload&&<ApAgingCutoffModal entityId={entityId} entityName={entityName} onClose={()=>setShowUpload(false)} onDone={()=>{setShowUpload(false);}}/>}<div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}><div><div style={S.h1}>A/P Aging Detail</div><div style={S.sub}>Built from GL account {data?data.ap_account:'202000'} &middot; ties to the book{data&&data.billcom_error?' · Bill.com enrich error: '+data.billcom_error:''}</div></div><div style={{display:'flex',gap:8,alignItems:'center'}}><button style={S.btnS} onClick={()=>setShowUpload(true)}>Upload aging detail</button><MemorizeBar entityId={entityId} reportType='apaging' currentConfig={{asOf}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);}} canEdit={canEdit}/>{hasAnything&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
