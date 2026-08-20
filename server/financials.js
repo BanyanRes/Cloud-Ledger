@@ -40,6 +40,12 @@ const execSummaries = require('./execSummaries');
 const ENTITY_DISPLAY_NAMES = [
   { match: /sabine|(county\s*line\s*)?srn/i, display: 'County Line SRN' },
   { match: /banyan\s*residential/i, display: 'Banyan Residential LLC' },
+  // CLIP Property Owner (entity 54) is the operating company that carries the
+  // parent's pushed-down 100% investment on its own books. Its issued CPA
+  // package is titled for the parent, "County Line Industrial Park, LLC", so the
+  // statement package prints that name even though the ledger entity is still
+  // "CLIP Property Owner". (The ledger entity is NOT renamed.)
+  { match: /clip\s*property\s*owner|county\s*line\s*industrial\s*park/i, display: 'County Line Industrial Park, LLC' },
 ];
 function displayEntityName(name) {
   const n = String(name || '').trim();
@@ -70,6 +76,16 @@ function entityProfile(opts) {
   // Scope is the fund only — CLRFI Midco I and the operating companies below it
   // are ordinary srn entities and DO get the intercompany sections.
   if (/^county\s*line\s*rail\s*fund/i.test(name) || code === 'COUNTYLI1') return 'clrf';
+  // CLIP Property Owner (entity 54). Its CPA reference package (County Line
+  // Industrial Park, LLC) defines a specific balance-sheet shape that differs
+  // from the generic srn heuristic: Allowance for Credit Losses nets inside
+  // Accounts Receivable, Net; Earnest Money and Due from Outside Vendor sit in
+  // Other Current Assets; PP&E is split into a gross Fixed Assets subtotal and a
+  // separate Accumulated Depreciation subtotal; land/construction costs form a
+  // Long Term Investments section; and the pushed-down parent investment
+  // (19041) and matching contributed capital (34164) are eliminated. Distinct
+  // from srn — pinned by entity name/code so no other entity is affected.
+  if (/clip\s*property\s*owner/i.test(name) || code === 'CLIPPROP' || code === 'CLIPPRO1') return 'clip';
   return 'srn';
 }
 
@@ -127,6 +143,33 @@ function bsClassifyFor(profile, row) {
       if (/due to|intercompany/.test(name)) return { section: 'Current Liabilities', sub: 'Intercompany Payable' };
       if (/payable/.test(name)) return { section: 'Current Liabilities', sub: 'Accounts Payable' };
       if (/loan|note payable|bond/.test(name)) return { section: 'Long Term Liabilities', sub: 'Loans' };
+      return { section: 'Current Liabilities', sub: 'Other Current Liabilities' };
+    }
+    if (row.type === 'Equity') {
+      if (/retained earning/.test(name)) return { section: 'Members Equity', sub: 'Retained Earnings' };
+      return { section: 'Members Equity', sub: 'Members Equity' };
+    }
+    return { section: 'Other', sub: 'Other' };
+  }
+  if (profile === 'clip') {
+    const explicit = BS_ACCOUNT_MAP_CLIP[String(row.code)];
+    if (explicit) return { section: explicit[0], sub: explicit[1] };
+    // Defensive fallback (every CLIP account is pinned above, but never drop a
+    // row). Mirror the CPA groupings: allowance nets into AR, prepaid/reserve/
+    // earnest to Other Current Assets, land/construction to Long Term
+    // Investments, remaining capitalized costs to Other Assets.
+    const name = (row.name || '').toLowerCase();
+    if (row.type === 'Asset') {
+      if (isCashAccount(row)) return { section: 'Current Assets', sub: 'Cash and Cash Equivalents' };
+      if (/due from|intercompany/.test(name)) return { section: 'Current Assets', sub: 'Intercompany Receivable' };
+      if (/receivable|allowance/.test(name)) return { section: 'Current Assets', sub: 'Accounts Receivable, Net' };
+      if (/prepaid|reserve|earnest|deposit/.test(name)) return { section: 'Current Assets', sub: 'Other Current Assets' };
+      if (/accum|depreciation/.test(name)) return { section: 'Fixed Assets, Net', sub: 'Accumulated Depreciation' };
+      return { section: 'Other Assets', sub: 'Other Assets' };
+    }
+    if (row.type === 'Liability') {
+      if (/loan|note payable|bot|bond/.test(name)) return { section: 'Long Term Liabilities', sub: 'Loans' };
+      if (/payable/.test(name)) return { section: 'Current Liabilities', sub: 'Accounts Payable' };
       return { section: 'Current Liabilities', sub: 'Other Current Liabilities' };
     }
     if (row.type === 'Equity') {
@@ -580,6 +623,96 @@ const BS_ACCOUNT_MAP = {
 // Contra accounts shown as a subtraction within their section (amortization).
 const BS_CONTRA_CODES = new Set(['16600']);
 
+// ── CLIP Property Owner (entity 54) balance-sheet map ───────────────────────
+// Explicit code → [section, subsection] assignment that reproduces the CPA
+// reference package (County Line Industrial Park, LLC) exactly. Differences from
+// the generic srn heuristic that this map pins:
+//   • 12002 Allowance for Credit Losses → Accounts Receivable, Net (contra),
+//     netting inside AR rather than falling to Other Assets.
+//   • 11030 Earnest Money and 18002 Due from Outside Vendor → Other Current
+//     Assets (the srn map/heuristic would route 18002 to Intercompany and
+//     11030 to Other Assets).
+//   • PP&E gross accounts → Fixed Assets, Net › Fixed Assets, with 16160/16500
+//     accumulated depreciation split into their own Accumulated Depreciation
+//     subsection (contra).
+//   • Land/construction cost accounts → Investments › Long Term Investments.
+//   • Development/soft-cost accounts → Other Assets.
+// 19041 (Investment in CLIP Property Owner) and 34164 (Contributed Capital -
+// County Line Industrial Park LLC) are the pushed-down parent investment/equity
+// pair; they are ELIMINATED before classification (see clipEliminate below) and
+// so are intentionally absent from this map.
+const BS_ACCOUNT_MAP_CLIP = {
+  // Current Assets → Cash and Cash Equivalents
+  '10107': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10111': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10882': ['Current Assets', 'Cash and Cash Equivalents'],
+  // Current Assets → Accounts Receivable, Net (12002 is a contra within it)
+  '12000': ['Current Assets', 'Accounts Receivable, Net'],
+  '12002': ['Current Assets', 'Accounts Receivable, Net'],
+  // Current Assets → Intercompany Receivable
+  '18307': ['Current Assets', 'Intercompany Receivable'],
+  // Current Assets → Other Current Assets
+  '11030': ['Current Assets', 'Other Current Assets'],
+  '13001': ['Current Assets', 'Other Current Assets'],
+  '13100': ['Current Assets', 'Other Current Assets'],
+  '18002': ['Current Assets', 'Other Current Assets'],
+  // Fixed Assets, Net → Fixed Assets (gross)
+  '11670': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15150': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15165': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15170': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15200': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15210': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15505': ['Fixed Assets, Net', 'Fixed Assets'],
+  // Fixed Assets, Net → Accumulated Depreciation (contra)
+  '16160': ['Fixed Assets, Net', 'Accumulated Depreciation'],
+  '16500': ['Fixed Assets, Net', 'Accumulated Depreciation'],
+  // Investments → Long Term Investments
+  '11010': ['Investments', 'Long Term Investments'],
+  '11040': ['Investments', 'Long Term Investments'],
+  '11050': ['Investments', 'Long Term Investments'],
+  '11211': ['Investments', 'Long Term Investments'],
+  '11230': ['Investments', 'Long Term Investments'],
+  // Other Assets (capitalized development / soft costs)
+  '11970': ['Other Assets', 'Other Assets'],
+  '12013': ['Other Assets', 'Other Assets'],
+  '12115': ['Other Assets', 'Other Assets'],
+  '12230': ['Other Assets', 'Other Assets'],
+  '12315': ['Other Assets', 'Other Assets'],
+  '12321': ['Other Assets', 'Other Assets'],
+  '12343': ['Other Assets', 'Other Assets'],
+  '12381': ['Other Assets', 'Other Assets'],
+  '12596': ['Other Assets', 'Other Assets'],
+  '12720': ['Other Assets', 'Other Assets'],
+  '12913': ['Other Assets', 'Other Assets'],
+  // Current Liabilities
+  '20000': ['Current Liabilities', 'Accounts Payable'],
+  '21006': ['Current Liabilities', 'Other Current Liabilities'],
+  '21011': ['Current Liabilities', 'Other Current Liabilities'],
+  '21200': ['Current Liabilities', 'Other Current Liabilities'],
+  // Long Term Liabilities → Loans
+  '25063': ['Long Term Liabilities', 'Loans'],
+  // Members Equity (34164 eliminated; not listed)
+  '34144': ['Members Equity', 'Members Equity'],
+  '34158': ['Members Equity', 'Members Equity'],
+  '34160': ['Members Equity', 'Members Equity'],
+  '34202': ['Members Equity', 'Members Equity'],
+  '34261': ['Members Equity', 'Members Equity'],
+  '34262': ['Members Equity', 'Members Equity'],
+  '39000': ['Members Equity', 'Retained Earnings'],
+};
+
+// Accumulated-depreciation contras for the CLIP profile (subtracted within the
+// Fixed Assets, Net section, same mechanism as banyan's 165xx contras).
+const BS_CONTRA_CODES_CLIP = new Set(['16160', '16500']);
+
+// Codes eliminated on CLIP before classification: the pushed-down parent
+// investment (asset) and the matching contributed-capital account (equity).
+// They are equal and opposite and net out of every getBalances window, so
+// dropping them keeps the balance sheet, members' equity statement and cash
+// flow all tied by construction while removing the self-referential gross-up.
+const CLIP_ELIMINATE_CODES = new Set(['19041', '34164']);
+
 // opts.intercompany routes "Due from ..." / "Due to ..." accounts into their own
 // balance-sheet subsections. It is ON for the default (srn) profile and OFF for
 // clrf, which keeps the pre-2026-08-18 shape. banyan/bsfrgp never reach here.
@@ -683,6 +816,17 @@ const BS_SUB_ORDER = {
 // exact order it had before.
 const BS_SUB_ORDER_SRN = Object.assign({}, BS_SUB_ORDER, {
   'Current Liabilities': ['Accounts Payable', 'Intercompany Payable', 'Other Current Liabilities'],
+});
+
+// CLIP (entity 54) presentation order — matches the CPA reference package:
+// Fixed Assets, Net splits into a gross Fixed Assets subtotal then an
+// Accumulated Depreciation subtotal; Current Assets carries Intercompany
+// Receivable between AR and Other Current Assets. Everything else follows the
+// default order.
+const BS_SUB_ORDER_CLIP = Object.assign({}, BS_SUB_ORDER, {
+  'Current Assets': ['Cash and Cash Equivalents', 'Accounts Receivable, Net', 'Intercompany Receivable', 'Other Current Assets'],
+  'Fixed Assets, Net': ['Fixed Assets', 'Accumulated Depreciation'],
+  'Investments': ['Long Term Investments'],
 });
 
 // ── P&L operating-expense classification ────────────────────────────────────
@@ -794,13 +938,30 @@ function plExpenseCategory(row) {
 async function buildStatements(getBalances, opts) {
   const asOf = opts.asOf;
   const profile = entityProfile(opts);
+  // CLIP push-down elimination: County Line Industrial Park, LLC owns 100% of
+  // CLIP Property Owner and its investment/contributed-capital is pushed down to
+  // CLIP's books, creating a self-referential gross-up. Drop the offsetting pair
+  // (19041 Investment in CLIP Property Owner, asset; 34164 Contributed Capital -
+  // County Line Industrial Park LLC, equity) from EVERY balance snapshot before
+  // any classification runs, so the elimination flows uniformly to the balance
+  // sheet, the statement of changes in members' equity, and the cash-flow
+  // statement. The two are equal and opposite and net out of every window, so
+  // Assets = Liabilities + Equity stays tied by construction.
+  const getBalancesEff = (profile === 'clip')
+    ? (o => Promise.resolve(getBalances(o)).then(rows =>
+        (rows || []).filter(r => !CLIP_ELIMINATE_CODES.has(String(r.code)))))
+    : getBalances;
   const bsSub = (profile === 'bsfrgp') ? BS_SUB_ORDER_BSFRGP
     : (profile === 'banyan') ? BS_SUB_ORDER_BANYAN
+    : (profile === 'clip') ? BS_SUB_ORDER_CLIP
     : usesIntercompanySections(profile) ? BS_SUB_ORDER_SRN
     : BS_SUB_ORDER;
   // Contra subsections (accumulated depreciation/amortization) are profile-
-  // specific: Banyan's are the 165xx accumulated-depreciation accounts.
-  const contraSet = (profile === 'banyan') ? BS_CONTRA_CODES_BANYAN : BS_CONTRA_CODES;
+  // specific: Banyan's are the 165xx accumulated-depreciation accounts; CLIP's
+  // are 16160/16500 in its own Accumulated Depreciation subsection.
+  const contraSet = (profile === 'banyan') ? BS_CONTRA_CODES_BANYAN
+    : (profile === 'clip') ? BS_CONTRA_CODES_CLIP
+    : BS_CONTRA_CODES;
   const bsCls = (row) => bsClassifyFor(profile, row);
   const bsSec = (row) => bsClassifyFor(profile, row).section;
   // The side a row PRINTS on, which is the side its classification puts it on —
@@ -827,17 +988,17 @@ async function buildStatements(getBalances, opts) {
   //  isYtd — calendar-YTD P&L (always 1/1 → asOf), drives the YTD column and CF.
   //  isCur / isPri — P&L for the current and prior comparable PERIOD windows.
   const [bsCur, bsPri, isYtd, isCur, isPri] = await Promise.all([
-    getBalances({ as_of: asOf, close_pl_before: ys }),
-    getBalances({ as_of: priorBsDate, close_pl_before: yearStart(priorBsDate) }),
-    getBalances({ from: ys, to: asOf }),
-    getBalances({ from: period.cur.from, to: period.cur.to }),
-    getBalances({ from: period.pri.from, to: period.pri.to }),
+    getBalancesEff({ as_of: asOf, close_pl_before: ys }),
+    getBalancesEff({ as_of: priorBsDate, close_pl_before: yearStart(priorBsDate) }),
+    getBalancesEff({ from: ys, to: asOf }),
+    getBalancesEff({ from: period.cur.from, to: period.cur.to }),
+    getBalancesEff({ from: period.pri.from, to: period.pri.to }),
   ]);
 
   const niYtd = netIncomeOf(isYtd);
   // Prior BS column's net-income line = P&L for the prior year through the prior
   // comparative date (calendar-YTD basis relative to that column's own year).
-  const niPriYtd = netIncomeOf(await getBalances({ from: yearStart(priorBsDate), to: priorBsDate }));
+  const niPriYtd = netIncomeOf(await getBalancesEff({ from: yearStart(priorBsDate), to: priorBsDate }));
 
   // ── Balance Sheet ────────────────────────────────────────────────────────
   // Group asset/liability/equity rows for both columns keyed by account code.
@@ -1197,7 +1358,7 @@ async function buildStatements(getBalances, opts) {
 
   // ── Statement of Cash Flows (indirect, YTD) ────────────────────────────────
   // Beginning balances = as of (year start − 1 day). Deltas over the YTD window.
-  const bsOpen = await getBalances({ as_of: priorMonthEnd(ys), close_pl_before: ys });
+  const bsOpen = await getBalancesEff({ as_of: priorMonthEnd(ys), close_pl_before: ys });
   const openMap = new Map(); for (const r of bsOpen) openMap.set(r.code, r);
   const curMap = new Map(); for (const r of bsCur) if (r.type !== 'Revenue' && r.type !== 'Expense') curMap.set(r.code, r);
   // Cash detection for the cash-flow statement MUST agree with the balance
