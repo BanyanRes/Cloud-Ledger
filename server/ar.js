@@ -1035,6 +1035,14 @@ function registerArRoutes(app, ctx) {
         if (inv.status === 'draft') {
           deleteJE(db, inv.je_id);
           db.prepare("UPDATE ar_invoices SET status='void', je_id=NULL, voided_at=datetime('now') WHERE id=?").run(inv.id);
+        } else if (inv.origin === 'opening' || !inv.je_id) {
+          // Opening items carry NO accrual JE — the balance already sits on the
+          // control account from the legacy GL import. Posting a reversal here
+          // would push the item's amount back onto the A/R control account and
+          // break the aging tie-out. Voiding simply drops it from the open
+          // subledger; the control balance is unchanged, so the report's
+          // un-itemized residual absorbs the difference by construction.
+          db.prepare("UPDATE ar_invoices SET status='void', voided_at=datetime('now') WHERE id=?").run(inv.id);
         } else {
           const jeLines = [{ account_code: inv.ar_account_code, debit: 0, credit: r2(inv.total), description: 'Void invoice ' + inv.invoice_num }];
           for (const l of lines) jeLines.push({ account_code: l.revenue_account_code, debit: r2(l.amount), credit: 0, description: 'Void: ' + l.description, class_id: l.class_id, location_id: l.location_id });
