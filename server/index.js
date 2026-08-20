@@ -3750,7 +3750,7 @@ async function extractPdfPositionedPages(buffer) {
       else { lines.push(cur); cur = [it]; cy = it.y; }
     }
     if (cur.length) lines.push(cur);
-    pages.push(lines.map(l => l.sort((a, b) => a.x - b.x).map(w => ({ x: w.x, x1: w.x + w.w, t: w.t }))));
+    pages.push(lines.map(l => l.sort((a, b) => a.x - b.x).map(w => ({ x: w.x, x1: w.x + w.w, y: w.y, t: w.t }))));
   }
   return pages;
 }
@@ -3835,10 +3835,21 @@ function parseUMB(pages, flatText) {
 // ── UBS "Business Services Account" brokerage statement parser ──────────────
 // This is a sweep/brokerage account, not a checking register — its only monthly
 // cash activity is dividend & interest income. Per Jimmy's decision, record that
-// income as ONE credit transaction dated the statement-period end. Reads the
-// "Change in the value of your account" box, whose identity — Opening value +
-// Dividend/interest income + Change in market value = Closing value — is used to
-// reconcile the parse.
+// income as ONE credit transaction dated the statement-period end.
+//
+// We read the MONTHLY figure from the "Cash activity summary" table, taking the
+// value in the period column ("<Month> <Year> ($)") — NOT the "Year to date ($)"
+// column. An earlier version keyed on the page-1 "Sources of your account growth
+// during <Year>" box, whose header also reads "Dividend and interest income" /
+// "Change in market value"; that box carries the YEAR-TO-DATE income, so a month
+// like July 2026 (period $0.06, YTD $0.90) imported $0.90. The YTD identity
+// (year-end value + YTD income = closing) happens to tie, which is why the bug
+// passed reconciliation. Reconciling on the PERIOD identity
+// (period opening + period income = period closing) rejects the YTD figure.
+//
+// The statement is rotated 90°, so pdf.js reports the label as the row key (its
+// x) and the period-vs-YTD column as the token y: each money value shares its
+// label's x and sits under either the period header or the YTD header by y.
 function parseUBS(pages, flatText) {
   const _num = s => parseFloat(String(s).replace(/[^0-9.]/g, '')) || 0;
   const norm = flatText.replace(/\s+/g, ' ');
@@ -3846,39 +3857,55 @@ function parseUBS(pages, flatText) {
   const pm = norm.match(/Business Services Account\s+([A-Za-z]+)\s+(\d{4})/i);
   let year = pm ? +pm[2] : (new Date()).getFullYear();
   let month = pm ? MONTHS[pm[1].toLowerCase()] : null;
-  const cd = norm.match(/on\s+([A-Za-z]+)\s+(\d{1,2})\s*\(\$\)/i);
-  let day = null;
-  if (cd && MONTHS[cd[1].toLowerCase()] === month) day = +cd[2];
   if (month == null) month = 0;
-  if (day == null) day = new Date(year, month + 1, 0).getDate();
+  const day = new Date(year, month + 1, 0).getDate();  // statement-period end
   const date = new Date(year, month, day);
   const dateStr = isNaN(date.getTime()) ? null : date.toISOString().slice(0, 10);
+  const monthName = Object.keys(MONTHS).find(k => MONTHS[k] === month);
 
-  const moneyRx = /^\$?[\d,]+\.\d{2}$/;
-  let income = null, mv = null, opening = null, closing = null;
+  const moneyRx = /^\$?\(?[\d,]+\.\d{2}\)?$/;
+  const periodHdrRx = new RegExp(`${monthName}\\s+${year}\\s*\\(\\$\\)`, 'i'); // "July 2026 ($)"
+  const ytdHdrRx = /Year to date\s*\(\$\)/i;
+
+  let income = null, opening = null, closing = null, netcash = null;
   for (const lines of pages) {
-    const hdrIdx = lines.findIndex(words => {
-      const s = words.map(w => w.t).join(' ');
-      return /Dividend and\s*interest income/i.test(s) && /Change in\s*market value/i.test(s);
-    });
-    if (hdrIdx < 0) continue;
-    const hdr = lines[hdrIdx];
-    const incTok = hdr.find(w => /interest/i.test(w.t)) || hdr.find(w => /Dividend/i.test(w.t));
-    const mvTok = hdr.find(w => /market/i.test(w.t)) || hdr.find(w => /^value$/i.test(w.t));
-    const xInc = incTok ? (incTok.x + incTok.x1) / 2 : null;
-    const xMv = mvTok ? (mvTok.x + mvTok.x1) / 2 : null;
-    if (xInc == null || xMv == null) break;
-    const lo = Math.min(xInc, xMv) - 40, hi = Math.max(xInc, xMv) + 40;
-    const cand = [];
-    for (const words of lines) for (const w of words) {
-      const c = (w.x + w.x1) / 2;
-      if (moneyRx.test(w.t) && c >= lo && c <= hi) cand.push({ c, v: _num(w.t) });
-    }
-    const small = cand.filter(t => t.v < 100).sort((a, b) => a.c - b.c);
-    const large = cand.filter(t => t.v >= 100).sort((a, b) => a.c - b.c);
-    if (small.length >= 2) { income = small[0].v; mv = small[small.length - 1].v; }
-    else if (small.length === 1) { income = small[0].v; mv = 0; }
-    if (large.length >= 2) { opening = large[0].v; closing = large[large.length - 1].v; }
+    const toks = [];
+    for (const ln of lines) for (const w of ln) toks.push(w);
+    if (!toks.some(w => /Cash activity summary/i.test(w.t))) continue;
+
+    // Period ("<Month> <Year> ($)") header tokens for this block. There may be
+    // one in the Change-in-value box and one in Cash-activity; matching on the
+    // header y (below) selects the right column regardless of which we anchor on.
+    const periodHdrs = toks.filter(w => periodHdrRx.test(w.t));
+    if (!periodHdrs.length) continue;
+
+    // Cash-activity row labels. Each label's value shares the label's x; the
+    // period value is the money token at that x whose y is nearest a period
+    // header's y (vs the YTD header's y).
+    const labelTok = rx => toks.find(w => rx.test(w.t));
+    const openLbl  = labelTok(/^Opening balances$/i);
+    const divLbl   = labelTok(/^Dividend and interest income$/i);
+    const netLbl   = labelTok(/^Net cash flow$/i);
+    const closeLbl = labelTok(/^Closing balances$/i);
+    if (!divLbl) continue;
+
+    const XTOL = 4;
+    const valueAtLabel = (lbl, hdrs) => {
+      if (!lbl || !hdrs.length) return null;
+      const col = toks.filter(w => moneyRx.test(w.t) && Math.abs(w.x - lbl.x) <= XTOL);
+      if (!col.length) return null;
+      let best = null, bestD = Infinity;
+      for (const m of col) for (const h of hdrs) {
+        const d = Math.abs(m.y - h.y);
+        if (d < bestD) { bestD = d; best = m; }
+      }
+      return best ? _num(best.t) : null;
+    };
+
+    opening = valueAtLabel(openLbl,  periodHdrs);
+    income  = valueAtLabel(divLbl,   periodHdrs);
+    netcash = valueAtLabel(netLbl,   periodHdrs);
+    closing = valueAtLabel(closeLbl, periodHdrs);
     break;
   }
 
@@ -3886,9 +3913,12 @@ function parseUBS(pages, flatText) {
   if (income != null && dateStr) rows.push({ date: dateStr, description: 'UBS dividend and interest income', amount: income });
   const EPS = 0.02;
   let reconciled = false;
-  if (opening != null && closing != null && income != null) reconciled = Math.abs((opening + income + (mv || 0)) - closing) < EPS;
+  // Period identity (cash sweep: no market-value change). Falls back to the
+  // Net cash flow line, which equals income for a cash-only account.
+  if (opening != null && closing != null && income != null) reconciled = Math.abs((opening + income) - closing) < EPS;
+  if (!reconciled && netcash != null && income != null) reconciled = Math.abs(netcash - income) < EPS;
   if (!reconciled) rows.forEach(r => { r.needs_review = true; });
-  const ctrlInfo = { deposits: income, checks: 0, prev: opening, curr: closing, market_value_change: mv,
+  const ctrlInfo = { deposits: income, checks: 0, prev: opening, curr: closing, net_cash_flow: netcash,
     parsed_deposits: income, parsed_checks: 0 };
   return { rows, reconciled, ctrlInfo };
 }
