@@ -326,7 +326,7 @@ async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfD
 // When `otherFoldersOnly` is true, only folders OTHER than keepFolderPath are
 // swept (used to clear a stale copy left behind when a re-finalize moves the
 // report to a different month). Returns the count removed. Best-effort.
-function purgePriorRequisitionCopies(db, workpapersDir, eid, { keepFolderPath, keepNames = [], otherFoldersOnly = false } = {}) {
+function purgePriorRequisitionCopies(db, workpapersDir, eid, { keepFolderPath, keepNames = [], otherFoldersOnly = false, phaseMatch = null } = {}) {
   let removed = 0;
   try {
     const entityDir = path.join(workpapersDir, String(eid));
@@ -339,6 +339,10 @@ function purgePriorRequisitionCopies(db, workpapersDir, eid, { keepFolderPath, k
     for (const r of rows) {
       if (otherFoldersOnly && r.folder_path === keepFolderPath) continue;
       if (r.folder_path === keepFolderPath && keepSet.has(r.original_name)) continue;
+      // Phase scoping: when a phaseMatch(name) predicate is supplied, only sweep
+      // files that belong to the SAME phase — so finalizing Phase 2a never
+      // deletes Phase 2's filed copy in the same month folder.
+      if (typeof phaseMatch === 'function' && !phaseMatch(r.original_name)) continue;
       try { fs.unlinkSync(path.join(entityDir, r.stored_filename)); } catch (_) {}
       db.prepare('DELETE FROM entity_files WHERE id=?').run(r.id);
       removed++;

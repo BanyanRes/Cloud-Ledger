@@ -5541,15 +5541,22 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const[draftMsg,setDraftMsg]=useState('');
   const[draftErr,setDraftErr]=useState('');
   const[seedSource,setSeedSource]=useState(undefined);// undefined=loading, null=none, else source
+  const[isRail,setIsRail]=useState(false);// entity is rail_assets → phase box + two streams
+  const[activePhase,setActivePhase]=useState('');// which stream is shown ('' = default/single)
+  const[draftList,setDraftList]=useState([]);// all open drafts (for the phase switcher)
+  const[newPhase,setNewPhase]=useState('');// phase # entered when starting a new rail req
+  const reqDraftNormPhase=(p)=>String(p==null?'':p).trim().replace(/^phase\s*/i,'').trim();
   const[finConfirm,setFinConfirm]=useState(false);
   const[uploadConflict,setUploadConflict]=useState(null);// {message, workbookFile, reqNumber, asOfDate}
-  const loadDraft=async()=>{try{const r=await api.getRequisitionDraft(entityId);setDraft(r&&r.draft);}catch(e){setDraft(null);}try{const s=await api.getRequisitionSeedSource(entityId);setSeedSource(s?s.source:null);}catch{setSeedSource(null);}};
-  useEffect(()=>{setDraft(null);setSeedSource(undefined);setDraftMsg('');setDraftErr('');loadDraft();// eslint-disable-next-line
+  const loadDraft=async(phaseArg)=>{const ph=phaseArg!==undefined?phaseArg:activePhase;try{const r=await api.getRequisitionDraft(entityId,ph||undefined);setIsRail(!!(r&&r.is_rail));if(r&&r.drafts){setDraftList(r.drafts);}if(ph){setDraft(r&&r.draft);}else{const list=(r&&r.drafts)||[];setDraftList(list);const cur=list.find(d=>(d.phase||'')===(activePhase||''));setDraft(cur||list[0]||null);if(cur)setActivePhase(cur.phase||'');else if(list[0])setActivePhase(list[0].phase||'');}}catch(e){setDraft(null);}try{const s=await api.getRequisitionSeedSource(entityId,(phaseArg!==undefined?phaseArg:activePhase)||undefined);setSeedSource(s?s.source:null);if(s&&typeof s.is_rail==='boolean')setIsRail(s.is_rail);}catch{setSeedSource(null);}};
+  // Switch the shown stream (rail phase) and load that draft.
+  const switchPhase=async(ph)=>{setActivePhase(ph);setDraftMsg('');setDraftErr('');await loadDraft(ph);};
+  useEffect(()=>{setDraft(null);setSeedSource(undefined);setDraftMsg('');setDraftErr('');setActivePhase('');setNewPhase('');setDraftList([]);loadDraft('');// eslint-disable-next-line
   },[entityId]);
-  const startDraft=async(baseChoice)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const wf=uploadConflict?uploadConflict.workbookFile:(rfFile||undefined);const r=await api.createRequisitionDraft(entityId,{workbookFile:wf,reqNumber:rfReqNum||undefined,asOfDate:rfAsOf||undefined,baseChoice});setDraft(r&&r.draft);setUploadConflict(null);setDraftMsg('Draft started.');}catch(e){if(e.detail&&e.detail.error==='upload_matches_filed'){setUploadConflict({message:e.detail.message,workbookFile:rfFile});}else{setDraftErr(e.message);}}finally{setDraftBusy(false);}};
-  const rollDraft=async()=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const r=await api.rollRequisitionDraft(entityId,{reqNumber:rfReqNum||undefined,asOfDate:rfAsOf||undefined});setDraft(r&&r.draft);setDraftMsg(r&&r.ok?'Saved — reconciled.':'Saved — needs review (reconciliation not balanced).');}catch(e){setDraftErr(e.message);}finally{setDraftBusy(false);}};
-  const downloadDraft=()=>{const a=document.createElement('a');a.href=api.downloadRequisitionDraftUrl(entityId);a.download='';document.body.appendChild(a);a.click();a.remove();};
-  const finalizeDraft=async(force)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const r=await api.finalizeRequisitionDraft(entityId,!!force);setFinConfirm(false);setDraftMsg('Finalized and filed to Workpapers → '+(r.folder||'')+'.');await loadDraft();}catch(e){if(e.detail&&e.detail.ok===false){setDraftErr('Reconciliation not balanced. Fix the invoices and re-save, or finalize anyway.');}else{setDraftErr(e.message);}}finally{setDraftBusy(false);}};
+  const startDraft=async(baseChoice)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const wf=uploadConflict?uploadConflict.workbookFile:(rfFile||undefined);const ph=isRail?(newPhase||'').trim():'';const r=await api.createRequisitionDraft(entityId,{workbookFile:wf,reqNumber:rfReqNum||undefined,asOfDate:rfAsOf||undefined,baseChoice,phase:ph||undefined});if(ph)setActivePhase(reqDraftNormPhase(ph));setDraft(r&&r.draft);setUploadConflict(null);setDraftMsg('Draft started.');}catch(e){if(e.detail&&e.detail.error==='upload_matches_filed'){setUploadConflict({message:e.detail.message,workbookFile:rfFile});}else{setDraftErr(e.message);}}finally{setDraftBusy(false);}};
+  const rollDraft=async()=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const r=await api.rollRequisitionDraft(entityId,{reqNumber:rfReqNum||undefined,asOfDate:rfAsOf||undefined,phase:activePhase||undefined});setDraft(r&&r.draft);setDraftMsg(r&&r.ok?'Saved — reconciled.':'Saved — needs review (reconciliation not balanced).');}catch(e){setDraftErr(e.message);}finally{setDraftBusy(false);}};
+  const downloadDraft=()=>{const a=document.createElement('a');a.href=api.downloadRequisitionDraftUrl(entityId,activePhase||undefined);a.download='';document.body.appendChild(a);a.click();a.remove();};
+  const finalizeDraft=async(force)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const r=await api.finalizeRequisitionDraft(entityId,!!force,activePhase||undefined);setFinConfirm(false);setDraftMsg('Finalized and filed to Workpapers → '+(r.folder||'')+'.');setActivePhase('');await loadDraft('');}catch(e){if(e.detail&&e.detail.ok===false){setDraftErr('Reconciliation not balanced. Fix the invoices and re-save, or finalize anyway.');}else{setDraftErr(e.message);}}finally{setDraftBusy(false);}};
   // Cost-code -> name parsed straight from the uploaded prior workbook's
   // "Prior Invoice Log" (col C = Cost Code #, col F = Cost Code Name). This is
   // the most authoritative source for this requisition, so it takes precedence
@@ -5805,6 +5812,11 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
       <div><div style={S.h1}>Requisitions</div><div style={S.sub}>{entityName} &mdash; roll forward to the next requisition</div></div>
     </div>
     {canEdit&&<div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+(draft?(draft.recon_ok===false?T.orange:(draft.recon_ok?T.green:T.accent)):T.border)}}>
+      {isRail&&(draftList.length>0||activePhase)&&<div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10,flexWrap:'wrap'}}>
+        <span style={{fontSize:12,color:T.textMuted}}>Stream:</span>
+        {draftList.map(d=><button key={d.id} onClick={()=>switchPhase(d.phase||'')} style={{...S.btnS,padding:'4px 12px',fontSize:12,background:(activePhase||'')===(d.phase||'')?T.accentDim:'transparent',color:(activePhase||'')===(d.phase||'')?T.accent:T.textMuted,borderColor:(activePhase||'')===(d.phase||'')?T.accent:T.border}}>{d.phase?('Phase '+d.phase):'Requisition'}</button>)}
+        {draftList.length<2&&<button onClick={()=>{setActivePhase('');setDraft(null);setNewPhase('');}} style={{...S.btnS,padding:'4px 12px',fontSize:12,color:T.green,borderColor:T.green}}>+ New phase</button>}
+      </div>}
       {draftErr&&<div style={{...S.err,padding:8,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:8}}>{draftErr}</div>}
       {draftMsg&&!draftErr&&<div style={{padding:8,background:T.greenDim,borderRadius:6,border:'1px solid '+T.greenBorder,marginBottom:8,fontSize:12,color:T.green}}>{draftMsg}</div>}
       {uploadConflict&&<div style={{padding:12,background:T.orangeDim,borderRadius:6,border:'1px solid '+T.orange+'40',marginBottom:10}}>
@@ -5816,6 +5828,8 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         </div></div>}
       {!draft&&!uploadConflict&&<div>
         <div style={{...S.h2,marginBottom:4}}>Start a requisition</div>
+        {isRail&&<div style={{marginBottom:10}}><label style={S.label}>Phase # <span style={{fontWeight:400,color:T.textMuted}}>(rail assets — e.g. 2 or 2a; leave blank if single)</span></label>
+          <input style={{...S.input,maxWidth:160}} type="text" placeholder="e.g. 2a" value={newPhase} onChange={e=>setNewPhase(e.target.value)}/></div>}
         <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>{seedSource===undefined?'Checking for a prior report…':(seedSource?('CloudLedger will auto-seed from the last filed requisition ('+seedSource+'). No upload needed.'):'No prior requisition on file — choose the prior month\u2019s finalized workbook above to start.')}</div>
         <button style={S.btnP} disabled={draftBusy||(seedSource===null&&!rfFile)} onClick={()=>startDraft()}>{draftBusy?'Starting…':'Start new Req'}</button>
       </div>}

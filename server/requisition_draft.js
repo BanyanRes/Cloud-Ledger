@@ -93,47 +93,94 @@ async function rollForwardFromBase(ExcelJS, baseBuffer, entityId, newCurrent, { 
 
 // ── Draft row helpers ──────────────────────────────────────────────────────
 
-function getOpenDraft(db, eid) {
-  return db.prepare("SELECT * FROM requisition_draft WHERE entity_id=? AND status='open' ORDER BY id DESC LIMIT 1").get(eid);
+// Normalize a phase key: trim, drop a leading "phase" word if the user typed it,
+// keep the identifier (e.g. "2", "2a"). '' / null → '' (the single default stream).
+function normPhase(p) {
+  if (p == null) return '';
+  let s = String(p).trim().replace(/^phase\s*/i, '').trim();
+  return s;
 }
 
-// Resolve the auto-seed base for a NEW draft: the most recent finalized draft's
-// output_blob, else the newest filed requisition workbook in the entity's
-// Workpapers "Requisition Reports" tree (covers Reqs finalized before this
-// feature shipped). Returns { buffer, name, source } or null (→ manual upload).
-function resolveAutoSeed(db, workpapersDir, eid) {
+// The label inserted into filenames for a phase, e.g. "Phase 2a". '' for the
+// default stream (no phase label). Used both to name the output and to match the
+// one-copy purge precisely (so "Phase 2" never matches "Phase 2a").
+function phaseLabel(p) {
+  const s = normPhase(p);
+  return s ? 'Phase ' + s : '';
+}
+
+function getOpenDraft(db, eid, phase) {
+  const ph = normPhase(phase);
+  return db.prepare(
+    "SELECT * FROM requisition_draft WHERE entity_id=? AND status='open' AND IFNULL(phase,'')=? ORDER BY id DESC LIMIT 1"
+  ).get(eid, ph);
+}
+
+// All open drafts for an entity (used to enforce the two-phase cap and to list
+// them in the UI). Ordered by phase then id.
+function getOpenDrafts(db, eid) {
+  return db.prepare(
+    "SELECT * FROM requisition_draft WHERE entity_id=? AND status='open' ORDER BY IFNULL(phase,''), id"
+  ).all(eid);
+}
+
+// Resolve the auto-seed base for a NEW draft of the given phase: the most recent
+// finalized draft's output_blob FOR THAT PHASE, else the newest filed requisition
+// workbook for that phase in the entity's "Requisition Reports" tree. Returns
+// { buffer, name, source } or null (→ manual upload).
+function resolveAutoSeed(db, workpapersDir, eid, phase) {
+  const ph = normPhase(phase);
   const fin = db.prepare(
-    "SELECT output_blob, output_name FROM requisition_draft WHERE entity_id=? AND status='finalized' AND output_blob IS NOT NULL ORDER BY finalized_at DESC, id DESC LIMIT 1"
-  ).get(eid);
+    "SELECT output_blob, output_name FROM requisition_draft WHERE entity_id=? AND status='finalized' AND IFNULL(phase,'')=? AND output_blob IS NOT NULL ORDER BY finalized_at DESC, id DESC LIMIT 1"
+  ).get(eid, ph);
   if (fin && fin.output_blob) {
     return { buffer: Buffer.from(fin.output_blob), name: fin.output_name || 'prior_requisition.xlsx', source: 'finalized-draft' };
   }
   // Fallback: newest filed workbook whose name looks like a Requisition Report,
-  // under a "Requisition Reports" folder for this entity.
-  const row = db.prepare(
+  // under a "Requisition Reports" folder for this entity. When a phase is set,
+  // require the phase label in the name so Phase 2 seeds from Phase 2 (and the
+  // default stream avoids grabbing a phased file). Matched with word boundaries
+  // so "Phase 2" never matches "Phase 2a".
+  const lbl = phaseLabel(ph);
+  let sql =
     "SELECT stored_filename, original_name FROM entity_files " +
     "WHERE entity_id=? AND folder_path LIKE '%Requisition Reports%' " +
-    "AND lower(original_name) LIKE '%requisition report%' AND lower(original_name) LIKE '%.xlsx' " +
-    "ORDER BY id DESC LIMIT 1"
-  ).get(eid);
-  if (row) {
+    "AND lower(original_name) LIKE '%requisition report%' AND lower(original_name) LIKE '%.xlsx' ";
+  const args = [eid];
+  if (lbl) { sql += "AND lower(original_name) LIKE ? "; args.push('%' + lbl.toLowerCase() + '%'); }
+  sql += "ORDER BY id DESC LIMIT 20";
+  const rows = db.prepare(sql).all(...args);
+  const pick = rows.find(r => phaseMatchesName(r.original_name, ph)) || (lbl ? null : rows[0]);
+  if (pick) {
     const fs = require('fs'); const path = require('path');
     try {
-      const buf = fs.readFileSync(path.join(workpapersDir, String(eid), row.stored_filename));
-      return { buffer: buf, name: row.original_name || 'prior_requisition.xlsx', source: 'workpapers' };
+      const buf = fs.readFileSync(path.join(workpapersDir, String(eid), pick.stored_filename));
+      return { buffer: buf, name: pick.original_name || 'prior_requisition.xlsx', source: 'workpapers' };
     } catch (_) { /* fall through */ }
   }
   return null;
 }
 
+// True when a filename belongs to the given phase. For the default stream ('')
+// the name must carry NO "Phase <x>" token at all. For a real phase it must
+// carry exactly that token, bounded so "Phase 2" doesn't match "Phase 2a".
+function phaseMatchesName(name, phase) {
+  const ph = normPhase(phase);
+  const s = String(name || '');
+  const anyPhase = /\bphase\s+[0-9a-z]+/i.test(s);
+  if (!ph) return !anyPhase;
+  const re = new RegExp('\\bphase\\s+' + ph.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![0-9a-z])', 'i');
+  return re.test(s);
+}
+
 // Upload guard (Option B — always ask): compare a hand-uploaded base against the
-// filed prior-month copy. Returns a match descriptor the endpoint surfaces so the
-// user picks "use uploaded" vs "use filed copy". Never decides on its own.
+// filed prior-month copy FOR THIS PHASE. Returns a match descriptor the endpoint
+// surfaces so the user picks "use uploaded" vs "use filed copy". Never decides.
 //   { match:'identical' } — byte-identical to the filed copy
 //   { match:'same-period-edited', filedName } — same req/date, different bytes
 //   null — no conflict (genuinely new base)
-function checkUploadAgainstFiled(db, workpapersDir, eid, uploadBuf, uploadedReqNumber, uploadedAsOf) {
-  const seed = resolveAutoSeed(db, workpapersDir, eid);
+function checkUploadAgainstFiled(db, workpapersDir, eid, uploadBuf, uploadedReqNumber, uploadedAsOf, phase) {
+  const seed = resolveAutoSeed(db, workpapersDir, eid, phase);
   if (!seed) return null; // nothing filed yet → first-time upload, no conflict
   const upHash = sha256(uploadBuf);
   const filedHash = sha256(seed.buffer);
@@ -148,12 +195,36 @@ function checkUploadAgainstFiled(db, workpapersDir, eid, uploadBuf, uploadedReqN
   return null;
 }
 
+// Insert the phase label into a built filename just before the trailing date +
+// extension, e.g. "...Requisition Report #12 07.31.2026.xlsx" →
+// "...Requisition Report #12 Phase 2a 07.31.2026.xlsx". No-op for the default
+// stream. If the base name already carries the same phase token, it's left as-is
+// (idempotent). Falls back to appending before the extension if no date is found.
+function phasedFilename(name, phase) {
+  const lbl = phaseLabel(phase);
+  if (!lbl) return name;
+  const s = String(name || 'Requisition_Report.xlsx');
+  if (phaseMatchesName(s, phase)) return s; // already labeled for this phase
+  // Try to insert before a trailing date token (dd.dd.dddd / dd_dd_dddd etc.)
+  const dateRe = /(\s+)(\d{1,2}[._/-]\d{1,2}[._/-]\d{2,4})(\.[^.]+)$/;
+  if (dateRe.test(s)) return s.replace(dateRe, (m, sp, date, ext) => ' ' + lbl + sp + date + ext);
+  // else insert before the extension
+  const dot = s.lastIndexOf('.');
+  if (dot > 0) return s.slice(0, dot) + ' ' + lbl + s.slice(dot);
+  return s + ' ' + lbl;
+}
+
 module.exports = {
   buildRollforwardMeta,
   rollForwardFromBase,
   loadReqWorkbook,
   getOpenDraft,
+  getOpenDrafts,
   resolveAutoSeed,
   checkUploadAgainstFiled,
+  normPhase,
+  phaseLabel,
+  phaseMatchesName,
+  phasedFilename,
   sha256,
 };

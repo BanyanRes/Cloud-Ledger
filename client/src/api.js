@@ -456,26 +456,30 @@ export const api = {
   },
 
   // ── Editable / persistent Requisition draft ──────────────────────────────
-  getRequisitionDraft: (eid) => request('/requisition/' + eid + '/draft'),
-  getRequisitionSeedSource: (eid) => request('/requisition/' + eid + '/draft/seed-source'),
+  // A `phase` (e.g. '2','2a') selects a rail-assets stream; omit/'' = default.
+  // Without a phase, getRequisitionDraft returns { draft, drafts:[...], is_rail }
+  // so the UI can list Phase 2 / 2a; with one it returns that stream's draft.
+  getRequisitionDraft: (eid, phase) => request('/requisition/' + eid + '/draft' + (phase ? ('?phase=' + encodeURIComponent(phase)) : '')),
+  getRequisitionSeedSource: (eid, phase) => request('/requisition/' + eid + '/draft/seed-source' + (phase ? ('?phase=' + encodeURIComponent(phase)) : '')),
   // Create the open draft. Auto-seeds when a prior finalized Req exists; pass a
   // workbook File for the first-time case. baseChoice ('uploaded'|'filed')
-  // answers the Option-B upload-guard prompt. On a guard conflict the thrown
-  // Error carries err.detail.conflict + err.detail.message.
-  createRequisitionDraft: (eid, { workbookFile, reqNumber, asOfDate, baseChoice } = {}) => {
+  // answers the Option-B upload-guard prompt. `phase` is the rail-assets stream.
+  // On a guard conflict the thrown Error carries err.detail.conflict + message.
+  createRequisitionDraft: (eid, { workbookFile, reqNumber, asOfDate, baseChoice, phase } = {}) => {
     const fd = new FormData();
     if (workbookFile) fd.append('workbook', workbookFile);
     if (reqNumber != null && reqNumber !== '') fd.append('reqNumber', String(reqNumber));
     if (asOfDate) fd.append('asOfDate', asOfDate);
     if (baseChoice) fd.append('baseChoice', baseChoice);
+    if (phase) fd.append('phase', phase);
     return request('/requisition/' + eid + '/draft', { method: 'POST', body: fd });
   },
-  addRequisitionDraftInvoice: (eid, inv) => request('/requisition/' + eid + '/draft/invoice', { method: 'POST', body: inv }),
-  updateRequisitionDraftInvoice: (eid, id, inv) => request('/requisition/' + eid + '/draft/invoice/' + id, { method: 'PUT', body: inv }),
-  deleteRequisitionDraftInvoice: (eid, id) => request('/requisition/' + eid + '/draft/invoice/' + id, { method: 'DELETE' }),
-  rollRequisitionDraft: (eid, meta = {}) => request('/requisition/' + eid + '/draft/roll', { method: 'POST', body: { reqNumber: meta.reqNumber, asOfDate: meta.asOfDate } }),
-  downloadRequisitionDraftUrl: (eid) => API_BASE + '/requisition/' + eid + '/draft/download?token=' + encodeURIComponent(getToken() || ''),
-  finalizeRequisitionDraft: (eid, force = false) => request('/requisition/' + eid + '/draft/finalize', { method: 'POST', body: { force } }),
+  addRequisitionDraftInvoice: (eid, inv, phase) => request('/requisition/' + eid + '/draft/invoice', { method: 'POST', body: { ...inv, phase } }),
+  updateRequisitionDraftInvoice: (eid, id, inv, phase) => request('/requisition/' + eid + '/draft/invoice/' + id, { method: 'PUT', body: { ...inv, phase } }),
+  deleteRequisitionDraftInvoice: (eid, id, phase) => request('/requisition/' + eid + '/draft/invoice/' + id + (phase ? ('?phase=' + encodeURIComponent(phase)) : ''), { method: 'DELETE' }),
+  rollRequisitionDraft: (eid, meta = {}) => request('/requisition/' + eid + '/draft/roll', { method: 'POST', body: { reqNumber: meta.reqNumber, asOfDate: meta.asOfDate, phase: meta.phase } }),
+  downloadRequisitionDraftUrl: (eid, phase) => API_BASE + '/requisition/' + eid + '/draft/download?token=' + encodeURIComponent(getToken() || '') + (phase ? ('&phase=' + encodeURIComponent(phase)) : ''),
+  finalizeRequisitionDraft: (eid, force = false, phase) => request('/requisition/' + eid + '/draft/finalize', { method: 'POST', body: { force, phase } }),
 
   // Workpapers › Management Fee: analyze a prior-quarter workbook, then generate
   // the next quarter as a downloadable .xlsx.

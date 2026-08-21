@@ -474,6 +474,7 @@ db.exec(`
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id     INTEGER NOT NULL REFERENCES entities(id),
     status        TEXT NOT NULL DEFAULT 'open',   -- 'open' | 'finalized'
+    phase         TEXT,                           -- rail-assets stream key (e.g. '2','2a'); NULL/'' = single default stream
     req_number    INTEGER,                        -- target req # (editable while open)
     as_of_date    TEXT,                           -- period end (editable while open)
     base_blob     BLOB,                           -- prior workbook this draft rolls from
@@ -490,7 +491,7 @@ db.exec(`
     finalized_at  TEXT,
     created_by    TEXT
   );
-  CREATE UNIQUE INDEX IF NOT EXISTS uq_reqdraft_open ON requisition_draft(entity_id) WHERE status='open';
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_reqdraft_open ON requisition_draft(entity_id, IFNULL(phase,'')) WHERE status='open';
   CREATE INDEX IF NOT EXISTS idx_reqdraft_entity ON requisition_draft(entity_id, status);
 `);
 
@@ -555,6 +556,20 @@ if (!reqInvCols.includes('draft_id')) {
   db.exec("ALTER TABLE requisition_invoice ADD COLUMN draft_id INTEGER");
   db.exec("CREATE INDEX IF NOT EXISTS idx_reqinv_draft ON requisition_invoice(draft_id)");
   console.log('[db migrate] requisition_invoice.draft_id added');
+}
+
+// phase: rail-assets requisition stream key (e.g. '2', '2a'). Rail-assets
+// entities can run two requisitions for the same month (e.g. Phase 2 and Phase
+// 2a); each is its own draft/stream. NULL/'' is the single default stream used
+// by every non-rail entity. The open-draft unique index must be phase-scoped so
+// two open drafts on different phases can coexist — the original entity-only
+// index is dropped and recreated here for existing databases.
+const reqDraftCols = db.prepare("PRAGMA table_info(requisition_draft)").all().map(c => c.name);
+if (!reqDraftCols.includes('phase')) {
+  db.exec("ALTER TABLE requisition_draft ADD COLUMN phase TEXT");
+  db.exec("DROP INDEX IF EXISTS uq_reqdraft_open");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS uq_reqdraft_open ON requisition_draft(entity_id, IFNULL(phase,'')) WHERE status='open'");
+  console.log('[db migrate] requisition_draft.phase added (open-draft index now phase-scoped)');
 }
 
 // Phase 3: default_cash_account on billcom_config (for payment JEs)
@@ -7712,7 +7727,7 @@ function draftForClient(db, draft) {
   try { recon = draft.recon_summary ? JSON.parse(draft.recon_summary) : null; } catch (_) {}
   return {
     id: draft.id, entity_id: draft.entity_id, status: draft.status,
-    req_number: draft.req_number, as_of_date: draft.as_of_date,
+    req_number: draft.req_number, as_of_date: draft.as_of_date, phase: draft.phase || '',
     base_name: draft.base_name, output_name: draft.output_name, packet_name: draft.packet_name,
     recon_ok: draft.recon_ok == null ? null : !!draft.recon_ok, recon: recon,
     has_output: draft.output_blob != null,
@@ -7726,8 +7741,16 @@ function draftForClient(db, draft) {
 app.get('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
   const eid = parseInt(req.params.entity_id);
   try {
-    const draft = reqDraft.getOpenDraft(db, eid);
-    res.json({ draft: draftForClient(db, draft) });
+    // With a phase (?phase=) return that stream's open draft; without one, return
+    // all open drafts for the entity (drafts:[...]) so the UI can list Phase 2 / 2a.
+    const ent = db.prepare('SELECT entity_type FROM entities WHERE id=?').get(eid) || {};
+    const isRail = ent.entity_type === 'rail_assets';
+    if (req.query.phase != null && req.query.phase !== '') {
+      const draft = reqDraft.getOpenDraft(db, eid, req.query.phase);
+      return res.json({ draft: draftForClient(db, draft), is_rail: isRail });
+    }
+    const all = reqDraft.getOpenDrafts(db, eid).map(d => draftForClient(db, d));
+    res.json({ draft: all[0] || null, drafts: all, is_rail: isRail });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -7736,8 +7759,9 @@ app.get('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin'
 app.get('/api/requisition/:entity_id/draft/seed-source', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
   const eid = parseInt(req.params.entity_id);
   try {
-    const seed = reqDraft.resolveAutoSeed(db, WORKPAPERS_DIR, eid);
-    res.json({ source: seed ? seed.source : null, name: seed ? seed.name : null });
+    const ent = db.prepare('SELECT entity_type FROM entities WHERE id=?').get(eid) || {};
+    const seed = reqDraft.resolveAutoSeed(db, WORKPAPERS_DIR, eid, req.query.phase);
+    res.json({ source: seed ? seed.source : null, name: seed ? seed.name : null, is_rail: ent.entity_type === 'rail_assets' });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -7753,8 +7777,19 @@ app.post('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin
 }, async (req, res) => {
   const eid = parseInt(req.params.entity_id);
   try {
-    if (reqDraft.getOpenDraft(db, eid)) {
-      return res.status(409).json({ error: 'An open draft already exists for this entity. Open it to continue editing, or finalize it first.' });
+    const ent = db.prepare('SELECT entity_type FROM entities WHERE id=?').get(eid) || {};
+    const isRail = ent.entity_type === 'rail_assets';
+    // Phase (rail-assets stream key). Ignored for non-rail entities (single stream).
+    const phase = isRail ? reqDraft.normPhase(req.body.phase) : '';
+    if (reqDraft.getOpenDraft(db, eid, phase)) {
+      return res.status(409).json({ error: phase
+        ? ('An open draft for Phase ' + phase + ' already exists. Open it to continue, or finalize it first.')
+        : 'An open draft already exists for this entity. Open it to continue editing, or finalize it first.' });
+    }
+    // Rail assets may run at most TWO requisition streams at once.
+    if (isRail) {
+      const openCount = reqDraft.getOpenDrafts(db, eid).length;
+      if (openCount >= 2) return res.status(409).json({ error: 'This rail asset already has two open requisition drafts. Finalize one before starting another.' });
     }
     const reqNumber = req.body.reqNumber != null && req.body.reqNumber !== '' ? parseInt(req.body.reqNumber) : null;
     const asOfDate = req.body.asOfDate || null;
@@ -7762,12 +7797,12 @@ app.post('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin
 
     let baseBuf = null, baseName = null;
     const uploaded = req.file ? req.file.buffer : null;
-    const seed = reqDraft.resolveAutoSeed(db, WORKPAPERS_DIR, eid);
+    const seed = reqDraft.resolveAutoSeed(db, WORKPAPERS_DIR, eid, phase);
 
     if (uploaded) {
       // Option B: if the upload matches the filed prior-month copy, ask before proceeding.
       if (!baseChoice) {
-        const conflict = reqDraft.checkUploadAgainstFiled(db, WORKPAPERS_DIR, eid, uploaded, reqNumber, asOfDate);
+        const conflict = reqDraft.checkUploadAgainstFiled(db, WORKPAPERS_DIR, eid, uploaded, reqNumber, asOfDate, phase);
         if (conflict) {
           return res.status(409).json({
             error: 'upload_matches_filed',
@@ -7793,9 +7828,9 @@ app.post('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin
     const now = new Date().toISOString();
     const who = (req.user && (req.user.name || req.user.email)) || 'system';
     const info = db.prepare(
-      'INSERT INTO requisition_draft (entity_id, status, req_number, as_of_date, base_blob, base_name, base_sha256, created_at, updated_at, created_by) ' +
-      "VALUES (?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).run(eid, reqNumber, asOfDate, baseBuf, baseName, reqDraft.sha256(baseBuf), now, now, who);
+      'INSERT INTO requisition_draft (entity_id, status, phase, req_number, as_of_date, base_blob, base_name, base_sha256, created_at, updated_at, created_by) ' +
+      "VALUES (?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run(eid, phase || null, reqNumber, asOfDate, baseBuf, baseName, reqDraft.sha256(baseBuf), now, now, who);
 
     const draft = db.prepare('SELECT * FROM requisition_draft WHERE id = ?').get(info.lastInsertRowid);
     res.json({ draft: draftForClient(db, draft), seededFrom: uploaded ? (baseChoice === 'filed' ? 'filed' : 'upload') : (seed ? seed.source : null) });
@@ -7807,7 +7842,7 @@ app.post('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin
 app.post('/api/requisition/:entity_id/draft/invoice', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
   const eid = parseInt(req.params.entity_id);
   try {
-    const draft = reqDraft.getOpenDraft(db, eid);
+    const draft = reqDraft.getOpenDraft(db, eid, req.body.phase);
     if (!draft) return res.status(404).json({ error: 'No open draft. Start a new requisition first.' });
     const inv = req.body || {};
     const amt = inv.amount != null && inv.amount !== '' ? Number(String(inv.amount).replace(/[$,]/g, '')) : null;
@@ -7825,7 +7860,7 @@ app.post('/api/requisition/:entity_id/draft/invoice', ...reqGuards(), requireRol
       new Date().toISOString()
     );
     db.prepare("UPDATE requisition_draft SET updated_at=?, recon_ok=NULL WHERE id=?").run(new Date().toISOString(), draft.id);
-    res.json({ id: info.lastInsertRowid, draft: draftForClient(db, reqDraft.getOpenDraft(db, eid)) });
+    res.json({ id: info.lastInsertRowid, draft: draftForClient(db, reqDraft.getOpenDraft(db, eid, req.body.phase)) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -7833,7 +7868,7 @@ app.post('/api/requisition/:entity_id/draft/invoice', ...reqGuards(), requireRol
 app.put('/api/requisition/:entity_id/draft/invoice/:invoice_id', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
   const eid = parseInt(req.params.entity_id);
   try {
-    const draft = reqDraft.getOpenDraft(db, eid);
+    const draft = reqDraft.getOpenDraft(db, eid, req.body.phase);
     if (!draft) return res.status(404).json({ error: 'No open draft.' });
     const row = db.prepare('SELECT * FROM requisition_invoice WHERE id=? AND draft_id=?').get(parseInt(req.params.invoice_id), draft.id);
     if (!row) return res.status(404).json({ error: 'Invoice not found on this draft.' });
@@ -7851,19 +7886,20 @@ app.put('/api/requisition/:entity_id/draft/invoice/:invoice_id', ...reqGuards(),
       row.id
     );
     db.prepare("UPDATE requisition_draft SET updated_at=?, recon_ok=NULL WHERE id=?").run(new Date().toISOString(), draft.id);
-    res.json({ draft: draftForClient(db, reqDraft.getOpenDraft(db, eid)) });
+    res.json({ draft: draftForClient(db, reqDraft.getOpenDraft(db, eid, req.body.phase)) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // DELETE a draft invoice line. Marks the draft dirty.
 app.delete('/api/requisition/:entity_id/draft/invoice/:invoice_id', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
   const eid = parseInt(req.params.entity_id);
+  const dphase = req.query.phase != null ? req.query.phase : (req.body && req.body.phase);
   try {
-    const draft = reqDraft.getOpenDraft(db, eid);
+    const draft = reqDraft.getOpenDraft(db, eid, dphase);
     if (!draft) return res.status(404).json({ error: 'No open draft.' });
     const info = db.prepare('DELETE FROM requisition_invoice WHERE id=? AND draft_id=?').run(parseInt(req.params.invoice_id), draft.id);
     db.prepare("UPDATE requisition_draft SET updated_at=?, recon_ok=NULL WHERE id=?").run(new Date().toISOString(), draft.id);
-    res.json({ deleted: info.changes, draft: draftForClient(db, reqDraft.getOpenDraft(db, eid)) });
+    res.json({ deleted: info.changes, draft: draftForClient(db, reqDraft.getOpenDraft(db, eid, dphase)) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -7873,7 +7909,7 @@ app.delete('/api/requisition/:entity_id/draft/invoice/:invoice_id', ...reqGuards
 app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('Admin', 'Accountant'), async (req, res) => {
   const eid = parseInt(req.params.entity_id);
   try {
-    const draft = reqDraft.getOpenDraft(db, eid);
+    const draft = reqDraft.getOpenDraft(db, eid, req.body.phase);
     if (!draft) return res.status(404).json({ error: 'No open draft.' });
     if (!draft.base_blob) return res.status(400).json({ error: 'Draft has no base workbook.' });
 
@@ -7888,7 +7924,7 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
       ExcelJS, Buffer.from(draft.base_blob), eid, newCurrent, { reqNumber, asOfDate }
     );
 
-    const outName = buildRollforwardFilename(draft.base_name || 'Requisition_Report.xlsx', reqNumber, asOfDate);
+    const outName = reqDraft.phasedFilename(buildRollforwardFilename(draft.base_name || 'Requisition_Report.xlsx', reqNumber, asOfDate), draft.phase);
     const reconSummary = verification && verification.finalResult ? JSON.stringify({
       ok: !!verification.ok,
       summary: verification.finalResult.summary,
@@ -7909,7 +7945,7 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
       recon: reconSummary ? JSON.parse(reconSummary) : null,
       devFee: rfResult && rfResult.devFee && !rfResult.devFee.error ? rfResult.devFee : null,
       output_name: outName,
-      draft: draftForClient(db, reqDraft.getOpenDraft(db, eid)),
+      draft: draftForClient(db, reqDraft.getOpenDraft(db, eid, draft.phase)),
     });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
@@ -7918,7 +7954,7 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
 app.get('/api/requisition/:entity_id/draft/download', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
   const eid = parseInt(req.params.entity_id);
   try {
-    const draft = reqDraft.getOpenDraft(db, eid);
+    const draft = reqDraft.getOpenDraft(db, eid, req.query.phase);
     if (!draft || !draft.output_blob) return res.status(404).json({ error: 'No rolled workbook yet — Save/re-roll the draft first.' });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="' + String(draft.output_name || 'Requisition_Report.xlsx').replace(/[\r\n"]/g, ' ') + '"');
@@ -7933,7 +7969,7 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
   const eid = parseInt(req.params.entity_id);
   const force = req.body.force === true || req.body.force === 'true' || req.body.force === '1';
   try {
-    const draft = reqDraft.getOpenDraft(db, eid);
+    const draft = reqDraft.getOpenDraft(db, eid, req.body.phase);
     if (!draft) return res.status(404).json({ error: 'No open draft.' });
     if (!draft.base_blob) return res.status(400).json({ error: 'Draft has no base workbook.' });
 
@@ -7958,8 +7994,11 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
       return res.status(422).json({ error: 'Roll-forward failed reconciliation', ok: false, recon: reconSummary });
     }
 
-    const fname = buildRollforwardFilename(draft.base_name || 'Requisition_Report.xlsx', reqNumber, asOfDate);
+    const fname = reqDraft.phasedFilename(buildRollforwardFilename(draft.base_name || 'Requisition_Report.xlsx', reqNumber, asOfDate), draft.phase);
     const who = (req.user && (req.user.name || req.user.email)) || 'system';
+    // Phase-scoped purge predicate: only sweep files belonging to THIS phase, so
+    // Phase 2a's finalize never deletes Phase 2's filed copy in the same folder.
+    const phaseMatch = (nm) => reqDraft.phaseMatchesName(nm, draft.phase);
 
     // Build invoice rows (with bytes) for the packet, ordered like the Current Log.
     let invoiceRows = invoices.map(inv => ({
@@ -7970,13 +8009,14 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
     try { invoiceRows = orderInvoicesByCurrentLog(workbook, invoiceRows); } catch (_) {}
 
     const entRow = db.prepare('SELECT name, display_id FROM entities WHERE id = ?').get(eid) || {};
-    const packetPrefix = (entRow.display_id && entRow.display_id.trim()) || entRow.name || '';
+    let packetPrefix = (entRow.display_id && entRow.display_id.trim()) || entRow.name || '';
+    { const _pl = reqDraft.phaseLabel(draft.phase); if (_pl) packetPrefix = (packetPrefix + ' ' + _pl).trim(); }
 
     // One-copy enforcement: clear prior report/packet copies in OTHER month
     // folders (in case a re-finalize moved the period), then let
     // saveRequisitionOutputs overwrite same-named files in the target folder.
     const targetFolder = require('./requisition_workpaper_save').requisitionFolderPath(asOfDate);
-    try { purgePriorRequisitionCopies(db, WORKPAPERS_DIR, eid, { keepFolderPath: targetFolder, otherFoldersOnly: true }); } catch (_) {}
+    try { purgePriorRequisitionCopies(db, WORKPAPERS_DIR, eid, { keepFolderPath: targetFolder, otherFoldersOnly: true, phaseMatch }); } catch (_) {}
 
     const saved = await saveRequisitionOutputs({
       db, workpapersDir: WORKPAPERS_DIR, eid,
@@ -7989,7 +8029,7 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
     // folder (e.g. a prior finalize under a different req number), keeping the
     // two we just wrote.
     const keepNames = [saved.workbook && saved.workbook.original_name, saved.packet && saved.packet.original_name].filter(Boolean);
-    try { purgePriorRequisitionCopies(db, WORKPAPERS_DIR, eid, { keepFolderPath: targetFolder, keepNames }); } catch (_) {}
+    try { purgePriorRequisitionCopies(db, WORKPAPERS_DIR, eid, { keepFolderPath: targetFolder, keepNames, phaseMatch }); } catch (_) {}
 
     // Stamp the draft's invoices with the final req number (keep draft_id for provenance).
     const now = new Date().toISOString();
