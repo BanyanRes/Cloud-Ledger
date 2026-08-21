@@ -316,4 +316,35 @@ async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfD
   return result;
 }
 
-module.exports = { saveRequisitionOutputs, requisitionFolderPath, buildInvoicePacket, buildDevFeePdf, saveBufferToWorkpapers, ensureFolders };
+// One-copy enforcement. Before filing a finalized report, remove any prior
+// requisition workbook / invoice packet in the given entity's Requisition
+// Reports folders so exactly one current copy survives. Scope is deliberately
+// pattern-limited to names containing "Requisition Report" or "Invoice Packet"
+// (case-insensitive) so anything a user manually dropped in the folder is left
+// untouched. Pass `keepFolderPath` = the destination month folder AND `keepNames`
+// = the exact filenames about to be written, so the fresh copies aren't deleted.
+// When `otherFoldersOnly` is true, only folders OTHER than keepFolderPath are
+// swept (used to clear a stale copy left behind when a re-finalize moves the
+// report to a different month). Returns the count removed. Best-effort.
+function purgePriorRequisitionCopies(db, workpapersDir, eid, { keepFolderPath, keepNames = [], otherFoldersOnly = false } = {}) {
+  let removed = 0;
+  try {
+    const entityDir = path.join(workpapersDir, String(eid));
+    const keepSet = new Set((keepNames || []).map(n => String(n)));
+    const rows = db.prepare(
+      "SELECT id, folder_path, stored_filename, original_name FROM entity_files " +
+      "WHERE entity_id=? AND folder_path LIKE '%Requisition Reports%' " +
+      "AND (lower(original_name) LIKE '%requisition report%' OR lower(original_name) LIKE '%invoice packet%')"
+    ).all(eid);
+    for (const r of rows) {
+      if (otherFoldersOnly && r.folder_path === keepFolderPath) continue;
+      if (r.folder_path === keepFolderPath && keepSet.has(r.original_name)) continue;
+      try { fs.unlinkSync(path.join(entityDir, r.stored_filename)); } catch (_) {}
+      db.prepare('DELETE FROM entity_files WHERE id=?').run(r.id);
+      removed++;
+    }
+  } catch (_) { /* best-effort */ }
+  return removed;
+}
+
+module.exports = { saveRequisitionOutputs, requisitionFolderPath, buildInvoicePacket, buildDevFeePdf, saveBufferToWorkpapers, ensureFolders, purgePriorRequisitionCopies };

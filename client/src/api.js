@@ -455,6 +455,28 @@ export const api = {
     return { blob, filename, summary, failedChecks, workpaperFolder, workpaperSaved, packetFileId, packetFileName, forced, devFee };
   },
 
+  // ── Editable / persistent Requisition draft ──────────────────────────────
+  getRequisitionDraft: (eid) => request('/requisition/' + eid + '/draft'),
+  getRequisitionSeedSource: (eid) => request('/requisition/' + eid + '/draft/seed-source'),
+  // Create the open draft. Auto-seeds when a prior finalized Req exists; pass a
+  // workbook File for the first-time case. baseChoice ('uploaded'|'filed')
+  // answers the Option-B upload-guard prompt. On a guard conflict the thrown
+  // Error carries err.detail.conflict + err.detail.message.
+  createRequisitionDraft: (eid, { workbookFile, reqNumber, asOfDate, baseChoice } = {}) => {
+    const fd = new FormData();
+    if (workbookFile) fd.append('workbook', workbookFile);
+    if (reqNumber != null && reqNumber !== '') fd.append('reqNumber', String(reqNumber));
+    if (asOfDate) fd.append('asOfDate', asOfDate);
+    if (baseChoice) fd.append('baseChoice', baseChoice);
+    return request('/requisition/' + eid + '/draft', { method: 'POST', body: fd });
+  },
+  addRequisitionDraftInvoice: (eid, inv) => request('/requisition/' + eid + '/draft/invoice', { method: 'POST', body: inv }),
+  updateRequisitionDraftInvoice: (eid, id, inv) => request('/requisition/' + eid + '/draft/invoice/' + id, { method: 'PUT', body: inv }),
+  deleteRequisitionDraftInvoice: (eid, id) => request('/requisition/' + eid + '/draft/invoice/' + id, { method: 'DELETE' }),
+  rollRequisitionDraft: (eid, meta = {}) => request('/requisition/' + eid + '/draft/roll', { method: 'POST', body: { reqNumber: meta.reqNumber, asOfDate: meta.asOfDate } }),
+  downloadRequisitionDraftUrl: (eid) => API_BASE + '/requisition/' + eid + '/draft/download?token=' + encodeURIComponent(getToken() || ''),
+  finalizeRequisitionDraft: (eid, force = false) => request('/requisition/' + eid + '/draft/finalize', { method: 'POST', body: { force } }),
+
   // Workpapers › Management Fee: analyze a prior-quarter workbook, then generate
   // the next quarter as a downloadable .xlsx.
   mgmtFeeAnalyze: async (eid, file) => {

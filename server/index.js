@@ -18,7 +18,8 @@ const { rollForward, findSheet: findReqSheet } = require('./requisition_rollforw
 const { verifyRollforward } = require('./requisition_rollforward_verify');
 const { finalizeRequisitionWorkbook } = require('./requisition_preserve');
 const { makeDevFeeClaudeCaller } = require('./requisition_devfee');
-const { saveRequisitionOutputs, saveBufferToWorkpapers: saveWpBuffer, ensureFolders: ensureWpFolders } = require('./requisition_workpaper_save');
+const { saveRequisitionOutputs, saveBufferToWorkpapers: saveWpBuffer, ensureFolders: ensureWpFolders, purgePriorRequisitionCopies } = require('./requisition_workpaper_save');
+const reqDraft = require('./requisition_draft');
 const { computeAllocation, buildAllocationWorkbook } = require('./insurance_allocation');
 const financials = require('./financials');
 const execSummaries = require('./execSummaries');
@@ -462,6 +463,35 @@ db.exec(`
     UNIQUE(entity_id, cost_code)
   );
   CREATE INDEX IF NOT EXISTS idx_reqcoa_entity ON requisition_coa_map(entity_id);
+  -- Editable / persistent Requisition Report draft (one open draft per entity).
+  -- A draft is created once, edited (add/delete/update invoices) and re-rolled on
+  -- each save; its in-progress workbook + packet live here (NOT in Workpapers) so
+  -- intermediate versions don't clutter the filing tree. Finalize flips status to
+  -- 'finalized', stamps the invoices with req_number, and files the workbook +
+  -- packet to Workpapers. The finalized draft's output_blob is next month's
+  -- auto-seed base. The partial unique index enforces at-most-one open draft.
+  CREATE TABLE IF NOT EXISTS requisition_draft (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id     INTEGER NOT NULL REFERENCES entities(id),
+    status        TEXT NOT NULL DEFAULT 'open',   -- 'open' | 'finalized'
+    req_number    INTEGER,                        -- target req # (editable while open)
+    as_of_date    TEXT,                           -- period end (editable while open)
+    base_blob     BLOB,                           -- prior workbook this draft rolls from
+    base_name     TEXT,                           -- original filename of the base (for name bump)
+    base_sha256   TEXT,                           -- hash of base bytes (upload-guard dedupe)
+    output_blob   BLOB,                           -- latest rolled-forward workbook
+    output_name   TEXT,                           -- filename for the current output/download
+    packet_blob   BLOB,                           -- latest merged invoice packet PDF
+    packet_name   TEXT,
+    recon_ok      INTEGER,                        -- last verify result (1/0/null)
+    recon_summary TEXT,                           -- last verify summary (JSON, for the banner)
+    created_at    TEXT,
+    updated_at    TEXT,
+    finalized_at  TEXT,
+    created_by    TEXT
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS uq_reqdraft_open ON requisition_draft(entity_id) WHERE status='open';
+  CREATE INDEX IF NOT EXISTS idx_reqdraft_entity ON requisition_draft(entity_id, status);
 `);
 
 const userCount = db.prepare('SELECT COUNT(*) as c FROM users').get();
@@ -514,6 +544,17 @@ if (!ugeaCols.includes('access_level')) {
 if (!entCols.includes('display_id')) {
   db.exec("ALTER TABLE entities ADD COLUMN display_id TEXT");
   console.log('[db migrate] entities.display_id added');
+}
+
+// draft_id: links a requisition_invoice to the editable draft that owns it while
+// open. NULL for every pre-existing (already-finalized) invoice, so the orphan
+// purge (req_number IS NULL) is narrowed to also require draft_id IS NULL and can
+// never delete a live draft's lines.
+const reqInvCols = db.prepare("PRAGMA table_info(requisition_invoice)").all().map(c => c.name);
+if (!reqInvCols.includes('draft_id')) {
+  db.exec("ALTER TABLE requisition_invoice ADD COLUMN draft_id INTEGER");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_reqinv_draft ON requisition_invoice(draft_id)");
+  console.log('[db migrate] requisition_invoice.draft_id added');
 }
 
 // Phase 3: default_cash_account on billcom_config (for payment JEs)
@@ -7629,13 +7670,355 @@ app.get('/api/requisition/invoice/:id/download', (req, res) => {
 app.delete('/api/requisition/:entity_id/orphan-invoices', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
   const eid = parseInt(req.params.entity_id);
   try {
-    const before = db.prepare('SELECT COUNT(*) c FROM requisition_invoice WHERE entity_id = ? AND req_number IS NULL').get(eid).c;
-    const info = db.prepare('DELETE FROM requisition_invoice WHERE entity_id = ? AND req_number IS NULL').run(eid);
+    const before = db.prepare('SELECT COUNT(*) c FROM requisition_invoice WHERE entity_id = ? AND req_number IS NULL AND draft_id IS NULL').get(eid).c;
+    const info = db.prepare('DELETE FROM requisition_invoice WHERE entity_id = ? AND req_number IS NULL AND draft_id IS NULL').run(eid);
     res.json({ deleted: info.changes, matched: before });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Editable / persistent Requisition Report draft
+// ───────────────────────────────────────────────────────────────────────────
+// One open draft per entity. Create (auto-seed or first-time upload) → edit its
+// invoice list (add/update/delete) → Save/re-roll → Finalize (files to
+// Workpapers, one copy only, becomes next month's auto-seed base).
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Map a stored requisition_invoice row into a Current-Invoice-Log "newCurrent"
+// row the roll-forward engine understands (same shape the legacy client sends).
+function draftInvoiceToNewCurrent(inv) {
+  const out = {
+    code: inv.cost_code || undefined,
+    name: inv.cost_code_name || undefined,
+    vendor: inv.vendor || undefined,
+    bill: inv.bill_number || undefined,
+    date: inv.invoice_date || undefined,
+  };
+  const amt = inv.amount != null && inv.amount !== '' ? Number(String(inv.amount).replace(/[$,]/g, '')) : NaN;
+  if (Number.isFinite(amt)) out.amount = amt;
+  return out;
+}
+
+// Serialize a draft row for the client (never ships the blobs).
+function draftForClient(db, draft) {
+  if (!draft) return null;
+  const invoices = db.prepare(
+    'SELECT id, vendor, bill_number, amount, invoice_date, cost_code, cost_code_name, confidence, original_name, mime_type, ' +
+    "(file_blob IS NOT NULL) AS has_file FROM requisition_invoice WHERE draft_id = ? ORDER BY id"
+  ).all(draft.id);
+  let recon = null;
+  try { recon = draft.recon_summary ? JSON.parse(draft.recon_summary) : null; } catch (_) {}
+  return {
+    id: draft.id, entity_id: draft.entity_id, status: draft.status,
+    req_number: draft.req_number, as_of_date: draft.as_of_date,
+    base_name: draft.base_name, output_name: draft.output_name, packet_name: draft.packet_name,
+    recon_ok: draft.recon_ok == null ? null : !!draft.recon_ok, recon: recon,
+    has_output: draft.output_blob != null,
+    created_at: draft.created_at, updated_at: draft.updated_at, finalized_at: draft.finalized_at,
+    created_by: draft.created_by,
+    invoices,
+  };
+}
+
+// GET the entity's open draft (or {draft:null}). Powers "reopen and edit".
+app.get('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  try {
+    const draft = reqDraft.getOpenDraft(db, eid);
+    res.json({ draft: draftForClient(db, draft) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Report what a NEW draft would auto-seed from, so the client can either proceed
+// (auto-seed available) or show the first-time upload box (source === null).
+app.get('/api/requisition/:entity_id/draft/seed-source', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  try {
+    const seed = reqDraft.resolveAutoSeed(db, WORKPAPERS_DIR, eid);
+    res.json({ source: seed ? seed.source : null, name: seed ? seed.name : null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// CREATE the open draft. Auto-seeds base from the last finalized Req; if none
+// exists, a base workbook upload is required (first time). Upload guard (Option
+// B): if a hand-uploaded base matches the filed copy, we STOP and ask unless the
+// client confirms which to use (baseChoice=uploaded|filed).
+app.post('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res, next) => {
+  reqRollUpload.single('workbook')(req, res, (err) => {
+    if (err) return res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: 'Upload failed: ' + err.message });
+    next();
+  });
+}, async (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  try {
+    if (reqDraft.getOpenDraft(db, eid)) {
+      return res.status(409).json({ error: 'An open draft already exists for this entity. Open it to continue editing, or finalize it first.' });
+    }
+    const reqNumber = req.body.reqNumber != null && req.body.reqNumber !== '' ? parseInt(req.body.reqNumber) : null;
+    const asOfDate = req.body.asOfDate || null;
+    const baseChoice = req.body.baseChoice || null; // 'uploaded' | 'filed' | null
+
+    let baseBuf = null, baseName = null;
+    const uploaded = req.file ? req.file.buffer : null;
+    const seed = reqDraft.resolveAutoSeed(db, WORKPAPERS_DIR, eid);
+
+    if (uploaded) {
+      // Option B: if the upload matches the filed prior-month copy, ask before proceeding.
+      if (!baseChoice) {
+        const conflict = reqDraft.checkUploadAgainstFiled(db, WORKPAPERS_DIR, eid, uploaded, reqNumber, asOfDate);
+        if (conflict) {
+          return res.status(409).json({
+            error: 'upload_matches_filed',
+            conflict,
+            message: conflict.match === 'identical'
+              ? `The uploaded file is an exact copy of the requisition report already filed in Workpapers (${conflict.filedName}). Use the uploaded file, or the filed copy?`
+              : `The uploaded file matches the period of the filed report (${conflict.filedName}) but its contents differ — it looks like an edited copy. Use the uploaded (edited) version, or the filed copy?`,
+          });
+        }
+      }
+      if (baseChoice === 'filed' && seed) { baseBuf = seed.buffer; baseName = seed.name; }
+      else { baseBuf = uploaded; baseName = req.file.originalname || 'uploaded_base.xlsx'; }
+    } else if (seed) {
+      baseBuf = seed.buffer; baseName = seed.name;
+    } else {
+      return res.status(400).json({ error: 'No prior finalized requisition on file — upload the prior month\'s finalized workbook (field name: workbook) to start.' });
+    }
+
+    // Validate the base has the required tabs before we store it.
+    try { await reqDraft.loadReqWorkbook(ExcelJS, baseBuf); }
+    catch (e) { return res.status(e.status || 400).json({ error: e.message }); }
+
+    const now = new Date().toISOString();
+    const who = (req.user && (req.user.name || req.user.email)) || 'system';
+    const info = db.prepare(
+      'INSERT INTO requisition_draft (entity_id, status, req_number, as_of_date, base_blob, base_name, base_sha256, created_at, updated_at, created_by) ' +
+      "VALUES (?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run(eid, reqNumber, asOfDate, baseBuf, baseName, reqDraft.sha256(baseBuf), now, now, who);
+
+    const draft = db.prepare('SELECT * FROM requisition_draft WHERE id = ?').get(info.lastInsertRowid);
+    res.json({ draft: draftForClient(db, draft), seededFrom: uploaded ? (baseChoice === 'filed' ? 'filed' : 'upload') : (seed ? seed.source : null) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ADD an invoice to the open draft (OCR/coding done client-side, same payload as
+// the legacy invoices[] rows). Marks the draft dirty (recon stale until re-roll).
+app.post('/api/requisition/:entity_id/draft/invoice', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  try {
+    const draft = reqDraft.getOpenDraft(db, eid);
+    if (!draft) return res.status(404).json({ error: 'No open draft. Start a new requisition first.' });
+    const inv = req.body || {};
+    const amt = inv.amount != null && inv.amount !== '' ? Number(String(inv.amount).replace(/[$,]/g, '')) : null;
+    let blob = null;
+    try { if (inv.file_b64) blob = Buffer.from(inv.file_b64, 'base64'); } catch (_) {}
+    const info = db.prepare(
+      'INSERT INTO requisition_invoice (entity_id, req_number, draft_id, vendor, bill_number, amount, invoice_date, cost_code, cost_code_name, confidence, original_name, mime_type, file_blob, created_at) ' +
+      'VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(
+      eid, draft.id,
+      inv.vendor || null, inv.bill_number || inv.bill || null,
+      Number.isFinite(amt) ? amt : null, inv.invoice_date || null,
+      inv.cost_code || null, inv.cost_code_name || null, inv.confidence || null,
+      inv.original_name || inv.filename || null, inv.mime_type || null, blob,
+      new Date().toISOString()
+    );
+    db.prepare("UPDATE requisition_draft SET updated_at=?, recon_ok=NULL WHERE id=?").run(new Date().toISOString(), draft.id);
+    res.json({ id: info.lastInsertRowid, draft: draftForClient(db, reqDraft.getOpenDraft(db, eid)) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// UPDATE a draft invoice's coding/amount in place. Marks the draft dirty.
+app.put('/api/requisition/:entity_id/draft/invoice/:invoice_id', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  try {
+    const draft = reqDraft.getOpenDraft(db, eid);
+    if (!draft) return res.status(404).json({ error: 'No open draft.' });
+    const row = db.prepare('SELECT * FROM requisition_invoice WHERE id=? AND draft_id=?').get(parseInt(req.params.invoice_id), draft.id);
+    if (!row) return res.status(404).json({ error: 'Invoice not found on this draft.' });
+    const inv = req.body || {};
+    const amt = inv.amount != null && inv.amount !== '' ? Number(String(inv.amount).replace(/[$,]/g, '')) : row.amount;
+    db.prepare(
+      'UPDATE requisition_invoice SET vendor=?, bill_number=?, amount=?, invoice_date=?, cost_code=?, cost_code_name=? WHERE id=?'
+    ).run(
+      inv.vendor != null ? inv.vendor : row.vendor,
+      inv.bill_number != null ? inv.bill_number : (inv.bill != null ? inv.bill : row.bill_number),
+      Number.isFinite(amt) ? amt : row.amount,
+      inv.invoice_date != null ? inv.invoice_date : row.invoice_date,
+      inv.cost_code != null ? inv.cost_code : row.cost_code,
+      inv.cost_code_name != null ? inv.cost_code_name : row.cost_code_name,
+      row.id
+    );
+    db.prepare("UPDATE requisition_draft SET updated_at=?, recon_ok=NULL WHERE id=?").run(new Date().toISOString(), draft.id);
+    res.json({ draft: draftForClient(db, reqDraft.getOpenDraft(db, eid)) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// DELETE a draft invoice line. Marks the draft dirty.
+app.delete('/api/requisition/:entity_id/draft/invoice/:invoice_id', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  try {
+    const draft = reqDraft.getOpenDraft(db, eid);
+    if (!draft) return res.status(404).json({ error: 'No open draft.' });
+    const info = db.prepare('DELETE FROM requisition_invoice WHERE id=? AND draft_id=?').run(parseInt(req.params.invoice_id), draft.id);
+    db.prepare("UPDATE requisition_draft SET updated_at=?, recon_ok=NULL WHERE id=?").run(new Date().toISOString(), draft.id);
+    res.json({ deleted: info.changes, draft: draftForClient(db, reqDraft.getOpenDraft(db, eid)) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// SAVE / re-roll: rebuild the draft's workbook + packet from the CURRENT invoice
+// set against the stored base. Overwrites output_blob/packet_blob/recon_*. Does
+// NOT touch Workpapers (that happens only at finalize).
+app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  try {
+    const draft = reqDraft.getOpenDraft(db, eid);
+    if (!draft) return res.status(404).json({ error: 'No open draft.' });
+    if (!draft.base_blob) return res.status(400).json({ error: 'Draft has no base workbook.' });
+
+    // Allow header edits (req#, as-of) to be sent with the roll.
+    const reqNumber = req.body.reqNumber != null && req.body.reqNumber !== '' ? parseInt(req.body.reqNumber) : draft.req_number;
+    const asOfDate = req.body.asOfDate || draft.as_of_date;
+
+    const invoices = db.prepare('SELECT * FROM requisition_invoice WHERE draft_id=? ORDER BY id').all(draft.id);
+    const newCurrent = invoices.map(draftInvoiceToNewCurrent).filter(r => Number.isFinite(r.amount));
+
+    const { outBuf, rfResult, verification } = await reqDraft.rollForwardFromBase(
+      ExcelJS, Buffer.from(draft.base_blob), eid, newCurrent, { reqNumber, asOfDate }
+    );
+
+    const outName = buildRollforwardFilename(draft.base_name || 'Requisition_Report.xlsx', reqNumber, asOfDate);
+    const reconSummary = verification && verification.finalResult ? JSON.stringify({
+      ok: !!verification.ok,
+      summary: verification.finalResult.summary,
+      checks: verification.finalResult.checks,
+      unresolved: verification.unresolved,
+    }) : null;
+
+    db.prepare(
+      'UPDATE requisition_draft SET req_number=?, as_of_date=?, output_blob=?, output_name=?, recon_ok=?, recon_summary=?, updated_at=? WHERE id=?'
+    ).run(
+      reqNumber, asOfDate, outBuf, outName,
+      verification && verification.ok ? 1 : 0, reconSummary,
+      new Date().toISOString(), draft.id
+    );
+
+    res.json({
+      ok: !!(verification && verification.ok),
+      recon: reconSummary ? JSON.parse(reconSummary) : null,
+      devFee: rfResult && rfResult.devFee && !rfResult.devFee.error ? rfResult.devFee : null,
+      output_name: outName,
+      draft: draftForClient(db, reqDraft.getOpenDraft(db, eid)),
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+// DOWNLOAD the draft's current workbook (must have been rolled at least once).
+app.get('/api/requisition/:entity_id/draft/download', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  try {
+    const draft = reqDraft.getOpenDraft(db, eid);
+    if (!draft || !draft.output_blob) return res.status(404).json({ error: 'No rolled workbook yet — Save/re-roll the draft first.' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + String(draft.output_name || 'Requisition_Report.xlsx').replace(/[\r\n"]/g, ' ') + '"');
+    res.send(Buffer.from(draft.output_blob));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// FINALIZE: lock the draft, stamp its invoices with the req number, file the
+// workbook + packet to Workpapers (one copy only), and leave it as next month's
+// auto-seed base. Re-rolls first so the filed output reflects the latest edits.
+app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const force = req.body.force === true || req.body.force === 'true' || req.body.force === '1';
+  try {
+    const draft = reqDraft.getOpenDraft(db, eid);
+    if (!draft) return res.status(404).json({ error: 'No open draft.' });
+    if (!draft.base_blob) return res.status(400).json({ error: 'Draft has no base workbook.' });
+
+    const reqNumber = draft.req_number;
+    const asOfDate = draft.as_of_date;
+    const invoices = db.prepare('SELECT * FROM requisition_invoice WHERE draft_id=? ORDER BY id').all(draft.id);
+    const newCurrent = invoices.map(draftInvoiceToNewCurrent).filter(r => Number.isFinite(r.amount));
+
+    // Always re-roll at finalize so the filed copy is current.
+    const { outBuf, rfResult, verification, workbook } = await reqDraft.rollForwardFromBase(
+      ExcelJS, Buffer.from(draft.base_blob), eid, newCurrent, { reqNumber, asOfDate }
+    );
+
+    if (!(verification && verification.ok) && !force) {
+      const reconSummary = verification && verification.finalResult ? {
+        ok: false, summary: verification.finalResult.summary,
+        checks: verification.finalResult.checks, unresolved: verification.unresolved,
+      } : null;
+      // Persist the fresh (failed) output so the user can download + inspect it.
+      db.prepare('UPDATE requisition_draft SET output_blob=?, recon_ok=0, recon_summary=?, updated_at=? WHERE id=?')
+        .run(outBuf, reconSummary ? JSON.stringify(reconSummary) : null, new Date().toISOString(), draft.id);
+      return res.status(422).json({ error: 'Roll-forward failed reconciliation', ok: false, recon: reconSummary });
+    }
+
+    const fname = buildRollforwardFilename(draft.base_name || 'Requisition_Report.xlsx', reqNumber, asOfDate);
+    const who = (req.user && (req.user.name || req.user.email)) || 'system';
+
+    // Build invoice rows (with bytes) for the packet, ordered like the Current Log.
+    let invoiceRows = invoices.map(inv => ({
+      original_name: inv.original_name, mime_type: inv.mime_type, file_blob: inv.file_blob ? Buffer.from(inv.file_blob) : null,
+      vendor: inv.vendor, bill_number: inv.bill_number, amount: inv.amount,
+      cost_code: inv.cost_code, cost_code_name: inv.cost_code_name,
+    }));
+    try { invoiceRows = orderInvoicesByCurrentLog(workbook, invoiceRows); } catch (_) {}
+
+    const entRow = db.prepare('SELECT name, display_id FROM entities WHERE id = ?').get(eid) || {};
+    const packetPrefix = (entRow.display_id && entRow.display_id.trim()) || entRow.name || '';
+
+    // One-copy enforcement: clear prior report/packet copies in OTHER month
+    // folders (in case a re-finalize moved the period), then let
+    // saveRequisitionOutputs overwrite same-named files in the target folder.
+    const targetFolder = require('./requisition_workpaper_save').requisitionFolderPath(asOfDate);
+    try { purgePriorRequisitionCopies(db, WORKPAPERS_DIR, eid, { keepFolderPath: targetFolder, otherFoldersOnly: true }); } catch (_) {}
+
+    const saved = await saveRequisitionOutputs({
+      db, workpapersDir: WORKPAPERS_DIR, eid,
+      reqNumber, asOfDate, workbookBuffer: Buffer.from(outBuf), invoices: invoiceRows,
+      devFee: rfResult && rfResult.devFee && !rfResult.devFee.error ? rfResult.devFee : null,
+      who, packetPrefix, workbookFilename: fname, saveWorkbook: true,
+    });
+
+    // Also sweep any leftover differently-named report/packet in the target
+    // folder (e.g. a prior finalize under a different req number), keeping the
+    // two we just wrote.
+    const keepNames = [saved.workbook && saved.workbook.original_name, saved.packet && saved.packet.original_name].filter(Boolean);
+    try { purgePriorRequisitionCopies(db, WORKPAPERS_DIR, eid, { keepFolderPath: targetFolder, keepNames }); } catch (_) {}
+
+    // Stamp the draft's invoices with the final req number (keep draft_id for provenance).
+    const now = new Date().toISOString();
+    const reconSummary = verification && verification.finalResult ? JSON.stringify({
+      ok: !!verification.ok, summary: verification.finalResult.summary,
+      checks: verification.finalResult.checks, unresolved: verification.unresolved,
+    }) : null;
+    const tx = db.transaction(() => {
+      if (reqNumber != null) db.prepare('UPDATE requisition_invoice SET req_number=? WHERE draft_id=?').run(reqNumber, draft.id);
+      db.prepare(
+        "UPDATE requisition_draft SET status='finalized', output_blob=?, output_name=?, packet_name=?, recon_ok=?, recon_summary=?, finalized_at=?, updated_at=? WHERE id=?"
+      ).run(
+        outBuf, fname, saved.packet ? saved.packet.original_name : null,
+        verification && verification.ok ? 1 : 0, reconSummary, now, now, draft.id
+      );
+    });
+    tx();
+
+    res.json({
+      ok: true, folder: saved.folder,
+      workbook: saved.workbook ? saved.workbook.original_name : null,
+      packet: saved.packet ? saved.packet.original_name : null,
+      forced: !(verification && verification.ok),
+    });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+
 
 // ─── R4: Read one invoice PDF with Claude (Haiku) and pre-fill fields ─────────
 // Upload a single invoice (PDF or image). The model extracts vendor / bill

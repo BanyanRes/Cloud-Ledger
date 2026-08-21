@@ -5535,6 +5535,21 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   // auto-fill the Cost Code Name when a code is entered. Loaded per entity.
   const[coaMap,setCoaMap]=useState({});
   useEffect(()=>{let alive=true;(async()=>{try{const r=await api.getRequisitionCoaMap(entityId);if(alive)setCoaMap((r&&r.map)||{});}catch{if(alive)setCoaMap({});}})();return()=>{alive=false;};},[entityId]);
+  // ── Editable / persistent Requisition draft ──
+  const[draft,setDraft]=useState(null);
+  const[draftBusy,setDraftBusy]=useState(false);
+  const[draftMsg,setDraftMsg]=useState('');
+  const[draftErr,setDraftErr]=useState('');
+  const[seedSource,setSeedSource]=useState(undefined);// undefined=loading, null=none, else source
+  const[finConfirm,setFinConfirm]=useState(false);
+  const[uploadConflict,setUploadConflict]=useState(null);// {message, workbookFile, reqNumber, asOfDate}
+  const loadDraft=async()=>{try{const r=await api.getRequisitionDraft(entityId);setDraft(r&&r.draft);}catch(e){setDraft(null);}try{const s=await api.getRequisitionSeedSource(entityId);setSeedSource(s?s.source:null);}catch{setSeedSource(null);}};
+  useEffect(()=>{setDraft(null);setSeedSource(undefined);setDraftMsg('');setDraftErr('');loadDraft();// eslint-disable-next-line
+  },[entityId]);
+  const startDraft=async(baseChoice)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const wf=uploadConflict?uploadConflict.workbookFile:(rfFile||undefined);const r=await api.createRequisitionDraft(entityId,{workbookFile:wf,reqNumber:rfReqNum||undefined,asOfDate:rfAsOf||undefined,baseChoice});setDraft(r&&r.draft);setUploadConflict(null);setDraftMsg('Draft started.');}catch(e){if(e.detail&&e.detail.error==='upload_matches_filed'){setUploadConflict({message:e.detail.message,workbookFile:rfFile});}else{setDraftErr(e.message);}}finally{setDraftBusy(false);}};
+  const rollDraft=async()=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const r=await api.rollRequisitionDraft(entityId,{reqNumber:rfReqNum||undefined,asOfDate:rfAsOf||undefined});setDraft(r&&r.draft);setDraftMsg(r&&r.ok?'Saved — reconciled.':'Saved — needs review (reconciliation not balanced).');}catch(e){setDraftErr(e.message);}finally{setDraftBusy(false);}};
+  const downloadDraft=()=>{const a=document.createElement('a');a.href=api.downloadRequisitionDraftUrl(entityId);a.download='';document.body.appendChild(a);a.click();a.remove();};
+  const finalizeDraft=async(force)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const r=await api.finalizeRequisitionDraft(entityId,!!force);setFinConfirm(false);setDraftMsg('Finalized and filed to Workpapers → '+(r.folder||'')+'.');await loadDraft();}catch(e){if(e.detail&&e.detail.ok===false){setDraftErr('Reconciliation not balanced. Fix the invoices and re-save, or finalize anyway.');}else{setDraftErr(e.message);}}finally{setDraftBusy(false);}};
   // Cost-code -> name parsed straight from the uploaded prior workbook's
   // "Prior Invoice Log" (col C = Cost Code #, col F = Cost Code Name). This is
   // the most authoritative source for this requisition, so it takes precedence
@@ -5789,6 +5804,42 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16}}>
       <div><div style={S.h1}>Requisitions</div><div style={S.sub}>{entityName} &mdash; roll forward to the next requisition</div></div>
     </div>
+    {canEdit&&<div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+(draft?(draft.recon_ok===false?T.orange:(draft.recon_ok?T.green:T.accent)):T.border)}}>
+      {draftErr&&<div style={{...S.err,padding:8,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:8}}>{draftErr}</div>}
+      {draftMsg&&!draftErr&&<div style={{padding:8,background:T.greenDim,borderRadius:6,border:'1px solid '+T.greenBorder,marginBottom:8,fontSize:12,color:T.green}}>{draftMsg}</div>}
+      {uploadConflict&&<div style={{padding:12,background:T.orangeDim,borderRadius:6,border:'1px solid '+T.orange+'40',marginBottom:10}}>
+        <div style={{fontSize:13,color:T.text,marginBottom:8}}>{uploadConflict.message}</div>
+        <div style={{display:'flex',gap:8}}>
+          <button style={S.btnS} disabled={draftBusy} onClick={()=>startDraft('uploaded')}>Use uploaded file</button>
+          <button style={S.btnS} disabled={draftBusy} onClick={()=>startDraft('filed')}>Use filed copy</button>
+          <button style={{...S.btnS,color:T.textMuted}} disabled={draftBusy} onClick={()=>setUploadConflict(null)}>Cancel</button>
+        </div></div>}
+      {!draft&&!uploadConflict&&<div>
+        <div style={{...S.h2,marginBottom:4}}>Start a requisition</div>
+        <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>{seedSource===undefined?'Checking for a prior report…':(seedSource?('CloudLedger will auto-seed from the last filed requisition ('+seedSource+'). No upload needed.'):'No prior requisition on file — choose the prior month\u2019s finalized workbook above to start.')}</div>
+        <button style={S.btnP} disabled={draftBusy||(seedSource===null&&!rfFile)} onClick={()=>startDraft()}>{draftBusy?'Starting…':'Start new Req'}</button>
+      </div>}
+      {draft&&<div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
+          <div><span style={{fontSize:14,fontWeight:600,color:T.text}}>Draft Req {draft.req_number!=null?('#'+draft.req_number):''}</span>
+            <span style={{fontSize:12,color:T.textMuted,marginLeft:8}}>{draft.as_of_date?('as of '+draft.as_of_date):''} · {(draft.invoices||[]).length} invoice{(draft.invoices||[]).length===1?'':'s'}</span></div>
+          <div style={{fontSize:12,fontWeight:600,color:draft.recon_ok===false?T.orange:(draft.recon_ok?T.green:T.textMuted)}}>{draft.recon_ok===false?'⚠ Needs review':(draft.recon_ok?'✓ Balanced':'Not yet rolled')}</div>
+        </div>
+        <div style={{display:'flex',gap:8,marginTop:12,flexWrap:'wrap'}}>
+          <button style={S.btnP} disabled={draftBusy} onClick={rollDraft}>{draftBusy?'Saving…':'Save / re-roll'}</button>
+          <button style={S.btnS} disabled={draftBusy||!draft.has_output} onClick={downloadDraft}>Download current</button>
+          <button style={{...S.btnP,background:T.green,borderColor:T.green}} disabled={draftBusy||!draft.has_output} onClick={()=>setFinConfirm(true)}>Finalize</button>
+        </div>
+        {finConfirm&&<div style={{marginTop:12,padding:14,background:T.bgElevated,borderRadius:8,border:'1px solid '+T.border}}>
+          <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:4}}>Finalize Req {draft.req_number!=null?('#'+draft.req_number):''}?</div>
+          <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>This locks the draft and files the workbook + invoice packet to Workpapers (replacing any earlier copy for this period). It becomes next month\u2019s auto-seed base.</div>
+          <div style={{display:'flex',gap:8}}>
+            <button style={{...S.btnP,background:T.green,borderColor:T.green}} disabled={draftBusy} onClick={()=>finalizeDraft(false)}>{draftBusy?'Filing…':'Finalize and file'}</button>
+            {draft.recon_ok===false&&<button style={{...S.btnS,color:T.red,borderColor:T.red}} disabled={draftBusy} onClick={()=>finalizeDraft(true)}>Finalize anyway (not balanced)</button>}
+            <button style={{...S.btnS,color:T.textMuted}} disabled={draftBusy} onClick={()=>setFinConfirm(false)}>Keep editing</button>
+          </div></div>}
+      </div>}
+    </div>}
     {!canEdit&&<div style={{...S.card,textAlign:'center',padding:50,color:T.textDim}}>The requisition roll-forward tool is read-only for your account. Contact an administrator if you need to run a requisition.</div>}
     {canEdit&&<>
     {err&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:12}}>{err}</div>}
