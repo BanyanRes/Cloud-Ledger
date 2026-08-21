@@ -31,6 +31,8 @@
 //     doubleUnderlineRows: number[]   double bottom border on amountCols
 //     amountCols         : number[]   which columns the rules are drawn under
 //     indentRows         : [{ r, n }] left indent for a label column
+//     alignCols          : { [col]: 'left'|'center'|'right' }  horizontal align
+//                                     applied to every data cell in that column
 //   }
 //
 // A row may appear in both boldRows and underlineRows; both apply. Rules are
@@ -71,6 +73,7 @@ function buildStyledWorkbookBuffer(spec) {
   const doubleRows = set(st.doubleUnderlineRows);
   const amountCols = Array.isArray(st.amountCols) ? st.amountCols : [];
   const indentByRow = new Map((Array.isArray(st.indentRows) ? st.indentRows : []).map(x => [x.r, x.n]));
+  const alignCols = (st.alignCols && typeof st.alignCols === 'object') ? st.alignCols : {};
 
   const wb = new ExcelJS.Workbook();
   wb.calcProperties = wb.calcProperties || {};
@@ -125,6 +128,14 @@ function buildStyledWorkbookBuffer(spec) {
         cell.border = { ...(cell.border || {}), bottom: { style: 'thin' } };
         cell.alignment = { ...(cell.alignment || {}), horizontal: 'right' };
       }
+      // Header labels follow alignCols when given, so a text column's heading
+      // sits over its values instead of defaulting to right.
+      for (const key of Object.keys(alignCols)) {
+        const c = Number(key);
+        if (!Number.isInteger(c) || c < 0 || c >= n) continue;
+        const cell = ws.getCell(r + 1, c + 1);
+        cell.alignment = { ...(cell.alignment || {}), horizontal: alignCols[key] };
+      }
     }
     if (boldRows.has(r) || underlineRows.has(r) || doubleRows.has(r)) {
       for (let c = 0; c < n; c++) font(r, c, { bold: true });
@@ -134,6 +145,16 @@ function buildStyledWorkbookBuffer(spec) {
     if (indentByRow.has(r)) {
       const cell = ws.getCell(r + 1, 1);
       cell.alignment = { ...(cell.alignment || {}), indent: indentByRow.get(r) };
+    }
+    // Per-column horizontal alignment on data rows only. Header rows keep their
+    // own right-alignment on amount columns; title/meta rows are left as-is.
+    if (!titleRows.has(r) && !metaRows.has(r) && !headerRows.has(r)) {
+      for (const key of Object.keys(alignCols)) {
+        const c = Number(key);
+        if (!Number.isInteger(c) || c < 0 || c >= n) continue;
+        const cell = ws.getCell(r + 1, c + 1);
+        cell.alignment = { ...(cell.alignment || {}), horizontal: alignCols[key] };
+      }
     }
   });
 

@@ -2940,7 +2940,7 @@ function ChartOfAccounts({entityId,entityName,canEdit}){const[accounts,setAccoun
     const d=[[entityName||'Chart of Accounts'],['Chart of Accounts'],['As of '+asOf],[],['Code','Name','Type','Bank/Cash']];
     list.forEach(a=>d.push([a.code,a.name,a.type,a.bank_acct?'Yes':'']));
     exportToExcel(d,'Chart_of_Accounts_'+asOf+'.xlsx',{plainCols:[0],style:{
-      titleRows:[0],metaRows:[1,2],headerRows:[4],
+      titleRows:[0],metaRows:[1,2],headerRows:[4],alignCols:{0:'center',1:'left',2:'center',3:'center'},
     }});
   };
   return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}><div><div style={S.h1}>Chart of Accounts</div><div style={S.sub}>{accounts.length} accounts</div></div>
