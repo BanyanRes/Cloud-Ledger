@@ -595,6 +595,26 @@ export const api = {
     const blob = await res.blob();
     return { blob, filename, summary };
   },
+  // Excel version of the statement package — mirrors the PDF formatting, one
+  // worksheet per statement. GET (no uploads); returns a downloadable .xlsx blob.
+  financialStatementsExcel: async (eid, asOf, period) => {
+    const token = getToken();
+    const qs = 'as_of=' + encodeURIComponent(asOf) + '&period=' + encodeURIComponent(period || 'monthly');
+    const res = await fetch(API_BASE + '/workpapers/financial-statements/' + eid + '/excel?' + qs, {
+      method: 'GET', headers: token ? { Authorization: 'Bearer ' + token } : {},
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) {
+      let data = {}; try { data = await res.json(); } catch {}
+      throw new Error(data.error || 'Excel export failed');
+    }
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename=\"?([^\"]+)\"?/);
+    const filename = m ? m[1] : 'Financial_Statements.xlsx';
+    const blob = await res.blob();
+    return { blob, filename };
+  },
 
   // Workpapers › Insurance Allocation: upload the carrier billing invoice + the
   // consolidated billing report; the server computes the entity allocation,

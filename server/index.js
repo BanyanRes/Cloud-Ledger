@@ -22,6 +22,7 @@ const { saveRequisitionOutputs, saveBufferToWorkpapers: saveWpBuffer, ensureFold
 const reqDraft = require('./requisition_draft');
 const { computeAllocation, buildAllocationWorkbook } = require('./insurance_allocation');
 const financials = require('./financials');
+const financialsXlsx = require('./financials_xlsx');
 const execSummaries = require('./execSummaries');
 const ExcelJS = require('exceljs');
 const xlsxStyledReport = require('./xlsxStyledReport.js');
@@ -9824,6 +9825,35 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       res.status(500).json({ error: 'Generate error: ' + e.message });
     }
   });
+});
+
+// Excel export of the SAME GL-derived statements the PDF renders, formatted to
+// mirror the PDF: one worksheet per statement (Balance Sheet, Statements of
+// Operations, Statement of Cash Flows, Statement of Changes in Members' Equity),
+// same titles/headers/indentation/subtotal rules. Built from buildStatements()
+// so the numbers are identical to the PDF by construction.
+app.get('/api/workpapers/financial-statements/:entity_id/excel', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  try {
+    const eid = req.params.entity_id;
+    const asOf = req.query && req.query.as_of;
+    const period = (req.query && req.query.period) || 'monthly';
+    if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
+    const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
+    const entityName = ent ? ent.name : ('Entity ' + eid);
+    const entityCode = ent ? ent.code : '';
+    const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
+    const statements = await financials.buildStatements(getBalances, { asOf, period, entityName, entityCode });
+    const buf = await financialsXlsx.buildStatementsWorkbook(statements);
+    const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
+    const safeName = entityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const fname = safeName + '_Financial_Statements_' + mm + '_' + yyyy + '.xlsx';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
+    res.setHeader('X-Financials-Summary', JSON.stringify({ checks: statements.checks }).replace(/[\r\n]/g, ' '));
+    res.send(Buffer.from(buf));
+  } catch (e) {
+    res.status(500).json({ error: 'Excel export error: ' + e.message });
+  }
 });
 
 // Extract plain text per page from a PDF buffer (for entity matching). Lazy pdfjs.

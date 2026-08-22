@@ -5147,6 +5147,15 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
       setResult(out.summary||{});
     }catch(e){setErr(e.message);}finally{setGen(false);}
   };
+  const[xls,setXls]=useState(false);
+  const exportExcel=async()=>{
+    setErr('');setXls(true);
+    try{
+      const out=await api.financialStatementsExcel(entityId,asOf,period);
+      if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
+    }catch(e){setErr(e.message);}finally{setXls(false);}
+  };
   const periods=[['monthly','Monthly'],['quarterly','Quarterly'],['annually','Annually']];
   const tieOk=preview&&preview.checks&&preview.checks.balanceSheetTies;
   const cfTie=preview&&preview.checks&&preview.checks.cashFlowTies;
@@ -5209,6 +5218,7 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
 
     <div style={{display:'flex',gap:10,alignItems:'center'}}>
       <button style={{...S.btnP,opacity:(gen||!preview)?0.6:1}} disabled={gen||!preview||!canEdit} onClick={generate}>{gen?'Generating…':'Generate financial statements PDF'}</button>
+      <button style={{...S.btnExport,opacity:(xls||!preview)?0.6:1}} disabled={xls||!preview} onClick={exportExcel}>{xls?'Exporting…':'Export Excel'}</button>
     </div>
 
     {result&&<div style={{...S.card,marginTop:16,borderColor:T.green+'55'}}>
