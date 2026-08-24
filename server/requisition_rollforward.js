@@ -27,6 +27,17 @@ const { cellNum, cellStr, cellFormula, COL, applyInvoiceCols, isDevFeeLabel, log
 // ranges track the DETECTED amount column instead of a hard-coded letter
 // (templates without a GL column put Amount in H, not I).
 function colLetter(n) { let s = ''; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s || 'A'; }
+
+// Last column the Prior-Log rebuild treats as "row content": the sheet's actual
+// width, floored at 11 (the historical mapped-column band) and capped at 26 so a
+// stray far-off cell can't blow the loop out. This is what lets trailing note
+// columns — notably Column M (13) historical notes — be captured into passthrough
+// on read and cleared on rebuild, so a note travels WITH its transaction instead
+// of being stranded at the row the transaction used to occupy.
+function passLastCol(ws) {
+  const w = Math.max((ws && ws.actualColumnCount) || 0, (ws && ws.columnCount) || 0, 11);
+  return Math.min(w, 26);
+}
 const { learnDevFeeSpec, applyDevFeeSpec } = require('./requisition_devfee.js');
 
 // Resolve a worksheet by name tolerantly: exact match first, then a
@@ -198,13 +209,17 @@ function readRowCells(ws, r) {
     }
     return c.value;
   };
-  // Preserve any UNMAPPED columns within the cleared region (1-11) verbatim so
-  // layouts with extra columns survive the fold. Braker's logs carry a "Budget
-  // Code" column (C) that the Budget-to-Actual SUMIFs match on; without this it
-  // would be blanked on every rolled-forward row and the B2A would zero out.
+  // Preserve any UNMAPPED columns verbatim so layouts with extra columns survive
+  // the fold. Braker's logs carry a "Budget Code" column (C) that the
+  // Budget-to-Actual SUMIFs match on; without this it would be blanked on every
+  // rolled-forward row and the B2A would zero out. The scan runs to the sheet's
+  // actual width (floor 11) so trailing note columns — e.g. Column M historical
+  // notes — are captured and travel WITH their row when the log is rebuilt row by
+  // row, instead of being stranded at their old coordinate as the row moves.
   const _mapped = new Set([COL.cat, COL.code, COL.bankcat, COL.gl, COL.name, COL.vendor, COL.bill, COL.amount, COL.req, COL.date]);
   const passthrough = {};
-  for (let c = 1; c <= 11; c++) {
+  const _lastCol = passLastCol(ws);
+  for (let c = 1; c <= _lastCol; c++) {
     if (_mapped.has(c)) continue;
     const v = get(c);
     if (v !== null && v !== undefined && v !== '') passthrough[c] = v;
@@ -651,10 +666,15 @@ function hideZeroAmountRows(ws) {
 
 function rebuildPriorLog(nextPriorWs, priorGroups, curByCode, opts = {}) {
   const _ds = logDataStart(nextPriorWs);
-  // Clear existing data region (keep header rows 1-2).
+  // Clear existing data region (keep header rows 1-2). Clear out to the sheet's
+  // actual width (passLastCol) rather than a fixed 11 so a note in a trailing
+  // column (e.g. Column M) left by the OLD row layout is wiped before the rebuild
+  // rewrites notes at their transactions' new positions — otherwise a stale note
+  // could linger beside an unrelated row.
   const existingLast = Math.max(nextPriorWs.rowCount || 0, nextPriorWs.actualRowCount || 0);
+  const _clearLast = passLastCol(nextPriorWs);
   for (let r = _ds; r <= existingLast; r++) {
-    for (let c = 1; c <= 11; c++) nextPriorWs.getCell(r, c).value = null;
+    for (let c = 1; c <= _clearLast; c++) nextPriorWs.getCell(r, c).value = null;
   }
 
   const landmarks = { groupSubtotalRow: {}, byLabel: {}, grandTotalRow: null };
