@@ -5916,8 +5916,9 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
           <span style={{fontSize:12,color:T.textMuted,marginLeft:8}}>{draft.as_of_date?('as of '+draft.as_of_date):''} · {(draft.invoices||[]).length} invoice{(draft.invoices||[]).length===1?'':'s'}</span></div>
         <div style={{fontSize:12,fontWeight:600,color:draft.recon_ok===false?T.orange:(draft.recon_ok?T.green:T.textMuted)}}>{draft.recon_ok===false?'\u26a0 Needs review':(draft.recon_ok?'\u2713 Balanced':'Not yet rolled')}</div>
       </div>
+      <div style={{fontSize:12,color:T.textMuted,marginTop:8}}>{(draft.invoices||[]).length===0?'Next: add this period’s invoices in the card below, then click Prepare to build the report.':(draft.recon_ok===false?'Reconciliation is off — fix the flagged invoices below and click Prepare again.':(draft.recon_ok===true?'Balanced. Review the report, then click Finalize to file it to Workpapers.':'Click Prepare to build the report from these invoices and check reconciliation.'))}</div>
       <div style={{display:'flex',gap:8,marginTop:12,flexWrap:'wrap'}}>
-        <button style={S.btnP} disabled={draftBusy} onClick={rollDraft}>{draftBusy?'Saving\u2026':'Save / re-roll'}</button>
+        <button style={S.btnP} disabled={draftBusy} onClick={rollDraft}>{draftBusy?'Preparing\u2026':'Prepare'}</button>
         <button style={S.btnS} disabled={draftBusy||!draft.has_output} onClick={downloadDraft}>Download current</button>
         <button style={{...S.btnP,background:T.green,borderColor:T.green}} disabled={draftBusy||!draft.has_output} onClick={()=>setFinConfirm(true)}>Finalize</button>
       </div>
