@@ -7743,7 +7743,10 @@ app.get('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin'
   const eid = parseInt(req.params.entity_id);
   try {
     // With a phase (?phase=) return that stream's open draft; without one, return
-    // all open drafts for the entity (drafts:[...]) so the UI can list Phase 2 / 2a.
+    // the full page state: all open drafts (drafts:[...]) so the UI can list
+    // Phase 2 / 2a, plus the reopenable finalized streams (finalized:[...]) — the
+    // LATEST finalized report per phase that has no open draft — so the page can
+    // offer "Reopen for edits" on exactly those.
     const ent = db.prepare('SELECT entity_type FROM entities WHERE id=?').get(eid) || {};
     const isRail = ent.entity_type === 'rail_assets';
     if (req.query.phase != null && req.query.phase !== '') {
@@ -7751,7 +7754,22 @@ app.get('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin'
       return res.json({ draft: draftForClient(db, draft), is_rail: isRail });
     }
     const all = reqDraft.getOpenDrafts(db, eid).map(d => draftForClient(db, d));
-    res.json({ draft: all[0] || null, drafts: all, is_rail: isRail });
+    // Latest finalized per phase, excluding any phase that has an open draft.
+    const openPhases = new Set(all.map(d => d.phase || ''));
+    const finRows = db.prepare(
+      "SELECT * FROM requisition_draft d WHERE entity_id=? AND status='finalized' " +
+      "AND finalized_at = (SELECT MAX(finalized_at) FROM requisition_draft x WHERE x.entity_id=d.entity_id AND x.status='finalized' AND IFNULL(x.phase,'')=IFNULL(d.phase,'')) " +
+      "ORDER BY IFNULL(phase,''), id DESC"
+    ).all(eid);
+    const seenPhase = new Set();
+    const finalized = [];
+    for (const r of finRows) {
+      const ph = r.phase || '';
+      if (seenPhase.has(ph) || openPhases.has(ph)) continue; // one per phase; skip if a draft is open
+      seenPhase.add(ph);
+      finalized.push(draftForClient(db, r));
+    }
+    res.json({ draft: all[0] || null, drafts: all, finalized, is_rail: isRail });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -8055,6 +8073,35 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
       packet: saved.packet ? saved.packet.original_name : null,
       forced: !(verification && verification.ok),
     });
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
+// Reopen the LATEST finalized requisition of a stream back into an editable
+// draft. Only the most-recent finalized report per (entity, phase) may be
+// reopened — never an older one that a newer req was already seeded from, which
+// would leave that newer req's base stale. The draft's invoices are still linked
+// by draft_id (finalize keeps them), so flipping status back to 'open' restores
+// the full editable set; re-finalizing replaces the filed copy in place.
+app.post('/api/requisition/:entity_id/draft/reopen', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const phase = reqDraft.normPhase(req.body.phase);
+  try {
+    // Guard: an open draft for this stream already exists — nothing to reopen.
+    if (reqDraft.getOpenDraft(db, eid, phase)) {
+      return res.status(409).json({ error: 'This stream already has an open draft.' });
+    }
+    // The latest finalized draft for this exact stream.
+    const latest = db.prepare(
+      "SELECT * FROM requisition_draft WHERE entity_id=? AND status='finalized' AND IFNULL(phase,'')=? ORDER BY finalized_at DESC, id DESC LIMIT 1"
+    ).get(eid, phase);
+    if (!latest) return res.status(404).json({ error: 'No finalized requisition to reopen for this stream.' });
+
+    // Flip it back to open. Keep output/packet blobs and recon state as-is; a
+    // subsequent Save/re-roll or Re-finalize regenerates them from the invoices.
+    db.prepare("UPDATE requisition_draft SET status='open', finalized_at=NULL, updated_at=? WHERE id=?")
+      .run(new Date().toISOString(), latest.id);
+    const draft = db.prepare('SELECT * FROM requisition_draft WHERE id=?').get(latest.id);
+    res.json({ draft: draftForClient(db, draft) });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
 

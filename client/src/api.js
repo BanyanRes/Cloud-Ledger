@@ -480,6 +480,8 @@ export const api = {
   rollRequisitionDraft: (eid, meta = {}) => request('/requisition/' + eid + '/draft/roll', { method: 'POST', body: { reqNumber: meta.reqNumber, asOfDate: meta.asOfDate, phase: meta.phase } }),
   downloadRequisitionDraftUrl: (eid, phase) => API_BASE + '/requisition/' + eid + '/draft/download?token=' + encodeURIComponent(getToken() || '') + (phase ? ('&phase=' + encodeURIComponent(phase)) : ''),
   finalizeRequisitionDraft: (eid, force = false, phase) => request('/requisition/' + eid + '/draft/finalize', { method: 'POST', body: { force, phase } }),
+  // Reopen the latest finalized requisition of a stream back into an editable draft.
+  reopenRequisitionDraft: (eid, phase) => request('/requisition/' + eid + '/draft/reopen', { method: 'POST', body: { phase } }),
 
   // Workpapers › Management Fee: analyze a prior-quarter workbook, then generate
   // the next quarter as a downloadable .xlsx.
