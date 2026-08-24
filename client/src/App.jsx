@@ -5569,13 +5569,17 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const[ftRows,setFtRows]=useState([]);// first-time setup: one row per stream (upload + req #)
   const[ftAsOf,setFtAsOf]=useState('');// shared as-of date across first-time streams
   const[ftBusy,setFtBusy]=useState(false);const[ftErr,setFtErr]=useState('');
+  // Inline "+ Add phase" card (start a second stream after the first exists).
+  const[addingPhase,setAddingPhase]=useState(false);
+  const[apRow,setApRow]=useState({phase:'',file:null,reqNum:'',asOf:''});
+  const[apBusy,setApBusy]=useState(false);const[apErr,setApErr]=useState('');
   const reqDraftNormPhase=(p)=>String(p==null?'':p).trim().replace(/^phase\s*/i,'').trim();
   const[finConfirm,setFinConfirm]=useState(false);
   const[uploadConflict,setUploadConflict]=useState(null);// {message, workbookFile, reqNumber, asOfDate}
   const loadDraft=async(phaseArg)=>{const ph=phaseArg!==undefined?phaseArg:activePhase;let rail=false;let openList=[];let finList=[];try{const r=await api.getRequisitionDraft(entityId,ph||undefined);rail=!!(r&&r.is_rail);setIsRail(rail);if(ph){setDraft(r&&r.draft);}else{openList=(r&&r.drafts)||[];finList=(r&&r.finalized)||[];setDraftList(openList);setFinalizedList(finList);const cur=openList.find(d=>(d.phase||'')===(activePhase||''));setDraft(cur||openList[0]||null);if(cur)setActivePhase(cur.phase||'');else if(openList[0])setActivePhase(openList[0].phase||'');}}catch(e){setDraft(null);}try{const s=await api.getRequisitionSeedSource(entityId,ph||undefined);setSeedSource(s?s.source:null);if(s&&typeof s.is_rail==='boolean'){rail=s.is_rail;setIsRail(s.is_rail);}}catch{setSeedSource(null);}if(!ph){const nothingYet=openList.length===0&&finList.length===0;if(nothingYet){setFtRows(rail?[{phase:'2',file:null,reqNum:''},{phase:'2a',file:null,reqNum:''}]:[{phase:'',file:null,reqNum:''}]);}}};
   // Switch the shown stream (rail phase) and load that draft.
   const switchPhase=async(ph)=>{setActivePhase(ph);setDraftMsg('');setDraftErr('');await loadDraft(ph);};
-  useEffect(()=>{setDraft(null);setSeedSource(undefined);setDraftMsg('');setDraftErr('');setActivePhase('');setNewPhase('');setDraftList([]);setFinalizedList([]);setFtRows([]);setFtAsOf('');setFtErr('');loadDraft('');// eslint-disable-next-line
+  useEffect(()=>{setDraft(null);setSeedSource(undefined);setDraftMsg('');setDraftErr('');setActivePhase('');setNewPhase('');setDraftList([]);setFinalizedList([]);setFtRows([]);setFtAsOf('');setFtErr('');setAddingPhase(false);setApErr('');loadDraft('');// eslint-disable-next-line
   },[entityId]);
   const startDraft=async(baseChoice)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const wf=uploadConflict?uploadConflict.workbookFile:(rfFile||undefined);const ph=isRail?(newPhase||'').trim():'';const r=await api.createRequisitionDraft(entityId,{workbookFile:wf,reqNumber:rfReqNum||undefined,asOfDate:rfAsOf||undefined,baseChoice,phase:ph||undefined});if(ph)setActivePhase(reqDraftNormPhase(ph));setDraft(r&&r.draft);setUploadConflict(null);setDraftMsg('Draft started.');}catch(e){if(e.detail&&e.detail.error==='upload_matches_filed'){setUploadConflict({message:e.detail.message,workbookFile:rfFile});}else{setDraftErr(e.message);}}finally{setDraftBusy(false);}};
   const rollDraft=async()=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const r=await api.rollRequisitionDraft(entityId,{reqNumber:rfReqNum||undefined,asOfDate:rfAsOf||undefined,phase:activePhase||undefined});setDraft(r&&r.draft);setDraftMsg(r&&r.ok?'Saved — reconciled.':'Saved — needs review (reconciliation not balanced).');}catch(e){setDraftErr(e.message);}finally{setDraftBusy(false);}};
@@ -5583,6 +5587,11 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const finalizeDraft=async(force)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const r=await api.finalizeRequisitionDraft(entityId,!!force,activePhase||undefined);setFinConfirm(false);setDraftMsg('Finalized and filed to Workpapers → '+(r.folder||'')+'.');setActivePhase('');await loadDraft('');}catch(e){if(e.detail&&e.detail.ok===false){setDraftErr('Reconciliation not balanced. Fix the invoices and re-save, or finalize anyway.');}else{setDraftErr(e.message);}}finally{setDraftBusy(false);}};
   const setFtRow=(i,patch)=>setFtRows(rows=>rows.map((r,ix)=>ix===i?{...r,...patch}:r));
   const createFirstTime=async()=>{setFtErr('');const ready=ftRows.filter(r=>r.file);if(!ready.length){setFtErr('Upload at least one prior workbook to start.');return;}if(!ftAsOf){setFtErr('Enter the as-of date.');return;}setFtBusy(true);try{let firstPhase=null;for(const r of ready){await api.createRequisitionDraft(entityId,{workbookFile:r.file,reqNumber:r.reqNum||undefined,asOfDate:ftAsOf,phase:(isRail?(r.phase||'').trim():'')||undefined});if(firstPhase==null)firstPhase=isRail?reqDraftNormPhase(r.phase):'';}setActivePhase(firstPhase||'');setDraftMsg('Requisition draft'+(ready.length>1?'s':'')+' created.');await loadDraft(firstPhase||'');}catch(e){setFtErr(e.message);}finally{setFtBusy(false);}};
+  // Suggest the next phase label (2 -> 2a) when opening the add-phase card.
+  const openAddPhase=()=>{const have=new Set([...draftList,...finalizedList].map(d=>reqDraftNormPhase(d.phase||'')));const guess=have.has('2')&&!have.has('2a')?'2a':(have.has('2a')&&!have.has('2')?'2':'');setApRow({phase:guess,file:null,reqNum:'',asOf:ftAsOf||''});setApErr('');setAddingPhase(true);};
+  const createAddedPhase=async()=>{setApErr('');if(!apRow.file){setApErr('Choose the prior workbook for this phase.');return;}if(!apRow.asOf){setApErr('Enter the as-of date.');return;}const ph=reqDraftNormPhase(apRow.phase);if(isRail&&!ph){setApErr('Enter the phase # (e.g. 2a).');return;}
+    const dup=[...draftList,...finalizedList].some(d=>reqDraftNormPhase(d.phase||'')===ph);if(dup){setApErr('Phase '+ph+' already exists.');return;}
+    setApBusy(true);try{await api.createRequisitionDraft(entityId,{workbookFile:apRow.file,reqNumber:apRow.reqNum||undefined,asOfDate:apRow.asOf,phase:ph||undefined});setAddingPhase(false);setActivePhase(ph||'');setDraftMsg('Phase '+ph+' draft created.');await loadDraft(ph||'');}catch(e){setApErr(e.message);}finally{setApBusy(false);}};
   const reopenDraft=async(phase)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const r=await api.reopenRequisitionDraft(entityId,phase||undefined);setActivePhase(phase||'');setDraft(r&&r.draft);setDraftMsg('Reopened for edits — change invoices and re-finalize.');await loadDraft(phase||'');}catch(e){setDraftErr(e.message);}finally{setDraftBusy(false);}};
   // Cost-code -> name parsed straight from the uploaded prior workbook's
   // "Prior Invoice Log" (col C = Cost Code #, col F = Cost Code Name). This is
@@ -5846,14 +5855,33 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     {isRail&&(draftList.length>0||finalizedList.length>0)&&<div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12,flexWrap:'wrap'}}>
       <span style={{fontSize:12,color:T.textMuted}}>Stream:</span>
       {[...draftList,...finalizedList].map(d=><button key={(d.phase||'')+'-'+d.id} onClick={()=>switchPhase(d.phase||'')} style={{...S.btnS,padding:'4px 12px',fontSize:12,background:(activePhase||'')===(d.phase||'')?T.accentDim:'transparent',color:(activePhase||'')===(d.phase||'')?T.accent:T.textMuted,borderColor:(activePhase||'')===(d.phase||'')?T.accent:T.border}}>{d.phase?('Phase '+d.phase):'Requisition'}</button>)}
+      {!addingPhase&&<button onClick={openAddPhase} style={{...S.btnS,padding:'4px 12px',fontSize:12,color:T.green,borderColor:T.green,borderStyle:'dashed'}}>+ Add phase</button>}
+    </div>}
+    {addingPhase&&<div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+T.green}}>
+      <div style={{...S.h2,marginBottom:4}}>Add a phase</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:12,lineHeight:1.6}}>Start another requisition stream for this entity. Upload that phase&#39;s last finalized workbook &mdash; it becomes the base going forward, and auto-seeds every month after the first finalize.</div>
+      <div style={{display:'flex',flexWrap:'wrap',gap:12,alignItems:'flex-end',marginBottom:12}}>
+        <div><label style={S.label}>Phase</label><input style={{...S.input,width:80,textAlign:'center'}} type="text" placeholder="2a" value={apRow.phase} onChange={e=>setApRow(p=>({...p,phase:e.target.value}))}/></div>
+        <div style={{position:'relative',display:'inline-block',overflow:'hidden'}}>
+          <button style={{...S.btnS,pointerEvents:'none'}}>{apRow.file?'Change file':'Choose .xlsx'}</button>
+          <input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:'pointer'}} onChange={e=>{const f=e.target.files[0];e.target.value='';if(f)setApRow(p=>({...p,file:f}));}}/></div>
+        <div><label style={S.label}>New req #</label><input style={{...S.input,maxWidth:120}} type="number" placeholder="e.g. 10" value={apRow.reqNum} onChange={e=>setApRow(p=>({...p,reqNum:e.target.value}))}/></div>
+        <div><label style={S.label}>As-of date</label><input style={{...S.input,maxWidth:170}} type="date" value={apRow.asOf} onChange={e=>setApRow(p=>({...p,asOf:e.target.value}))}/></div>
+      </div>
+      <div style={{fontSize:11,color:apRow.file?T.textBright:T.textMuted,marginBottom:10}}>{apRow.file?apRow.file.name:'No file selected'}</div>
+      {apErr&&<div style={{...S.err,padding:8,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'6px 0'}}>{apErr}</div>}
+      <div style={{display:'flex',gap:8}}>
+        <button style={S.btnP} disabled={apBusy} onClick={createAddedPhase}>{apBusy?'Creating…':'Create phase draft'}</button>
+        <button style={{...S.btnS,color:T.textMuted}} disabled={apBusy} onClick={()=>setAddingPhase(false)}>Cancel</button>
+      </div>
     </div>}
     {draftList.length===0&&finalizedList.length===0&&<div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+T.accent}}>
       <div style={{...S.h2,marginBottom:4}}>First-time requisition report</div>
-      <div style={{fontSize:12,color:T.textMuted,marginBottom:12,lineHeight:1.6}}>No prior report is on file. Upload the last finalized workbook for each phase &mdash; that becomes the base CloudLedger rolls forward. After the first finalize it auto-seeds every month, no more uploads.</div>
-      {isRail&&<div style={{display:'inline-flex',alignItems:'center',gap:6,background:T.accentDim,borderRadius:6,padding:'5px 10px',marginBottom:14,fontSize:12,color:T.accent,fontWeight:600}}>Rail asset &mdash; two requisition streams</div>}
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:12,lineHeight:1.6}}>No prior report is on file. Upload the last finalized workbook for a phase &mdash; that becomes the base CloudLedger rolls forward. You can start just one phase now and add the other later; only phases with a file are created. After the first finalize each auto-seeds every month, no more uploads.</div>
+      {isRail&&<div style={{display:'inline-flex',alignItems:'center',gap:6,background:T.accentDim,borderRadius:6,padding:'5px 10px',marginBottom:14,fontSize:12,color:T.accent,fontWeight:600}}>Rail asset &mdash; up to two requisition streams (each optional)</div>}
       <div style={{display:'flex',flexWrap:'wrap',gap:12,marginBottom:14}}>
         {ftRows.map((r,i)=><div key={i} style={{flex:'1 1 240px',border:'1px solid '+T.border,borderRadius:8,padding:14}}>
-          {isRail&&<div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}><span style={{fontSize:13,fontWeight:600,color:T.text}}>Phase</span><input style={{...S.input,width:60,textAlign:'center'}} type="text" value={r.phase} onChange={e=>setFtRow(i,{phase:e.target.value})}/></div>}
+          {isRail&&<div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}><span style={{fontSize:13,fontWeight:600,color:T.text}}>Phase</span><input style={{...S.input,width:60,textAlign:'center'}} type="text" value={r.phase} onChange={e=>setFtRow(i,{phase:e.target.value})}/>{i>0&&<span style={{fontSize:11,color:T.textMuted}}>(optional)</span>}</div>}
           <label style={S.label}>Prior workbook (.xlsx)</label>
           <div style={{position:'relative',display:'inline-block',overflow:'hidden',marginTop:4}}>
             <button style={{...S.btnS,pointerEvents:'none'}}>{r.file?'Change file':'Choose .xlsx'}</button>
@@ -5868,7 +5896,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         {isRail&&<span style={{fontSize:11,color:T.textMuted}}>applies to both phases</span>}
       </div>
       {ftErr&&<div style={{...S.err,padding:8,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'10px 0'}}>{ftErr}</div>}
-      <button style={{...S.btnP,marginTop:12}} disabled={ftBusy} onClick={createFirstTime}>{ftBusy?'Creating\u2026':'Create requisition draft'+(ftRows.filter(r=>r.file).length>1?'s':'')}</button>
+      <button style={{...S.btnP,marginTop:12}} disabled={ftBusy||ftRows.filter(r=>r.file).length===0} onClick={createFirstTime}>{ftBusy?'Creating\u2026':(ftRows.filter(r=>r.file).length>1?'Create 2 requisition drafts':'Create requisition draft')}</button>
     </div>}
     {(()=>{const fin=finalizedList.find(f=>(f.phase||'')===(activePhase||''))||(draftList.length===0?finalizedList[0]:null);if(!fin||draft)return null;return(
       <div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+T.green}}>
