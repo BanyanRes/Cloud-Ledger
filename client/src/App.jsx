@@ -5831,7 +5831,11 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16}}>
       <div><div style={S.h1}>Requisitions</div><div style={S.sub}>{entityName} &mdash; roll forward to the next requisition</div></div>
     </div>
-    {canEdit&&<div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+(draft?(draft.recon_ok===false?T.orange:(draft.recon_ok?T.green:T.accent)):T.border)}}>
+    {/* Draft card temporarily disabled pending redesign (upload/phase UX). The
+        editable-draft banner, phase switcher, and Start-a-requisition block are
+        gated off with `false&&` so the code is preserved but nothing renders;
+        the original Roll Forward card below is the active flow for now. */}
+    {false&&canEdit&&<div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+(draft?(draft.recon_ok===false?T.orange:(draft.recon_ok?T.green:T.accent)):T.border)}}>
       {isRail&&(draftList.length>0||activePhase)&&<div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10,flexWrap:'wrap'}}>
         <span style={{fontSize:12,color:T.textMuted}}>Stream:</span>
         {draftList.map(d=><button key={d.id} onClick={()=>switchPhase(d.phase||'')} style={{...S.btnS,padding:'4px 12px',fontSize:12,background:(activePhase||'')===(d.phase||'')?T.accentDim:'transparent',color:(activePhase||'')===(d.phase||'')?T.accent:T.textMuted,borderColor:(activePhase||'')===(d.phase||'')?T.accent:T.border}}>{d.phase?('Phase '+d.phase):'Requisition'}</button>)}
