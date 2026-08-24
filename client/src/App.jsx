@@ -5765,6 +5765,25 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     vendor:card.vendor||null,bill_number:card.bill||null,amount:card.amount!=null?String(card.amount):null,
     invoice_date:card.date||null,cost_code:card.cost_code||null,cost_code_name:card.cost_code_name||null,
   },activePhase||undefined);if(r&&r.draft)setDraft(r.draft);}catch(_e){/* keep local edit; surface on Prepare */}};
+  // Editable mirror of the DRAFT's own invoices (server truth). Keyed by the
+  // real invoice id. Re-synced whenever the draft reloads, so the list always
+  // shows the in-progress version as it actually is, on every visit.
+  const[invEdits,setInvEdits]=useState({});
+  useEffect(()=>{
+    const inv=(draft&&draft.invoices)||[];
+    const next={};
+    for(const r of inv){next[r.id]={cost_code:r.cost_code||'',cost_code_name:r.cost_code_name||'',vendor:r.vendor||'',bill:r.bill_number||'',amount:r.amount!=null?String(r.amount):'',date:r.invoice_date||''};}
+    setInvEdits(next);
+  },[draft&&draft.id,draft&&(draft.invoices||[]).length]);
+  const setInvField=(id,field,val)=>setInvEdits(m=>({...m,[id]:{...(m[id]||{}),[field]:val}}));
+  // Persist one draft invoice's edited values back to the draft.
+  const saveInv=async(id)=>{const e=invEdits[id];if(!e)return;try{const r=await api.updateRequisitionDraftInvoice(entityId,id,{
+    vendor:e.vendor||null,bill_number:e.bill||null,amount:e.amount!=null&&e.amount!==''?String(e.amount):null,
+    invoice_date:e.date||null,cost_code:e.cost_code||null,cost_code_name:e.cost_code_name||null,
+  },activePhase||undefined);if(r&&r.draft)setDraft(r.draft);}catch(_e){/* keep local edit */}};
+  // Remove one invoice from the draft.
+  const removeInv=async(id)=>{try{await api.deleteRequisitionDraftInvoice(entityId,id,activePhase||undefined);}catch(_e){}
+    try{await loadDraft(activePhase);}catch(_e){}};
   const updateCard=(id,field,val)=>setRfCards(cards=>cards.map(c=>{
     if(c._id!==id)return c;
     const next={...c,[field]:val};
@@ -5973,32 +5992,30 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         {rfReading>0&&<div style={{fontSize:12,color:T.accent,margin:'8px 0'}}>Reading {rfReading} invoice{rfReading===1?'':'s'}&hellip;</div>}
         {rfReadErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'8px 0'}}>{rfReadErr}</div>}
 
-        {rfCards.length>0&&<div style={{marginTop:14}}>
-          <div style={{fontSize:12,fontWeight:600,color:T.textMuted,marginBottom:8}}>Invoices read &middot; {rfCards.length}</div>
-          {rfCards.map((c,idx)=><div key={c._id} style={{border:'1px solid '+T.border,borderRadius:8,padding:'12px 14px',marginBottom:10,background:'#fff'}}>
+        {(draft&&(draft.invoices||[]).length>0)&&<div style={{marginTop:14}}>
+          <div style={{fontSize:12,fontWeight:600,color:T.textMuted,marginBottom:8}}>Invoices in this draft · {(draft.invoices||[]).length}</div>
+          {(draft.invoices||[]).map((c,idx)=>{const e=invEdits[c.id]||{cost_code:c.cost_code||'',cost_code_name:c.cost_code_name||'',vendor:c.vendor||'',bill:c.bill_number||'',amount:c.amount!=null?String(c.amount):'',date:c.invoice_date||''};return(
+          <div key={c.id} style={{border:'1px solid '+T.border,borderRadius:8,padding:'12px 14px',marginBottom:10,background:'#fff'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <div style={{display:'flex',alignItems:'center',gap:8}}>
                 <span style={{fontSize:11,color:T.textMuted}}>#{idx+1}</span>
-                <span style={{fontSize:11,color:T.textMuted,maxWidth:240,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{c.filename}</span>
+                <span style={{fontSize:11,color:T.textMuted,maxWidth:240,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{c.original_name||''}</span>
               </div>
-              <button style={{...S.btnD,padding:'4px 10px',fontSize:11}} onClick={()=>removeCard(c._id)}>Remove</button>
+              <button style={{...S.btnD,padding:'4px 10px',fontSize:11}} onClick={()=>removeInv(c.id)}>Remove</button>
             </div>
             <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-              <div style={{flex:'1 1 90px'}}><label style={S.label}>Cost Code</label><input style={S.input} value={c.cost_code} onChange={e=>updateCard(c._id,'cost_code',e.target.value)} onBlur={()=>persistCard(rfCards.find(x=>x._id===c._id))}/></div>
-              <div style={{flex:'2 1 160px'}}><label style={S.label}>Cost Code Name</label><input style={S.input} value={c.cost_code_name} onChange={e=>updateCard(c._id,'cost_code_name',e.target.value)} onBlur={()=>persistCard(rfCards.find(x=>x._id===c._id))}/></div>
-              {Object.values(wbBudgetMap).some(b=>b&&b.budget)&&(
-              <div style={{flex:'1 1 130px'}}><label style={S.label}>Budget Code</label><input style={S.input} value={c.budget_code||''} onChange={e=>updateCard(c._id,'budget_code',e.target.value)}/></div>
-              )}
-              <div style={{flex:'2 1 160px'}}><label style={S.label}>Vendor</label><input style={S.input} value={c.vendor} onChange={e=>updateCard(c._id,'vendor',e.target.value)} onBlur={()=>persistCard(rfCards.find(x=>x._id===c._id))}/></div>
-              <div style={{flex:'1 1 120px'}}><label style={S.label}>Bill #</label><input style={S.input} value={c.bill} onChange={e=>updateCard(c._id,'bill',e.target.value)} onBlur={()=>persistCard(rfCards.find(x=>x._id===c._id))}/></div>
-              <div style={{flex:'1 1 110px'}}><label style={S.label}>Amount</label><input style={S.input} value={c.amount} onChange={e=>updateCard(c._id,'amount',e.target.value)} onBlur={()=>persistCard(rfCards.find(x=>x._id===c._id))}/></div>
-              <div style={{flex:'1 1 120px'}}><label style={S.label}>Invoice Date</label><input style={S.input} type="date" value={c.date} onChange={e=>updateCard(c._id,'date',e.target.value)} onBlur={()=>persistCard(rfCards.find(x=>x._id===c._id))}/></div>
+              <div style={{flex:'1 1 90px'}}><label style={S.label}>Cost Code</label><input style={S.input} value={e.cost_code} onChange={ev=>setInvField(c.id,'cost_code',ev.target.value)} onBlur={()=>saveInv(c.id)}/></div>
+              <div style={{flex:'2 1 160px'}}><label style={S.label}>Cost Code Name</label><input style={S.input} value={e.cost_code_name} onChange={ev=>setInvField(c.id,'cost_code_name',ev.target.value)} onBlur={()=>saveInv(c.id)}/></div>
+              <div style={{flex:'2 1 160px'}}><label style={S.label}>Vendor</label><input style={S.input} value={e.vendor} onChange={ev=>setInvField(c.id,'vendor',ev.target.value)} onBlur={()=>saveInv(c.id)}/></div>
+              <div style={{flex:'1 1 120px'}}><label style={S.label}>Bill #</label><input style={S.input} value={e.bill} onChange={ev=>setInvField(c.id,'bill',ev.target.value)} onBlur={()=>saveInv(c.id)}/></div>
+              <div style={{flex:'1 1 110px'}}><label style={S.label}>Amount</label><input style={S.input} value={e.amount} onChange={ev=>setInvField(c.id,'amount',ev.target.value)} onBlur={()=>saveInv(c.id)}/></div>
+              <div style={{flex:'1 1 120px'}}><label style={S.label}>Invoice Date</label><input style={S.input} type="date" value={e.date} onChange={ev=>setInvField(c.id,'date',ev.target.value)} onBlur={()=>saveInv(c.id)}/></div>
             </div>
-          </div>)}
+          </div>);})}
         </div>}
 
         {rfErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'10px 0'}}>{rfErr}</div>}
-        {rfCards.length>0&&<div style={{fontSize:12,color:T.textMuted,marginTop:12}}>Saved to the draft. Click <strong>Prepare</strong> in the banner above to build the report.</div>}
+        {(draft&&(draft.invoices||[]).length>0)&&<div style={{fontSize:12,color:T.textMuted,marginTop:12}}>Reviewed and correct? Click <strong>Prepare</strong> in the banner above to build the report, then Finalize.</div>}
       </div>
 
       {false&&rfResult&&<div style={{...S.card,background:rfResult.forced?T.redDim:T.greenDim,borderColor:rfResult.forced?T.red+'40':T.greenBorder}}>
