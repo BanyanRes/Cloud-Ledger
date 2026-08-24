@@ -5722,8 +5722,23 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         // wins; only fall back to the per-code modal budget when the vendor seed
         // gave none (e.g. the code was typed by hand). Empty without the column.
         if(!budget&&cc){const b=wbBudgetMap[String(cc).trim()];if(b&&b.budget)budget=b.budget;}
+        const _localId=Date.now()+'-'+Math.random().toString(36).slice(2,7);
+        // Persist this invoice onto the open draft so the banner count + Prepare
+        // see it. OCR/coding already done above; send the same payload shape.
+        let _draftInvId=null;
+        try{
+          const _res=await api.addRequisitionDraftInvoice(entityId,{
+            vendor:r.vendor||null,bill_number:r.bill_number||null,
+            amount:r.amount!=null?String(r.amount):null,invoice_date:r.invoice_date||null,
+            cost_code:cc||null,cost_code_name:ccName||null,confidence:r.confidence||'new',
+            file_b64:r.file_b64||null,original_name:r.original_name||r.filename||f.name,mime_type:r.mime_type||f.type||null,
+          },activePhase||undefined);
+          _draftInvId=_res&&_res.id;
+          if(_res&&_res.draft)setDraft(_res.draft);
+        }catch(_e){setRfReadErr(_e.message);}
         setRfCards(cards=>[...cards,{
-          _id:Date.now()+'-'+Math.random().toString(36).slice(2,7),
+          _id:_localId,
+          draftInvId:_draftInvId,
           filename:r.filename||f.name,
           cost_code:cc,
           // Prefer the name from THIS workbook's cost-code catalog (authoritative
@@ -5745,6 +5760,11 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
       }catch(ex){setRfReadErr(ex.message);}
       finally{setRfReading(n=>Math.max(0,n-1));}
     }};
+  // Push a card's current values to its draft invoice (if it has been persisted).
+  const persistCard=async(card)=>{if(!card||!card.draftInvId)return;try{const r=await api.updateRequisitionDraftInvoice(entityId,card.draftInvId,{
+    vendor:card.vendor||null,bill_number:card.bill||null,amount:card.amount!=null?String(card.amount):null,
+    invoice_date:card.date||null,cost_code:card.cost_code||null,cost_code_name:card.cost_code_name||null,
+  },activePhase||undefined);if(r&&r.draft)setDraft(r.draft);}catch(_e){/* keep local edit; surface on Prepare */}};
   const updateCard=(id,field,val)=>setRfCards(cards=>cards.map(c=>{
     if(c._id!==id)return c;
     const next={...c,[field]:val};
@@ -5796,7 +5816,10 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
       return changed?next:cards;
     });
   },[wbCoaMap,wbBudgetMap,coaMap]);
-  const removeCard=id=>setRfCards(cards=>cards.filter(c=>c._id!==id));
+  const removeCard=async(id)=>{const card=(rfCards||[]).find(c=>c._id===id);
+    if(card&&card.draftInvId){try{await api.deleteRequisitionDraftInvoice(entityId,card.draftInvId,activePhase||undefined);}catch(_e){}
+      try{await loadDraft(activePhase);}catch(_e){}}
+    setRfCards(cards=>cards.filter(c=>c._id!==id));};
 
   const runRollForward=async(force=false)=>{
     if(!rfFile){setRfErr('Upload the prior requisition workbook (.xlsx) first.');return;}
@@ -5939,24 +5962,9 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     <div>
       <div style={S.card}>
         <div style={{...S.h2,marginBottom:6}}>Add this period's invoices</div>
-        <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>Upload the <strong>prior requisition workbook</strong> (.xlsx), then add this period's invoices one at a time below &mdash; each invoice is read automatically and its fields pre-filled for you to check. The engine folds the prior Current Invoice Log into the Prior Log, replaces the Current Log with these invoices, re-points cross-sheet references, and runs a reconciliation check before producing the next workbook. The result downloads automatically on success.</div>
+        <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>Drop this period's invoices below. Each is read automatically and its fields pre-filled for you to check, and saved to the draft as you go. When you're done, click <strong>Prepare</strong> in the banner above to build the report and check reconciliation.</div>
 
-        <div style={{marginBottom:14}}>
-          <label style={S.label}>Prior requisition workbook (.xlsx)</label>
-          <div style={{display:'flex',gap:10,alignItems:'center',marginTop:4}}>
-            <div style={{position:'relative',display:'inline-block',overflow:'hidden'}}>
-              <button style={{...S.btnS,pointerEvents:'none'}}>{rfFile?'Change file':'Choose .xlsx'}</button>
-              <input type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:'pointer'}} onChange={e=>{const f=e.target.files[0];e.target.value='';if(f){setRfFile(f);parseWorkbookCoaMap(f);}}}/></div>
-            <span style={{fontSize:12,color:rfFile?T.textBright:T.textMuted}}>{rfFile?rfFile.name:'No file selected'}</span>
-          </div>
-        </div>
-
-        <div style={S.row}>
-          <div style={{...S.col,flex:1}}><label style={S.label}>New Requisition #</label><input style={S.input} type="number" placeholder="e.g. 15" value={rfReqNum} onChange={e=>setRfReqNum(e.target.value)}/></div>
-          <div style={{...S.col,flex:1}}><label style={S.label}>As-of Date</label><input style={S.input} type="date" value={rfAsOf} onChange={e=>setRfAsOf(e.target.value)}/></div>
-        </div>
-
-        <label style={{...S.label,marginTop:6}}>This period's invoices</label>
+        <label style={{...S.label}}>This period's invoices</label>
         <div style={{position:'relative',border:'1.5px dashed '+T.border,borderRadius:T.radiusXs||8,padding:'22px 16px',textAlign:'center',background:T.bgElevated,marginTop:4}}>
           <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:2}}>Drop invoice PDFs here, or click to upload</div>
           <div style={{fontSize:11,color:T.textMuted}}>Multiple files at once is fine &mdash; each file is read as a separate invoice and its fields are pre-filled.</div>
@@ -5976,27 +5984,24 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
               <button style={{...S.btnD,padding:'4px 10px',fontSize:11}} onClick={()=>removeCard(c._id)}>Remove</button>
             </div>
             <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
-              <div style={{flex:'1 1 90px'}}><label style={S.label}>Cost Code</label><input style={S.input} value={c.cost_code} onChange={e=>updateCard(c._id,'cost_code',e.target.value)}/></div>
-              <div style={{flex:'2 1 160px'}}><label style={S.label}>Cost Code Name</label><input style={S.input} value={c.cost_code_name} onChange={e=>updateCard(c._id,'cost_code_name',e.target.value)}/></div>
+              <div style={{flex:'1 1 90px'}}><label style={S.label}>Cost Code</label><input style={S.input} value={c.cost_code} onChange={e=>updateCard(c._id,'cost_code',e.target.value)} onBlur={()=>persistCard(rfCards.find(x=>x._id===c._id))}/></div>
+              <div style={{flex:'2 1 160px'}}><label style={S.label}>Cost Code Name</label><input style={S.input} value={c.cost_code_name} onChange={e=>updateCard(c._id,'cost_code_name',e.target.value)} onBlur={()=>persistCard(rfCards.find(x=>x._id===c._id))}/></div>
               {Object.values(wbBudgetMap).some(b=>b&&b.budget)&&(
               <div style={{flex:'1 1 130px'}}><label style={S.label}>Budget Code</label><input style={S.input} value={c.budget_code||''} onChange={e=>updateCard(c._id,'budget_code',e.target.value)}/></div>
               )}
-              <div style={{flex:'2 1 160px'}}><label style={S.label}>Vendor</label><input style={S.input} value={c.vendor} onChange={e=>updateCard(c._id,'vendor',e.target.value)}/></div>
-              <div style={{flex:'1 1 120px'}}><label style={S.label}>Bill #</label><input style={S.input} value={c.bill} onChange={e=>updateCard(c._id,'bill',e.target.value)}/></div>
-              <div style={{flex:'1 1 110px'}}><label style={S.label}>Amount</label><input style={S.input} value={c.amount} onChange={e=>updateCard(c._id,'amount',e.target.value)}/></div>
-              <div style={{flex:'1 1 120px'}}><label style={S.label}>Invoice Date</label><input style={S.input} type="date" value={c.date} onChange={e=>updateCard(c._id,'date',e.target.value)}/></div>
+              <div style={{flex:'2 1 160px'}}><label style={S.label}>Vendor</label><input style={S.input} value={c.vendor} onChange={e=>updateCard(c._id,'vendor',e.target.value)} onBlur={()=>persistCard(rfCards.find(x=>x._id===c._id))}/></div>
+              <div style={{flex:'1 1 120px'}}><label style={S.label}>Bill #</label><input style={S.input} value={c.bill} onChange={e=>updateCard(c._id,'bill',e.target.value)} onBlur={()=>persistCard(rfCards.find(x=>x._id===c._id))}/></div>
+              <div style={{flex:'1 1 110px'}}><label style={S.label}>Amount</label><input style={S.input} value={c.amount} onChange={e=>updateCard(c._id,'amount',e.target.value)} onBlur={()=>persistCard(rfCards.find(x=>x._id===c._id))}/></div>
+              <div style={{flex:'1 1 120px'}}><label style={S.label}>Invoice Date</label><input style={S.input} type="date" value={c.date} onChange={e=>updateCard(c._id,'date',e.target.value)} onBlur={()=>persistCard(rfCards.find(x=>x._id===c._id))}/></div>
             </div>
           </div>)}
         </div>}
 
         {rfErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'10px 0'}}>{rfErr}</div>}
-        <div style={{display:'flex',gap:10,marginTop:12,alignItems:'center'}}>
-          <button style={S.btnP} disabled={rfBusy||rfCards.length===0} onClick={runRollForward}>{rfBusy?'Rolling forward...':'Roll Forward & Download'+(rfCards.length?' ('+rfCards.length+')':'')}</button>
-          {(rfCards.length>0||rfFile)&&<button style={S.btnS} disabled={rfBusy} onClick={clearReq}>Cancel</button>}
-        </div>
+        {rfCards.length>0&&<div style={{fontSize:12,color:T.textMuted,marginTop:12}}>Saved to the draft. Click <strong>Prepare</strong> in the banner above to build the report.</div>}
       </div>
 
-      {rfResult&&<div style={{...S.card,background:rfResult.forced?T.redDim:T.greenDim,borderColor:rfResult.forced?T.red+'40':T.greenBorder}}>
+      {false&&rfResult&&<div style={{...S.card,background:rfResult.forced?T.redDim:T.greenDim,borderColor:rfResult.forced?T.red+'40':T.greenBorder}}>
         <div style={{fontWeight:700,color:rfResult.forced?T.red:T.green,marginBottom:8}}>{rfResult.forced?'Forced roll-forward':'Roll-forward complete'} &mdash; {rfResult.filename} downloaded</div>
         <div style={{fontSize:12,color:T.text,marginBottom:10}}>{rfResult.count} current-period invoice line{rfResult.count===1?'':'s'} folded forward. {rfResult.forced?'This file was produced despite a failed required check \u2014 review and hand-correct the flagged lines below before relying on it.':'Reconciliation checks passed:'}</div>
         {rfResult.summary&&<div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
