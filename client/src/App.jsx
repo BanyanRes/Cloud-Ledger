@@ -5901,9 +5901,9 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     {(()=>{const fin=finalizedList.find(f=>(f.phase||'')===(activePhase||''))||(draftList.length===0?finalizedList[0]:null);if(!fin||draft)return null;return(
       <div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+T.green}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:10}}>
-          <div><span style={{fontSize:14,fontWeight:600,color:T.text}}>Req {fin.req_number!=null?('#'+fin.req_number):''}{fin.phase?(' \u00b7 Phase '+fin.phase):''}</span>
-            <span style={{fontSize:12,color:T.textMuted,marginLeft:8}}>{fin.as_of_date?('as of '+fin.as_of_date):''} \u00b7 {(fin.invoices||[]).length} invoice{(fin.invoices||[]).length===1?'':'s'}</span></div>
-          <span style={{fontSize:12,fontWeight:600,color:T.green}}>\u2713 Finalized</span>
+          <div><span style={{fontSize:14,fontWeight:600,color:T.text}}>Req {fin.req_number!=null?('#'+fin.req_number):''}{fin.phase?(' · Phase '+fin.phase):''}</span>
+            <span style={{fontSize:12,color:T.textMuted,marginLeft:8}}>{fin.as_of_date?('as of '+fin.as_of_date):''} · {(fin.invoices||[]).length} invoice{(fin.invoices||[]).length===1?'':'s'}</span></div>
+          <span style={{fontSize:12,fontWeight:600,color:T.green}}>✓ Finalized</span>
         </div>
         <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Filed to Workpapers. Reopen to change invoices and re-finalize &mdash; the filed copy for this period is replaced.</div>
         <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
@@ -5912,8 +5912,8 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
       </div>);})()}
     {draft&&<div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+(draft.recon_ok===false?T.orange:(draft.recon_ok?T.green:T.accent))}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
-        <div><span style={{fontSize:14,fontWeight:600,color:T.text}}>Draft Req {draft.req_number!=null?('#'+draft.req_number):''}{draft.phase?(' \u00b7 Phase '+draft.phase):''}</span>
-          <span style={{fontSize:12,color:T.textMuted,marginLeft:8}}>{draft.as_of_date?('as of '+draft.as_of_date):''} \u00b7 {(draft.invoices||[]).length} invoice{(draft.invoices||[]).length===1?'':'s'}</span></div>
+        <div><span style={{fontSize:14,fontWeight:600,color:T.text}}>Draft Req {draft.req_number!=null?('#'+draft.req_number):''}{draft.phase?(' · Phase '+draft.phase):''}</span>
+          <span style={{fontSize:12,color:T.textMuted,marginLeft:8}}>{draft.as_of_date?('as of '+draft.as_of_date):''} · {(draft.invoices||[]).length} invoice{(draft.invoices||[]).length===1?'':'s'}</span></div>
         <div style={{fontSize:12,fontWeight:600,color:draft.recon_ok===false?T.orange:(draft.recon_ok?T.green:T.textMuted)}}>{draft.recon_ok===false?'\u26a0 Needs review':(draft.recon_ok?'\u2713 Balanced':'Not yet rolled')}</div>
       </div>
       <div style={{display:'flex',gap:8,marginTop:12,flexWrap:'wrap'}}>
