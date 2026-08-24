@@ -5877,7 +5877,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     </div>}
     {draftList.length===0&&finalizedList.length===0&&<div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+T.accent}}>
       <div style={{...S.h2,marginBottom:4}}>First-time requisition report</div>
-      <div style={{fontSize:12,color:T.textMuted,marginBottom:12,lineHeight:1.6}}>No prior report is on file. Upload the last finalized workbook for a phase &mdash; that becomes the base CloudLedger rolls forward. You can start just one phase now and add the other later; only phases with a file are created. After the first finalize each auto-seeds every month, no more uploads.</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:12,lineHeight:1.6}}>{isRail?'No prior report is on file. Upload the last finalized workbook for a phase — that becomes the base CloudLedger rolls forward. You can start just one phase now and add the other later; only phases with a file are created. After the first finalize each auto-seeds every month, no more uploads.':'No prior report is on file. Upload the last finalized requisition workbook — that becomes the base CloudLedger rolls forward. After the first finalize it auto-seeds every month, no more uploads.'}</div>
       {isRail&&<div style={{display:'inline-flex',alignItems:'center',gap:6,background:T.accentDim,borderRadius:6,padding:'5px 10px',marginBottom:14,fontSize:12,color:T.accent,fontWeight:600}}>Rail asset &mdash; up to two requisition streams (each optional)</div>}
       <div style={{display:'flex',flexWrap:'wrap',gap:12,marginBottom:14}}>
         {ftRows.map((r,i)=><div key={i} style={{flex:'1 1 240px',border:'1px solid '+T.border,borderRadius:8,padding:14}}>
