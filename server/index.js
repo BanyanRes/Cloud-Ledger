@@ -7771,6 +7771,11 @@ app.get('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin'
       const ph = r.phase || '';
       if (seenPhase.has(ph) || openPhases.has(ph)) continue; // one per phase; skip if a draft is open
       seenPhase.add(ph);
+      // Folder is the source of truth: only surface this phase as finalized if its
+      // report file is actually present in Workpapers (same lookup seeding uses).
+      let hasFile = false;
+      try { hasFile = !!reqDraft.resolveAutoSeed(db, WORKPAPERS_DIR, eid, ph); } catch (_) { hasFile = false; }
+      if (!hasFile) continue;
       finalized.push(draftForClient(db, r));
     }
     res.json({ draft: all[0] || null, drafts: all, finalized, is_rail: isRail });
