@@ -7771,12 +7771,15 @@ app.get('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin'
       const ph = r.phase || '';
       if (seenPhase.has(ph) || openPhases.has(ph)) continue; // one per phase; skip if a draft is open
       seenPhase.add(ph);
-      // Folder is the source of truth: only surface this phase as finalized if its
-      // report file is actually present in Workpapers (same lookup seeding uses).
+      // Folder is the source of truth for SEEDING, but we still surface the
+      // finalized phase here so its card (and Reopen) stays reachable even when
+      // the filed report is missing/renamed. Flag file_missing so the UI can warn
+      // and so create-draft (which does require the file) is gated correctly.
       let hasFile = false;
       try { hasFile = !!reqDraft.resolveAutoSeed(db, WORKPAPERS_DIR, eid, ph); } catch (_) { hasFile = false; }
-      if (!hasFile) continue;
-      finalized.push(draftForClient(db, r));
+      const finClient = draftForClient(db, r);
+      finClient.file_missing = !hasFile;
+      finalized.push(finClient);
     }
     res.json({ draft: all[0] || null, drafts: all, finalized, is_rail: isRail });
   } catch (e) { res.status(500).json({ error: e.message }); }

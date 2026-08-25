@@ -5954,9 +5954,11 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
             <span style={{fontSize:12,color:T.textMuted,marginLeft:8}}>{fin.as_of_date?('as of '+fin.as_of_date):''} · {(fin.invoices||[]).length} invoice{(fin.invoices||[]).length===1?'':'s'}</span></div>
           <span style={{fontSize:12,fontWeight:600,color:T.green}}>✓ Finalized</span>
         </div>
-        <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Filed to Workpapers. Reopen to change invoices and re-finalize &mdash; the filed copy for this period is replaced.</div>
+        {fin.file_missing
+          ? <div style={{fontSize:12,color:T.orange,marginBottom:12,padding:'8px 10px',background:T.orangeDim,borderRadius:6,border:'1px solid '+T.orange+'40'}}>\u26a0 The filed report for this period isn\u2019t in Workpapers (it may have been moved, renamed, or deleted). CloudLedger seeds the next requisition from that file, so restore it \u2014 or Reopen and re-finalize to regenerate it \u2014 before starting the next one.</div>
+          : <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Filed to Workpapers. Reopen to change invoices and re-finalize \u2014 the filed copy for this period is replaced.</div>}
         <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-          <button style={S.btnP} disabled={draftBusy} onClick={()=>startNext(fin.phase||'')}>{draftBusy?'Starting\u2026':'Start next requisition'}</button>
+          <button style={S.btnP} disabled={draftBusy||fin.file_missing} onClick={()=>startNext(fin.phase||'')} title={fin.file_missing?'Restore or regenerate the filed report first':''}>{draftBusy?'Starting\u2026':'Start next requisition'}</button>
           <button style={S.btnS} disabled={draftBusy} onClick={()=>reopenDraft(fin.phase||'')}>{draftBusy?'Reopening\u2026':'Reopen for edits'}</button>
         </div>
       </div>);})()}
