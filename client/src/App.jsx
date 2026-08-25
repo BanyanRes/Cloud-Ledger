@@ -5576,6 +5576,8 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const[apBusy,setApBusy]=useState(false);const[apErr,setApErr]=useState('');
   const reqDraftNormPhase=(p)=>String(p==null?'':p).trim().replace(/^phase\s*/i,'').trim();
   const[finConfirm,setFinConfirm]=useState(false);
+  const[nextAsOfPhase,setNextAsOfPhase]=useState(null);// which finalized phase's 'start next' as-of prompt is open (null=closed)
+  const[nextAsOf,setNextAsOf]=useState('');// the as-of date entered for the next requisition
   const[showReview,setShowReview]=useState(false);
   const[hlInv,setHlInv]=useState(null);
   const jumpToInvoice=(id)=>{setHlInv(id);const el=document.getElementById('inv-'+id);if(el)el.scrollIntoView({behavior:'smooth',block:'center'});setTimeout(()=>setHlInv(null),2000);};
@@ -5596,7 +5598,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const createAddedPhase=async()=>{setApErr('');if(!apRow.file){setApErr('Choose the prior workbook for this phase.');return;}if(!apRow.asOf){setApErr('Enter the as-of date.');return;}const ph=reqDraftNormPhase(apRow.phase);if(isRail&&!ph){setApErr('Enter the phase # (e.g. 2a).');return;}
     const dup=[...draftList,...finalizedList].some(d=>reqDraftNormPhase(d.phase||'')===ph);if(dup){setApErr('Phase '+ph+' already exists.');return;}
     setApBusy(true);try{await api.createRequisitionDraft(entityId,{workbookFile:apRow.file,reqNumber:apRow.reqNum||undefined,asOfDate:apRow.asOf,phase:ph||undefined});setAddingPhase(false);setActivePhase(ph||'');setFinConfirm(false);setDraftMsg('Phase '+ph+' draft created.');await loadDraft(ph||'');}catch(e){setApErr(e.message);}finally{setApBusy(false);}};
-  const startNext=async(phase)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');setFinConfirm(false);try{const r=await api.createRequisitionDraft(entityId,{phase:phase||undefined});setActivePhase(phase||'');setDraft(r&&r.draft);setDraftMsg('Next requisition started \u2014 seeded from the filed report. Add this period\u2019s invoices, then Prepare.');await loadDraft(phase||'');}catch(e){setDraftErr(e.message);}finally{setDraftBusy(false);}};
+  const startNext=async(phase,asOf)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');setFinConfirm(false);try{const r=await api.createRequisitionDraft(entityId,{phase:phase||undefined,asOfDate:asOf||undefined});setActivePhase(phase||'');setDraft(r&&r.draft);setNextAsOfPhase(null);setNextAsOf('');setDraftMsg('Next requisition started \u2014 seeded from the filed report. Add this period\u2019s invoices, then Prepare.');await loadDraft(phase||'');}catch(e){setDraftErr(e.message);}finally{setDraftBusy(false);}};
   const reopenDraft=async(phase)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');setFinConfirm(false);try{const r=await api.reopenRequisitionDraft(entityId,phase||undefined);setActivePhase(phase||'');setDraft(r&&r.draft);setDraftMsg('Reopened for edits — change invoices and re-finalize.');await loadDraft(phase||'');}catch(e){setDraftErr(e.message);}finally{setDraftBusy(false);}};
   const discardDraft=async()=>{const n=(draft&&(draft.invoices||[]).length)||0;if(!confirm('Discard this in-progress requisition'+(n?(' and its '+n+' invoice'+(n===1?'':'s')):'')+'? This cannot be undone.'))return;setDraftBusy(true);setDraftErr('');setDraftMsg('');try{await api.discardRequisitionDraft(entityId,activePhase||undefined);setDraftMsg('Draft discarded.');setActivePhase('');await loadDraft('');}catch(e){setDraftErr(e.message);}finally{setDraftBusy(false);}};
   // Cost-code -> name parsed straight from the uploaded prior workbook's
@@ -5958,9 +5960,18 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
           ? <div style={{fontSize:12,color:T.orange,marginBottom:12,padding:'8px 10px',background:T.orangeDim,borderRadius:6,border:'1px solid '+T.orange+'40'}}>\u26a0 The filed report for this period isn\u2019t in Workpapers (it may have been moved, renamed, or deleted). CloudLedger seeds the next requisition from that file, so restore it \u2014 or Reopen and re-finalize to regenerate it \u2014 before starting the next one.</div>
           : <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Filed to Workpapers. Reopen to change invoices and re-finalize \u2014 the filed copy for this period is replaced.</div>}
         <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-          <button style={S.btnP} disabled={draftBusy||fin.file_missing} onClick={()=>startNext(fin.phase||'')} title={fin.file_missing?'Restore or regenerate the filed report first':''}>{draftBusy?'Starting\u2026':'Start next requisition'}</button>
+          <button style={S.btnP} disabled={draftBusy||fin.file_missing} onClick={()=>{setNextAsOfPhase(fin.phase||'');setNextAsOf('');}} title={fin.file_missing?'Restore or regenerate the filed report first':''}>{draftBusy?'Starting\u2026':'Start next requisition'}</button>
           <button style={S.btnS} disabled={draftBusy} onClick={()=>reopenDraft(fin.phase||'')}>{draftBusy?'Reopening\u2026':'Reopen for edits'}</button>
         </div>
+        {nextAsOfPhase===(fin.phase||'')&&<div style={{marginTop:12,padding:14,background:T.bgElevated,borderRadius:8,border:'1px solid '+T.border}}>
+          <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:4}}>Report date for the next requisition</div>
+          <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>Enter the period-end (as-of) date for this requisition report. This date is used in the report and its filename.</div>
+          <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+            <input type="date" style={S.inputSm} value={nextAsOf} onChange={e=>setNextAsOf(e.target.value)}/>
+            <button style={{...S.btnP}} disabled={draftBusy||!nextAsOf} onClick={()=>startNext(fin.phase||'',nextAsOf)}>{draftBusy?'Starting\u2026':'Start requisition'}</button>
+            <button style={{...S.btnS,color:T.textMuted}} disabled={draftBusy} onClick={()=>{setNextAsOfPhase(null);setNextAsOf('');}}>Cancel</button>
+          </div>
+        </div>}
       </div>);})()}
     {draft&&<div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+(draft.recon_ok===false?T.orange:(draft.recon_ok?T.green:T.accent))}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
