@@ -5593,6 +5593,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     const dup=[...draftList,...finalizedList].some(d=>reqDraftNormPhase(d.phase||'')===ph);if(dup){setApErr('Phase '+ph+' already exists.');return;}
     setApBusy(true);try{await api.createRequisitionDraft(entityId,{workbookFile:apRow.file,reqNumber:apRow.reqNum||undefined,asOfDate:apRow.asOf,phase:ph||undefined});setAddingPhase(false);setActivePhase(ph||'');setDraftMsg('Phase '+ph+' draft created.');await loadDraft(ph||'');}catch(e){setApErr(e.message);}finally{setApBusy(false);}};
   const reopenDraft=async(phase)=>{setDraftBusy(true);setDraftErr('');setDraftMsg('');try{const r=await api.reopenRequisitionDraft(entityId,phase||undefined);setActivePhase(phase||'');setDraft(r&&r.draft);setDraftMsg('Reopened for edits — change invoices and re-finalize.');await loadDraft(phase||'');}catch(e){setDraftErr(e.message);}finally{setDraftBusy(false);}};
+  const discardDraft=async()=>{const n=(draft&&(draft.invoices||[]).length)||0;if(!confirm('Discard this in-progress requisition'+(n?(' and its '+n+' invoice'+(n===1?'':'s')):'')+'? This cannot be undone.'))return;setDraftBusy(true);setDraftErr('');setDraftMsg('');try{await api.discardRequisitionDraft(entityId,activePhase||undefined);setDraftMsg('Draft discarded.');setActivePhase('');await loadDraft('');}catch(e){setDraftErr(e.message);}finally{setDraftBusy(false);}};
   // Cost-code -> name parsed straight from the uploaded prior workbook's
   // "Prior Invoice Log" (col C = Cost Code #, col F = Cost Code Name). This is
   // the most authoritative source for this requisition, so it takes precedence
@@ -5963,6 +5964,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         <button style={S.btnP} disabled={draftBusy} onClick={rollDraft}>{draftBusy?'Preparing\u2026':'Prepare'}</button>
         <button style={S.btnS} disabled={draftBusy||!draft.has_output} onClick={downloadDraft}>Download current</button>
         <button style={{...S.btnP,background:T.green,borderColor:T.green}} disabled={draftBusy||!draft.has_output} onClick={()=>setFinConfirm(true)}>Finalize</button>
+        <button style={{...S.btnS,marginLeft:'auto',color:T.red,borderColor:T.red+'55'}} disabled={draftBusy} onClick={discardDraft}>Discard draft</button>
       </div>
       {finConfirm&&<div style={{marginTop:12,padding:14,background:T.bgElevated,borderRadius:8,border:'1px solid '+T.border}}>
         <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:4}}>Finalize Req {draft.req_number!=null?('#'+draft.req_number):''}?</div>

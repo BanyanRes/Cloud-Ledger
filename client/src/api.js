@@ -482,6 +482,7 @@ export const api = {
   finalizeRequisitionDraft: (eid, force = false, phase) => request('/requisition/' + eid + '/draft/finalize', { method: 'POST', body: { force, phase } }),
   // Reopen the latest finalized requisition of a stream back into an editable draft.
   reopenRequisitionDraft: (eid, phase) => request('/requisition/' + eid + '/draft/reopen', { method: 'POST', body: { phase } }),
+  discardRequisitionDraft: (eid, phase) => request('/requisition/' + eid + '/draft' + (phase ? ('?phase=' + encodeURIComponent(phase)) : ''), { method: 'DELETE' }),
 
   // Workpapers › Management Fee: analyze a prior-quarter workbook, then generate
   // the next quarter as a downloadable .xlsx.

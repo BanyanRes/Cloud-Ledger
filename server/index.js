@@ -7922,6 +7922,34 @@ app.delete('/api/requisition/:entity_id/draft/invoice/:invoice_id', ...reqGuards
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// DISCARD an open draft entirely: drop its invoices, remove any in-progress
+// [DRAFT] copy filed in Workpapers for this phase, then delete the draft row.
+// Returns the page back to its prior state (first-time, or the last finalized).
+app.delete('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const dphase = req.query.phase != null ? req.query.phase : (req.body && req.body.phase);
+  try {
+    const draft = reqDraft.getOpenDraft(db, eid, dphase);
+    if (!draft) return res.status(404).json({ error: 'No open draft to discard.' });
+    const phaseMatch = (nm) => reqDraft.phaseMatchesName(nm, draft.phase);
+    // Remove any [DRAFT] workbook this draft filed into Workpapers (phase-scoped).
+    try {
+      const rows = db.prepare(
+        "SELECT id, stored_filename, original_name FROM entity_files WHERE entity_id=? AND original_name LIKE '[DRAFT] %'"
+      ).all(eid);
+      for (const r of rows) {
+        if (!phaseMatch(r.original_name)) continue;
+        try { fs.unlinkSync(path.join(WORKPAPERS_DIR, String(eid), r.stored_filename)); } catch (_) {}
+        db.prepare('DELETE FROM entity_files WHERE id=?').run(r.id);
+      }
+    } catch (_) {}
+    // Drop the draft's invoices, then the draft row itself.
+    db.prepare('DELETE FROM requisition_invoice WHERE draft_id=?').run(draft.id);
+    db.prepare('DELETE FROM requisition_draft WHERE id=?').run(draft.id);
+    res.json({ discarded: true, draft_id: draft.id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // SAVE / re-roll: rebuild the draft's workbook + packet from the CURRENT invoice
 // set against the stored base. Overwrites output_blob/packet_blob/recon_*. Does
 // NOT touch Workpapers (that happens only at finalize).
