@@ -5963,7 +5963,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         {draft.recon_ok===false?(<button onClick={()=>setShowReview(v=>!v)} style={{fontSize:12,fontWeight:600,color:T.orange,background:'none',border:'none',cursor:'pointer',textDecoration:'underline',padding:0}}>{'\u26a0 Needs review'}{showReview?' \u25b2':' \u25bc'}</button>):(<div style={{fontSize:12,fontWeight:600,color:draft.recon_ok?T.green:T.textMuted}}>{draft.recon_ok?'\u2713 Balanced':'Not yet rolled'}</div>)}
       </div>
       <div style={{fontSize:12,color:T.textMuted,marginTop:8}}>{(draft.invoices||[]).length===0?'Next: add this period’s invoices in the card below, then click Prepare to build the report.':(draft.recon_ok===false?'Reconciliation is off — fix the flagged invoices below and click Prepare again.':(draft.recon_ok===true?'Balanced. Review the report, then click Finalize to file it to Workpapers.':'Click Prepare to build the report from these invoices and check reconciliation.'))}</div>
-      {showReview&&draft.recon_ok===false&&(()=>{const rc=draft.recon||{};const failed=(rc.checks||[]).filter(c=>!c.pass);const flagged=(draft.invoices||[]).filter(i=>i.confidence==='review');return(
+      {showReview&&draft.recon_ok===false&&(()=>{const rc=draft.recon||{};const failed=(rc.checks||[]).filter(c=>!c.pass);return(
       <div style={{marginTop:12,padding:14,background:T.bgElevated,borderRadius:8,border:'1px solid '+T.orange+'40'}}>
         <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:8}}>What needs fixing</div>
         <div style={{fontSize:12,fontWeight:600,color:T.textMuted,margin:'6px 0 4px'}}>Reconciliation ({failed.length} failed)</div>
@@ -5971,13 +5971,6 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
           <div key={c.id} style={{fontSize:12,color:T.text,padding:'6px 10px',background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'25',marginBottom:6}}>
             <strong>{c.id}</strong>{c.detail?(' \u2014 '+c.detail):''}{(c.expected!=null&&c.actual!=null)?(<span style={{color:T.textMuted}}>{' (expected '+fmt(c.expected)+', actual '+fmt(c.actual)+', off by '+fmt(c.delta)+')'}</span>):null}
           </div>))}
-        <div style={{fontSize:12,fontWeight:600,color:T.textMuted,margin:'10px 0 4px'}}>Invoices flagged for review ({flagged.length})</div>
-        {flagged.length===0?<div style={{fontSize:12,color:T.textMuted}}>No invoices flagged.</div>:<div style={{display:'flex',flexDirection:'column',gap:6}}>{flagged.map(i=>(
-          <div key={i.id} style={{display:'flex',flexDirection:'column',gap:2,padding:'6px 10px',background:'#fff',border:'1px solid '+T.border,borderRadius:6}}>
-            <button onClick={()=>jumpToInvoice(i.id)} style={{alignSelf:'flex-start',fontSize:12,fontWeight:600,color:T.accent,background:'none',border:'none',cursor:'pointer',textDecoration:'underline',padding:0}} title={i.original_name||''}>{(i.vendor||i.original_name||('Invoice '+i.id)).slice(0,44)}</button>
-            <span style={{fontSize:11,color:T.textMuted}}>{i.confidence_reason||'Flagged during coding — confirm the cost code.'}</span>
-          </div>))}</div>}
-        <div style={{fontSize:11,color:T.textMuted,marginTop:10}}>Reconciliation failures are report-total mismatches; flagged invoices are low-confidence codings. Fixing a flagged coding may or may not resolve a reconciliation check.</div>
       </div>);})()}
       <div style={{display:'flex',gap:8,marginTop:12,flexWrap:'wrap'}}>
         <button style={S.btnP} disabled={draftBusy} onClick={rollDraft}>{draftBusy?'Preparing\u2026':'Prepare'}</button>
