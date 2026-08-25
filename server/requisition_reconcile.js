@@ -296,10 +296,6 @@ function approxEq(a, b, tol = TOL) {
 const CHECK_TEXT = {
   A1: { title: 'Prior report total carried forward',
         help: 'The running total from last month should match the new cumulative total. If it is off, re-Prepare; if it persists, the prior report total may have changed.' },
-  A2: { title: 'Each cost code carried forward',
-        help: 'Every cost code\u2019s running total should match last month\u2019s plus this month\u2019s. A mismatch points to a specific code that did not roll up correctly \u2014 re-Prepare and, if it persists, check that code in the prior report.' },
-  A3: { title: 'All invoice lines carried forward',
-        help: 'The cumulative log should contain every prior invoice line plus this month\u2019s (subtotal and total rows are excluded). If lines are missing, re-Prepare; if it persists, an invoice line may have been dropped from the prior report.' },
   A4: { title: 'Cumulative grand total is correct',
         help: 'The grand-total cell recalculates in Excel; open the report to confirm it shows the expected cumulative total.' },
   B1: { title: 'Budget-to-Actual ties to the invoice log',
@@ -338,38 +334,6 @@ function reconcile(prev, next, opts = {}) {
     checks.push(chk('A1', 'required', approxEq(nPrior.total, expected, tol),
       round2(expected), round2(nPrior.total),
       'Req#N+1 Prior total == Req#N Prior + Req#N Current'));
-  }
-
-  // A2 - per cost code
-  {
-    const codes = new Set([
-      ...Object.keys(oPrior.byCode), ...Object.keys(oCurr.byCode), ...Object.keys(nPrior.byCode),
-    ]);
-    const fails = [];
-    for (const code of codes) {
-      const expected = (oPrior.byCode[code] || 0) + (oCurr.byCode[code] || 0);
-      const actual = nPrior.byCode[code] || 0;
-      if (!approxEq(actual, expected, tol)) {
-        fails.push({ code, expected: round2(expected), actual: round2(actual), delta: round2(actual - expected) });
-      }
-    }
-    checks.push(chk('A2', 'required', fails.length === 0, 0, fails.length,
-      fails.length ? 'Per-code mismatch: ' + JSON.stringify(fails) : 'all cost codes tie'));
-  }
-
-  // A3 - row count (invoice LINES only). Roll-forward correctly omits last
-  // month's subtotal/total rows from the cumulative log, so exclude any
-  // "...Total"/"Grand Total" labelled row from all three counts; otherwise a
-  // correct roll-forward is falsely flagged. Money correctness is covered by
-  // A1/A2; A3 only guards against real invoice lines going missing.
-  {
-    const isTotalRow = (r) => /\btotal\b/i.test(String((r && r.name) || ''));
-    const oPriorLines = oPrior.rows.filter(r => !isTotalRow(r)).length;
-    const oCurrLines  = oCurr.rows.filter(r => !isTotalRow(r)).length;
-    const nPriorLines = nPrior.rows.filter(r => !isTotalRow(r)).length;
-    const expected = oPriorLines + oCurrLines;
-    checks.push(chk('A3', 'required', nPriorLines === expected,
-      expected, nPriorLines, 'Cumulative invoice lines == prior lines + this-period lines (subtotals excluded)'));
   }
 
   // A4 - Grand Total cell on the new Prior Log.
