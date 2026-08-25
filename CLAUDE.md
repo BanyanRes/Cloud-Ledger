@@ -31,6 +31,27 @@ Guidance for Claude working in this repository.
 - Proceed end-to-end autonomously; don't ask "should I continue?" between steps.
 - Never enter credentials. Never trigger Bill.com syncs.
 
+## Browser / Chrome MCP — ALWAYS attach to an existing browser, NEVER create a tab
+
+Jimmy has THREE browsers already set up and connected for Claude to use (the
+"Claude (MCP)" tabs). A chat must drive one of those existing browsers — it must
+NOT spin up its own tab. Opening a new MCP tab every session is a known,
+repeatedly-reported annoyance. Follow this exactly:
+
+- **NEVER call `tabs_context_mcp` with `createIfEmpty:true`.** That flag is what
+  spawns a fresh tab/tab-group. Do not use it.
+- **To start any browser work, first `list_connected_browsers`,** then
+  `select_browser` (by `deviceId`) to attach to one already open. If a connection
+  handshake is needed, use `switch_browser`. Only after attaching do anything else.
+- If the attached browser already has the CloudLedger tab open, **reuse it** —
+  read its state / `navigate` within it. Do not open a second tab for the same site.
+- Only if `list_connected_browsers` returns nothing at all should Claude tell
+  Jimmy the extension looks disconnected (and how to reconnect) — never silently
+  fall back to creating a tab.
+- One `claude-code` stdio pipe / one browser attachment at a time; a second
+  concurrent chat can cause false timeouts. After any MCP reconnect, verify with a
+  trivial action before resuming.
+
 ## Investigation discipline — get the COMPLETE picture before answering (non-negotiable)
 
 When diagnosing data (bank transactions, AR/AP, journal entries, tie-outs, balances),
