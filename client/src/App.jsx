@@ -728,7 +728,7 @@ export default function App(){
   // navigation. Kept per-entity so switching entities shows the right set.
   const[reqStateByEntity,setReqStateByEntity]=useState({});
   const reqState=(activeEntity&&reqStateByEntity[activeEntity])||null;
-  const setReqState=updater=>{if(!activeEntity)return;setReqStateByEntity(prev=>{const cur=prev[activeEntity]||{cards:[],reqNum:'',asOf:today(),result:null,detail:null};const next=typeof updater==='function'?updater(cur):updater;return{...prev,[activeEntity]:next};});};
+  const setReqState=updater=>{if(!activeEntity)return;setReqStateByEntity(prev=>{const cur=prev[activeEntity]||{cards:[],reqNum:'',asOf:'',result:null,detail:null};const next=typeof updater==='function'?updater(cur):updater;return{...prev,[activeEntity]:next};});};
 
   useEffect(()=>{try{localStorage.setItem(SIDEBAR_KEY,String(sidebarCol));}catch{}},[sidebarCol]);
   useEffect(()=>{const t=api.getToken();if(t){api.me().then(u=>{if(u)setUser(u);}).catch(()=>api.clearToken()).finally(()=>setLoading(false));}else setLoading(false);},[]);
@@ -5540,7 +5540,7 @@ function InsuranceAllocationWorkpaper({entityId,entityName,canEdit=true}){
 function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const[err,setErr]=useState('');
   // Persistent working set lifted to App (survives navigation), kept per-entity.
-  const rs=reqState||{cards:[],reqNum:'',asOf:today(),result:null,detail:null,file:null};
+  const rs=reqState||{cards:[],reqNum:'',asOf:'',result:null,detail:null,file:null};
   const rfCards=rs.cards, rfReqNum=rs.reqNum, rfAsOf=rs.asOf, rfResult=rs.result, rfDetail=rs.detail, rfFile=rs.file||null;
   const setRfCards=updater=>setReqState(cur=>({...cur,cards:typeof updater==='function'?updater(cur.cards||[]):updater}));
   const setRfReqNum=v=>setReqState(cur=>({...cur,reqNum:v}));
@@ -5582,7 +5582,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const[hlInv,setHlInv]=useState(null);
   const jumpToInvoice=(id)=>{setHlInv(id);const el=document.getElementById('inv-'+id);if(el)el.scrollIntoView({behavior:'smooth',block:'center'});setTimeout(()=>setHlInv(null),2000);};
   const[uploadConflict,setUploadConflict]=useState(null);// {message, workbookFile, reqNumber, asOfDate}
-  const loadDraft=async(phaseArg)=>{const ph=phaseArg!==undefined?phaseArg:activePhase;let rail=false;let openList=[];let finList=[];try{const r=await api.getRequisitionDraft(entityId,ph||undefined);rail=!!(r&&r.is_rail);setIsRail(rail);if(ph){setDraft(r&&r.draft);}else{openList=(r&&r.drafts)||[];finList=(r&&r.finalized)||[];setDraftList(openList);setFinalizedList(finList);const cur=openList.find(d=>(d.phase||'')===(activePhase||''));setDraft(cur||openList[0]||null);if(cur)setActivePhase(cur.phase||'');else if(openList[0])setActivePhase(openList[0].phase||'');}}catch(e){setDraft(null);}try{const s=await api.getRequisitionSeedSource(entityId,ph||undefined);setSeedSource(s?s.source:null);if(s&&typeof s.is_rail==='boolean'){rail=s.is_rail;setIsRail(s.is_rail);}}catch{setSeedSource(null);}if(!ph){const nothingYet=openList.length===0&&finList.length===0;if(nothingYet){setFtRows(rail?[{phase:'2',file:null,reqNum:''},{phase:'2a',file:null,reqNum:''}]:[{phase:'',file:null,reqNum:''}]);}setDraftLoaded(true);}};
+  const loadDraft=async(phaseArg)=>{const ph=phaseArg!==undefined?phaseArg:activePhase;let rail=false;let openList=[];let finList=[];try{const r=await api.getRequisitionDraft(entityId,ph||undefined);rail=!!(r&&r.is_rail);setIsRail(rail);let _loadedDraft=null;if(ph){_loadedDraft=r&&r.draft;setDraft(_loadedDraft);}else{openList=(r&&r.drafts)||[];finList=(r&&r.finalized)||[];setDraftList(openList);setFinalizedList(finList);const cur=openList.find(d=>(d.phase||'')===(activePhase||''));_loadedDraft=cur||openList[0]||null;setDraft(_loadedDraft);if(cur)setActivePhase(cur.phase||'');else if(openList[0])setActivePhase(openList[0].phase||'');}if(_loadedDraft){setReqState(cur=>({...cur,asOf:_loadedDraft.as_of_date||cur.asOf||'',reqNum:(_loadedDraft.req_number!=null?String(_loadedDraft.req_number):cur.reqNum)}));}}catch(e){setDraft(null);}try{const s=await api.getRequisitionSeedSource(entityId,ph||undefined);setSeedSource(s?s.source:null);if(s&&typeof s.is_rail==='boolean'){rail=s.is_rail;setIsRail(s.is_rail);}}catch{setSeedSource(null);}if(!ph){const nothingYet=openList.length===0&&finList.length===0;if(nothingYet){setFtRows(rail?[{phase:'2',file:null,reqNum:''},{phase:'2a',file:null,reqNum:''}]:[{phase:'',file:null,reqNum:''}]);}setDraftLoaded(true);}};
   // Switch the shown stream (rail phase) and load that draft.
   const switchPhase=async(ph)=>{setActivePhase(ph);setDraftMsg('');setDraftErr('');setFinConfirm(false);await loadDraft(ph);};
   useEffect(()=>{setDraft(null);setSeedSource(undefined);setDraftMsg('');setDraftErr('');setActivePhase('');setNewPhase('');setDraftList([]);setFinalizedList([]);setFtRows([]);setFtAsOf('');setFtErr('');setAddingPhase(false);setApErr('');setDraftLoaded(false);setFinConfirm(false);loadDraft('');// eslint-disable-next-line
@@ -5887,7 +5887,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     finally{setRfBusy(false);}};
 
   // Explicit cancel/clear of the in-progress requisition working set.
-  const clearReq=()=>{if(!confirm('Clear the uploaded workbook and all invoices? This cannot be undone.'))return;setReqState({cards:[],reqNum:'',asOf:today(),result:null,detail:null,file:null});setRfErr('');setRfReadErr('');};
+  const clearReq=()=>{if(!confirm('Clear the uploaded workbook and all invoices? This cannot be undone.'))return;setReqState({cards:[],reqNum:'',asOf:'',result:null,detail:null,file:null});setRfErr('');setRfReadErr('');};
 
   const tierStyle=conf=>conf==='high'?{color:T.green,background:T.greenDim,border:'1px solid '+T.greenBorder}
     :conf==='review'?{color:T.orange,background:T.orangeDim,border:'1px solid '+T.orange+'40'}
