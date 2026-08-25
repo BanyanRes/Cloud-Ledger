@@ -7966,8 +7966,9 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
     // clean report in its place.
     try {
       const draftWho = (req.user && (req.user.name || req.user.email)) || 'system';
-      const draftFolder = require('./requisition_workpaper_save').requisitionFolderPath(asOfDate);
+      const draftFolder = require('./requisition_workpaper_save').requisitionFolderPath(asOfDate) + '/Drafts';
       const draftFileName = '[DRAFT] ' + String(outName || 'Requisition_Report.xlsx');
+      try { ensureWpFolders(db, eid, draftFolder, draftWho); } catch (_e) {}
       saveWpBuffer(
         db, WORKPAPERS_DIR, eid, draftFolder, draftFileName,
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -8053,7 +8054,7 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
     const targetFolder = require('./requisition_workpaper_save').requisitionFolderPath(asOfDate);
     try { purgePriorRequisitionCopies(db, WORKPAPERS_DIR, eid, { keepFolderPath: targetFolder, otherFoldersOnly: true, phaseMatch }); } catch (_) {}
 
-    // Remove the in-progress [DRAFT] copy for this phase from the target folder
+    // Remove the in-progress [DRAFT] copy for this phase from the Drafts subfolder
     // (and any other month folder a re-finalize may have moved it from). The
     // finalized report filed just below replaces it.
     try {
