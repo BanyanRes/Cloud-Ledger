@@ -145,10 +145,14 @@ function resolveAutoSeed(db, workpapersDir, eid, phase) {
     "AND folder_path NOT LIKE '%/Drafts' AND original_name NOT LIKE '[DRAFT] %' " +
     "AND lower(original_name) LIKE '%requisition report%' AND lower(original_name) LIKE '%.xlsx' ";
   const args = [eid];
-  if (lbl) { sql += "AND lower(original_name) LIKE ? "; args.push('%' + lbl.toLowerCase() + '%'); }
+  const singleStream = countStreams(db, eid) <= 1;
+  // Only constrain the SQL to a phase-labelled name when the entity actually runs
+  // multiple streams. A single-stream entity's file is intentionally phase-less
+  // (e.g. "SRN Requisition Report #15 ..."), so filtering by "Phase N" here would
+  // wrongly exclude it; phaseMatchesName below handles the single-stream case.
+  if (lbl && !singleStream) { sql += "AND lower(original_name) LIKE ? "; args.push('%' + lbl.toLowerCase() + '%'); }
   sql += "ORDER BY id DESC LIMIT 20";
   const rows = db.prepare(sql).all(...args);
-  const singleStream = countStreams(db, eid) <= 1;
   const pick = rows.find(r => phaseMatchesName(r.original_name, ph, { singleStream })) || ((lbl && !singleStream) ? null : rows[0]);
   if (pick) {
     const fs = require('fs'); const path = require('path');
