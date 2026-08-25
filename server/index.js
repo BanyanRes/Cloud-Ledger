@@ -7787,6 +7787,15 @@ app.get('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin'
 
 // Report what a NEW draft would auto-seed from, so the client can either proceed
 // (auto-seed available) or show the first-time upload box (source === null).
+// TEMP DIAGNOSTIC — dump raw requisition_draft phases + countStreams for an entity.
+app.get('/api/requisition/:entity_id/_diag_streams', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  try {
+    const rows = db.prepare('SELECT id, status, phase, req_number, output_name FROM requisition_draft WHERE entity_id=? ORDER BY id').all(eid);
+    const distinct = db.prepare("SELECT DISTINCT phase FROM requisition_draft WHERE entity_id=? AND phase IS NOT NULL AND TRIM(phase)<>''").all(eid).map(r=>r.phase);
+    res.json({ rows, distinctNonEmptyPhases: distinct, countStreams: reqDraft.countStreams(db, eid) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 app.get('/api/requisition/:entity_id/draft/seed-source', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
   const eid = parseInt(req.params.entity_id);
   try {
