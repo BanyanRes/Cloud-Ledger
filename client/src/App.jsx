@@ -5982,17 +5982,13 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
 
     <div>
       <div style={S.card}>
-        <div style={{...S.h2,marginBottom:6}}>Add this period's invoices</div>
-        <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>Drop this period's invoices below. Each is read automatically and its fields pre-filled for you to check, and saved to the draft as you go. When you're done, click <strong>Prepare</strong> in the banner above to build the report and check reconciliation.</div>
-
-        <label style={{...S.label}}>This period's invoices</label>
-        <div style={{position:'relative',border:'1.5px dashed '+T.border,borderRadius:T.radiusXs||8,padding:'22px 16px',textAlign:'center',background:T.bgElevated,marginTop:4}}>
-          <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:2}}>Drop invoice PDFs here, or click to upload</div>
-          <div style={{fontSize:11,color:T.textMuted}}>Multiple files at once is fine &mdash; each file is read as a separate invoice and its fields are pre-filled.</div>
-          <input type="file" accept=".pdf,application/pdf,image/*" multiple disabled={rfBusy} style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:rfBusy?'not-allowed':'pointer'}} onChange={onRfInvoices}/>
-        </div>
-        {rfReading>0&&<div style={{fontSize:12,color:T.accent,margin:'8px 0'}}>Reading {rfReading} invoice{rfReading===1?'':'s'}&hellip;</div>}
-        {rfReadErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'8px 0'}}>{rfReadErr}</div>}
+        {(draft&&(draft.invoices||[]).length>0)?(<>
+          <div style={{...S.h2,marginBottom:6}}>Invoices in this draft</div>
+          <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>Review each invoice below and fix anything that&#39;s off &mdash; edits save as you go. Add more with the box at the bottom. When everything looks right, click <strong>Prepare</strong> in the banner above to build the report, then Finalize.</div>
+        </>):(<>
+          <div style={{...S.h2,marginBottom:6}}>Add this period&#39;s invoices</div>
+          <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>Drop this period&#39;s invoices below. Each is read automatically and its fields pre-filled for you to check, and saved to the draft as you go. When you&#39;re done, click <strong>Prepare</strong> in the banner above to build the report and check reconciliation.</div>
+        </>)}
 
         {(draft&&(draft.invoices||[]).length>0)&&<div style={{marginTop:14}}>
           <div style={{fontSize:12,fontWeight:600,color:T.textMuted,marginBottom:8}}>Invoices in this draft · {(draft.invoices||[]).length}</div>
@@ -6015,6 +6011,15 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
             </div>
           </div>);})}
         </div>}
+        <label style={{...S.label}}>{(draft&&(draft.invoices||[]).length>0)?'Add more invoices':'This period'+String.fromCharCode(39)+'s invoices'}</label>
+        <div style={{position:'relative',border:'1.5px dashed '+T.border,borderRadius:T.radiusXs||8,padding:(draft&&(draft.invoices||[]).length>0)?'14px 16px':'22px 16px',textAlign:'center',background:T.bgElevated,marginTop:4}}>
+          <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:2}}>{(draft&&(draft.invoices||[]).length>0)?'Drop more invoice PDFs here, or click to upload':'Drop invoice PDFs here, or click to upload'}</div>
+          <div style={{fontSize:11,color:T.textMuted}}>Multiple files at once is fine &mdash; each file is read as a separate invoice and its fields are pre-filled.</div>
+          <input type="file" accept=".pdf,application/pdf,image/*" multiple disabled={rfBusy} style={{position:'absolute',top:0,left:0,width:'100%',height:'100%',opacity:0,cursor:rfBusy?'not-allowed':'pointer'}} onChange={onRfInvoices}/>
+        </div>
+        {rfReading>0&&<div style={{fontSize:12,color:T.accent,margin:'8px 0'}}>Reading {rfReading} invoice{rfReading===1?'':'s'}&hellip;</div>}
+        {rfReadErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'8px 0'}}>{rfReadErr}</div>}
+
 
         {rfErr&&<div style={{...S.err,padding:10,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',margin:'10px 0'}}>{rfErr}</div>}
         {(draft&&(draft.invoices||[]).length>0)&&<div style={{fontSize:12,color:T.textMuted,marginTop:12}}>Reviewed and correct? Click <strong>Prepare</strong> in the banner above to build the report, then Finalize.</div>}
