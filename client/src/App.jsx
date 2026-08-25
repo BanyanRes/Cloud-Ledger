@@ -5974,8 +5974,10 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:8}}>What needs fixing</div>
         <div style={{fontSize:12,fontWeight:600,color:T.textMuted,margin:'6px 0 4px'}}>Reconciliation ({failed.length} failed)</div>
         {failed.length===0?<div style={{fontSize:12,color:T.textMuted,marginBottom:8}}>All reconciliation checks passed.</div>:failed.map(c=>(
-          <div key={c.id} style={{fontSize:12,color:T.text,padding:'6px 10px',background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'25',marginBottom:6}}>
-            <strong>{c.id}</strong>{c.detail?(' \u2014 '+c.detail):''}{(c.expected!=null&&c.actual!=null)?(<span style={{color:T.textMuted}}>{' (expected '+fmt(c.expected)+', actual '+fmt(c.actual)+', off by '+fmt(c.delta)+')'}</span>):null}
+          <div key={c.id} style={{fontSize:12,color:T.text,padding:'8px 10px',background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'25',marginBottom:6}}>
+            <div style={{fontWeight:600}}>{c.title||'Check failed'}</div>
+            {c.help?<div style={{color:T.textMuted,marginTop:2}}>{c.help}</div>:null}
+            {(c.expected!=null&&c.actual!=null)?(<div style={{color:T.textMuted,marginTop:2,fontSize:11}}>{'Expected '+fmt(c.expected)+', found '+fmt(c.actual)+' (off by '+fmt(c.delta)+').'}</div>):null}
           </div>))}
       </div>);})()}
       <div style={{display:'flex',gap:8,marginTop:12,flexWrap:'wrap'}}>
@@ -6069,13 +6071,13 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         :null)}
         {rfResult.failedChecks&&rfResult.failedChecks.length>0&&<div style={{marginTop:12,paddingTop:10,borderTop:'1px solid '+T.greenBorder}}>
           <div style={{fontSize:11,fontWeight:700,color:T.orange,textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:6}}>Advisory checks not evaluated / not passed</div>
-          <table style={S.table}><thead><tr><th style={S.th}>Check</th><th style={S.th}>Level</th><th style={S.thR}>Expected</th><th style={S.thR}>Actual</th><th style={S.th}>Detail</th></tr></thead>
+          <table style={S.table}><thead><tr><th style={S.th}>Issue</th><th style={S.th}>Level</th><th style={S.thR}>Expected</th><th style={S.thR}>Actual</th><th style={S.th}>Detail</th></tr></thead>
             <tbody>{rfResult.failedChecks.map((c,i)=><tr key={i}>
-              <td style={{...S.td,fontWeight:600,color:T.textBright}}>{c.id}</td>
+              <td style={{...S.td,fontWeight:600,color:T.textBright}}>{c.title||c.id}</td>
               <td style={S.td}>{c.level}</td>
               <td style={S.tdR}>{c.expected!=null?Number(c.expected).toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</td>
               <td style={S.tdR}>{c.actual!=null?Number(c.actual).toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</td>
-              <td style={{...S.td,fontSize:11,color:T.textMuted}}>{c.detail}</td></tr>)}</tbody></table>
+              <td style={{...S.td,fontSize:11,color:T.textMuted}}>{c.help||c.detail}</td></tr>)}</tbody></table>
         </div>}
         {rfResult.workpaperFolder&&<div style={{fontSize:12,color:T.text,marginTop:12,paddingTop:10,borderTop:'1px solid '+T.greenBorder}}>
           Saved to Workpapers: <strong>{rfResult.workpaperFolder}</strong>
@@ -6086,13 +6088,13 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
       {rfDetail&&rfDetail.checks&&<div style={{...S.card,background:T.redDim,borderColor:T.red+'40'}}>
         <div style={{fontWeight:700,color:T.red,marginBottom:8}}>Reconciliation failed &mdash; workbook not produced</div>
         <div style={{fontSize:12,color:T.text,marginBottom:10}}>A roll-forward only moves data, so a failure means a mechanical issue (a dropped amount, a shifted reference, or a stale subtotal range). The failing checks:</div>
-        <table style={S.table}><thead><tr><th style={S.th}>Check</th><th style={S.th}>Level</th><th style={S.thR}>Expected</th><th style={S.thR}>Actual</th><th style={S.th}>Detail</th></tr></thead>
+        <table style={S.table}><thead><tr><th style={S.th}>Issue</th><th style={S.th}>Level</th><th style={S.thR}>Expected</th><th style={S.thR}>Actual</th><th style={S.th}>Detail</th></tr></thead>
           <tbody>{rfDetail.checks.filter(c=>!c.pass).map((c,i)=><tr key={i}>
-            <td style={{...S.td,fontWeight:600,color:T.textBright}}>{c.id}</td>
+            <td style={{...S.td,fontWeight:600,color:T.textBright}}>{c.title||c.id}</td>
             <td style={S.td}>{c.level}</td>
             <td style={S.tdR}>{c.expected!=null?Number(c.expected).toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</td>
             <td style={S.tdR}>{c.actual!=null?Number(c.actual).toLocaleString(undefined,{maximumFractionDigits:2}):'—'}</td>
-            <td style={{...S.td,fontSize:11,color:T.textMuted}}>{c.detail}</td></tr>)}</tbody></table>
+            <td style={{...S.td,fontSize:11,color:T.textMuted}}>{c.help||c.detail}</td></tr>)}</tbody></table>
         <div style={{marginTop:12,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
           <button style={{...S.btnP,background:T.red,borderColor:T.red}} disabled={rfBusy} onClick={()=>runRollForward(true)}>{rfBusy?'Rolling forward...':'Force roll-forward & download anyway'}</button>
           <span style={{fontSize:11,color:T.textMuted}}>Produces the file despite the failed check(s) so you can fix the flagged lines by hand. Any prepopulation beats starting from scratch.</span>

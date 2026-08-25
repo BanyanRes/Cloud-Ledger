@@ -290,8 +290,31 @@ function readLog(ws) {
 function approxEq(a, b, tol = TOL) {
   return Math.abs((a || 0) - (b || 0)) <= tol;
 }
+// Plain-English wording for each reconciliation check, shown to users instead of
+// the internal codes (A1, A3, ...). title = what the check verifies; help = what
+// to do when it fails. Kept here (server-side) so the UI stays code-free.
+const CHECK_TEXT = {
+  A1: { title: 'Prior report total carried forward',
+        help: 'The running total from last month should match the new cumulative total. If it is off, re-Prepare; if it persists, the prior report total may have changed.' },
+  A2: { title: 'Each cost code carried forward',
+        help: 'Every cost code\u2019s running total should match last month\u2019s plus this month\u2019s. A mismatch points to a specific code that did not roll up correctly \u2014 re-Prepare and, if it persists, check that code in the prior report.' },
+  A3: { title: 'All invoice lines carried forward',
+        help: 'The cumulative log should contain every prior invoice line plus this month\u2019s (subtotal and total rows are excluded). If lines are missing, re-Prepare; if it persists, an invoice line may have been dropped from the prior report.' },
+  A4: { title: 'Cumulative grand total is correct',
+        help: 'The grand-total cell recalculates in Excel; open the report to confirm it shows the expected cumulative total.' },
+  B1: { title: 'Budget-to-Actual ties to the invoice log',
+        help: 'Each Budget-to-Actual line should match the invoice log. A mismatch means a line did not tie \u2014 re-Prepare and review that line.' },
+  B4: { title: 'Dev fee references are intact',
+        help: 'The dev-fee formulas should point at the right rows. If this fails, the Dev Fee tab layout may have shifted \u2014 re-Prepare.' },
+  B5: { title: 'Development fee is calculated correctly',
+        help: 'The posted dev fee should equal this month\u2019s new costs times the dev-fee rate. If it is off, re-Prepare so CloudLedger recomputes and posts it.' },
+  C1: { title: 'This month\u2019s total ties to the invoice log',
+        help: 'The Budget-to-Actual this-period total recalculates in Excel; open the report to confirm it matches the current invoice log.' },
+};
 function chk(id, level, pass, expected, actual, detail) {
-  return { id, level, pass, expected, actual, delta: (actual || 0) - (expected || 0), detail: detail || '' };
+  const t = CHECK_TEXT[id] || {};
+  return { id, level, pass, expected, actual, delta: (actual || 0) - (expected || 0),
+           detail: detail || '', title: t.title || id, help: t.help || '' };
 }
 function round2(n) { return n == null ? n : Math.round(n * 100) / 100; }
 
@@ -334,11 +357,19 @@ function reconcile(prev, next, opts = {}) {
       fails.length ? 'Per-code mismatch: ' + JSON.stringify(fails) : 'all cost codes tie'));
   }
 
-  // A3 - row count
+  // A3 - row count (invoice LINES only). Roll-forward correctly omits last
+  // month's subtotal/total rows from the cumulative log, so exclude any
+  // "...Total"/"Grand Total" labelled row from all three counts; otherwise a
+  // correct roll-forward is falsely flagged. Money correctness is covered by
+  // A1/A2; A3 only guards against real invoice lines going missing.
   {
-    const expected = oPrior.rows.length + oCurr.rows.length;
-    checks.push(chk('A3', 'required', nPrior.rows.length === expected,
-      expected, nPrior.rows.length, 'Prior row count == old Prior + old Current rows'));
+    const isTotalRow = (r) => /\btotal\b/i.test(String((r && r.name) || ''));
+    const oPriorLines = oPrior.rows.filter(r => !isTotalRow(r)).length;
+    const oCurrLines  = oCurr.rows.filter(r => !isTotalRow(r)).length;
+    const nPriorLines = nPrior.rows.filter(r => !isTotalRow(r)).length;
+    const expected = oPriorLines + oCurrLines;
+    checks.push(chk('A3', 'required', nPriorLines === expected,
+      expected, nPriorLines, 'Cumulative invoice lines == prior lines + this-period lines (subtotals excluded)'));
   }
 
   // A4 - Grand Total cell on the new Prior Log.
