@@ -215,8 +215,19 @@ function countStreams(db, eid) {
 // Tidy the report base name: drop a leading code prefix like "0005 B1 " and
 // shorten "County Line SRN" to "SRN". Cosmetic only; the "Requisition Report"
 // token (which seeding matches on) is preserved.
-function cleanReportBaseName(name) {
+function cleanReportBaseName(name, displayId) {
   let s = String(name || '');
+  const did = (displayId == null ? '' : String(displayId)).trim();
+  // Preferred: rebuild the name from the entity's display id. Everything before
+  // the "Requisition Report" token is the entity identifier; replace it wholesale
+  // with the display id so the prefix always reflects the entity, not whatever
+  // text the original uploaded workbook happened to carry.
+  if (did) {
+    const m = s.match(/requisition report.*/i);
+    const tail = m ? m[0] : s;               // "Requisition Report #15 ... .xlsx"
+    return (did + ' ' + tail).replace(/\s{2,}/g, ' ').trim();
+  }
+  // Fallback (no display id): strip a leading code prefix and the old long name.
   s = s.replace(/^\s*\d{2,}\s+[A-Za-z]\d+\s+/, '');   // "0005 B1 " -> ""
   s = s.replace(/County Line SRN/gi, 'SRN');
   return s.replace(/\s{2,}/g, ' ').trim();

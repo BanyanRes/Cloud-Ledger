@@ -7981,7 +7981,8 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
     );
 
     const _multiStream = reqDraft.countStreams(db, eid) > 1;
-    const outName = reqDraft.phasedFilename(buildRollforwardFilename(reqDraft.cleanReportBaseName(draft.base_name || 'Requisition_Report.xlsx'), reqNumber, asOfDate), draft.phase, { multiStream: _multiStream });
+    const _entRow = db.prepare('SELECT display_id FROM entities WHERE id=?').get(eid) || {};
+    const outName = reqDraft.phasedFilename(buildRollforwardFilename(reqDraft.cleanReportBaseName(draft.base_name || 'Requisition_Report.xlsx', _entRow.display_id), reqNumber, asOfDate), draft.phase, { multiStream: _multiStream });
     const reconSummary = verification && verification.finalResult ? JSON.stringify({
       ok: !!verification.ok,
       summary: verification.finalResult.summary,
@@ -8078,7 +8079,8 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
     }
 
     const _multiStreamF = reqDraft.countStreams(db, eid) > 1;
-    const fname = reqDraft.phasedFilename(buildRollforwardFilename(reqDraft.cleanReportBaseName(draft.base_name || 'Requisition_Report.xlsx'), reqNumber, asOfDate), draft.phase, { multiStream: _multiStreamF });
+    const _entRowF = db.prepare('SELECT display_id FROM entities WHERE id=?').get(eid) || {};
+    const fname = reqDraft.phasedFilename(buildRollforwardFilename(reqDraft.cleanReportBaseName(draft.base_name || 'Requisition_Report.xlsx', _entRowF.display_id), reqNumber, asOfDate), draft.phase, { multiStream: _multiStreamF });
     const who = (req.user && (req.user.name || req.user.email)) || 'system';
     // Phase-scoped purge predicate: only sweep files belonging to THIS phase, so
     // Phase 2a's finalize never deletes Phase 2's filed copy in the same folder.
