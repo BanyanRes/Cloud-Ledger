@@ -5898,11 +5898,11 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     {canEdit&&<>
     {draftErr&&<div style={{...S.err,padding:8,background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'30',marginBottom:8}}>{draftErr}</div>}
     {draftMsg&&!draftErr&&<div style={{padding:8,background:T.greenDim,borderRadius:6,border:'1px solid '+T.greenBorder,marginBottom:8,fontSize:12,color:T.green}}>{draftMsg}</div>}
-    {isRail&&(draftList.length>0||finalizedList.length>0)&&<div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12,flexWrap:'wrap'}}>
-      <span style={{fontSize:12,color:T.textMuted}}>Stream:</span>
-      {[...draftList,...finalizedList].map(d=><button key={(d.phase||'')+'-'+d.id} onClick={()=>switchPhase(d.phase||'')} style={{...S.btnS,padding:'4px 12px',fontSize:12,background:(activePhase||'')===(d.phase||'')?T.accentDim:'transparent',color:(activePhase||'')===(d.phase||'')?T.accent:T.textMuted,borderColor:(activePhase||'')===(d.phase||'')?T.accent:T.border}}>{d.phase?('Phase '+d.phase):'Requisition'}</button>)}
+    {isRail&&(draftList.length>0||finalizedList.length>0)&&(()=>{const streamCount=[...draftList,...finalizedList].length;const multi=streamCount>1;return(<div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12,flexWrap:'wrap'}}>
+      {multi&&<span style={{fontSize:12,color:T.textMuted}}>Stream:</span>}
+      {multi&&[...draftList,...finalizedList].map(d=><button key={(d.phase||'')+'-'+d.id} onClick={()=>switchPhase(d.phase||'')} style={{...S.btnS,padding:'4px 12px',fontSize:12,background:(activePhase||'')===(d.phase||'')?T.accentDim:'transparent',color:(activePhase||'')===(d.phase||'')?T.accent:T.textMuted,borderColor:(activePhase||'')===(d.phase||'')?T.accent:T.border}}>{d.phase?('Phase '+d.phase):'Requisition'}</button>)}
       {!addingPhase&&<button onClick={openAddPhase} style={{...S.btnS,padding:'4px 12px',fontSize:12,color:T.green,borderColor:T.green,borderStyle:'dashed'}}>+ Add phase</button>}
-    </div>}
+    </div>);})()}
     {addingPhase&&<div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+T.green}}>
       <div style={{...S.h2,marginBottom:4}}>Add a phase</div>
       <div style={{fontSize:12,color:T.textMuted,marginBottom:12,lineHeight:1.6}}>Start another requisition stream for this entity. Upload that phase&#39;s last finalized workbook &mdash; it becomes the base going forward, and auto-seeds every month after the first finalize.</div>
@@ -5947,7 +5947,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
     {(()=>{const fin=finalizedList.find(f=>(f.phase||'')===(activePhase||''))||(draftList.length===0?finalizedList[0]:null);if(!fin||draft)return null;return(
       <div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+T.green}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:10}}>
-          <div><span style={{fontSize:14,fontWeight:600,color:T.text}}>Req {fin.req_number!=null?('#'+fin.req_number):''}{fin.phase?(' · Phase '+fin.phase):''}</span>
+          <div><span style={{fontSize:14,fontWeight:600,color:T.text}}>Req {fin.req_number!=null?('#'+fin.req_number):''}{(fin.phase&&[...draftList,...finalizedList].length>1)?(' · Phase '+fin.phase):''}</span>
             <span style={{fontSize:12,color:T.textMuted,marginLeft:8}}>{fin.as_of_date?('as of '+fin.as_of_date):''} · {(fin.invoices||[]).length} invoice{(fin.invoices||[]).length===1?'':'s'}</span></div>
           <span style={{fontSize:12,fontWeight:600,color:T.green}}>✓ Finalized</span>
         </div>
@@ -5958,7 +5958,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
       </div>);})()}
     {draft&&<div style={{...S.card,marginBottom:16,borderLeft:'4px solid '+(draft.recon_ok===false?T.orange:(draft.recon_ok?T.green:T.accent))}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
-        <div><span style={{fontSize:14,fontWeight:600,color:T.text}}>Draft Req {draft.req_number!=null?('#'+draft.req_number):''}{draft.phase?(' · Phase '+draft.phase):''}</span>
+        <div><span style={{fontSize:14,fontWeight:600,color:T.text}}>Draft Req {draft.req_number!=null?('#'+draft.req_number):''}{(draft.phase&&[...draftList,...finalizedList].length>1)?(' · Phase '+draft.phase):''}</span>
           <span style={{fontSize:12,color:T.textMuted,marginLeft:8}}>{draft.as_of_date?('as of '+draft.as_of_date):''} · {(draft.invoices||[]).length} invoice{(draft.invoices||[]).length===1?'':'s'}</span></div>
         {draft.recon_ok===false?(<button onClick={()=>setShowReview(v=>!v)} style={{fontSize:12,fontWeight:600,color:T.orange,background:'none',border:'none',cursor:'pointer',textDecoration:'underline',padding:0}}>{'\u26a0 Needs review'}{showReview?' \u25b2':' \u25bc'}</button>):(<div style={{fontSize:12,fontWeight:600,color:draft.recon_ok?T.green:T.textMuted}}>{draft.recon_ok?'\u2713 Balanced':'Not yet rolled'}</div>)}
       </div>
