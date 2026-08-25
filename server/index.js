@@ -8024,9 +8024,18 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
 });
 
 // DOWNLOAD the draft's current workbook (must have been rolled at least once).
-app.get('/api/requisition/:entity_id/draft/download', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+// Auth is taken from ?token= as well as the header, because the browser reaches
+// this via a plain <a> link that cannot set an Authorization header. We verify
+// the token and enforce entity access + role manually (reqGuards' header-only
+// auth would 401 the link and surface as "file wasn't available").
+app.get('/api/requisition/:entity_id/draft/download', (req, res) => {
   const eid = parseInt(req.params.entity_id);
   try {
+    const token = req.query.token || req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: 'No token' });
+    let user; try { user = jwt.verify(token, JWT_SECRET); } catch { return res.status(401).json({ error: 'Invalid token' }); }
+    if (!(user.role === 'Admin' || user.role === 'Accountant')) return res.status(403).json({ error: 'Forbidden' });
+    if (!userHasEntityAccess(user.id, user.role, eid)) return res.status(403).json({ error: 'No access to this entity' });
     const draft = reqDraft.getOpenDraft(db, eid, req.query.phase);
     if (!draft || !draft.output_blob) return res.status(404).json({ error: 'No rolled workbook yet — Save/re-roll the draft first.' });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
