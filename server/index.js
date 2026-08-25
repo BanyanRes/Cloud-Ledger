@@ -7980,7 +7980,8 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
       ExcelJS, Buffer.from(draft.base_blob), eid, newCurrent, { reqNumber, asOfDate }
     );
 
-    const outName = reqDraft.phasedFilename(buildRollforwardFilename(draft.base_name || 'Requisition_Report.xlsx', reqNumber, asOfDate), draft.phase);
+    const _multiStream = reqDraft.countStreams(db, eid) > 1;
+    const outName = reqDraft.phasedFilename(buildRollforwardFilename(reqDraft.cleanReportBaseName(draft.base_name || 'Requisition_Report.xlsx'), reqNumber, asOfDate), draft.phase, { multiStream: _multiStream });
     const reconSummary = verification && verification.finalResult ? JSON.stringify({
       ok: !!verification.ok,
       summary: verification.finalResult.summary,
@@ -8076,7 +8077,8 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
       return res.status(422).json({ error: 'Roll-forward failed reconciliation', ok: false, recon: reconSummary });
     }
 
-    const fname = reqDraft.phasedFilename(buildRollforwardFilename(draft.base_name || 'Requisition_Report.xlsx', reqNumber, asOfDate), draft.phase);
+    const _multiStreamF = reqDraft.countStreams(db, eid) > 1;
+    const fname = reqDraft.phasedFilename(buildRollforwardFilename(reqDraft.cleanReportBaseName(draft.base_name || 'Requisition_Report.xlsx'), reqNumber, asOfDate), draft.phase, { multiStream: _multiStreamF });
     const who = (req.user && (req.user.name || req.user.email)) || 'system';
     // Phase-scoped purge predicate: only sweep files belonging to THIS phase, so
     // Phase 2a's finalize never deletes Phase 2's filed copy in the same folder.

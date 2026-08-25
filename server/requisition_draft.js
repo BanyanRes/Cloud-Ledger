@@ -148,7 +148,8 @@ function resolveAutoSeed(db, workpapersDir, eid, phase) {
   if (lbl) { sql += "AND lower(original_name) LIKE ? "; args.push('%' + lbl.toLowerCase() + '%'); }
   sql += "ORDER BY id DESC LIMIT 20";
   const rows = db.prepare(sql).all(...args);
-  const pick = rows.find(r => phaseMatchesName(r.original_name, ph)) || (lbl ? null : rows[0]);
+  const singleStream = countStreams(db, eid) <= 1;
+  const pick = rows.find(r => phaseMatchesName(r.original_name, ph, { singleStream })) || ((lbl && !singleStream) ? null : rows[0]);
   if (pick) {
     const fs = require('fs'); const path = require('path');
     try {
@@ -162,10 +163,12 @@ function resolveAutoSeed(db, workpapersDir, eid, phase) {
 // True when a filename belongs to the given phase. For the default stream ('')
 // the name must carry NO "Phase <x>" token at all. For a real phase it must
 // carry exactly that token, bounded so "Phase 2" doesn't match "Phase 2a".
-function phaseMatchesName(name, phase) {
+function phaseMatchesName(name, phase, opts) {
+  const singleStream = !!(opts && opts.singleStream);
   const ph = normPhase(phase);
   const s = String(name || '');
   const anyPhase = /\bphase\s+[0-9a-z]+/i.test(s);
+  if (singleStream && !anyPhase) return true; // one stream, phase-less name is the report
   if (!ph) return !anyPhase;
   const re = new RegExp('\\bphase\\s+' + ph.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![0-9a-z])', 'i');
   return re.test(s);
@@ -198,9 +201,35 @@ function checkUploadAgainstFiled(db, workpapersDir, eid, uploadBuf, uploadedReqN
 // "...Requisition Report #12 Phase 2a 07.31.2026.xlsx". No-op for the default
 // stream. If the base name already carries the same phase token, it's left as-is
 // (idempotent). Falls back to appending before the extension if no date is found.
-function phasedFilename(name, phase) {
+// Count how many requisition streams an entity runs (distinct phases across all
+// its drafts, open or finalized). Used to decide whether a phase label belongs
+// in the filename: with a single stream there is nothing to disambiguate, so
+// the phase is omitted; with two (e.g. 2 and 2a) each name carries its phase.
+function countStreams(db, eid) {
+  try {
+    const rows = db.prepare("SELECT DISTINCT IFNULL(phase,'') AS ph FROM requisition_draft WHERE entity_id=?").all(eid);
+    return rows.length;
+  } catch (_) { return 1; }
+}
+
+// Tidy the report base name: drop a leading code prefix like "0005 B1 " and
+// shorten "County Line SRN" to "SRN". Cosmetic only; the "Requisition Report"
+// token (which seeding matches on) is preserved.
+function cleanReportBaseName(name) {
+  let s = String(name || '');
+  s = s.replace(/^\s*\d{2,}\s+[A-Za-z]\d+\s+/, '');   // "0005 B1 " -> ""
+  s = s.replace(/County Line SRN/gi, 'SRN');
+  return s.replace(/\s{2,}/g, ' ').trim();
+}
+
+function phasedFilename(name, phase, opts) {
+  const multiStream = !!(opts && opts.multiStream);
   const lbl = phaseLabel(phase);
-  if (!lbl) return name;
+  if (!lbl || !multiStream) {
+    // Single stream -> no phase in the name. Also strip any existing 'Phase N'
+    // token carried over from an older base name, collapsing the extra space.
+    return String(name || '').replace(/\s*\bPhase\s+[0-9a-z]+\b/i, '').replace(/\s{2,}/g, ' ').trim();
+  }
   const s = String(name || 'Requisition_Report.xlsx');
   if (phaseMatchesName(s, phase)) return s; // already labeled for this phase
   // Try to insert before a trailing date token (dd.dd.dddd / dd_dd_dddd etc.)
@@ -224,5 +253,7 @@ module.exports = {
   phaseLabel,
   phaseMatchesName,
   phasedFilename,
+  countStreams,
+  cleanReportBaseName,
   sha256,
 };
