@@ -7735,7 +7735,7 @@ function draftForClient(db, draft) {
     req_number: draft.req_number, as_of_date: draft.as_of_date, phase: draft.phase || '',
     base_name: draft.base_name, output_name: draft.output_name, packet_name: draft.packet_name,
     recon_ok: draft.recon_ok == null ? null : !!draft.recon_ok, recon: recon,
-    has_output: draft.output_blob != null,
+    has_output: draft.status === 'finalized' ? (draft.output_name != null) : (draft.output_blob != null),
     created_at: draft.created_at, updated_at: draft.updated_at, finalized_at: draft.finalized_at,
     created_by: draft.created_by,
     invoices,
@@ -8125,10 +8125,12 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
     }) : null;
     const tx = db.transaction(() => {
       if (reqNumber != null) db.prepare('UPDATE requisition_invoice SET req_number=? WHERE draft_id=?').run(reqNumber, draft.id);
+      // Do NOT keep a copy of the finalized workbook in the DB. The filed file
+      // in Workpapers is the single source of truth; seeding reads it directly.
       db.prepare(
-        "UPDATE requisition_draft SET status='finalized', output_blob=?, output_name=?, packet_name=?, recon_ok=?, recon_summary=?, finalized_at=?, updated_at=? WHERE id=?"
+        "UPDATE requisition_draft SET status='finalized', output_blob=NULL, output_name=?, packet_name=?, recon_ok=?, recon_summary=?, finalized_at=?, updated_at=? WHERE id=?"
       ).run(
-        outBuf, fname, saved.packet ? saved.packet.original_name : null,
+        fname, saved.packet ? saved.packet.original_name : null,
         verification && verification.ok ? 1 : 0, reconSummary, now, now, draft.id
       );
     });

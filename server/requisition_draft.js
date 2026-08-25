@@ -130,12 +130,8 @@ function getOpenDrafts(db, eid) {
 // { buffer, name, source } or null (→ manual upload).
 function resolveAutoSeed(db, workpapersDir, eid, phase) {
   const ph = normPhase(phase);
-  const fin = db.prepare(
-    "SELECT output_blob, output_name FROM requisition_draft WHERE entity_id=? AND status='finalized' AND IFNULL(phase,'')=? AND output_blob IS NOT NULL ORDER BY finalized_at DESC, id DESC LIMIT 1"
-  ).get(eid, ph);
-  if (fin && fin.output_blob) {
-    return { buffer: Buffer.from(fin.output_blob), name: fin.output_name || 'prior_requisition.xlsx', source: 'finalized-draft' };
-  }
+  // Single source of truth: always seed from the finalized report FILE in
+  // Workpapers, so a user's manual edits to that file are what CL rolls forward.
   // Fallback: newest filed workbook whose name looks like a Requisition Report,
   // under a "Requisition Reports" folder for this entity. When a phase is set,
   // require the phase label in the name so Phase 2 seeds from Phase 2 (and the
@@ -145,6 +141,8 @@ function resolveAutoSeed(db, workpapersDir, eid, phase) {
   let sql =
     "SELECT stored_filename, original_name FROM entity_files " +
     "WHERE entity_id=? AND folder_path LIKE '%Requisition Reports%' " +
+    // Never seed from an in-progress [DRAFT] copy or anything in a Drafts subfolder.
+    "AND folder_path NOT LIKE '%/Drafts' AND original_name NOT LIKE '[DRAFT] %' " +
     "AND lower(original_name) LIKE '%requisition report%' AND lower(original_name) LIKE '%.xlsx' ";
   const args = [eid];
   if (lbl) { sql += "AND lower(original_name) LIKE ? "; args.push('%' + lbl.toLowerCase() + '%'); }
