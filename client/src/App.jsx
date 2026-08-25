@@ -5575,6 +5575,9 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
   const[apBusy,setApBusy]=useState(false);const[apErr,setApErr]=useState('');
   const reqDraftNormPhase=(p)=>String(p==null?'':p).trim().replace(/^phase\s*/i,'').trim();
   const[finConfirm,setFinConfirm]=useState(false);
+  const[showReview,setShowReview]=useState(false);
+  const[hlInv,setHlInv]=useState(null);
+  const jumpToInvoice=(id)=>{setHlInv(id);const el=document.getElementById('inv-'+id);if(el)el.scrollIntoView({behavior:'smooth',block:'center'});setTimeout(()=>setHlInv(null),2000);};
   const[uploadConflict,setUploadConflict]=useState(null);// {message, workbookFile, reqNumber, asOfDate}
   const loadDraft=async(phaseArg)=>{const ph=phaseArg!==undefined?phaseArg:activePhase;let rail=false;let openList=[];let finList=[];try{const r=await api.getRequisitionDraft(entityId,ph||undefined);rail=!!(r&&r.is_rail);setIsRail(rail);if(ph){setDraft(r&&r.draft);}else{openList=(r&&r.drafts)||[];finList=(r&&r.finalized)||[];setDraftList(openList);setFinalizedList(finList);const cur=openList.find(d=>(d.phase||'')===(activePhase||''));setDraft(cur||openList[0]||null);if(cur)setActivePhase(cur.phase||'');else if(openList[0])setActivePhase(openList[0].phase||'');}}catch(e){setDraft(null);}try{const s=await api.getRequisitionSeedSource(entityId,ph||undefined);setSeedSource(s?s.source:null);if(s&&typeof s.is_rail==='boolean'){rail=s.is_rail;setIsRail(s.is_rail);}}catch{setSeedSource(null);}if(!ph){const nothingYet=openList.length===0&&finList.length===0;if(nothingYet){setFtRows(rail?[{phase:'2',file:null,reqNum:''},{phase:'2a',file:null,reqNum:''}]:[{phase:'',file:null,reqNum:''}]);}}};
   // Switch the shown stream (rail phase) and load that draft.
@@ -5957,9 +5960,22 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
         <div><span style={{fontSize:14,fontWeight:600,color:T.text}}>Draft Req {draft.req_number!=null?('#'+draft.req_number):''}{draft.phase?(' · Phase '+draft.phase):''}</span>
           <span style={{fontSize:12,color:T.textMuted,marginLeft:8}}>{draft.as_of_date?('as of '+draft.as_of_date):''} · {(draft.invoices||[]).length} invoice{(draft.invoices||[]).length===1?'':'s'}</span></div>
-        <div style={{fontSize:12,fontWeight:600,color:draft.recon_ok===false?T.orange:(draft.recon_ok?T.green:T.textMuted)}}>{draft.recon_ok===false?'\u26a0 Needs review':(draft.recon_ok?'\u2713 Balanced':'Not yet rolled')}</div>
+        {draft.recon_ok===false?(<button onClick={()=>setShowReview(v=>!v)} style={{fontSize:12,fontWeight:600,color:T.orange,background:'none',border:'none',cursor:'pointer',textDecoration:'underline',padding:0}}>{'\u26a0 Needs review'}{showReview?' \u25b2':' \u25bc'}</button>):(<div style={{fontSize:12,fontWeight:600,color:draft.recon_ok?T.green:T.textMuted}}>{draft.recon_ok?'\u2713 Balanced':'Not yet rolled'}</div>)}
       </div>
       <div style={{fontSize:12,color:T.textMuted,marginTop:8}}>{(draft.invoices||[]).length===0?'Next: add this period’s invoices in the card below, then click Prepare to build the report.':(draft.recon_ok===false?'Reconciliation is off — fix the flagged invoices below and click Prepare again.':(draft.recon_ok===true?'Balanced. Review the report, then click Finalize to file it to Workpapers.':'Click Prepare to build the report from these invoices and check reconciliation.'))}</div>
+      {showReview&&draft.recon_ok===false&&(()=>{const rc=draft.recon||{};const failed=(rc.checks||[]).filter(c=>!c.pass);const flagged=(draft.invoices||[]).filter(i=>i.confidence==='review');return(
+      <div style={{marginTop:12,padding:14,background:T.bgElevated,borderRadius:8,border:'1px solid '+T.orange+'40'}}>
+        <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:8}}>What needs fixing</div>
+        <div style={{fontSize:12,fontWeight:600,color:T.textMuted,margin:'6px 0 4px'}}>Reconciliation ({failed.length} failed)</div>
+        {failed.length===0?<div style={{fontSize:12,color:T.textMuted,marginBottom:8}}>All reconciliation checks passed.</div>:failed.map(c=>(
+          <div key={c.id} style={{fontSize:12,color:T.text,padding:'6px 10px',background:T.redDim,borderRadius:6,border:'1px solid '+T.red+'25',marginBottom:6}}>
+            <strong>{c.id}</strong>{c.detail?(' \u2014 '+c.detail):''}{(c.expected!=null&&c.actual!=null)?(<span style={{color:T.textMuted}}>{' (expected '+fmt(c.expected)+', actual '+fmt(c.actual)+', off by '+fmt(c.delta)+')'}</span>):null}
+          </div>))}
+        <div style={{fontSize:12,fontWeight:600,color:T.textMuted,margin:'10px 0 4px'}}>Invoices flagged for review ({flagged.length})</div>
+        {flagged.length===0?<div style={{fontSize:12,color:T.textMuted}}>No invoices flagged.</div>:<div style={{display:'flex',flexWrap:'wrap',gap:6}}>{flagged.map(i=>(
+          <button key={i.id} onClick={()=>jumpToInvoice(i.id)} style={{fontSize:11,color:T.accent,background:'none',border:'1px solid '+T.accent+'40',borderRadius:6,padding:'4px 8px',cursor:'pointer'}} title={i.vendor||i.original_name||''}>{(i.vendor||i.original_name||('Invoice '+i.id)).slice(0,28)}</button>))}</div>}
+        <div style={{fontSize:11,color:T.textMuted,marginTop:10}}>Reconciliation failures are report-total mismatches; flagged invoices are low-confidence codings. Fixing a flagged coding may or may not resolve a reconciliation check.</div>
+      </div>);})()}
       <div style={{display:'flex',gap:8,marginTop:12,flexWrap:'wrap'}}>
         <button style={S.btnP} disabled={draftBusy} onClick={rollDraft}>{draftBusy?'Preparing\u2026':'Prepare'}</button>
         <button style={S.btnS} disabled={draftBusy||!draft.has_output} onClick={downloadDraft}>Download current</button>
@@ -5993,7 +6009,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         {(draft&&(draft.invoices||[]).length>0)&&<div style={{marginTop:14}}>
           <div style={{fontSize:12,fontWeight:600,color:T.textMuted,marginBottom:8}}>Invoices in this draft · {(draft.invoices||[]).length}</div>
           {(draft.invoices||[]).map((c,idx)=>{const e=invEdits[c.id]||{cost_code:c.cost_code||'',cost_code_name:c.cost_code_name||'',vendor:c.vendor||'',bill:c.bill_number||'',amount:c.amount!=null?String(c.amount):'',date:c.invoice_date||''};return(
-          <div key={c.id} style={{border:'1px solid '+T.border,borderRadius:8,padding:'12px 14px',marginBottom:10,background:'#fff'}}>
+          <div key={c.id} id={'inv-'+c.id} style={{border:'1px solid '+(hlInv===c.id?T.orange:T.border),borderRadius:8,padding:'12px 14px',marginBottom:10,background:hlInv===c.id?T.orange+'12':'#fff',transition:'background .3s,border-color .3s'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <div style={{display:'flex',alignItems:'center',gap:8}}>
                 <span style={{fontSize:11,color:T.textMuted}}>#{idx+1}</span>
