@@ -207,8 +207,12 @@ function checkUploadAgainstFiled(db, workpapersDir, eid, uploadBuf, uploadedReqN
 // the phase is omitted; with two (e.g. 2 and 2a) each name carries its phase.
 function countStreams(db, eid) {
   try {
-    const rows = db.prepare("SELECT DISTINCT IFNULL(phase,'') AS ph FROM requisition_draft WHERE entity_id=?").all(eid);
-    return rows.length;
+    // Count only distinct NON-EMPTY phases (real streams like '2', '2a'). A stray
+    // blank-phase row left over from earlier testing must not inflate the count
+    // and flip a single-stream entity into multi-stream (which would then demand a
+    // 'Phase N' token in the filename and break seeding). Minimum of 1.
+    const rows = db.prepare("SELECT DISTINCT phase AS ph FROM requisition_draft WHERE entity_id=? AND phase IS NOT NULL AND TRIM(phase) <> ''").all(eid);
+    return Math.max(1, rows.length);
   } catch (_) { return 1; }
 }
 
