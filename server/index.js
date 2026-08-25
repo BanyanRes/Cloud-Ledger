@@ -558,6 +558,10 @@ if (!reqInvCols.includes('draft_id')) {
   db.exec("CREATE INDEX IF NOT EXISTS idx_reqinv_draft ON requisition_invoice(draft_id)");
   console.log('[db migrate] requisition_invoice.draft_id added');
 }
+if (!reqInvCols.includes('confidence_reason')) {
+  db.exec("ALTER TABLE requisition_invoice ADD COLUMN confidence_reason TEXT");
+  console.log('[db migrate] requisition_invoice.confidence_reason added');
+}
 
 // phase: rail-assets requisition stream key (e.g. '2', '2a'). Rail-assets
 // entities can run two requisitions for the same month (e.g. Phase 2 and Phase
@@ -7721,7 +7725,7 @@ function draftInvoiceToNewCurrent(inv) {
 function draftForClient(db, draft) {
   if (!draft) return null;
   const invoices = db.prepare(
-    'SELECT id, vendor, bill_number, amount, invoice_date, cost_code, cost_code_name, confidence, original_name, mime_type, ' +
+    'SELECT id, vendor, bill_number, amount, invoice_date, cost_code, cost_code_name, confidence, confidence_reason, original_name, mime_type, ' +
     "(file_blob IS NOT NULL) AS has_file FROM requisition_invoice WHERE draft_id = ? ORDER BY id"
   ).all(draft.id);
   let recon = null;
@@ -7868,13 +7872,13 @@ app.post('/api/requisition/:entity_id/draft/invoice', ...reqGuards(), requireRol
     let blob = null;
     try { if (inv.file_b64) blob = Buffer.from(inv.file_b64, 'base64'); } catch (_) {}
     const info = db.prepare(
-      'INSERT INTO requisition_invoice (entity_id, req_number, draft_id, vendor, bill_number, amount, invoice_date, cost_code, cost_code_name, confidence, original_name, mime_type, file_blob, created_at) ' +
-      'VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      'INSERT INTO requisition_invoice (entity_id, req_number, draft_id, vendor, bill_number, amount, invoice_date, cost_code, cost_code_name, confidence, confidence_reason, original_name, mime_type, file_blob, created_at) ' +
+      'VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     ).run(
       eid, draft.id,
       inv.vendor || null, inv.bill_number || inv.bill || null,
       Number.isFinite(amt) ? amt : null, inv.invoice_date || null,
-      inv.cost_code || null, inv.cost_code_name || null, inv.confidence || null,
+      inv.cost_code || null, inv.cost_code_name || null, inv.confidence || null, inv.confidence_reason || null,
       inv.original_name || inv.filename || null, inv.mime_type || null, blob,
       new Date().toISOString()
     );
@@ -8276,6 +8280,7 @@ app.post('/api/requisition/:entity_id/read-invoice', ...reqGuards(), requireRole
     cost_code: prediction.cost_code,
     cost_code_name: costCodeName,
     confidence: prediction.confidence,
+    confidence_reason: prediction.reason || null,
     candidates: prediction.candidates || [],
     filename: req.file.originalname,
     // Bytes echoed back so the client can resend at roll-forward (not stored server-side yet).

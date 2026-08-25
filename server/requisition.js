@@ -151,6 +151,7 @@ function predict(line, index) {
     const ranked = rankCodes(keyCodes);
     return {
       confidence: keyCodes.size === 1 ? 'high' : 'review',
+      reason: keyCodes.size === 1 ? null : ('This vendor and bill number have been coded to ' + keyCodes.size + ' different cost codes before — confirm which applies.'),
       cost_code: ranked[0].cost_code,
       coding: ranked[0].sample,
       candidates: ranked.map((r) => r.sample),
@@ -163,6 +164,7 @@ function predict(line, index) {
     const ranked = rankCodes(vCodes);
     return {
       confidence: vCodes.size === 1 ? 'high' : 'review',
+      reason: vCodes.size === 1 ? null : ('This vendor has been coded to ' + vCodes.size + ' different cost codes before — confirm which applies.'),
       cost_code: ranked[0].cost_code,
       coding: ranked[0].sample,
       candidates: ranked.map((r) => r.sample),
@@ -185,6 +187,7 @@ function predict(line, index) {
         const ranked = rankCodes(codes);
         return {
           confidence: 'review',
+          reason: 'Matched a similarly-named vendor in history, not an exact prior match — confirm the coding.',
           cost_code: ranked[0].cost_code,
           coding: ranked[0].sample,
           candidates: ranked.map((r) => r.sample),
@@ -216,6 +219,7 @@ function predict(line, index) {
         const ranked = rankCodes(codes);
         return {
           confidence: 'review',
+          reason: 'Matched only on the first word of the vendor name — confirm this is the right vendor and coding.',
           cost_code: ranked[0].cost_code,
           coding: ranked[0].sample,
           candidates: ranked.map((r) => r.sample),

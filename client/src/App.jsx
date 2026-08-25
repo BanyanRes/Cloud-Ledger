@@ -5734,7 +5734,7 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
           const _res=await api.addRequisitionDraftInvoice(entityId,{
             vendor:r.vendor||null,bill_number:r.bill_number||null,
             amount:r.amount!=null?String(r.amount):null,invoice_date:r.invoice_date||null,
-            cost_code:cc||null,cost_code_name:ccName||null,confidence:r.confidence||'new',
+            cost_code:cc||null,cost_code_name:ccName||null,confidence:r.confidence||'new',confidence_reason:r.confidence_reason||null,
             file_b64:r.file_b64||null,original_name:r.original_name||r.filename||f.name,mime_type:r.mime_type||f.type||null,
           },activePhase||undefined);
           _draftInvId=_res&&_res.id;
@@ -5972,8 +5972,11 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
             <strong>{c.id}</strong>{c.detail?(' \u2014 '+c.detail):''}{(c.expected!=null&&c.actual!=null)?(<span style={{color:T.textMuted}}>{' (expected '+fmt(c.expected)+', actual '+fmt(c.actual)+', off by '+fmt(c.delta)+')'}</span>):null}
           </div>))}
         <div style={{fontSize:12,fontWeight:600,color:T.textMuted,margin:'10px 0 4px'}}>Invoices flagged for review ({flagged.length})</div>
-        {flagged.length===0?<div style={{fontSize:12,color:T.textMuted}}>No invoices flagged.</div>:<div style={{display:'flex',flexWrap:'wrap',gap:6}}>{flagged.map(i=>(
-          <button key={i.id} onClick={()=>jumpToInvoice(i.id)} style={{fontSize:11,color:T.accent,background:'none',border:'1px solid '+T.accent+'40',borderRadius:6,padding:'4px 8px',cursor:'pointer'}} title={i.vendor||i.original_name||''}>{(i.vendor||i.original_name||('Invoice '+i.id)).slice(0,28)}</button>))}</div>}
+        {flagged.length===0?<div style={{fontSize:12,color:T.textMuted}}>No invoices flagged.</div>:<div style={{display:'flex',flexDirection:'column',gap:6}}>{flagged.map(i=>(
+          <div key={i.id} style={{display:'flex',flexDirection:'column',gap:2,padding:'6px 10px',background:'#fff',border:'1px solid '+T.border,borderRadius:6}}>
+            <button onClick={()=>jumpToInvoice(i.id)} style={{alignSelf:'flex-start',fontSize:12,fontWeight:600,color:T.accent,background:'none',border:'none',cursor:'pointer',textDecoration:'underline',padding:0}} title={i.original_name||''}>{(i.vendor||i.original_name||('Invoice '+i.id)).slice(0,44)}</button>
+            <span style={{fontSize:11,color:T.textMuted}}>{i.confidence_reason||'Flagged during coding — confirm the cost code.'}</span>
+          </div>))}</div>}
         <div style={{fontSize:11,color:T.textMuted,marginTop:10}}>Reconciliation failures are report-total mismatches; flagged invoices are low-confidence codings. Fixing a flagged coding may or may not resolve a reconciliation check.</div>
       </div>);})()}
       <div style={{display:'flex',gap:8,marginTop:12,flexWrap:'wrap'}}>
