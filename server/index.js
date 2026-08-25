@@ -7959,6 +7959,22 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
       new Date().toISOString(), draft.id
     );
 
+    // Keep an in-progress copy of the report visible in Workpapers while the
+    // draft is being worked on. It lives in the same month folder as the final
+    // report will, but with a [DRAFT] prefix so it is unmistakably provisional,
+    // and is overwritten on each Prepare. Finalize deletes it and files the
+    // clean report in its place.
+    try {
+      const draftWho = (req.user && (req.user.name || req.user.email)) || 'system';
+      const draftFolder = require('./requisition_workpaper_save').requisitionFolderPath(asOfDate);
+      const draftFileName = '[DRAFT] ' + String(outName || 'Requisition_Report.xlsx');
+      saveWpBuffer(
+        db, WORKPAPERS_DIR, eid, draftFolder, draftFileName,
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        Buffer.from(outBuf), draftWho, { overwrite: true }
+      );
+    } catch (_e) { /* non-fatal: the draft blob in the DB remains the source of truth */ }
+
     res.json({
       ok: !!(verification && verification.ok),
       recon: reconSummary ? JSON.parse(reconSummary) : null,
@@ -8036,6 +8052,24 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
     // saveRequisitionOutputs overwrite same-named files in the target folder.
     const targetFolder = require('./requisition_workpaper_save').requisitionFolderPath(asOfDate);
     try { purgePriorRequisitionCopies(db, WORKPAPERS_DIR, eid, { keepFolderPath: targetFolder, otherFoldersOnly: true, phaseMatch }); } catch (_) {}
+
+    // Remove the in-progress [DRAFT] copy for this phase from the target folder
+    // (and any other month folder a re-finalize may have moved it from). The
+    // finalized report filed just below replaces it.
+    try {
+      const draftRows = db.prepare(
+        "SELECT ef.id, ef.stored_filename FROM entity_files ef WHERE ef.entity_id=? AND ef.original_name LIKE '[DRAFT] %'"
+      ).all(eid);
+      for (const dr of draftRows) {
+        const bare = dr && dr.stored_filename;
+        // Only sweep [DRAFT] files belonging to THIS phase, mirroring phaseMatch
+        // so Phase 2a's finalize never removes Phase 2's in-progress copy.
+        const nameRow = db.prepare('SELECT original_name FROM entity_files WHERE id=?').get(dr.id);
+        if (nameRow && !phaseMatch(nameRow.original_name)) continue;
+        try { fs.unlinkSync(path.join(WORKPAPERS_DIR, String(eid), bare)); } catch (_) {}
+        db.prepare('DELETE FROM entity_files WHERE id=?').run(dr.id);
+      }
+    } catch (_) {}
 
     const saved = await saveRequisitionOutputs({
       db, workpapersDir: WORKPAPERS_DIR, eid,
