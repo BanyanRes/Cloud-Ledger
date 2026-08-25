@@ -87,6 +87,50 @@ async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
 
     // (2) Re-inject external links the write dropped (if the source had any).
     const src = await JSZip.loadAsync(originalBuf);
+
+    // (CF) Restore each worksheet's original conditional formatting. ExcelJS does
+    // not reliably round-trip <conditionalFormatting> on sheets it modifies (it can
+    // emit a malformed, typeless <cfRule priority="1"/> with no rule body), which
+    // makes Excel show "we found a problem" and strip the formatting on open. We
+    // copy the exact original CF blocks from the source sheet back into the output
+    // sheet, matched by worksheet part name. Best-effort and non-fatal.
+    try {
+      const sheetRe = /^xl\/worksheets\/sheet\d+\.xml$/;
+      const srcSheets = Object.keys(src.files).filter(n => sheetRe.test(n) && !src.files[n].dir);
+      for (const name of srcSheets) {
+        if (!out.files[name]) continue;
+        const srcXml = await src.file(name).async('string');
+        const origCF = (srcXml.match(/<conditionalFormatting\b[\s\S]*?<\/conditionalFormatting>/g) || []).join('');
+        let outXml = await out.file(name).async('string');
+        const outHasCF = /<conditionalFormatting\b/.test(outXml);
+        if (!origCF) {
+          if (outHasCF) { outXml = outXml.replace(/<conditionalFormatting\b[\s\S]*?<\/conditionalFormatting>/g, ''); out.file(name, outXml); changed = true; }
+          continue;
+        }
+        if (outHasCF) {
+          let replaced = false;
+          outXml = outXml.replace(/<conditionalFormatting\b[\s\S]*?<\/conditionalFormatting>/g, () => { if (replaced) return ''; replaced = true; return origCF; });
+        } else if (/<pageMargins\b/.test(outXml)) {
+          outXml = outXml.replace(/<pageMargins\b/, origCF + '<pageMargins');
+        } else {
+          outXml = outXml.replace('</worksheet>', origCF + '</worksheet>');
+        }
+        out.file(name, outXml); changed = true;
+      }
+      const srcStyles = await src.file('xl/styles.xml').async('string');
+      const srcDxfs = (srcStyles.match(/<dxfs\b[\s\S]*?<\/dxfs>/) || srcStyles.match(/<dxfs\b[^>]*\/>/) || [null])[0];
+      if (srcDxfs && out.files['xl/styles.xml']) {
+        let outStyles = await out.file('xl/styles.xml').async('string');
+        if (/<dxfs\b/.test(outStyles)) {
+          const rep2 = outStyles.replace(/<dxfs\b[\s\S]*?<\/dxfs>|<dxfs\b[^>]*\/>/, srcDxfs);
+          if (rep2 !== outStyles) { out.file('xl/styles.xml', rep2); changed = true; }
+        } else if (/<\/cellStyles>/.test(outStyles)) {
+          out.file('xl/styles.xml', outStyles.replace('</cellStyles>', '</cellStyles>' + srcDxfs)); changed = true;
+        } else {
+          out.file('xl/styles.xml', outStyles.replace('</styleSheet>', srcDxfs + '</styleSheet>')); changed = true;
+        }
+      }
+    } catch (_) { /* non-fatal: leave ExcelJS CF as-is */ }
     const extNames = Object.keys(src.files).filter(n => n.startsWith('xl/externalLinks/') && !src.files[n].dir);
     const alreadyHas = Object.keys(out.files).some(n => n.startsWith('xl/externalLinks/') && !out.files[n].dir);
     if (extNames.length && !alreadyHas) {
