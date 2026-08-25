@@ -780,6 +780,32 @@ function findRowByLabel(ws, needles) {
 //   { row, amount, code, base, rateText, spec, source, needsReview, note } | null
 // where `row` matches the shape replaceCurrentLog / writeRowCells expect. A null
 // return means there was no Dev Fee tab or no costs to base a fee on.
+// Read the entity's dev-fee rate straight off the Dev Fee tab, the same way the
+// B5 reconciliation check does: scan columns B-G for the first "*<pct>%" (or
+// "*0.0x") formula, and detect a "/2" halving anywhere in the fee chain. This
+// lets the posting side compute base*rate when the richer learnDevFeeSpec path
+// can't confirm a method, so a fee is always posted and B5 (which reads the
+// same rate) ties out. Returns { rate, halve } or null if no rate is present.
+function readDevFeeRateFromTab(devFeeWs) {
+  if (!devFeeWs) return null;
+  const last = Math.max(devFeeWs.rowCount || 0, devFeeWs.actualRowCount || 0, 30);
+  let rate = null, halve = false;
+  for (let r = 1; r <= last && rate == null; r++) {
+    for (const c of ['B', 'C', 'D', 'E', 'F', 'G']) {
+      const f = cellFormula(devFeeWs.getCell(c + r)); if (!f) continue;
+      const pm = f.match(/\*\s*(\d+(?:\.\d+)?)\s*%/) || f.match(/\*\s*(0?\.\d+)\b/);
+      if (pm) { rate = f.includes('%') ? parseFloat(pm[1]) / 100 : parseFloat(pm[1]); break; }
+    }
+  }
+  if (rate == null) return null;
+  for (let r = 1; r <= last && !halve; r++) {
+    for (const c of ['B', 'C', 'D', 'E', 'F', 'G']) {
+      const f = cellFormula(devFeeWs.getCell(c + r)); if (f && /\/\s*2\b/.test(f)) { halve = true; break; }
+    }
+  }
+  return { rate, halve };
+}
+
 async function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta, callClaude = null }) {
   const _ds = logDataStart(priorCurWs);
   if (!devFeeWs) return null;
@@ -842,6 +868,36 @@ async function computeDevFeeRow({ devFeeWs, priorCurWs, newCurrent, meta, callCl
   // Could not learn a trustworthy method → don't invent a fee. Surface for
   // manual entry with the prior example so the user can key it in.
   if (!learned || !learned.spec || learned.needsReview) {
+    // Fallback: the learned-spec path failed, but the Dev Fee tab still carries
+    // a rate. Compute base*rate (the same figure B5 expects) and POST it, so a
+    // fee is always calculated rather than dropped. Only when no rate at all can
+    // be read do we surface for manual entry.
+    const rateInfo = readDevFeeRateFromTab(devFeeWs);
+    if (rateInfo && rateInfo.rate > 0) {
+      let fee = round2(base * rateInfo.rate);
+      if (rateInfo.halve) fee = round2(fee / 2);
+      if (fee > 0) {
+        const pctF = rateInfo.halve ? (rateInfo.rate * 50) : (rateInfo.rate * 100);
+        const rateTextF = (Number.isInteger(pctF) ? String(pctF) : pctF.toFixed(2).replace(/\.?0+$/, '')) +
+          '% of new costs' + (rateInfo.halve ? ' (half waived)' : '');
+        return {
+          amount: fee, code: devCode, base: round2(base), rateText: rateTextF,
+          spec: { rate: rateInfo.rate, halve: rateInfo.halve, source: 'tab-rate' },
+          source: 'tab-rate', needsReview: false, prior: learned ? learned.prior : null,
+          row: {
+            cat: t.cat != null ? t.cat : 'Soft Costs',
+            code: devCode,
+            bankcat: t.bankcat != null ? t.bankcat : 'Development Fee',
+            gl: t.gl != null ? t.gl : devCode,
+            name: t.name || 'Development Fee',
+            vendor: (meta && meta.devFeePayee) || t.vendor || 'County Line Rail Interest',
+            bill: billLabel,
+            amount: fee,
+            req: meta && meta.reqNumber ? 'Req#' + meta.reqNumber : undefined,
+          },
+        };
+      }
+    }
     return {
       amount: null,
       code: devCode,
