@@ -335,6 +335,51 @@ function reconcile(prev, next, opts = {}) {
       round2(expected), round2(nPrior.total),
       'Req#N+1 Prior total == Req#N Prior + Req#N Current'));
   }
+  // A5 - Cost-code continuity. A1 proves the TOTAL carried forward; this proves
+  // it landed on the right lines. For every cost code, the new Prior Invoice Log
+  // must hold last month's Prior amount plus last month's Current amount for the
+  // SAME code -- 15100 at 10,000 prior plus 1,000 current must read 11,000 now.
+  // A code that is off while A1 passes means an invoice carried forward under the
+  // wrong code: the totals still tie, so no total-level check can see it.
+  {
+    const money = n => (n == null ? '-' : (n < 0 ? '-' : '') + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+    const codes = new Set([].concat(
+      Object.keys(oPrior.byCode), Object.keys(oCurr.byCode), Object.keys(nPrior.byCode)
+    ));
+    const fails = [];
+    for (const k of codes) {
+      const expected = (oPrior.byCode[k] || 0) + (oCurr.byCode[k] || 0);
+      const actual = nPrior.byCode[k] || 0;
+      if (approxEq(actual, expected, tol)) continue;
+      fails.push({
+        code: k === '__none__' ? '(no cost code)' : k,
+        expected: round2(expected), actual: round2(actual), delta: round2(actual - expected),
+      });
+    }
+    // Biggest breaks first, so the ones worth chasing lead the message.
+    fails.sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+    const shown = fails.slice(0, 6)
+      .map(f => 'code ' + f.code + ': expected ' + money(f.expected) + ', found ' + money(f.actual) + ' (off by ' + money(f.delta) + ')')
+      .join('; ');
+    const only = fails.length === 1 ? fails[0] : null;
+    checks.push({
+      id: 'A5',
+      level: 'required',
+      pass: fails.length === 0,
+      // With a single break the UI can show the expected/found line; with several
+      // there is no one pair to show, so the codes are spelled out in the help.
+      expected: only ? only.expected : null,
+      actual: only ? only.actual : null,
+      delta: only ? only.delta : null,
+      detail: fails.length
+        ? 'cost-code continuity broken on ' + fails.length + ' code(s): ' + JSON.stringify(fails)
+        : 'every cost code carries forward (' + codes.size + ' codes checked)',
+      title: 'Cost codes carried forward correctly',
+      help: fails.length
+        ? (fails.length + ' cost code' + (fails.length === 1 ? '' : 's') + ' did not carry forward. Each code’s new Prior Invoice Log balance should equal last month’s Prior balance plus last month’s Current invoices for that same code. ' + shown + (fails.length > 6 ? '; and ' + (fails.length - 6) + ' more' : '') + '. Re-Prepare, and check that each invoice is coded to the right cost code.')
+        : 'Every cost code’s new Prior balance equals last month’s Prior plus last month’s Current for that code.',
+    });
+  }
 
   // A4 - Grand Total cell on the new Prior Log.
   // The Grand Total is SUBTOTAL(9, I3:I<last>) spanning the whole column, which
