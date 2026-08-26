@@ -478,7 +478,7 @@ export const api = {
   addRequisitionDraftInvoice: (eid, inv, phase) => request('/requisition/' + eid + '/draft/invoice', { method: 'POST', body: { ...inv, phase } }),
   updateRequisitionDraftInvoice: (eid, id, inv, phase) => request('/requisition/' + eid + '/draft/invoice/' + id, { method: 'PUT', body: { ...inv, phase } }),
   deleteRequisitionDraftInvoice: (eid, id, phase) => request('/requisition/' + eid + '/draft/invoice/' + id + (phase ? ('?phase=' + encodeURIComponent(phase)) : ''), { method: 'DELETE' }),
-  rollRequisitionDraft: (eid, meta = {}) => request('/requisition/' + eid + '/draft/roll', { method: 'POST', body: { reqNumber: meta.reqNumber, asOfDate: meta.asOfDate, phase: meta.phase } }),
+  rollRequisitionDraft: (eid, meta = {}) => request('/requisition/' + eid + '/draft/roll', { method: 'POST', body: { reqNumber: meta.reqNumber, asOfDate: meta.asOfDate, phase: meta.phase, force: !!meta.force } }),
   downloadRequisitionDraftUrl: (eid, phase) => API_BASE + '/requisition/' + eid + '/draft/download?token=' + encodeURIComponent(getToken() || '') + (phase ? ('&phase=' + encodeURIComponent(phase)) : ''),
   finalizeRequisitionDraft: (eid, force = false, phase) => request('/requisition/' + eid + '/draft/finalize', { method: 'POST', body: { force, phase } }),
   // Reopen the latest finalized requisition of a stream back into an editable draft.

@@ -576,6 +576,16 @@ if (!reqDraftCols.includes('phase')) {
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS uq_reqdraft_open ON requisition_draft(entity_id, IFNULL(phase,'')) WHERE status='open'");
   console.log('[db migrate] requisition_draft.phase added (open-draft index now phase-scoped)');
 }
+// draft_file_sha256: hash of the workbook the last Prepare wrote into the month
+// folder's Drafts subfolder. Users update Budget to Actual by hand in Excel and
+// put that file back there; a folder workbook whose bytes no longer match this
+// hash was edited outside CL. Prepare warns before overwriting it, and finalize
+// files THAT workbook instead of the regenerated one.
+if (!reqDraftCols.includes('draft_file_sha256')) {
+  db.exec("ALTER TABLE requisition_draft ADD COLUMN draft_file_sha256 TEXT");
+  console.log('[db migrate] requisition_draft.draft_file_sha256 added');
+}
+
 
 // Phase 3: default_cash_account on billcom_config (for payment JEs)
 const bcCfgCols = db.prepare("PRAGMA table_info(billcom_config)").all().map(c => c.name);
@@ -8206,6 +8216,32 @@ app.delete('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Adm
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Hand-updated draft workbook ─────────────────────────────────────────────
+// The review loop is: Prepare -> the draft workbook lands in the month folder's
+// Drafts subfolder -> the user updates Budget to Actual in Excel -> that version
+// goes back into the same folder. Workpapers' Replace overwrites original_name,
+// so the "[DRAFT] " prefix is often gone by then; the workbook is therefore
+// located by FOLDER rather than by name, and tied to the right stream by phase.
+// Returns the newest readable .xlsx there with its bytes and hash, or null.
+function reqDraftFolderWorkbook(eid, asOfDate, phase) {
+  try {
+    if (!asOfDate) return null;
+    const folder = require('./requisition_workpaper_save').requisitionFolderPath(asOfDate) + '/Drafts';
+    const single = reqDraft.countStreams(db, eid) <= 1;
+    const rows = db.prepare('SELECT * FROM entity_files WHERE entity_id=? AND folder_path=? ORDER BY created_at DESC, id DESC')
+      .all(eid, folder)
+      .filter(r => /\.xlsx$/i.test(String(r.original_name || '')))
+      .filter(r => reqDraft.phaseMatchesName(String(r.original_name || '').replace(/^\[DRAFT\]\s*/i, ''), phase, { singleStream: single }));
+    for (const r of rows) {
+      const fp = path.resolve(WORKPAPERS_DIR, String(eid), r.stored_filename);
+      if (!fs.existsSync(fp)) continue;
+      const buf = fs.readFileSync(fp);
+      return { row: r, buf, sha: reqDraft.sha256(buf) };
+    }
+    return null;
+  } catch (_e) { return null; }
+}
+
 // SAVE / re-roll: rebuild the draft's workbook + packet from the CURRENT invoice
 // set against the stored base. Overwrites output_blob/packet_blob/recon_*. Does
 // NOT touch Workpapers (that happens only at finalize).
@@ -8219,6 +8255,22 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
     // Allow header edits (req#, as-of) to be sent with the roll.
     const reqNumber = req.body.reqNumber != null && req.body.reqNumber !== '' ? parseInt(req.body.reqNumber) : draft.req_number;
     const asOfDate = req.body.asOfDate || draft.as_of_date;
+    // Regenerating would throw away any hand edits made to the workbook sitting
+    // in the Drafts folder, so stop and let the user decide. The client re-sends
+    // with force:true after confirming. Only fires once a Prepare has actually
+    // filed a copy (draft_file_sha256 set) and the bytes there have since moved.
+    const rollForce = req.body.force === true || req.body.force === 'true' || req.body.force === '1';
+    if (!rollForce && draft.draft_file_sha256) {
+      const cur = reqDraftFolderWorkbook(eid, asOfDate, draft.phase);
+      if (cur && cur.sha !== draft.draft_file_sha256) {
+        return res.status(409).json({
+          error: 'The workbook in the Drafts folder (' + cur.row.original_name + ') has been updated by hand since the last Prepare. Preparing again rebuilds it from the invoices and discards those manual edits.',
+          manualEdit: true,
+          fileName: cur.row.original_name,
+        });
+      }
+    }
+
 
     const invoices = db.prepare('SELECT * FROM requisition_invoice WHERE draft_id=? ORDER BY id').all(draft.id);
     const newCurrent = invoices.map(draftInvoiceToNewCurrent).filter(r => Number.isFinite(r.amount));
@@ -8273,6 +8325,9 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
         who: draftWho, packetPrefix: draftPacketPrefix, workbookFilename: outName, saveWorkbook: true,
         folderPathOverride: draftFolder, namePrefix: '[DRAFT] ',
       });
+      // Remember what we wrote, so a later hand edit to this file is detectable.
+      db.prepare('UPDATE requisition_draft SET draft_file_sha256=? WHERE id=?')
+        .run(reqDraft.sha256(Buffer.from(outBuf)), draft.id);
     } catch (_e) { /* non-fatal: the draft blob in the DB remains the source of truth */ }
 
     res.json({
@@ -8323,9 +8378,37 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
     const newCurrent = invoices.map(draftInvoiceToNewCurrent).filter(r => Number.isFinite(r.amount));
 
     // Always re-roll at finalize so the filed copy is current.
-    const { outBuf, rfResult, verification, workbook } = await reqDraft.rollForwardFromBase(
+    let { outBuf, rfResult, verification, workbook } = await reqDraft.rollForwardFromBase(
       ExcelJS, Buffer.from(draft.base_blob), eid, newCurrent, { reqNumber, asOfDate }
     );
+
+    // Carry a hand-updated workbook forward into the final version. Users update
+    // Budget to Actual in Excel and put that file back in the Drafts folder; when
+    // its bytes differ from what the last Prepare wrote, THAT workbook is what
+    // gets filed, so every manual change survives finalization and next month
+    // seeds from it. The regenerated copy above is still used for its dev-fee
+    // figures (the packet's generated Dev Fee page). Reconciliation is re-run
+    // against the manual workbook, so an unbalanced hand edit hits the same gate
+    // -- and the same "finalize anyway" override -- as a generated one.
+    let filedSource = 'generated';
+    let manualName = null;
+    const manualWb = reqDraftFolderWorkbook(eid, asOfDate, draft.phase);
+    if (manualWb && draft.draft_file_sha256 && manualWb.sha !== draft.draft_file_sha256) {
+      try {
+        const loadedManual = await reqDraft.loadReqWorkbook(ExcelJS, manualWb.buf);
+        const loadedBase = await reqDraft.loadReqWorkbook(ExcelJS, Buffer.from(draft.base_blob));
+        verification = await require('./requisition_rollforward_verify').verifyRollforward({
+          prevSheets: loadedBase.prevSheets, nextWorkbook: loadedManual.workbook, recalc: null, callClaude: null,
+        });
+        outBuf = manualWb.buf;
+        workbook = loadedManual.workbook;
+        filedSource = 'manual';
+        manualName = manualWb.row.original_name;
+      } catch (e) {
+        return res.status(400).json({ error: 'The manually updated workbook in the Drafts folder (' + manualWb.row.original_name + ') could not be read: ' + e.message });
+      }
+    }
+
 
     if (!(verification && verification.ok) && !force) {
       const reconSummary = verification && verification.finalResult ? {
@@ -8364,19 +8447,25 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
     const targetFolder = require('./requisition_workpaper_save').requisitionFolderPath(asOfDate);
     try { purgePriorRequisitionCopies(db, WORKPAPERS_DIR, eid, { keepFolderPath: targetFolder, otherFoldersOnly: true, phaseMatch }); } catch (_) {}
 
-    // Remove the in-progress [DRAFT] copy for this phase from the Drafts subfolder
-    // (and any other month folder a re-finalize may have moved it from). The
-    // finalized report filed just below replaces it.
+    // Remove the in-progress copies for this phase: every "[DRAFT] " file, plus
+    // the hand-updated workbook we just consumed (Replace strips the prefix, so
+    // it is matched by id rather than by name). Deliberately NOT a blanket sweep
+    // of the Drafts folder -- anything else a user put there is left alone. The
+    // filed report + packet below replace them.
     try {
       const draftRows = db.prepare(
-        "SELECT ef.id, ef.stored_filename FROM entity_files ef WHERE ef.entity_id=? AND ef.original_name LIKE '[DRAFT] %'"
+        "SELECT ef.id, ef.stored_filename, ef.original_name FROM entity_files ef WHERE ef.entity_id=? AND ef.original_name LIKE '[DRAFT] %'"
       ).all(eid);
+      if (filedSource === 'manual' && manualWb && manualWb.row) {
+        const already = draftRows.some(r => r.id === manualWb.row.id);
+        if (!already) draftRows.push({ id: manualWb.row.id, stored_filename: manualWb.row.stored_filename, original_name: '[DRAFT] ' + manualWb.row.original_name });
+      }
       for (const dr of draftRows) {
         const bare = dr && dr.stored_filename;
-        // Only sweep [DRAFT] files belonging to THIS phase, mirroring phaseMatch
-        // so Phase 2a's finalize never removes Phase 2's in-progress copy.
-        const nameRow = db.prepare('SELECT original_name FROM entity_files WHERE id=?').get(dr.id);
-        if (nameRow && !phaseMatch(nameRow.original_name)) continue;
+        // Only sweep files belonging to THIS phase, mirroring phaseMatch so Phase
+        // 2a's finalize never removes Phase 2's in-progress copy. The prefix is
+        // stripped first so a renamed manual copy still matches.
+        if (!phaseMatch(String(dr.original_name || '').replace(/^\[DRAFT\]\s*/i, ''))) continue;
         try { fs.unlinkSync(path.join(WORKPAPERS_DIR, String(eid), bare)); } catch (_) {}
         db.prepare('DELETE FROM entity_files WHERE id=?').run(dr.id);
       }
@@ -8419,6 +8508,7 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
       workbook: saved.workbook ? saved.workbook.original_name : null,
       packet: saved.packet ? saved.packet.original_name : null,
       forced: !(verification && verification.ok),
+      filedSource: filedSource, manualName: manualName,
     });
   } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
 });
