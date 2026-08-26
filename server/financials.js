@@ -526,6 +526,19 @@ function monthYearLabel(asOf) {
   const d = new Date(asOf + 'T00:00:00Z');
   return MONTHS[d.getUTCMonth()] + ' ' + d.getUTCFullYear();
 }
+// Statements-of-Operations heading. The statement carries three period columns
+// (current period, prior period, year to date), so the heading names all three
+// rather than only the two comparative dates (Jimmy, 2026-08-26):
+//   "For the One Month Ended July 31, 2026 and June 30, 2026 and
+//    Year to Date Ended July 31, 2026"
+// The year-to-date clause is dropped on an annual report, where it would just
+// restate the period already named.
+function opsHeadingLine(colLabel, curLong, priLong) {
+  const word = String(colLabel || 'Month Ended').replace(/ Ended$/, '');
+  const lead = word === 'Month' ? 'One Month' : word;
+  const base = 'For the ' + lead + ' Ended ' + curLong + ' and ' + priLong;
+  return word === 'Year' ? base : base + ' and Year to Date Ended ' + curLong;
+}
 function monthsEndedLabel(asOf) {
   const m = parseInt(String(asOf).slice(5, 7), 10); // 1..12 → months elapsed YTD
   const word = ['','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten','Eleven','Twelve'][m] || String(m);
@@ -1720,7 +1733,8 @@ async function buildStatements(getBalances, opts) {
   return {
     meta: { entityName: displayEntityName(opts.entityName), rawEntityName: opts.entityName || '', entityCode: (opts.entityCode || ''), asOf, priorDate: priorBsDate, longDate: longDate(asOf),
             priorLongDate: longDate(priorBsDate), monthsEnded: monthsEndedLabel(asOf),
-            period: (opts.period || 'monthly').toLowerCase(), periodLabel: period.periodLabel, colLabel: period.colLabel, profile },
+            period: (opts.period || 'monthly').toLowerCase(), periodLabel: period.periodLabel, colLabel: period.colLabel,
+            opsDateLine: opsHeadingLine(period.colLabel, longDate(asOf), longDate(priorBsDate)), profile },
     balanceSheet: { assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
     operations: Object.assign({ revenue, cogs, opex, opexGroups, totRev, totCogs, grossProfit, totOpex, netIncome },
       bsfrgpOps ? { bsfrgp: bsfrgpOps, netIncome: bsfrgpOps.netIncome } : {},
@@ -2155,8 +2169,7 @@ async function renderStatementsPdf(s, outOffsets) {
     // | 'Year Ended'; pluralize it for the two-date subtitle and prefix it on
     // the two period columns so a quarterly report reads 'For the Quarters Ended
     // 6/30/26 and 3/31/26' with 'Quarter Ended' columns (matches the CPA package).
-    const periodWord = (m.colLabel || 'Month Ended').replace(/ Ended$/, '');
-    const opsDateLine = 'For the ' + periodWord + 's Ended ' + m.longDate + ' and ' + m.priorLongDate;
+    const opsDateLine = m.opsDateLine || opsHeadingLine(m.colLabel, m.longDate, m.priorLongDate);
     const opsTitle = m.profile === 'banyan'
       ? 'Statements of Revenues and Expenses \u2013 Tax Basis'
       : 'Statements of Operations';

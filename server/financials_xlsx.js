@@ -196,7 +196,7 @@ function buildOperations(s) {
   const title = m.profile === 'banyan'
     ? 'Statements of Revenues and Expenses \u2013 Tax Basis'
     : 'Statements of Operations';
-  sh.titleBlock([m.entityName, title, 'For the ' + periodWord + 's Ended ' + m.longDate + ' and ' + m.priorLongDate]);
+  sh.titleBlock([m.entityName, title, m.opsDateLine || ('For the ' + periodWord + 's Ended ' + m.longDate + ' and ' + m.priorLongDate)]);
   sh.colHeaders([m.longDate, m.priorLongDate, 'Change', 'Year to Date']);
   const cell4 = (t) => [num(t.cur), num(t.pri), chg(t.cur, t.pri), num(t.ytd)];
   const line = (r, o = {}) => sh.row(r.name, cell4(r), { indent: 16, ...o });
