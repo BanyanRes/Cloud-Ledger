@@ -7979,7 +7979,7 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
     const invoices = db.prepare('SELECT * FROM requisition_invoice WHERE draft_id=? ORDER BY id').all(draft.id);
     const newCurrent = invoices.map(draftInvoiceToNewCurrent).filter(r => Number.isFinite(r.amount));
 
-    const { outBuf, rfResult, verification } = await reqDraft.rollForwardFromBase(
+    const { outBuf, rfResult, verification, workbook } = await reqDraft.rollForwardFromBase(
       ExcelJS, Buffer.from(draft.base_blob), eid, newCurrent, { reqNumber, asOfDate }
     );
 
@@ -8001,21 +8001,34 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
       new Date().toISOString(), draft.id
     );
 
-    // Keep an in-progress copy of the report visible in Workpapers while the
-    // draft is being worked on. It lives in the same month folder as the final
-    // report will, but with a [DRAFT] prefix so it is unmistakably provisional,
-    // and is overwritten on each Prepare. Finalize deletes it and files the
-    // clean report in its place.
+    // Keep an in-progress copy of BOTH deliverables visible in Workpapers while
+    // the draft is being worked on: the report workbook and the merged invoice
+    // packet. They are built by the same saveRequisitionOutputs path finalize
+    // uses -- same ordering, same Dev Fee page, same bookmarks, same filenames --
+    // so what the reviewer opens is exactly what will be filed. A review that
+    // finds nothing to change can therefore go straight to Finalize.
+    // They live in a Drafts subfolder of the same month folder, carry a [DRAFT]
+    // prefix so they are unmistakably provisional, and are overwritten on each
+    // Prepare. Finalize deletes them and files the clean pair in their place.
     try {
       const draftWho = (req.user && (req.user.name || req.user.email)) || 'system';
       const draftFolder = require('./requisition_workpaper_save').requisitionFolderPath(asOfDate) + '/Drafts';
-      const draftFileName = '[DRAFT] ' + String(outName || 'Requisition_Report.xlsx');
-      try { ensureWpFolders(db, eid, draftFolder, draftWho); } catch (_e) {}
-      saveWpBuffer(
-        db, WORKPAPERS_DIR, eid, draftFolder, draftFileName,
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        Buffer.from(outBuf), draftWho, { overwrite: true }
-      );
+      let draftInvoiceRows = invoices.map(inv => ({
+        original_name: inv.original_name, mime_type: inv.mime_type, file_blob: inv.file_blob ? Buffer.from(inv.file_blob) : null,
+        vendor: inv.vendor, bill_number: inv.bill_number, amount: inv.amount,
+        cost_code: inv.cost_code, cost_code_name: inv.cost_code_name,
+      }));
+      try { draftInvoiceRows = orderInvoicesByCurrentLog(workbook, draftInvoiceRows); } catch (_e) {}
+      const _entRowD = db.prepare('SELECT name, display_id FROM entities WHERE id = ?').get(eid) || {};
+      let draftPacketPrefix = (_entRowD.display_id && _entRowD.display_id.trim()) || _entRowD.name || '';
+      { const _pl = reqDraft.phaseLabel(draft.phase); if (_pl) draftPacketPrefix = (draftPacketPrefix + ' ' + _pl).trim(); }
+      await saveRequisitionOutputs({
+        db, workpapersDir: WORKPAPERS_DIR, eid,
+        reqNumber, asOfDate, workbookBuffer: Buffer.from(outBuf), invoices: draftInvoiceRows,
+        devFee: rfResult && rfResult.devFee && !rfResult.devFee.error ? rfResult.devFee : null,
+        who: draftWho, packetPrefix: draftPacketPrefix, workbookFilename: outName, saveWorkbook: true,
+        folderPathOverride: draftFolder, namePrefix: '[DRAFT] ',
+      });
     } catch (_e) { /* non-fatal: the draft blob in the DB remains the source of truth */ }
 
     res.json({

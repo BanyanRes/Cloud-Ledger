@@ -241,10 +241,13 @@ function addOutline(doc, marks) {
 // Main entry. Saves the workbook and (if any invoices) the merged packet into
 // the period folder. Best-effort: never throws — returns a result summary so the
 // caller can log it without risking the user's download.
-async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfDate, workbookBuffer, invoices, devFee, who, packetPrefix, workbookFilename, saveWorkbook = true }) {
+async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfDate, workbookBuffer, invoices, devFee, who, packetPrefix, workbookFilename, saveWorkbook = true, folderPathOverride = null, namePrefix = '' }) {
   const result = { folder: null, workbook: null, packet: null, errors: [] };
   try {
-    const folderPath = requisitionFolderPath(asOfDate);
+    // folderPathOverride lets the draft flow file an in-progress pair into the
+    // month folder's Drafts subfolder; namePrefix stamps them '[DRAFT] '. Both
+    // default to the finalize behaviour, so the two paths build identical files.
+    const folderPath = folderPathOverride || requisitionFolderPath(asOfDate);
     result.folder = folderPath;
     ensureFolders(db, eid, folderPath, who);
 
@@ -253,7 +256,7 @@ async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfD
     // "0005 B1 County Line SRN Requisition Report #12 02.28.2026.xlsx") so the
     // saved workbook matches the prior report's naming convention. Only fall
     // back to the bare label if no name was supplied.
-    const workbookName = (workbookFilename && String(workbookFilename).trim()) || `${reqLabel} Report.xlsx`;
+    const workbookName = namePrefix + ((workbookFilename && String(workbookFilename).trim()) || `${reqLabel} Report.xlsx`);
 
     if (saveWorkbook !== false && workbookBuffer && workbookBuffer.length) {
       try {
@@ -301,7 +304,7 @@ async function saveRequisitionOutputs({ db, workpapersDir, eid, reqNumber, asOfD
         // Falls back to the Req label prefix if no entity prefix was supplied.
         const { monthName } = periodFolderParts(asOfDate);
         const prefix = (packetPrefix && String(packetPrefix).trim()) || reqLabel;
-        const packetName = `${prefix} Invoice Packet ${monthName}.pdf`;
+        const packetName = `${namePrefix}${prefix} Invoice Packet ${monthName}.pdf`;
         result.packet = saveBufferToWorkpapers(
           db, workpapersDir, eid, folderPath,
           packetName,
