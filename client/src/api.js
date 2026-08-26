@@ -338,6 +338,7 @@ export const api = {
     return request('/entities/' + eid + '/files', { method: 'POST', body: fd });
   },
   downloadEntityFile: (id) => API_BASE + '/entity-files/' + id + '/download?token=' + encodeURIComponent(getToken() || ''),
+  downloadEntityFolder: (eid, folderPath) => API_BASE + '/entities/' + eid + '/folders/download?folder_path=' + encodeURIComponent(folderPath || '') + '&token=' + encodeURIComponent(getToken() || ''),
   deleteEntityFile: (id) => request('/entity-files/' + id, { method: 'DELETE' }),
   replaceEntityFile: (id, file) => {
     const fd = new FormData();

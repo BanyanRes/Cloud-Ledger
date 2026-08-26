@@ -5165,6 +5165,70 @@ app.get('/api/entity-files/:id/download', (req, res) => {
   res.sendFile(filepath, err => { if (err && !res.headersSent) res.status(500).json({ error: 'Send failed' }); });
 });
 
+// Download every file at a folder path -- including its subfolders -- as one
+// ZIP, so a reviewer can pull a whole month (or a Drafts folder) in one click.
+// Auth comes from ?token= like the single-file download, because the browser
+// reaches this through a link/fetch that cannot set an Authorization header.
+app.get('/api/entities/:eid/folders/download', (req, res) => {
+  const eid = parseInt(req.params.eid);
+  let claims;
+  try {
+    const token = req.query.token || (req.headers.authorization || '').replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: 'Token required' });
+    claims = jwt.verify(token, JWT_SECRET);
+  } catch { return res.status(401).json({ error: 'Invalid token' }); }
+  if (!userHasEntityAccess(claims.id, claims.role, eid)) return res.status(403).json({ error: 'No access to this entity' });
+  const isAdmin = claims.role === 'Admin';
+  const folderPath = normFolderPath(req.query.folder_path);
+  if (String(folderPath || '').split('/')[0] === '_Admin' && !isAdmin) return res.status(403).json({ error: 'Admin only' });
+
+  // The folder itself plus every descendant. Root ('') means the whole tree.
+  const rows = db.prepare('SELECT * FROM entity_files WHERE entity_id=? ORDER BY folder_path, original_name').all(eid)
+    .filter(f => {
+      const fp = String(f.folder_path || '');
+      if (!isAdmin && fp.split('/')[0] === '_Admin') return false;
+      return folderPath === '' ? true : (fp === folderPath || fp.startsWith(folderPath + '/'));
+    });
+  if (!rows.length) return res.status(404).json({ error: 'This folder has no files to download.' });
+
+  // The zip is built in memory, so cap it rather than risk the process.
+  const MAX_ZIP_BYTES = 300 * 1024 * 1024;
+  const totalBytes = rows.reduce((n, f) => n + (Number(f.size) || 0), 0);
+  if (totalBytes > MAX_ZIP_BYTES) {
+    return res.status(413).json({ error: 'This folder is too large to zip (' + Math.round(totalBytes / 1048576) + ' MB). Open a subfolder and download that instead.' });
+  }
+
+  (async () => {
+    try {
+      const JSZip = require('jszip');
+      const zip = new JSZip();
+      let added = 0;
+      for (const f of rows) {
+        const filepath = path.resolve(WORKPAPERS_DIR, String(f.entity_id), f.stored_filename);
+        if (!fs.existsSync(filepath)) continue; // skip rows whose file went missing
+        // Keep the subfolder structure below the requested folder.
+        const rel = folderPath === ''
+          ? String(f.folder_path || '')
+          : String(f.folder_path || '').slice(folderPath.length).replace(/^\//, '');
+        zip.file((rel ? rel + '/' : '') + f.original_name, fs.readFileSync(filepath));
+        added++;
+      }
+      if (!added) return res.status(404).json({ error: 'No files found on disk for this folder.' });
+      const buf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+      const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid) || {};
+      const leaf = folderPath ? folderPath.split('/').pop() : 'Workpapers';
+      const zipName = ((ent.name ? ent.name + ' - ' : '') + leaf)
+        .replace(/[\/:*?"<>|\r\n]/g, ' ').replace(/\s+/g, ' ').trim() + '.zip';
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', 'attachment; filename="' + zipName + '"');
+      res.setHeader('Content-Length', buf.length);
+      res.send(buf);
+    } catch (e) {
+      if (!res.headersSent) res.status(500).json({ error: 'Zip failed: ' + e.message });
+    }
+  })();
+});
+
 app.delete('/api/entity-files/:id', auth, requireRole('Admin','Accountant'), (req, res) => {
   const f = db.prepare('SELECT * FROM entity_files WHERE id=?').get(req.params.id);
   if (!f) return res.status(404).json({ error: 'Not found' });

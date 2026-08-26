@@ -1681,6 +1681,7 @@ function WorkpapersModal({entity, user, onClose}){
   const[renameValue,setRenameValue]=useState('');
   const[replacingFileId,setReplacingFileId]=useState(null);
   const[editingFile,setEditingFile]=useState(null);
+  const[zipBusy,setZipBusy]=useState(false);
   const fileInputRef = useRef(null);
   const replaceInputRef = useRef(null);
   const canEdit = user.role === 'Admin' || user.role === 'Accountant';
@@ -1717,6 +1718,35 @@ function WorkpapersModal({entity, user, onClose}){
 
   // All folder paths for the upload-target dropdown (root + every known folder)
   const allFolderPaths = useMemo(() => ['', ...folders], [folders]);
+  // Everything at or below the folder being browsed -- what Download All zips.
+  const downloadAllFiles = useMemo(() => files.filter(f => {
+    const fp = String(f.folder_path || '');
+    return curPath === '' ? true : (fp === curPath || fp.startsWith(curPath + '/'));
+  }), [files, curPath]);
+
+  const downloadAll = async () => {
+    if (!downloadAllFiles.length || zipBusy) return;
+    setErr(''); setMsg(''); setZipBusy(true);
+    try {
+      const resp = await fetch(api.downloadEntityFolder(entity.id, curPath));
+      if (!resp.ok) {
+        let m = 'Download failed';
+        try { const j = await resp.json(); if (j && j.error) m = j.error; } catch (_e) {}
+        throw new Error(m);
+      }
+      const blob = await resp.blob();
+      const cd = resp.headers.get('Content-Disposition') || '';
+      const hit = /filename="?([^"]+)"?/.exec(cd);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = (hit && hit[1]) || 'Workpapers.zip';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setMsg('Downloaded ' + downloadAllFiles.length + ' file(s) as a ZIP.');
+    } catch (ex) { setErr(ex.message || 'Download failed'); }
+    finally { setZipBusy(false); }
+  };
+
 
   const doUpload = async e => {
     const fileList = e.target.files;
@@ -1833,6 +1863,15 @@ function WorkpapersModal({entity, user, onClose}){
     </div>}
     {err && <div style={{...S.err, marginBottom: 10}}>{err}</div>}
     {msg && <div style={{...S.success, marginBottom: 10}}>{msg}</div>}
+    {/* Bulk download -- available to everyone who can see the folder */}
+    <div style={{display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 10, marginBottom: 8}}>
+      <button
+        style={{...S.btnS, opacity: (downloadAllFiles.length === 0 || zipBusy) ? 0.5 : 1, cursor: (downloadAllFiles.length === 0 || zipBusy) ? 'not-allowed' : 'pointer'}}
+        disabled={downloadAllFiles.length === 0 || zipBusy}
+        title={downloadAllFiles.length === 0 ? 'Nothing to download in this folder' : 'Download every file in this folder and its subfolders as one ZIP'}
+        onClick={downloadAll}
+      >{zipBusy ? 'Zipping...' : 'Download All' + (downloadAllFiles.length ? ' (' + downloadAllFiles.length + ')' : '')}</button>
+    </div>
     {/* File & folder list */}
     <div style={{flex: '0 1 auto', minHeight: 160, overflowY: 'auto', border: '1px solid ' + T.border, borderRadius: T.radiusSm}}>
       {loading ? <div style={{padding: 60, textAlign: 'center', color: T.textMuted}}>Loading...</div>
