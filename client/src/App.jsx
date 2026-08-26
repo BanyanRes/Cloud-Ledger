@@ -3793,6 +3793,35 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
     const F=[],dcols=[];cols.forEach((c,i)=>{dcols.push(3+2*i,4+2*i);});sumCols(F,tr,dcols,first,last);
     exportToExcel(d,'TB'+(fnameTag?'_'+fnameTag:'')+'_'+anchor+'.xlsx',{formulas:F});};
   const amtStyle={...S.tdR,cursor:'pointer'};
+  // ── Activity-TB drill-down ──
+  // Every figure in the Activity view opens the GL detail behind it, the way the
+  // Balances view's Debit/Credit cells already did (Jimmy, 2026-08-26). The window
+  // is the one that actually BUILDS that figure, so the drill-down foots to the
+  // number that was clicked:
+  //   Period Debits / Period Credits → the From→To window itself.
+  //   Beginning Balance → everything up to the day before From.
+  //   Ending Balance    → everything up to To.
+  // For a P&L account "everything" starts at that year's annual close (Jan 1),
+  // which is how the balance was computed (close_pl_before); a balance-sheet
+  // account carries forward, so it starts at inception. The modal has its own
+  // date inputs, so the user can widen or narrow from there.
+  const TB_INCEPTION='2015-01-01';
+  const isPLType=t=>t==='Revenue'||t==='Expense';
+  const actWindow=(r,which)=>{
+    // Guard the inverted range: with From = Jan 1, a P&L account's window would run
+    // Jan 1 → Dec 31 of the prior year. Such an account has no beginning balance to
+    // click (it closed to RE), but fall back to inception rather than query backwards.
+    const win=(f,t)=>({from:f>t?TB_INCEPTION:f,to:t});
+    if(which==='beg')return win(isPLType(r.type)?yStart(validFrom):TB_INCEPTION,prevDayTB(validFrom));
+    if(which==='end')return win(isPLType(r.type)?yStart(validAsOf):TB_INCEPTION,validAsOf);
+    return{from:validFrom,to:validAsOf};
+  };
+  const actCell=(r,which,v)=>{
+    const live=Math.abs(v||0)>0.005,w=actWindow(r,which);
+    return<td style={{...S.tdR,cursor:live?'pointer':'default',color:live?(v<0?T.red:T.accent):undefined}}
+      title={live?('View GL detail: '+w.from+' → '+w.to):undefined}
+      onClick={()=>{if(live)setDrillAcct({code:r.code,name:r.name,type:r.type,...w});}}>{sfmt(v)}</td>;
+  };
   // GL detail export (optionally scoped to the selected location and/or investor).
   // Pulls flat lines with running balance from /gl-detail through the as-of date;
   // dimension-tagged lines only when a dimension is selected.
@@ -3840,7 +3869,7 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
         <th style={S.thR}>Period Debits</th><th style={S.thR}>Period Credits</th>
         <th style={S.thR}>Ending Balance<div style={{fontSize:9,fontWeight:400,textTransform:'none',letterSpacing:0}}>on {validAsOf}</div></th></tr></thead>
       <tbody>{actRows.map(r=><tr key={r.code}><td style={{...S.td,color:T.textBright}}>{r.code}</td><td style={S.td} title={r.name}>{r.name}</td><td style={S.td}><span style={S.tag(r.type)}>{r.type}</span></td>
-        <td style={{...S.tdR,color:r.beg<0?T.red:undefined}}>{sfmt(r.beg)}</td><td style={S.tdR}>{sfmt(r.dr)}</td><td style={S.tdR}>{sfmt(r.cr)}</td><td style={{...S.tdR,color:r.end<0?T.red:undefined}}>{sfmt(r.end)}</td></tr>)}
+        {actCell(r,'beg',r.beg)}{actCell(r,'dr',r.dr)}{actCell(r,'cr',r.cr)}{actCell(r,'end',r.end)}</tr>)}
         <tr style={S.grandTotalRow}><td style={S.tdBold} colSpan={3}>Totals</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(rnd(actTot.beg))}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(actTot.dr)}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(actTot.cr)}</td><td style={{...S.tdBold,textAlign:'right'}}>{fmt(rnd(actTot.end))}</td></tr></tbody></table></div>}
     {!isActivity&&<div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520}}>
       <thead><tr><th style={S.th}>Code</th><th style={S.th}>Account</th><th style={S.th}>Type</th>
