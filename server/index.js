@@ -6297,6 +6297,186 @@ app.post('/api/billcom/retag-projects/:entity_id', auth, requireEntityAccess('en
  }
 });
 
+// Backfill memo / vendor / doc # / line description on bills synced BEFORE the
+// 2026-08-19 sync rework (CLA request, Max Meyer 8/26 — Turnkey Rail).
+//
+// The sync now writes memo = "Bill - <vendor>: <line description>", the vendor on
+// journal_entries.vendor, the Bill.com invoiceNumber on journal_entries.doc_number,
+// and each line item's own description on its journal line. Entries synced before
+// that still read "Bill.com bill #<n>" with a null vendor and blank descriptions,
+// and nothing that exists today repairs them:
+//   - retag-projects fills project_id / description / doc_number but never memo or
+//     vendor, and refuses outright when the entity has no department -> project map
+//     (Turnkey has none, so it 400s before doing anything);
+//   - the in-sync vendor backfill (see the 'already synced' branch below) only fires
+//     while the bill is still inside the live list window, so it cannot reach a
+//     May or June bill.
+//
+// This route re-reads each synced bill and fills only what is MISSING. The memo is
+// rewritten ONLY when it still matches the machine-written "Bill.com bill #<n>"
+// pattern, so a memo a human edited is never overwritten. Idempotent: a second run
+// finds nothing left to do.
+//
+// Body: { from?, to?, limit?, offset?, dry_run? }. Batched like retag-projects —
+// one Bill.com round trip per bill does not fit in Railway's gateway timeout, so
+// the caller loops on next_offset until remaining is 0.
+app.post('/api/billcom/backfill-memos/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+ try {
+  // `pick` is a local helper in every function that uses it, not a module-level
+  // one — declare it here rather than reaching for a global that does not exist.
+  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
+  const eid = parseInt(req.params.entity_id);
+  const dryRun = !!(req.body && req.body.dry_run);
+  const from = (req.body && req.body.from) || null;
+  const to = (req.body && req.body.to) || null;
+  const limit = Math.max(1, Math.min(parseInt((req.body && req.body.limit) || 20, 10) || 20, 100));
+  const offset = Math.max(0, parseInt((req.body && req.body.offset) || 0, 10) || 0);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(eid);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+
+  let where = '';
+  const params = [eid];
+  if (from) { where += ' AND je.date >= ?'; params.push(from); }
+  if (to) { where += ' AND je.date <= ?'; params.push(to); }
+  const allSynced = db.prepare(
+    "SELECT bl.billcom_id, bl.cl_entry_id, bl.invoice_number, je.date, je.entry_num, je.memo, je.vendor, je.doc_number " +
+    "FROM billcom_sync_log bl JOIN journal_entries je ON je.id = bl.cl_entry_id " +
+    "WHERE bl.entity_id = ? AND bl.sync_type = 'bill' AND bl.status = 'success' " +
+    "AND bl.cl_entry_id IS NOT NULL" + where + " ORDER BY je.date, je.entry_num"
+  ).all(...params);
+  const total = allSynced.length;
+  const synced = allSynced.slice(offset, offset + limit);
+  if (!synced.length) {
+    return res.json({ dry_run: dryRun, total_in_window: total, offset, examined: 0, memos_rewritten: 0, vendors_filled: 0, docs_filled: 0, line_descriptions_filled: 0, next_offset: null, remaining: 0, details: [] });
+  }
+
+  let session, devKey;
+  try {
+    const password = billcomDecrypt(cfg.password_enc);
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (e) { return res.status(502).json({ error: 'Bill.com login failed: ' + e.message }); }
+  const args = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+
+  // The v3 bill detail carries vendorName, so the vendor list is only downloaded
+  // if a bill turns up without one — never on the happy path.
+  let vendorById = null;
+  const loadVendors = async () => {
+    if (vendorById) return vendorById;
+    vendorById = new Map();
+    try {
+      const vlist = await billcomListVendors({ ...args, maxItems: 5000 });
+      for (const v of vlist) { const id = String(pick(v, 'id') || ''); const n = pick(v, 'name', 'vendorName', 'companyName'); if (id && n) vendorById.set(id, n); }
+    } catch (e) {}
+    return vendorById;
+  };
+  const vendorOf = async (detail) => {
+    const direct = pick(detail, 'vendorName', 'vendor_name') || pick(pick(detail, 'vendor') || {}, 'name', 'vendorName');
+    if (direct) return String(direct).trim();
+    const vid = String(pick(detail, 'vendorId', 'vendor_id') || (pick(detail, 'vendor') || {}).id || '');
+    if (!vid) return '';
+    const map = await loadVendors();
+    return String(map.get(vid) || '').trim();
+  };
+
+  const nextOffset = offset + synced.length;
+  const result = { dry_run: dryRun, total_in_window: total, offset, examined: synced.length, next_offset: nextOffset < total ? nextOffset : null, remaining: Math.max(0, total - nextOffset), memos_rewritten: 0, vendors_filled: 0, docs_filled: 0, line_descriptions_filled: 0, skipped_no_vendor: 0, skipped_memo_edited: 0, errors: [], details: [] };
+  const debitLinesOf = db.prepare("SELECT id, debit, description FROM journal_lines WHERE entry_id = ? ORDER BY id");
+  const setDesc = db.prepare('UPDATE journal_lines SET description = ? WHERE id = ?');
+  const setMemo = db.prepare('UPDATE journal_entries SET memo = ? WHERE id = ? AND entity_id = ?');
+  const setVendor = db.prepare('UPDATE journal_entries SET vendor = ? WHERE id = ? AND entity_id = ?');
+  const setDoc = db.prepare('UPDATE journal_entries SET doc_number = ? WHERE id = ? AND entity_id = ?');
+
+  // Only a memo the sync itself wrote is eligible for a rewrite.
+  const MACHINE_MEMO = /^Bill\.com bill #/;
+
+  for (const row of synced) {
+    const memoNow = String(row.memo || '');
+    const memoIsMachine = MACHINE_MEMO.test(memoNow);
+    const needsMemo = memoIsMachine;
+    const needsVendor = !row.vendor;
+    const needsDoc = !row.doc_number;
+    const clLines = debitLinesOf.all(row.cl_entry_id).filter(l => (l.debit || 0) > 0);
+    const needsAnyDesc = clLines.some(l => !String(l.description || '').trim());
+    // Nothing missing -> no Bill.com round trip at all. This is what makes a
+    // second run cheap as well as harmless.
+    if (!needsMemo && !needsVendor && !needsDoc && !needsAnyDesc) continue;
+
+    let detail;
+    try {
+      detail = await billcomGetById({ ...args, resourcePath: '/bills', id: row.billcom_id });
+    } catch (e) { result.errors.push({ billcom_id: row.billcom_id, entry_num: row.entry_num, error: e.message }); continue; }
+    const lineItems = pick(detail, 'lineItems', 'line_items', 'billLineItems') || [];
+    if (!Array.isArray(lineItems)) { result.errors.push({ billcom_id: row.billcom_id, entry_num: row.entry_num, error: 'no line items' }); continue; }
+
+    const vendor = await vendorOf(detail);
+
+    // Bill.com line order is stable and the sync wrote one debit line per line
+    // item in that order, so pair them positionally over the DEBIT lines only.
+    // The AP credit line carries no description.
+    const descPlan = [];
+    lineItems.forEach((li, i) => {
+      const clLine = clLines[i];
+      if (!clLine) return;
+      const desc = String(pick(li, 'description', 'memo', 'lineItemDescription') || '').trim();
+      if (desc && !String(clLine.description || '').trim()) descPlan.push({ line_id: clLine.id, description: desc });
+    });
+
+    // The memo mirrors what the sync would write today: the first line item that
+    // has a description, exactly as `_lineDesc` does on the posting path.
+    const firstDesc = (() => {
+      for (let i = 0; i < lineItems.length; i++) {
+        const d = String(pick(lineItems[i], 'description', 'memo', 'lineItemDescription') || '').trim();
+        if (d) return d;
+      }
+      for (const l of clLines) { const d = String(l.description || '').trim(); if (d) return d; }
+      return '';
+    })();
+
+    let newMemo = null;
+    if (needsMemo) {
+      if (vendor) newMemo = 'Bill - ' + vendor + (firstDesc ? ': ' + firstDesc : '');
+      else result.skipped_no_vendor++;
+    } else if (!memoIsMachine) {
+      result.skipped_memo_edited++;
+    }
+
+    // doc_number: the sync log is the source of truth, the bill detail is next,
+    // and the old machine memo is the last resort (it embedded the number).
+    let docToFill = null;
+    if (needsDoc) {
+      const fromLog = row.invoice_number ? String(row.invoice_number).trim() : '';
+      const fromDetail = String(pick(detail, 'invoiceNumber', 'invoice_number') || '').trim();
+      const fromMemo = memoIsMachine ? (memoNow.match(/^Bill\.com bill #(.+)$/) || [])[1] : '';
+      docToFill = fromLog || fromDetail || String(fromMemo || '').trim() || null;
+    }
+
+    const vendorToFill = needsVendor && vendor ? vendor : null;
+    if (!newMemo && !vendorToFill && !docToFill && !descPlan.length) continue;
+
+    if (!dryRun) {
+      db.transaction(() => {
+        for (const p of descPlan) setDesc.run(p.description, p.line_id);
+        if (newMemo) setMemo.run(newMemo, row.cl_entry_id, eid);
+        if (vendorToFill) setVendor.run(vendorToFill, row.cl_entry_id, eid);
+        if (docToFill) setDoc.run(docToFill, row.cl_entry_id, eid);
+      })();
+    }
+    if (newMemo) result.memos_rewritten++;
+    if (vendorToFill) result.vendors_filled++;
+    if (docToFill) result.docs_filled++;
+    result.line_descriptions_filled += descPlan.length;
+    if (result.details.length < 100) {
+      result.details.push({ entry_num: row.entry_num, date: row.date, billcom_id: row.billcom_id, memo_before: memoNow, memo_after: newMemo, vendor_set: vendorToFill, doc_number_set: docToFill, descriptions_filled: descPlan.length });
+    }
+  }
+  res.json(result);
+ } catch (e) {
+  console.error('backfill-memos failed: ' + (e && e.stack || e));
+  if (!res.headersSent) res.status(500).json({ error: e.message });
+ }
+});
+
 // Phase 5: Push CloudLedger COA to Bill.com and auto-create mappings.
 app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
