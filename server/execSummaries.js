@@ -121,7 +121,7 @@ const SUMMARIES = [
   {
     key: 'clrfi_midco',
     match: { name: /clrfi|midco/i, codes: ['CLRFIMID'], entityId: 70 },
-    title: 'CLRFI Midco I LLC',
+    title: 'CLRFI Midco I, LLC',
     dateMode: 'quarterEnded',
     blocks: [
       { p: GAAP_INTRO },

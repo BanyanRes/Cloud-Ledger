@@ -39,7 +39,11 @@ const execSummaries = require('./execSummaries');
 // aliases; anything else passes through unchanged.
 const ENTITY_DISPLAY_NAMES = [
   { match: /sabine|(county\s*line\s*)?srn/i, display: 'County Line SRN' },
-  { match: /banyan\s*residential/i, display: 'Banyan Residential LLC' },
+  // Anchored to the exact ledger name (entity 41). An unanchored /banyan\s*
+  // residential/ also swallowed "Banyan Residential NCG Fund I, LLC" (entity 14)
+  // and "Guaranty Banyan Residential" (entity 5), so both printed entity 41's
+  // name at the top of their own statements. Found 2026-08-26.
+  { match: /^banyan\s*residential$/i, display: 'Banyan Residential, LLC' },
   // CLIP Property Owner (entity 54) is the operating company that carries the
   // parent's pushed-down 100% investment on its own books. Its issued CPA
   // package is titled for the parent, "County Line Industrial Park, LLC", so the
@@ -52,10 +56,31 @@ const ENTITY_DISPLAY_NAMES = [
   // Owner".
   { match: /clr\s*silsbee\s*property\s*owner|county\s*line\s*rail\s*silsbee/i, display: 'County Line Rail Silsbee, LLC' },
 ];
+// ── entity designation suffix ───────────────────────────────────────
+// ASC 272-10-45-2 (from AICPA Practice Bulletin 14) requires the heading of each
+// statement to identify the entity as a limited liability entity, so every
+// statement name carries its designation. House format puts a comma before the
+// suffix — "County Line SRN, LLC" (Jimmy, 2026-08-26) — which is the form the
+// executive-summary titles already used.
+//
+// An entity that already carries a designation keeps it: an existing LLC suffix
+// is normalized to the comma form ("BROZ FUND I LLC" -> "BROZ FUND I, LLC"), and
+// LP / Inc. / Corp. / LLP / Ltd. are left exactly as they are. County Line Rail
+// Fund — the fund itself, an LP — is excluded outright per Jimmy.
+const DESIGNATION_RX = /(?:,\s*|\s+)(l\.?l\.?c\.?|l\.?l\.?l\.?p\.?|l\.?l\.?p\.?|l\.?p\.?|inc\.?|incorporated|corp\.?|corporation|co\.|ltd\.?|limited|trust)$/i;
+const NO_DESIGNATION = [/county\s*line\s*rail\s*fund/i];
+function withDesignation(name) {
+  const n = String(name || '').trim().replace(/\s+/g, ' ');
+  if (!n) return n;
+  if (NO_DESIGNATION.some(rx => rx.test(n))) return n;
+  const m = n.match(DESIGNATION_RX);
+  if (m) return /^l\.?l\.?c\.?$/i.test(m[1]) ? n.replace(DESIGNATION_RX, ', LLC') : n;
+  return n + ', LLC';
+}
 function displayEntityName(name) {
   const n = String(name || '').trim();
-  for (const { match, display } of ENTITY_DISPLAY_NAMES) if (match.test(n)) return display;
-  return n || 'Entity';
+  for (const { match, display } of ENTITY_DISPLAY_NAMES) if (match.test(n)) return withDesignation(display);
+  return withDesignation(n) || 'Entity';
 }
 
 // ── statement profile ─────────────────────────────────────
@@ -2806,7 +2831,7 @@ async function buildTtmPL(getBalances, opts) {
 
   return {
     meta: {
-      entityName: opts.entityName || '',
+      entityName: displayEntityName(opts.entityName),
       asOf,
       title: 'Trailing 12 Months',
       periodLabel: 'For the Trailing Twelve Months Ended ' + longDate(asOf),
@@ -3309,7 +3334,7 @@ async function buildFundStatements(opts) {
 
   return {
     meta: {
-      entityName: opts.entityName || '',
+      entityName: displayEntityName(opts.entityName),
       asOf,
       longDate: longDate(asOf),
       periodLabel: 'For the Quarter Ended ' + longDate(asOf),
@@ -3483,5 +3508,5 @@ module.exports = {
   renderStatementsPdf,
   stripInvoiceLogPages,
   // exported for unit tests / reuse
-  _helpers: { acct, r2, isZero, netIncomeOf, bsSection, priorMonthEnd, yearStart, monthStart, monthsEndedLabel, longDate, resolvePeriod },
+  _helpers: { acct, r2, isZero, netIncomeOf, bsSection, priorMonthEnd, yearStart, monthStart, monthsEndedLabel, longDate, monthYearLabel, displayEntityName, withDesignation, resolvePeriod },
 };
