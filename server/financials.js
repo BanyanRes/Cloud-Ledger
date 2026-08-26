@@ -495,6 +495,12 @@ function longDate(asOf) {
   const d = new Date(asOf + 'T00:00:00Z');
   return MONTHS[d.getUTCMonth()] + ' ' + d.getUTCDate() + ', ' + d.getUTCFullYear();
 }
+// Month + year only ("August 2026"). Used for page footers, where the exact
+// day adds nothing and the CPA package convention is the period, not the date.
+function monthYearLabel(asOf) {
+  const d = new Date(asOf + 'T00:00:00Z');
+  return MONTHS[d.getUTCMonth()] + ' ' + d.getUTCFullYear();
+}
 function monthsEndedLabel(asOf) {
   const m = parseInt(String(asOf).slice(5, 7), 10); // 1..12 → months elapsed YTD
   const word = ['','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten','Eleven','Twelve'][m] || String(m);
@@ -1770,8 +1776,11 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     if (layout._subline) textC(layout._subline, FS.sub, reg, PH - PAGE.mT - 2);
   }
   function drawFooter() {
-    // Centered footer on every page: "<entity>, <date>  |  See Executive Summary".
-    const label = meta.entityName + ', ' + meta.longDate + '  |  See Executive Summary';
+    // Centered footer on every page: "<entity>, <Month YYYY>  |  See Executive
+    // Summary". Month + year only, never the day (rule set by Jimmy 2026-08-26)
+    // — the statement headings already carry the exact period end date.
+    const period = meta.asOf ? monthYearLabel(meta.asOf) : meta.longDate;
+    const label = meta.entityName + ', ' + period + '  |  See Executive Summary';
     const w = reg.widthOfTextAtSize(label, FS.foot);
     page.drawText(label, { x: (PW - w) / 2, y: PAGE.mB - 12, size: FS.foot, font: reg, color: rgb(0.4, 0.4, 0.4) });
   }
