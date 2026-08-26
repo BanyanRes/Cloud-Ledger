@@ -1651,12 +1651,35 @@ async function buildStatements(getBalances, opts) {
     const beg = openRow ? r2(bal(openRow)) : 0;
     return { code: r.code, name: r.name, beginning: beg, contributions: r2(r.cur - beg), distributions: 0, netIncome: 0, ending: r2(r.cur) };
   });
-  // Retained earnings row (opening RE + YTD NI). Opening RE = frozen RE in the
-  // BS columns is captured by the equity accounts already; but the hand-prepared
-  // statement carries a distinct Retained Earnings member line.
-  const reOpenRow = bsOpen.find(x => x.type === 'Equity' && /retained earning/i.test(x.name));
-  const reOpen = reOpenRow ? r2(bal(reOpenRow)) : 0;
-  const reMember = { code: 're', name: 'Retained Earnings', beginning: reOpen, contributions: 0, distributions: 0, netIncome: niYtd, ending: r2(reOpen + niYtd) };
+  // An equity account can carry a balance at the START of the year and be zero
+  // in BOTH balance-sheet columns — a member redeemed during the year, or (CLR
+  // Buna) a distribution account rolled into Retained Earnings on 1 January.
+  // equityRows drops those (it filters accounts that are zero in cur AND pri),
+  // so their opening balance silently vanished from this statement and the
+  // beginning total stopped equalling the prior period's ending equity. Buna's
+  // 2026 statement opened at 1,310,478.41 against a 12/31/2025 close of
+  // 1,162,361.34 — exactly the 148,117.07 sitting in 33011 Distribution - Ben.
+  // Re-add any such account from the opening balance sheet.
+  const stmtCodes = new Set(equityMembers.map(m => String(m.code)));
+  for (const o of bsOpen) {
+    if (o.type !== 'Equity' || stmtCodes.has(String(o.code))) continue;
+    if (bsCls(o).sub !== 'Members Equity') continue; // RE is the reMember row below
+    const beg = r2(bal(o));
+    if (isZero(beg)) continue;
+    const cr = colCur.map.get(o.code);
+    const end = cr ? r2(bal(cr)) : 0;
+    stmtCodes.add(String(o.code));
+    equityMembers.push({ code: o.code, name: o.name, beginning: beg, contributions: r2(end - beg), distributions: 0, netIncome: 0, ending: end });
+  }
+  equityMembers.sort((a, b) => String(a.code).localeCompare(String(b.code), undefined, { numeric: true }));
+  // Retained earnings row. Beginning = opening RE; ending = the RE balance the
+  // BALANCE SHEET carries plus YTD net income — NOT opening + net income. A
+  // current-year entry posted directly to 39000 (the Buna 1/1 roll-forward
+  // above) is part of RE's movement for the year; taking only the opening
+  // balance dropped it and broke this statement's tie to the balance sheet.
+  const reOpenRows = bsOpen.filter(x => x.type === 'Equity' && bsCls(x).sub === 'Retained Earnings');
+  const reOpen = r2(reOpenRows.reduce((a, x) => a + bal(x), 0));
+  const reMember = { code: 're', name: 'Retained Earnings', beginning: reOpen, contributions: r2(totalRetained.cur - reOpen), distributions: 0, netIncome: niYtd, ending: r2(totalRetained.cur + niYtd) };
   const equityStmt = [...equityMembers.filter(m => !/retained earning/i.test(m.name)), reMember];
   const equityTotals = equityStmt.reduce((t, m) => ({
     beginning: r2(t.beginning + m.beginning), contributions: r2(t.contributions + m.contributions),
@@ -1679,6 +1702,11 @@ async function buildStatements(getBalances, opts) {
       cashFlowTies: isZero(cashFlow.tieOut),
       cashFlowDiff: cashFlow.tieOut,
       niAgrees: isZero(netIncome.ytd - niYtd),
+      // The equity statement must close on the balance sheet's equity, and open
+      // on the prior period's close. Both were silently untrue before the
+      // 2026-08-26 fix above; surface them rather than let them drift again.
+      equityTies: isZero(equityTotals.ending - totalEquity.cur),
+      equityDiff: r2(equityTotals.ending - totalEquity.cur),
     },
   };
 }
