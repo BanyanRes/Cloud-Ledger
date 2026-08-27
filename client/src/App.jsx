@@ -5189,6 +5189,13 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
   const[execFile,setExecFile]=useState(null);
   const[reqFile,setReqFile]=useState(null);
   const[reqFile2,setReqFile2]=useState(null);
+  // WIP schedule (Turnkey Rail only). Gated on the entity name so the button
+  // appears exactly where the server's 'turnkey' statement profile applies.
+  const isTurnkey=/^turnkey\s*rail$/i.test(String(entityName||'').trim());
+  const[wipFile,setWipFile]=useState(null);
+  const[wipStatus,setWipStatus]=useState(null);
+  const[wipBusy,setWipBusy]=useState(false);
+  const[wipMsg,setWipMsg]=useState('');
   const[preview,setPreview]=useState(null);
   const[busy,setBusy]=useState(false);
   const[gen,setGen]=useState(false);
@@ -5205,10 +5212,30 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
       .finally(()=>{if(!cancelled)setBusy(false);});
     return()=>{cancelled=true;};
   },[entityId,asOf,period]);
+  // Is a WIP schedule already stored for this entity + period?
+  useEffect(()=>{let cancelled=false;setWipStatus(null);setWipFile(null);setWipMsg('');
+    if(!isTurnkey||!entityId||!/^\d{4}-\d{2}-\d{2}$/.test(asOf))return;
+    api.financialStatementsWipStatus(entityId,asOf)
+      .then(st=>{if(!cancelled)setWipStatus(st);})
+      .catch(()=>{});
+    return()=>{cancelled=true;};
+  },[entityId,asOf,isTurnkey]);
+  const uploadWip=async(f)=>{
+    if(!f)return;
+    setWipMsg('');setWipBusy(true);
+    try{
+      const out=await api.financialStatementsWipUpload(entityId,asOf,f);
+      if(!out)return;
+      setWipFile(null);
+      setWipMsg('Uploaded '+(out.original_name||f.name)+' for '+(out.period||asOf.slice(0,7))+'.');
+      const st=await api.financialStatementsWipStatus(entityId,asOf).catch(()=>null);
+      if(st)setWipStatus(st);
+    }catch(e){setWipMsg(e.message);}finally{setWipBusy(false);}
+  };
   const generate=async()=>{
     setErr('');setGen(true);setResult(null);
     try{
-      const out=await api.financialStatementsGenerate(entityId,asOf,period,execFile,isDevEntity?[reqFile,reqFile2]:null);
+      const out=await api.financialStatementsGenerate(entityId,asOf,period,execFile,isDevEntity?[reqFile,reqFile2]:null,isTurnkey?wipFile:null);
       if(!out)return;
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
       setResult(out.summary||{});
@@ -5279,6 +5306,18 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
           <label style={S.label}>Second requisition report <span style={{fontWeight:400,color:T.textMuted}}>(optional &mdash; adds a second Budget to Actual to the package)</span></label>
           <input type="file" accept=".pdf,.xlsx,.xls" disabled={!canEdit} onChange={e=>setReqFile2(e.target.files[0]||null)} style={{fontSize:13}}/>
           {reqFile2&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{reqFile2.name}</span>}
+        </div>}
+        {isTurnkey&&<div>
+          <label style={S.label}>WIP schedule <span style={{fontWeight:400,color:T.textMuted}}>(PDF &mdash; merged as &ldquo;Schedule of Contracts&rdquo; at the end of the statements)</span></label>
+          <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+            <input type="file" accept=".pdf" disabled={!canEdit||wipBusy} onChange={e=>setWipFile(e.target.files[0]||null)} style={{fontSize:13}}/>
+            <button style={{...S.btnS,padding:'6px 12px',opacity:(!wipFile||wipBusy||!canEdit)?0.6:1}} disabled={!wipFile||wipBusy||!canEdit} onClick={()=>uploadWip(wipFile)}>{wipBusy?'Uploading…':'Upload WIP schedule'}</button>
+          </div>
+          {wipFile&&<div style={{marginTop:6,fontSize:12,color:T.textMuted}}>Selected: {wipFile.name}</div>}
+          {wipStatus&&wipStatus.present&&<div style={{marginTop:6,fontSize:12,color:T.green}}>&#10003; On file for {wipStatus.period}{wipStatus.uploaded_at?(' (uploaded '+String(wipStatus.uploaded_at).slice(0,10)+')'):''} &mdash; it will be merged into the package.</div>}
+          {wipStatus&&!wipStatus.present&&!wipFile&&<div style={{marginTop:6,fontSize:12,color:T.textMuted}}>Nothing on file for {wipStatus.period} yet. Without one the package generates without a Schedule of Contracts.</div>}
+          {wipMsg&&<div style={{marginTop:6,fontSize:12,color:T.textBright}}>{wipMsg}</div>}
+          <div style={{marginTop:6,fontSize:12,color:T.textDim}}>Stored per period, so each month keeps its own schedule.</div>
         </div>}
       </div>
     </div>

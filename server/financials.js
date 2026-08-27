@@ -125,7 +125,51 @@ function entityProfile(opts) {
   // Vendor, so nothing extra moves into Other Current Assets. Pinned by entity
   // name/code so no other entity is affected.
   if (/clr\s*silsbee\s*property\s*owner/i.test(name) || code === 'CLRSILSB2' || code === 'CLRSILSB') return 'silsbee';
+  // Turnkey Rail (entity 36) - a construction-contractor P&L. Its CPA reference
+  // package (June 2026) shapes the Statements of Operations as:
+  //   Revenue (Construction Revenue) -> Total Revenue
+  //   Cost of Goods Sold (the whole 5xxxx Cost-of-Construction block)
+  //   Gross Profit
+  //   General & Administrative Expenses (6xxxx)
+  //   Other Income (Expense) - Interest Income, Interest Expense
+  //   Net Income (Loss)
+  // Two things the default srn shape got wrong for this chart. COGS is detected
+  // by NAME, and none of Turnkey's 55xxx lines ('Track Materials',
+  // 'Administrative Costs', 'Maintenance', ...) match, so the entire cost of
+  // construction fell into operating expenses and no Gross Profit row rendered
+  // at all. And srn has no Other Income (Expense) section, so Interest Income
+  // (42000, a Revenue account) sat in the top line. Pinned by name/code so no
+  // other entity is affected. (Jimmy, 2026-08-27.)
+  if (/^turnkey[ ]*rail$/i.test(name) || code === 'TURNKEYR') return 'turnkey';
   return 'srn';
+}
+
+// -- Turnkey Rail P&L routing ------------------------------------------------
+// COGS is the whole 5xxxx block - 50000 Cost of Goods Sold plus 55000-55170
+// Cost of Construction (Insurance, Track Materials, Small Tools, Crossing
+// Materials, Leases & Rentals, Fuel & Disposals, Truck, Haul/Fencing/Welding,
+// Traffic Control, Utilities, Subcontractors, Turnkey Labor, Contract
+// Employees, Staffing Labor, Administrative Costs, Marketing, Maintenance).
+// Confirmed against the CPA package, whose COGS section shows only 55xxx lines.
+function turnkeyIsCogs(row) { return /^5/.test(String(row.code || '')); }
+
+// Other Income (Expense). NOTE the chart-specific trap: on Turnkey, 42000 is
+// Interest INCOME (type Revenue, subtype 'Other Revenue') and 70000 is Interest
+// EXPENSE (subtype 'Other Expense'). Other profiles in this file map 70000 to
+// Interest Income, so never share a code heuristic between them - key off the
+// subtype, with the code and name only as backstops.
+function turnkeyIsOtherIncome(row) {
+  if (row.type !== 'Revenue') return false;
+  const sub = String(row.subtype || '').toLowerCase();
+  const nm = String(row.name || '').toLowerCase();
+  return /other revenue|other income/.test(sub) || /interest income/.test(nm) || String(row.code) === '42000';
+}
+function turnkeyIsOtherExpense(row) {
+  if (row.type !== 'Expense') return false;
+  if (turnkeyIsCogs(row)) return false; // COGS wins; never double-count
+  const sub = String(row.subtype || '').toLowerCase();
+  const nm = String(row.name || '').toLowerCase();
+  return /other expense/.test(sub) || /interest expense/.test(nm) || String(row.code) === '70000';
 }
 
 // Which profiles present the intercompany balances as their own balance-sheet
@@ -1332,17 +1376,34 @@ async function buildStatements(getBalances, opts) {
     }).filter(Boolean);
   }
 
-  const revenue = plLines(r => r.type === 'Revenue');
-  const cogs = plLines(r => r.type === 'Expense' && /cogs|cost of goods|cost of revenue|car hire/i.test((r.subtype || '') + ' ' + (r.name || '')));
+  // Turnkey routes its own P&L: COGS is the whole 5xxxx block (the name-based
+  // test below matches none of its 55xxx lines), and Interest Income /
+  // Interest Expense are lifted out of Revenue / Operating Expenses into an
+  // Other Income (Expense) section. Every other profile is unchanged.
+  const isTk = profile === 'turnkey';
+  const revenue = plLines(r => r.type === 'Revenue' && !(isTk && turnkeyIsOtherIncome(r)));
+  const cogs = plLines(r => r.type === 'Expense' && (isTk
+    ? turnkeyIsCogs(r)
+    : /cogs|cost of goods|cost of revenue|car hire/i.test((r.subtype || '') + ' ' + (r.name || ''))));
   const cogsCodes = new Set(cogs.map(l => l.code));
-  const opex = plLines(r => r.type === 'Expense' && !cogsCodes.has(r.code));
+  // Other Income (Expense) lines — turnkey only; empty elsewhere so the
+  // section never renders and the arithmetic below is a no-op.
+  const otherIncomeLines = isTk ? plLines(r => turnkeyIsOtherIncome(r)) : [];
+  const otherExpenseLines = isTk ? plLines(r => turnkeyIsOtherExpense(r)) : [];
+  const otherExpCodes = new Set(otherExpenseLines.map(l => l.code));
+  const opex = plLines(r => r.type === 'Expense' && !cogsCodes.has(r.code) && !otherExpCodes.has(r.code));
 
   const sumCol = (lines, k) => r2(lines.reduce((s, l) => s + l[k], 0));
   const totRev = { cur: sumCol(revenue, 'cur'), pri: sumCol(revenue, 'pri'), ytd: sumCol(revenue, 'ytd') };
   const totCogs = { cur: sumCol(cogs, 'cur'), pri: sumCol(cogs, 'pri'), ytd: sumCol(cogs, 'ytd') };
   const grossProfit = { cur: r2(totRev.cur - totCogs.cur), pri: r2(totRev.pri - totCogs.pri), ytd: r2(totRev.ytd - totCogs.ytd) };
   const totOpex = { cur: sumCol(opex, 'cur'), pri: sumCol(opex, 'pri'), ytd: sumCol(opex, 'ytd') };
-  const netIncome = { cur: r2(grossProfit.cur - totOpex.cur), pri: r2(grossProfit.pri - totOpex.pri), ytd: r2(grossProfit.ytd - totOpex.ytd) };
+  // Other Income (Expense) nets income less expense. Both line sets carry
+  // positive magnitudes (see plLines), so the expense side is subtracted.
+  const totOtherInc = { cur: sumCol(otherIncomeLines, 'cur'), pri: sumCol(otherIncomeLines, 'pri'), ytd: sumCol(otherIncomeLines, 'ytd') };
+  const totOtherExp = { cur: sumCol(otherExpenseLines, 'cur'), pri: sumCol(otherExpenseLines, 'pri'), ytd: sumCol(otherExpenseLines, 'ytd') };
+  const totOtherIE = { cur: r2(totOtherInc.cur - totOtherExp.cur), pri: r2(totOtherInc.pri - totOtherExp.pri), ytd: r2(totOtherInc.ytd - totOtherExp.ytd) };
+  const netIncome = { cur: r2(grossProfit.cur - totOpex.cur + totOtherIE.cur), pri: r2(grossProfit.pri - totOpex.pri + totOtherIE.pri), ytd: r2(grossProfit.ytd - totOpex.ytd + totOtherIE.ytd) };
 
   // Group operating expenses into the 11 presentation categories (per the CLR
   // operating-expense restructure). Category subtotals sum to totOpex exactly —
@@ -1770,7 +1831,8 @@ async function buildStatements(getBalances, opts) {
             period: (opts.period || 'monthly').toLowerCase(), periodLabel: period.periodLabel, colLabel: period.colLabel,
             opsDateLine: opsHeadingLine(period.colLabel, longDate(asOf), longDate(priorBsDate)), profile },
     balanceSheet: { assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
-    operations: Object.assign({ revenue, cogs, opex, opexGroups, totRev, totCogs, grossProfit, totOpex, netIncome },
+    operations: Object.assign({ revenue, cogs, opex, opexGroups, totRev, totCogs, grossProfit, totOpex, netIncome,
+      otherIncomeLines, otherExpenseLines, totOtherInc, totOtherExp, totOtherIE },
       bsfrgpOps ? { bsfrgp: bsfrgpOps, netIncome: bsfrgpOps.netIncome } : {},
       banyanOps ? { banyan: banyanOps, netIncome: banyanOps.netIncome } : {}),
     cashFlow,
@@ -2330,16 +2392,21 @@ async function renderStatementsPdf(s, outOffsets) {
     s.operations.revenue.forEach((r, i) => line(r, { dollarPrefix: i === 0 }));
     L.row('Total Revenue', [money(s.operations.totRev.cur), money(s.operations.totRev.pri), chg(s.operations.totRev.cur, s.operations.totRev.pri), money(s.operations.totRev.ytd)], { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     if (s.operations.cogs.length) {
-      L.sectionTitle('Cost of Revenue');
+      const cogsLabel = m.profile === 'turnkey' ? 'Cost of Goods Sold' : 'Cost of Revenue';
+      L.sectionTitle(cogsLabel);
       s.operations.cogs.forEach(r => line(r));
-      L.row('Total Cost of Revenue', [money(s.operations.totCogs.cur), money(s.operations.totCogs.pri), chg(s.operations.totCogs.cur, s.operations.totCogs.pri), money(s.operations.totCogs.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 4 });
+      L.row('Total ' + cogsLabel, [money(s.operations.totCogs.cur), money(s.operations.totCogs.pri), chg(s.operations.totCogs.cur, s.operations.totCogs.pri), money(s.operations.totCogs.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 4 });
       L.row('Gross Profit', [money(s.operations.grossProfit.cur), money(s.operations.grossProfit.pri), chg(s.operations.grossProfit.cur, s.operations.grossProfit.pri), money(s.operations.grossProfit.ytd)], { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     }
-    L.sectionTitle('Operating Expenses');
+    L.sectionTitle(m.profile === 'turnkey' ? 'General & Administrative Expenses' : 'Operating Expenses');
     // Grouped into the 11 presentation categories, each with its own subtotal.
     // Category subtotals sum to Total Operating Expenses exactly (pure re-group).
     // Fall back to a flat list if grouping produced nothing (defensive).
-    const groups = s.operations.opexGroups && s.operations.opexGroups.length
+    // Turnkey renders G&A FLAT. The 11 categories are an SRN railroad-operations
+    // construct and misfile a contractor chart - Depreciation Expense landed
+    // under a "Professional Services" header - and the CPA package presents
+    // General & Administrative Expenses as a plain list of accounts.
+    const groups = (m.profile !== 'turnkey') && s.operations.opexGroups && s.operations.opexGroups.length
       ? s.operations.opexGroups : null;
     if (groups) {
       for (const g of groups) {
@@ -2359,7 +2426,18 @@ async function renderStatementsPdf(s, outOffsets) {
     } else {
       s.operations.opex.forEach(r => line(r));
     }
-    L.row('Total Operating Expenses', [money(s.operations.totOpex.cur), money(s.operations.totOpex.pri), chg(s.operations.totOpex.cur, s.operations.totOpex.pri), money(s.operations.totOpex.ytd)], { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
+    L.row('Total ' + (m.profile === 'turnkey' ? 'General & Administrative Expenses' : 'Operating Expenses'), [money(s.operations.totOpex.cur), money(s.operations.totOpex.pri), chg(s.operations.totOpex.cur, s.operations.totOpex.pri), money(s.operations.totOpex.ytd)], { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
+    // Other Income (Expense) - income lines then expense lines, netted. Only
+    // turnkey populates these, so this block is inert for every other profile.
+    const oiLines = s.operations.otherIncomeLines || [];
+    const oeLines = s.operations.otherExpenseLines || [];
+    if (oiLines.length || oeLines.length) {
+      L.sectionTitle('Other Income (Expense)');
+      oiLines.forEach(r => line(r));
+      // Expense lines are shown parenthesised as reductions of income.
+      oeLines.forEach(r => L.row(r.name, [money(-r.cur), money(-r.pri), chg(-r.cur, -r.pri), money(-r.ytd)], { indent: 26 }));
+      L.row('Total Other Income (Expense)', [money(s.operations.totOtherIE.cur), money(s.operations.totOtherIE.pri), chg(s.operations.totOtherIE.cur, s.operations.totOtherIE.pri), money(s.operations.totOtherIE.ytd)], { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
+    }
     L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
     }
   }
@@ -2616,7 +2694,7 @@ async function renderCoverPdf(meta, tocEntries) {
 // }
 // Returns { bytes, info: { pages, reqRemoved, reqKept, cashFlowTies, ... } }.
 // ═══════════════════════════════════════════════════════════════════════════
-async function generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName }) {
+async function generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName }) {
   const merged = await PDFDocument.create();
   const info = { sections: [], warnings: [] };
 
@@ -2683,6 +2761,30 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
   await appendToBody(stmtBytes, 'Financial Statements', false);
   for (const off of stmtOffsets) {
     tocEntries.push({ label: off.label, page: stmtBodyStart + off.page + COVER_TOC_PAGES + 1 });
+  }
+
+  // 3b. WIP schedule (uploaded) -> 'Schedule of Contracts'. The CPA reference
+  //     package carries this as its final statement page, so it is appended
+  //     directly after the GL statements and ahead of any requisition report.
+  //     appendToBody records the section's absolute start page and adds the
+  //     Table-of-Contents entry, so nothing else needs bookkeeping.
+  //     A non-PDF (or unreadable) upload is warned about, not fatal: the rest
+  //     of the package still generates.
+  if (wipBytes && wipBytes.length) {
+    // appendToBody catches an unreadable PDF itself and pushes its own warning
+    // rather than throwing, so inclusion is measured by whether the body
+    // actually grew - never assumed. A try/catch alone reported success on a
+    // file that had in fact been skipped.
+    const wipPagesBefore = body.getPageCount();
+    try {
+      await appendToBody(wipBytes, 'Schedule of Contracts', true);
+    } catch (e) {
+      info.warnings.push('WIP schedule could not be merged (' + e.message + '); package generated without it.');
+    }
+    const wipAdded = body.getPageCount() - wipPagesBefore;
+    info.wipSchedule = { included: wipAdded > 0, pages: wipAdded, name: wipName || null };
+  } else {
+    info.wipSchedule = { included: false, pages: 0, name: null };
   }
   // 4. Requisition report(s) (uploaded). Accepts a PDF or an .xlsx workbook.
   //    Rail-assets entities may pair TWO reports; each becomes its own body

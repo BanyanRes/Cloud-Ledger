@@ -9920,7 +9920,8 @@ require('./orgstructure').registerOrgStructureRoutes(app, {
 //   cover -> executive summary (uploaded) -> GL statements -> requisition report
 //   (uploaded, with Current/Prior Invoice Log pages stripped).
 const finStmtUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
-const finStmtFields = finStmtUpload.fields([{ name: 'execSummary', maxCount: 1 }, { name: 'reqReport', maxCount: 2 }]);
+const finStmtFields = finStmtUpload.fields([{ name: 'execSummary', maxCount: 1 }, { name: 'reqReport', maxCount: 2 }, { name: 'wip', maxCount: 1 }]);
+const wipUploadFields = finStmtUpload.fields([{ name: 'wip', maxCount: 1 }]);
 
 // Preview endpoint: returns the numeric statements + tie-out checks as JSON,
 // so the UI can show balance-sheet / cash-flow tie-outs before generating.
@@ -10288,6 +10289,63 @@ function writeStoredExecSummary(eid, buffer, who) {
     execSummaries.DEFAULT_FILENAME, 'application/pdf', buffer, who, { overwrite: true });
 }
 
+// ── WIP schedule (Schedule of Contracts) ───────────────────────────────────
+// Users upload the WIP schedule as a PDF; it is merged into the statement
+// package as its final statement section. Stored PER PERIOD (Jimmy,
+// 2026-08-27) so regenerating an older month still picks up that month's WIP
+// rather than the newest one.
+const WIP_FOLDER = 'WIP Schedule';
+// as_of 2026-06-30 -> 'wip_schedule_2026-06.pdf'
+function wipFilename(asOf) { return 'wip_schedule_' + String(asOf).slice(0, 7) + '.pdf'; }
+
+function readStoredWip(eid, asOf) {
+  const row = db.prepare(
+    'SELECT stored_filename, original_name, created_at FROM entity_files WHERE entity_id=? AND folder_path=? AND original_name=? ORDER BY id DESC LIMIT 1'
+  ).get(eid, WIP_FOLDER, wipFilename(asOf));
+  if (!row) return null;
+  try {
+    const p = path.resolve(WORKPAPERS_DIR, String(eid), row.stored_filename);
+    return { bytes: fs.readFileSync(p), uploadedAt: row.created_at || null };
+  } catch (_) { return null; }
+}
+
+function writeStoredWip(eid, asOf, buffer, who) {
+  ensureWpFolders(db, eid, WIP_FOLDER, who);
+  return saveWpBuffer(db, WORKPAPERS_DIR, eid, WIP_FOLDER,
+    wipFilename(asOf), 'application/pdf', buffer, who, { overwrite: true });
+}
+
+// Upload (or replace) the WIP schedule for one period. Body: as_of=YYYY-MM-DD.
+app.post('/api/workpapers/financial-statements/:entity_id/wip', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
+  wipUploadFields(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    try {
+      const eid = req.params.entity_id;
+      const asOf = req.body.as_of;
+      if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
+      const f = req.files && req.files.wip && req.files.wip[0];
+      if (!f || !f.buffer || !f.buffer.length) return res.status(400).json({ error: 'No file uploaded (field name: wip)' });
+      // PDF only — the merge copies pages straight into the package.
+      const isPdf = f.buffer.slice(0, 5).toString('latin1') === '%PDF-';
+      if (!isPdf) return res.status(400).json({ error: 'The WIP schedule must be a PDF.' });
+      const who = req.user ? (req.user.name || req.user.email) : 'system';
+      writeStoredWip(eid, asOf, f.buffer, who);
+      res.json({ ok: true, period: String(asOf).slice(0, 7), stored_as: wipFilename(asOf), original_name: f.originalname, bytes: f.buffer.length });
+    } catch (e) {
+      res.status(500).json({ error: 'WIP upload failed: ' + e.message });
+    }
+  });
+});
+
+// Is a WIP schedule on file for this entity + period?
+app.get('/api/workpapers/financial-statements/:entity_id/wip', auth, requireEntityAccess('entity_id'), (req, res) => {
+  const asOf = req.query.as_of;
+  if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(String(asOf))) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
+  const got = readStoredWip(req.params.entity_id, asOf);
+  res.json({ present: !!got, period: String(asOf).slice(0, 7), stored_as: wipFilename(asOf),
+             bytes: got ? got.bytes.length : 0, uploaded_at: got ? got.uploadedAt : null });
+});
+
 app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   finStmtFields(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message });
@@ -10333,7 +10391,21 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
         storedDefaultBytes = readStoredExecSummary(eid);
       }
 
-      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName });
+      // WIP schedule: an upload on this request both goes into THIS package
+      // and becomes the stored copy for this period; otherwise use whatever
+      // was uploaded for the period earlier. Mirrors the exec-summary flow.
+      const wipUpload = files.wip && files.wip[0] ? files.wip[0] : null;
+      let wipBytes = null, wipName = null;
+      if (wipUpload && wipUpload.buffer && wipUpload.buffer.length) {
+        wipBytes = wipUpload.buffer; wipName = wipUpload.originalname || null;
+        try { writeStoredWip(eid, asOf, wipBytes, who); }
+        catch (e) { console.error('WIP persist failed:', e.message); }
+      } else {
+        const stored = readStoredWip(eid, asOf);
+        if (stored) { wipBytes = stored.bytes; wipName = wipFilename(asOf); }
+      }
+
+      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName });
 
       const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
       const safeName = entityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');

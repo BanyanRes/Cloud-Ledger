@@ -574,11 +574,13 @@ export const api = {
     if (!res.ok) throw new Error(data.error || 'Preview failed');
     return data;
   },
-  financialStatementsGenerate: async (eid, asOf, period, execSummaryFile, reqReportFile) => {
+  financialStatementsGenerate: async (eid, asOf, period, execSummaryFile, reqReportFile, wipFile) => {
     const fd = new FormData();
     fd.append('as_of', asOf);
     fd.append('period', period || 'monthly');
     if (execSummaryFile) fd.append('execSummary', execSummaryFile);
+    // WIP schedule -> merged as the package's 'Schedule of Contracts' section.
+    if (wipFile) fd.append('wip', wipFile);
     // reqReportFile may be a single File or an array of up to two Files.
     const reqFiles = Array.isArray(reqReportFile) ? reqReportFile.filter(Boolean) : (reqReportFile ? [reqReportFile] : []);
     for (const f of reqFiles) fd.append('reqReport', f);
@@ -598,6 +600,32 @@ export const api = {
     const filename = m ? m[1] : 'Financial_Statements.pdf';
     const blob = await res.blob();
     return { blob, filename, summary };
+  },
+  // WIP schedule (Schedule of Contracts). Stored per period, so as_of decides
+  // which month's schedule is replaced/read.
+  financialStatementsWipUpload: async (eid, asOf, file) => {
+    const fd = new FormData();
+    fd.append('as_of', asOf);
+    fd.append('wip', file);
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/financial-statements/' + eid + '/wip', {
+      method: 'POST', headers: token ? { Authorization: 'Bearer ' + token } : {}, body: fd,
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'WIP upload failed');
+    return data;
+  },
+  financialStatementsWipStatus: async (eid, asOf) => {
+    const token = getToken();
+    const qs = 'as_of=' + encodeURIComponent(asOf);
+    const res = await fetch(API_BASE + '/workpapers/financial-statements/' + eid + '/wip?' + qs, {
+      method: 'GET', headers: token ? { Authorization: 'Bearer ' + token } : {},
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'WIP status failed');
+    return data;
   },
   // Excel version of the statement package — mirrors the PDF formatting, one
   // worksheet per statement. GET (no uploads); returns a downloadable .xlsx blob.
