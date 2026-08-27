@@ -695,14 +695,23 @@ function registerConsolidationRoutes(app, deps) {
       const o = { as_of: asOf, close_pl_before: yearStart(asOf) };
       const { rules, adjustments } = C.computeEliminations(db, group, o, computeBalances, null);
       const entries = adjustments.map(a => {
+        // The operating column's accounts live in an uploaded trial balance, not
+        // in `accounts`, so the type the engine carried with the adjustment is
+        // authoritative and the chart is only a fallback for the name.
         const acct = db.prepare('SELECT name, type FROM accounts WHERE entity_id=? AND code=?').get(a.entity_id, a.code);
+        const type = a.type || (acct ? acct.type : null);
+        // Which side removes the balance depends on the side the account sits
+        // on. Taking out a positive asset or expense is a CREDIT; taking out
+        // positive liability, equity or revenue is a DEBIT. A negative balance
+        // reverses that.
+        const isDr = type === 'Asset' || type === 'Expense';
+        const removeWithCredit = isDr ? a.amount > 0 : a.amount < 0;
+        const mag = r2(Math.abs(a.amount));
         return {
           entity_id: a.entity_id, entity_name: entName(a.entity_id), code: a.code,
-          name: acct ? acct.name : null, type: acct ? acct.type : null,
-          // A positive natural balance is removed by a credit; a negative one by
-          // a debit. Stated both ways so the schedule can print either.
-          debit: a.amount < 0 ? r2(-a.amount) : 0,
-          credit: a.amount > 0 ? r2(a.amount) : 0,
+          name: acct ? acct.name : null, type,
+          debit: removeWithCredit ? 0 : mag,
+          credit: removeWithCredit ? mag : 0,
         };
       });
       const totalDr = r2(entries.reduce((s, e2) => s + e2.debit, 0));

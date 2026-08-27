@@ -402,8 +402,12 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
     const holder = figureFor(rowsFor(p.holder_entity_id), p.holder_account_code);
     const issuer = figureFor(rowsFor(p.issuer_entity_id), p.issuer_account_code);
     const matched = r2(Math.min(Math.abs(holder), Math.abs(issuer)));
-    if (holder) adjustments.push({ entity_id: p.holder_entity_id, code: p.holder_account_code, amount: matched * Math.sign(holder) });
-    if (issuer) adjustments.push({ entity_id: p.issuer_entity_id, code: p.issuer_account_code, amount: matched * Math.sign(issuer) });
+    const typeOf = (eid, code) => {
+      const row = (rowsFor(eid) || []).find(x => String(x.code) === String(code));
+      return row ? row.type : null;
+    };
+    if (holder) adjustments.push({ entity_id: p.holder_entity_id, code: p.holder_account_code, type: typeOf(p.holder_entity_id, p.holder_account_code), amount: matched * Math.sign(holder) });
+    if (issuer) adjustments.push({ entity_id: p.issuer_entity_id, code: p.issuer_account_code, type: typeOf(p.issuer_entity_id, p.issuer_account_code), amount: matched * Math.sign(issuer) });
     rules.push({
       type: 'investment_capital',
       label: p.label || 'Investment in subsidiary / contributed capital',
@@ -424,37 +428,55 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
   const fundRows = db.prepare('SELECT * FROM consol_funding_accounts WHERE group_id = ? ORDER BY entity_id, account_code').all(group.id);
   const capRows = db.prepare('SELECT * FROM consol_funding_capital WHERE group_id = ?').all(group.id);
   if (fundRows.length || capRows.length) {
-    const legs = [];
-    let fundTotal = 0;
-    for (const f of fundRows) {
-      const bal = figureFor(rowsFor(f.entity_id), f.account_code);
+    // Both sides are measured BEFORE anything is eliminated, because only the
+    // matched amount may come out. Eliminating a funding account with no
+    // capital facing it — an operating trial balance not yet uploaded, say —
+    // would leave the elimination column one-sided and the schedule would stop
+    // cross-footing.
+    const legFor = (eid, code, extra) => {
+      const row = (rowsFor(eid) || []).find(x => String(x.code) === String(code));
+      const bal = row ? r2(row.balance) : 0;
+      return Object.assign({ entity_id: eid, code, type: row ? row.type : null, balance: bal }, extra);
+    };
+    const capLegs = capRows.map(c => {
+      const l = legFor(c.entity_id, c.account_code, { side: 'capital' });
+      l.available = Math.abs(l.balance);
+      return l;
+    });
+    const fundLegs = fundRows.map(f => {
+      const l = legFor(f.entity_id, f.account_code, { side: 'funding', name: f.account_name, mode: f.mode });
       // 'full' self-maintains on an account that carries nothing else;
       // 'amount' is the cumulative figure the user keeps, capped at the
       // account's own balance so an elimination can never exceed what is there.
-      let amt = f.mode === 'full' ? Math.abs(bal) : Math.abs(r2(f.amount));
-      if (Math.abs(bal) < amt) amt = Math.abs(bal);
-      amt = r2(amt);
-      if (amt) adjustments.push({ entity_id: f.entity_id, code: f.account_code, amount: amt * (Math.sign(bal) || 1) });
-      fundTotal = r2(fundTotal + amt);
-      legs.push({
-        entity_id: f.entity_id, code: f.account_code, name: f.account_name,
-        mode: f.mode, balance: r2(bal), amount: amt,
-        capped: f.mode !== 'full' && Math.abs(r2(f.amount)) > Math.abs(bal),
-      });
-    }
-    let capTotal = 0;
-    for (const c of capRows) {
-      const bal = figureFor(rowsFor(c.entity_id), c.account_code);
-      capTotal = r2(capTotal + Math.abs(bal));
-      const matched = r2(Math.min(Math.abs(bal), fundTotal));
-      if (bal) adjustments.push({ entity_id: c.entity_id, code: c.account_code, amount: matched * Math.sign(bal) });
-      legs.push({ entity_id: c.entity_id, code: c.account_code, side: 'capital', balance: r2(bal), amount: matched });
-    }
+      let want = f.mode === 'full' ? Math.abs(l.balance) : Math.abs(r2(f.amount));
+      if (Math.abs(l.balance) < want) want = Math.abs(l.balance);
+      l.available = r2(want);
+      l.capped = f.mode !== 'full' && Math.abs(r2(f.amount)) > Math.abs(l.balance);
+      return l;
+    });
+    const fundTotal = r2(fundLegs.reduce((s, l) => s + l.available, 0));
+    const capTotal = r2(capLegs.reduce((s, l) => s + l.available, 0));
+    const matchedTotal = r2(Math.min(fundTotal, capTotal));
+
+    // Allocate the matched amount down each side in listed order. Whatever is
+    // left over stays on the books and is reported, never absorbed.
+    const allocate = (legs, budget) => {
+      let left = budget;
+      for (const l of legs) {
+        const amt = r2(Math.min(l.available, Math.max(0, left)));
+        l.amount = amt;
+        left = r2(left - amt);
+        if (amt) adjustments.push({ entity_id: l.entity_id, code: l.code, type: l.type, amount: amt * (Math.sign(l.balance) || 1) });
+      }
+    };
+    allocate(fundLegs, matchedTotal);
+    allocate(capLegs, matchedTotal);
+
     rules.push({
       type: 'funding_capital',
       label: 'Operating funding / contributed capital',
-      legs,
-      eliminated: r2(Math.min(fundTotal, capTotal)),
+      legs: fundLegs.concat(capLegs),
+      eliminated: matchedTotal,
       funding_total: fundTotal,
       capital_total: capTotal,
       residual: r2(capTotal - fundTotal),
@@ -462,16 +484,17 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
     });
   }
 
-  // Collapse to one figure per (entity, account).
+  // Collapse to one figure per (entity, account). The account's type travels
+  // with it so a caller can render the entry as a debit or a credit — removing
+  // a positive asset is a credit, removing positive equity is a debit.
   const byKey = new Map();
   for (const a of adjustments) {
     const k = a.entity_id + '|' + a.code;
-    byKey.set(k, r2((byKey.get(k) || 0) + a.amount));
+    const cur = byKey.get(k);
+    if (cur) cur.amount = r2(cur.amount + a.amount);
+    else byKey.set(k, { entity_id: a.entity_id, code: a.code, type: a.type || null, amount: r2(a.amount) });
   }
-  return { rules, adjustments: [...byKey.entries()].map(([k, amount]) => {
-    const [eid, code] = k.split('|');
-    return { entity_id: Number(eid), code, amount };
-  }) };
+  return { rules, adjustments: [...byKey.values()] };
 }
 
 // ═══════════════════ Consolidated and consolidating ═══════════════════
