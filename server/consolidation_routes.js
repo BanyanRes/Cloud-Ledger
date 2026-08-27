@@ -303,6 +303,49 @@ const BRAKER_FUNDING = [
   ['13425', 'Operating Shortfall', 'full', 238779.06],
 ];
 
+// ────────────────────────────── HP ──────────────────────────────
+//
+// HP's property manager mirrors the whole development book inside its own
+// trial balance, and no cash passes between development and operating, so the
+// Braker funding rule does not apply: the mirrored accounts simply come out in
+// full. Read off CLA's July 2026 consolidating schedules (pages 35-38 of the
+// Bridge Banyan HP QOZB package).
+//
+// These are STATEMENT-LINE codes — the targets the operating TB maps to, not
+// the property system's own source codes. Three of them are deliberately shared
+// with the development ledger, because both books carry the same account and
+// CLA unions them into one row: 21003 Retention Liability, 39000 Retained
+// Earnings, 75000 Interest Expense.
+//
+// 25004 is the exception and the one place this list departs from CLA's
+// numbering. CLA prints "25004 Deployed Funds Sponsor Capital" on the operating
+// column and "25006 Loan Payable - UMB Bank Loan" on HP Property Owner;
+// CloudLedger's entity 55 carries that same UMB loan at 25004. Mapping the
+// mirror to 25004 would merge a 5.7m capital account into a 60.07m loan, so it
+// is seeded at 25007 instead. The tidy fix is to renumber 55's UMB loan to
+// 25006 to match CLA and move this row back to 25004 — a production account
+// renumber, so it waits for Jimmy.
+//
+// [ code, name, sort ]
+const HP_FULL_ELIMINATIONS = [
+  ['10132', 'Cash Ozone JV Non-Controlled Account', 10],
+  ['12002', 'Construction in Progress', 20],
+  ['12004', 'Accrued WIP 2', 30],
+  ['12005', 'WIP Contra Acct - Operating Deficit Off-Set', 40],
+  ['21003', 'Retention Liability', 50],
+  ['23002', 'Development Intercompany Payable', 60],
+  ['23009', 'Development Construction Loan Interest Payable', 70],
+  ['25001', 'Fund Capital Deployed', 80],
+  ['25002', 'Deployed Fund Capital', 90],
+  ['25003', 'Fund Sponsor Capital Deployed', 100],
+  ['25007', 'Deployed Funds Sponsor Capital', 110],
+  ['25005', 'Construction Loan 1', 120],
+  ['31001', 'Capital Contributions', 130],
+  ['32001', 'Distributions', 140],
+  ['39000', 'Retained Earnings', 150],
+  ['75000', 'Interest Expense', 160],
+];
+
 function findEntity(db, rx, codes) {
   const rows = db.prepare('SELECT id, name, code FROM entities').all();
   return rows.find(e => codes.includes(String(e.code || '').toUpperCase()))
@@ -370,6 +413,70 @@ function seedBraker(db) {
   return { seeded: true, group_id: g.id, parent: parent.id, propco: propco.id, operating: oper.id, mapped, funds };
 }
 
+// The HP group. Idempotent, same as Braker: creates what is missing and never
+// overwrites a row a user has since edited.
+//
+// The operating column gets a NEGATIVE entity id. The property manager is not a
+// CloudLedger entity and, after 38785a3, a trial-balance column does not need
+// an entity row — but it does need a stable id to key the TB, the map and the
+// elimination list on. A negative id can never collide with entities.id, which
+// AUTOINCREMENTs from 1, so nothing later created can quietly take it over.
+// Braker's column uses 57 only because that entity existed once and was then
+// deleted; HP has no such placeholder and should not gain one.
+const hpOperatingId = parentId => -parentId;
+
+function seedHp(db) {
+  const parent = findEntity(db, /bridge\s*banyan\s*hp\s*qozb/i, ['BRIDGEBA']);
+  const devco = findEntity(db, /hp\s*property\s*owner/i, ['HPPROPER']);
+  if (!parent || !devco) return { seeded: false, reason: 'HP entities are not all present' };
+  const operId = hpOperatingId(parent.id);
+
+  const now = new Date().toISOString();
+  let g = C.groupForParent(db, parent.id);
+  if (!g) {
+    db.prepare('INSERT INTO consol_groups (parent_entity_id, scope_key, name, created_at, created_by) VALUES (?,?,?,?,?)')
+      .run(parent.id, 'hp', 'Bridge Banyan HP QOZB, LLC', now, 'seed');
+    g = C.groupForParent(db, parent.id);
+  }
+  const addMember = (eid, label, source, order) => {
+    try {
+      db.prepare('INSERT INTO consol_members (group_id, entity_id, label, source, sort_order) VALUES (?,?,?,?,?)')
+        .run(g.id, eid, label, source, order);
+    } catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
+  };
+  // Column order and headings follow CLA's package exactly.
+  addMember(parent.id, 'Bridge Banyan HP QOZB', 'ledger', 0);
+  addMember(devco.id, 'HP Property Owner', 'ledger', 1);
+  addMember(operId, 'Highpoint Operating', 'tb', 2);
+
+  // Investment in HP Property Owner ↔ the capital it issued to the QOZB.
+  // Reciprocal and equal at 52,899,612.00 on the July books.
+  try {
+    db.prepare(`INSERT INTO consol_investment_pairs
+      (group_id, label, holder_entity_id, holder_account_code, issuer_entity_id, issuer_account_code, sort_order, created_at, created_by)
+      VALUES (?,?,?,?,?,?,?,?,?)`)
+      .run(g.id, 'Investment in HP Property Owner / Contributed Capital - Bridge Banyan HP QOZB',
+        parent.id, '19033', devco.id, '34107', 0, now, 'seed');
+  } catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
+
+  const insFull = db.prepare(`INSERT INTO consol_full_eliminations
+    (group_id, entity_id, account_code, account_name, notes, sort_order, created_at, created_by, updated_at, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`);
+  let mirrors = 0;
+  for (const [code, name, sort] of HP_FULL_ELIMINATIONS) {
+    try {
+      insFull.run(g.id, operId, code, name,
+        'Seeded from the CLA July 2026 consolidating schedules', sort, now, 'seed', now, 'seed');
+      mirrors++;
+    } catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
+  }
+
+  // No operating_tb_map is seeded. The property manager's own account codes are
+  // not known until a trial balance is uploaded, and inventing a source->target
+  // map would look like verified work while being a guess.
+  return { seeded: true, group_id: g.id, parent: parent.id, devco: devco.id, operating: operId, mirrors };
+}
+
 // ══════════════════════════════ Routes ══════════════════════════════
 
 function registerConsolidationRoutes(app, deps) {
@@ -379,7 +486,12 @@ function registerConsolidationRoutes(app, deps) {
     const s = seedBraker(db);
     if (s.seeded) console.log('[consol] Braker group ready (group ' + s.group_id + ', +' + s.mapped + ' map rows, +' + s.funds + ' funding accounts)');
     else console.log('[consol] Braker seed skipped: ' + s.reason);
-  } catch (e) { console.error('[consol] seed failed:', e.message); }
+  } catch (e) { console.error('[consol] Braker seed failed:', e.message); }
+  try {
+    const s = seedHp(db);
+    if (s.seeded) console.log('[consol] HP group ready (group ' + s.group_id + ', operating column ' + s.operating + ', +' + s.mirrors + ' mirrored accounts)');
+    else console.log('[consol] HP seed skipped: ' + s.reason);
+  } catch (e) { console.error('[consol] HP seed failed:', e.message); }
 
   const gate = [auth, requireRole('Admin', 'Accountant')];
   const who = req => (req.user && (req.user.name || req.user.email)) || null;
@@ -469,6 +581,7 @@ function registerConsolidationRoutes(app, deps) {
         investment_pairs: db.prepare('SELECT * FROM consol_investment_pairs WHERE group_id = ? ORDER BY sort_order, id').all(group.id),
         funding_accounts: db.prepare('SELECT * FROM consol_funding_accounts WHERE group_id = ? ORDER BY entity_id, account_code').all(group.id),
         funding_capital: db.prepare('SELECT * FROM consol_funding_capital WHERE group_id = ?').all(group.id),
+        full_eliminations: db.prepare('SELECT * FROM consol_full_eliminations WHERE group_id = ? ORDER BY sort_order, entity_id, account_code').all(group.id),
       });
     } catch (e) { fail(res, e); }
   });
@@ -700,6 +813,64 @@ function registerConsolidationRoutes(app, deps) {
     } catch (e) { fail(res, e); }
   });
 
+  // ── Mirrored development accounts: removed in full (HP) ──
+  // The property manager's book carries a copy of the development ledger, so
+  // these accounts are already counted in the development column. No amount is
+  // stored: whatever the account holds in the window being built comes out.
+  app.get('/api/consolidation/:parent_eid/full-eliminations', ...gate, (req, res) => {
+    try {
+      const { group } = scopedGroup(req);
+      res.json({
+        rows: db.prepare('SELECT * FROM consol_full_eliminations WHERE group_id = ? ORDER BY sort_order, entity_id, account_code').all(group.id)
+          .map(r => Object.assign({}, r, { entity_name: memberLabel(r.entity_id) })),
+      });
+    } catch (e) { fail(res, e); }
+  });
+
+  app.put('/api/consolidation/:parent_eid/full-eliminations', ...gate, (req, res) => {
+    try {
+      const { group, columns } = scopedGroup(req);
+      const rows = Array.isArray(req.body.rows) ? req.body.rows : [];
+      if (!rows.length) return res.status(400).json({ error: 'rows is required' });
+      const now = new Date().toISOString();
+      const by = who(req);
+      let changed = 0;
+      const tx = db.transaction(() => {
+        for (const r of rows) {
+          const eid = Number(r.entity_id);
+          const code = String(r.account_code || '').trim();
+          if (!eid || !code) continue;
+          // Any column of this group may hold mirrored accounts, but it must be
+          // a column of THIS group — otherwise the list could reach into a
+          // ledger the schedule never prints and remove a balance invisibly.
+          if (!columns.find(c => c.entity_id === eid)) {
+            throw Object.assign(new Error('entity ' + eid + ' is not a column of this group'), { status: 400 });
+          }
+          const prev = db.prepare('SELECT * FROM consol_full_eliminations WHERE group_id=? AND entity_id=? AND account_code=?').get(group.id, eid, code);
+          if (r.remove) {
+            if (prev) { db.prepare('DELETE FROM consol_full_eliminations WHERE id=?').run(prev.id); changed++; }
+            continue;
+          }
+          // The name is a label only — the schedule prints the account's own
+          // name from whichever column supplies it. Kept so the setup list
+          // still reads sensibly in a month the account carries nothing.
+          const name = String(r.account_name || (prev ? prev.account_name : '') || '').trim();
+          const sort = Number.isFinite(Number(r.sort_order)) ? Number(r.sort_order) : (prev ? prev.sort_order : 999);
+          if (prev) {
+            db.prepare('UPDATE consol_full_eliminations SET account_name=?, notes=?, sort_order=?, updated_at=?, updated_by=? WHERE id=?')
+              .run(name, r.notes != null ? r.notes : prev.notes, sort, now, by, prev.id);
+          } else {
+            db.prepare(`INSERT INTO consol_full_eliminations (group_id, entity_id, account_code, account_name, notes, sort_order, created_at, created_by, updated_at, updated_by)
+              VALUES (?,?,?,?,?,?,?,?,?,?)`).run(group.id, eid, code, name, r.notes || null, sort, now, by, now, by);
+          }
+          changed++;
+        }
+      });
+      tx();
+      res.json({ success: true, changed });
+    } catch (e) { fail(res, e); }
+  });
+
   // ── Eliminations and the consolidating schedules ──
   function asOfOf(req) {
     const as_of = String((req.query && req.query.as_of) || '');
@@ -794,4 +965,8 @@ function registerConsolidationRoutes(app, deps) {
   });
 }
 
-module.exports = { registerConsolidationRoutes, parseOperatingTb, seedBraker, BRAKER_MAP, BRAKER_FUNDING };
+module.exports = {
+  registerConsolidationRoutes, parseOperatingTb,
+  seedBraker, BRAKER_MAP, BRAKER_FUNDING,
+  seedHp, HP_FULL_ELIMINATIONS, hpOperatingId,
+};

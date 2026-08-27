@@ -39,6 +39,30 @@
 //      between it and the sum of the funding accounts is reported as
 //      unassigned, never plugged.
 //
+// HP is a different shape, and simpler (Jimmy, 2026-08-27):
+//
+//   Bridge Banyan HP QOZB (43) — the parent. Holds the investment in the
+//                                property company.
+//   HP Property Owner     (55) — the development ledger.
+//   Highpoint Operating        — the property manager's ledger, uploaded.
+//
+// No cash passes between development and operating there, so rule 2 does not
+// apply and there is nothing to match. Instead the property manager MIRRORS the
+// whole development book inside its own trial balance — construction in
+// progress, the construction loan, retention, deployed fund capital, the
+// mortgage interest. The same dollars therefore appear on the development
+// column and again on the operating column, and the mirror is simply removed:
+//
+//   3. mirrored development accounts.  A user-maintained list of operating
+//      accounts that come out IN FULL, for whatever they carry that month. The
+//      list is fixed month to month; only the balances move, which is what lets
+//      the same elimination run every month with no re-derivation. Unlike rule
+//      2 nothing is paired, so the removal can be one-sided — CLA's own July
+//      schedule is one-sided by 47,199,612.00 because their operating column is
+//      out of balance by the same amount. The rule reports that as its residual
+//      rather than hiding it; the schedule still cross-foots either way,
+//      because the column carries the same imbalance the elimination does.
+//
 // Nothing here posts a journal entry. Eliminations are a reporting overlay, so
 // the member ledgers stay exactly as they were entered and re-running a prior
 // month always reproduces the same schedule.
@@ -185,6 +209,28 @@ function ensureSchema(db) {
       entity_id INTEGER NOT NULL,
       account_code TEXT NOT NULL,
       PRIMARY KEY (group_id, entity_id, account_code)
+    );
+
+    -- Accounts that MIRROR another column and are removed in full (HP). The
+    -- property manager keeps a copy of the whole development book inside its
+    -- own trial balance, so the same dollars are already in the development
+    -- column. Nothing is paired and no amount is stored: the listed account
+    -- comes out for whatever it carries in the window being built, which is why
+    -- the same list runs unchanged every month.
+    --
+    -- account_code is the STATEMENT-LINE code, i.e. the target the operating
+    -- account maps to, not the property system's own source code — eliminations
+    -- run after the map has been applied.
+    CREATE TABLE IF NOT EXISTS consol_full_eliminations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL,
+      entity_id INTEGER NOT NULL,
+      account_code TEXT NOT NULL,
+      account_name TEXT,
+      notes TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT, created_by TEXT, updated_at TEXT, updated_by TEXT,
+      UNIQUE (group_id, entity_id, account_code)
     );
   `);
 }
@@ -481,6 +527,52 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
       capital_total: capTotal,
       residual: r2(capTotal - fundTotal),
       unassigned: r2(capTotal - fundTotal),
+    });
+  }
+
+  // ── 3. Mirrored development accounts on an operating ledger (HP) ──
+  // The property manager keeps a copy of the development book inside its own
+  // trial balance, so these accounts are the same dollars already carried by
+  // the development column. Nothing is matched: the listed account comes out
+  // for whatever it holds in this window. That is deliberate — HP moves no cash
+  // between development and operating, so there is no second side to agree to,
+  // and pairing would only invent a constraint the books do not have.
+  //
+  // Because it is one-sided by design, the debit and credit legs need not
+  // agree, and on HP they do not: CLA's July operating column is itself out of
+  // balance, so the mirror is too. `residual` states that difference instead of
+  // hiding it. The schedule still cross-foots, because the consolidated column
+  // is the arithmetic sum of the member columns and this one — the same
+  // imbalance is on both sides of that sum.
+  const mirrorRows = db.prepare('SELECT * FROM consol_full_eliminations WHERE group_id = ? ORDER BY sort_order, entity_id, account_code').all(group.id);
+  if (mirrorRows.length) {
+    const legs = mirrorRows.map(m => {
+      const row = (rowsFor(m.entity_id) || []).find(x => String(x.code) === String(m.account_code));
+      const bal = row ? r2(row.balance) : 0;
+      // A listed account absent from the window is normal, not an error: a
+      // balance-sheet mirror account has no place on a statement of operations,
+      // and an account can carry nothing in a given month. It is reported so a
+      // code that has quietly stopped appearing — a renamed mapping target,
+      // say — can be seen rather than silently eliminating nothing forever.
+      if (row) adjustments.push({ entity_id: m.entity_id, code: m.account_code, type: row.type, amount: bal });
+      return {
+        entity_id: m.entity_id, code: m.account_code,
+        name: (row && row.name) || m.account_name || null,
+        type: row ? row.type : null, balance: bal, amount: bal, present: !!row,
+      };
+    });
+    const sideSum = pred => r2(legs.filter(l => l.type && pred(l.type)).reduce((s, l) => s + l.balance, 0));
+    const drSide = sideSum(isDrType);
+    const crSide = sideSum(t => !isDrType(t));
+    rules.push({
+      type: 'full_elimination',
+      label: 'Development accounts mirrored on the operating ledger',
+      legs,
+      eliminated: r2(legs.reduce((s, l) => s + Math.abs(l.balance), 0)),
+      debit_side: drSide,
+      credit_side: crSide,
+      residual: r2(drSide - crSide),
+      absent: legs.filter(l => !l.present).map(l => l.code),
     });
   }
 
