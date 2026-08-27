@@ -74,12 +74,12 @@ const titleName = s => String(s == null ? '' : s).replace(/(^|\s)(\S)/g, (m, p, 
 const ENTITY_TYPES = [
   { key:'accounting',  label:'Accounting',  icon:'📒' },
   { key:'development', label:'Development', icon:'🏗️' },
-  { key:'shell',       label:'Shell',       icon:'🗂️' },
   { key:'rail_assets', label:'Rail Assets', icon:'🚆' },
+  { key:'shell',       label:'Shell',       icon:'🗂️' },
 ];
 const entTypeOf = e => (e && e.entity_type) || 'accounting';
 const groupByType = list => {
-  const g = { accounting:[], development:[], shell:[], rail_assets:[] };
+  const g = { accounting:[], development:[], rail_assets:[], shell:[] };
   (list||[]).forEach(e => { (g[entTypeOf(e)] || (g[entTypeOf(e)]=[])).push(e); });
   return g;
 };
@@ -1932,7 +1932,7 @@ function WorkpapersModal({entity, user, onClose}){
 // ═══ Dashboard ═══
 function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSummary]=useState([]);useEffect(()=>{api.getSummary().then(setSummary);},[]);
   const[wpEntity,setWpEntity]=useState(null);
-  const[open,setOpen]=useState({accounting:false,development:false,shell:false,rail_assets:false});
+  const[open,setOpen]=useState({accounting:false,development:false,rail_assets:false,shell:false});
   const go=id=>{setActiveEntity(id);setPage('journal');};
   const grouped=groupByType(summary);
   const toggle=k=>setOpen(o=>({...o,[k]:!o[k]}));
@@ -6228,7 +6228,7 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
       <div style={{fontSize:14,fontWeight:600,color:T.textBright,marginBottom:12}}>Create New Entity</div>
       <div style={S.row}><div style={{...S.col,flex:3}}><label style={S.label}>Entity Name</label><input style={S.input} placeholder="e.g. CLR Fund I LP" value={name} onChange={e=>setName(e.target.value)}/></div>
         <div style={{...S.col,flex:1}}><label style={S.label}>Entity ID</label><input style={S.input} placeholder="e.g. 0005 B1a" value={newDisplayId} onChange={e=>setNewDisplayId(e.target.value)}/></div>
-        <div style={{...S.col,flex:2}}><label style={S.label}>Entity Type</label><select style={S.input} value={newType} onChange={e=>setNewType(e.target.value)}><option value="accounting">Accounting</option><option value="development">Development Project</option><option value="shell">Shell</option><option value="rail_assets">Rail Assets</option></select></div></div>
+        <div style={{...S.col,flex:2}}><label style={S.label}>Entity Type</label><select style={S.input} value={newType} onChange={e=>setNewType(e.target.value)}><option value="accounting">Accounting</option><option value="development">Development Project</option><option value="rail_assets">Rail Assets</option><option value="shell">Shell</option></select></div></div>
       {err&&<div style={S.err}>{err}</div>}
       <div style={{fontSize:11,color:T.textMuted,marginBottom:10}}>A default chart of accounts will be created. You can replace it by importing a trial balance from the entity row. Development-project entities unlock the Requisitions coding tools.</div>
       <button style={S.btnP} onClick={async()=>{if(!name.trim()){setErr('Name required');return;}try{await api.createEntity(name.trim(),newType,newDisplayId.trim());setName('');setNewType('accounting');setNewDisplayId('');setShowAdd(false);setErr('');refresh();}catch(e){setErr(e.message);}}}>Create Entity</button></div>}
@@ -6245,8 +6245,8 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
       <textarea style={{...S.input,height:160,fontFamily:'monospace',fontSize:12,resize:'vertical'}} value={bulkText} onChange={e=>setBulkText(e.target.value)}/>
       <div style={{display:'flex',gap:12,alignItems:'center',marginTop:10,flexWrap:'wrap'}}>
         <label style={{...S.label,marginBottom:0}}>Default type</label>
-        <select style={{...S.inputSm,width:'auto'}} value={bulkType} onChange={e=>setBulkType(e.target.value)}><option value="accounting">Accounting</option><option value="development">Development Project</option><option value="shell">Shell</option><option value="rail_assets">Rail Assets</option></select>
-        {rows.length>0&&<span style={{fontSize:11,color:T.textMuted}}>{rows.length} entit{rows.length===1?'y':'ies'}: {['accounting','development','shell','rail_assets'].map(t=>({t,n:rows.filter(r=>r.type===t).length})).filter(x=>x.n>0).map(x=>x.n+' '+x.t).join(', ')}</span>}
+        <select style={{...S.inputSm,width:'auto'}} value={bulkType} onChange={e=>setBulkType(e.target.value)}><option value="accounting">Accounting</option><option value="development">Development Project</option><option value="rail_assets">Rail Assets</option><option value="shell">Shell</option></select>
+        {rows.length>0&&<span style={{fontSize:11,color:T.textMuted}}>{rows.length} entit{rows.length===1?'y':'ies'}: {['accounting','development','rail_assets','shell'].map(t=>({t,n:rows.filter(r=>r.type===t).length})).filter(x=>x.n>0).map(x=>x.n+' '+x.t).join(', ')}</span>}
       </div>
       {err&&<div style={S.err}>{err}</div>}<button style={{...S.btnP,marginTop:10}} disabled={bulkBusy} onClick={async()=>{if(!rows.length){setErr('None');return;}setBulkBusy(true);setErr('');try{for(const r of rows)await api.createEntity(r.name,r.type);setBulkText('');setBulk(false);refresh();}catch(e){setErr(e.message);}finally{setBulkBusy(false);}}}>{bulkBusy?'Importing...':'Import'}</button></div>);})()}
     <div className="cl-scroll" style={scrollBox()}><table style={{...S.table,minWidth:1180}}><thead><tr><th style={{...S.th,minWidth:240}}>Entity</th><th style={{...S.th,width:760,minWidth:760}}>Actions</th></tr></thead>
@@ -6261,7 +6261,7 @@ function EntityManagement({refresh,entities,activeEntity,setActiveEntity}){
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0}} onClick={()=>setActiveEntity(e.id)}>Select</button>
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0,color:T.accent,borderColor:T.accent+'40'}} onClick={()=>{setImporting(e.id);setImportMsg('');setImportErr('');}}>Import Trial Balance</button>
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0,color:T.accent,borderColor:T.accent+'40'}} onClick={()=>{resetGl();setGlEntity(e.id);}}>Import General Ledger Detail</button>
-          <select style={{...S.inputSm,padding:'5px 8px',fontSize:11,flexShrink:0,width:'auto'}} disabled={typeBusy===e.id} title="Entity type" value={e.entity_type||'accounting'} onChange={async(ev)=>{const next=ev.target.value;if(next===e.entity_type)return;if(!confirm('Set "'+e.name+'" to '+({accounting:'Accounting',development:'Development Project',shell:'Shell',rail_assets:'Rail Assets'}[next]||next)+'?'))return;setTypeBusy(e.id);try{await api.updateEntity(e.id,{entity_type:next});await refresh();}catch(ex){alert(ex.message);}finally{setTypeBusy(null);}}}><option value="accounting">Accounting</option><option value="development">Development Project</option><option value="shell">Shell</option><option value="rail_assets">Rail Assets</option></select>
+          <select style={{...S.inputSm,padding:'5px 8px',fontSize:11,flexShrink:0,width:'auto'}} disabled={typeBusy===e.id} title="Entity type" value={e.entity_type||'accounting'} onChange={async(ev)=>{const next=ev.target.value;if(next===e.entity_type)return;if(!confirm('Set "'+e.name+'" to '+({accounting:'Accounting',development:'Development Project',rail_assets:'Rail Assets',shell:'Shell'}[next]||next)+'?'))return;setTypeBusy(e.id);try{await api.updateEntity(e.id,{entity_type:next});await refresh();}catch(ex){alert(ex.message);}finally{setTypeBusy(null);}}}><option value="accounting">Accounting</option><option value="development">Development Project</option><option value="rail_assets">Rail Assets</option><option value="shell">Shell</option></select>
           <button style={{...S.btnS,padding:'5px 12px',fontSize:11,flexShrink:0}} title="Set the short Entity ID used as the invoice-packet filename prefix" onClick={async()=>{const cur=e.display_id||'';const v=prompt('Entity ID for "'+e.name+'"\n(used as the invoice-packet filename prefix; leave blank to use the entity name):',cur);if(v===null)return;try{await api.updateEntity(e.id,{display_id:v.trim()});await refresh();}catch(ex){alert(ex.message);}}}>Edit ID</button>
           <button style={{...S.btnD,padding:'5px 12px',fontSize:11,flexShrink:0}} onClick={async()=>{if(!confirm('Delete entity '+e.name+' and all its data?'))return;await api.deleteEntity(e.id);const r=await refresh();if(activeEntity===e.id)setActiveEntity(r[0]?.id||null);}}>Delete</button>
         </div></td></tr>)}
