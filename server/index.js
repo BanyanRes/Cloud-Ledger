@@ -5860,11 +5860,13 @@ app.put('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id')
 // Set ONLY the Bill.com sync cutoff date, without touching stored credentials.
 // Driven by the A/P Aging "Upload aging detail" flow: the latest bill date on
 // the uploaded GL/prior-system aging report is the last invoice already booked
-// in the GL, so we skip anything dated on/before it. The sync engine treats the
-// cutoff as EXCLUSIVE (a bill syncs when invoiceDate >= cutoff), so to exclude
-// the last booked bill itself the caller stores latestBillDate + 1 day. Creating
-// a fresh config row here would be missing required credentials, so this only
-// updates an existing config.
+// in the GL, so we skip anything dated on/before it. The sync engine compares
+// the cutoff against each bill's GL POSTING date (not its invoice date) for
+// every entity except CLRF and Turnkey Rail, and skips when
+// postingDate <= cutoff — so the cutoff date itself is excluded, and the caller
+// stores latestBillDate + 1 day only to keep the stored value aligned with the
+// aging report it came from. Creating a fresh config row here would be missing
+// required credentials, so this only updates an existing config.
 app.put('/api/billcom/config/:entity_id/cutoff', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
   const cutoff = (req.body && req.body.sync_cutoff_date) || null;
   if (cutoff !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(cutoff))) return res.status(400).json({ error: 'sync_cutoff_date must be YYYY-MM-DD or null' });
@@ -7034,6 +7036,14 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   const INVOICE_DATE_ENTITIES = new Set([40, 36]);
   const useGlPosting = !INVOICE_DATE_ENTITIES.has(entityId);
   let glMap = { byId: new Map(), byIdent: new Map(), identKey: (n, a) => String(n == null ? '' : n).trim() + '|' + (a == null ? '' : Number(a).toFixed(2)) };
+  // When the GL posting date cannot be resolved, the run STOPS rather than
+  // guessing. The cutoff gate below treats an unknown posting date as
+  // pre-cutoff AND persists that as skip_cutoff, which every later run then
+  // honours before any other check — so one failed v2 login would have silently
+  // locked every bill in the window out of syncing, permanently, with nothing
+  // in the response to say so. Failing loudly here is recoverable; failing
+  // quietly there is not.
+  let glMapReady = !useGlPosting;
   if (useGlPosting) {
     try {
       const v2pw = billcomDecrypt(cfg.password_enc);
@@ -7041,8 +7051,18 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       const v2Session = await billcomV2Login({ username: cfg.username, password: v2pw, orgId: cfg.org_id, devKey: v2dk });
       const v2bills = await billcomV2ListBillsByGlPosting({ sessionId: v2Session, devKey: v2dk, fromDate: windowFrom });
       glMap = billcomBuildGlPostingMap(v2bills);
+      glMapReady = true;
       console.log('[billcom sync] entity ' + entityId + ': v2 glPostingDate map built (' + v2bills.length + ' bills)');
-    } catch (e) { console.log('[billcom sync] entity ' + entityId + ': v2 glPostingDate unavailable, using invoice date: ' + e.message); }
+    } catch (e) {
+      console.error('[billcom sync] entity ' + entityId + ': v2 glPostingDate unavailable: ' + e.message);
+      return res.status(502).json({
+        error: 'Could not read GL posting dates from Bill.com, so no bills were synced. '
+          + 'This entity posts by GL posting date, and syncing without it would skip every bill '
+          + 'and mark it as already in the GL. Nothing was changed — try again, or check the '
+          + 'Bill.com credentials. (' + e.message + ')',
+        gl_posting_unavailable: true,
+      });
+    }
   } else {
     console.log('[billcom sync] entity ' + entityId + ': posts by invoice date (GL posting date not used)');
   }
@@ -7237,12 +7257,28 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     const approvedDate = billApprovalDate(detail);
     const approvedDay = approvedDate ? String(approvedDate).slice(0, 10) : null;
     const postDay = postingDate ? String(postingDate).slice(0, 10) : null;
-    if (!postDay || postDay <= cutoffDate) {
+    // An UNKNOWN posting date is not the same as a pre-cutoff one. It used to be
+    // treated as pre-cutoff and written to the log as skip_cutoff, which every
+    // later run then honoured — so a bill Bill.com simply has no posting date on
+    // could never sync again, and the only trace was one line in a details array.
+    // Now it is skipped for this run only, reported as needing attention, and
+    // NOT remembered, so setting the date in Bill.com is enough to fix it.
+    if (!postDay) {
+      result.bills.skipped++;
+      result.bills.no_posting_date = (result.bills.no_posting_date || 0) + 1;
+      result.bills.details.push({
+        id: billId, invoice_number: billNumber, status: 'skip',
+        reason: 'no GL posting date in Bill.com — set it there and re-run; this skip is not remembered',
+      });
+      continue;
+    }
+    if (postDay <= cutoffDate) {
       result.bills.skipped++;
       // Persist so later batches skip this bill cheaply (before the budget gate
-      // and detail fetch) instead of re-fetching it every run.
-      try { logSync.run(entityId, 'bill', billId, null, 'skip_cutoff', 'GL posting date ' + (postDay || 'unknown') + ' on/before cutoff ' + cutoffDate + ' (already in GL)', now, billNumber); } catch (e) {}
-      result.bills.details.push({ id: billId, status: 'skip', reason: 'GL posting date ' + (postDay || 'unknown') + ' on/before cutoff ' + cutoffDate + ' (already in GL)' });
+      // and detail fetch) instead of re-fetching it every run. Safe to remember
+      // because the posting date is known and will not change.
+      try { logSync.run(entityId, 'bill', billId, null, 'skip_cutoff', 'GL posting date ' + postDay + ' on/before cutoff ' + cutoffDate + ' (already in GL)', now, billNumber); } catch (e) {}
+      result.bills.details.push({ id: billId, status: 'skip', reason: 'GL posting date ' + postDay + ' on/before cutoff ' + cutoffDate + ' (already in GL)' });
       continue;
     }
 
