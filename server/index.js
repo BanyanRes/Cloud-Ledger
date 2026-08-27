@@ -1732,7 +1732,7 @@ app.get('/api/entities', auth, (req, res) => {
 });
 app.post('/api/entities', auth, requireRole('Admin','Accountant'), (req, res) => {
   const { name } = req.body; if (!name) return res.status(400).json({ error: 'Name required' });
-  const entityType = ['development','shell','operating','rail_assets'].includes(req.body.entity_type) ? req.body.entity_type : 'accounting';
+  const entityType = ['development','shell','rail_assets'].includes(req.body.entity_type) ? req.body.entity_type : 'accounting';
   const displayId = (req.body.display_id || '').trim() || null;
   // Auto-generate a code from the name (used internally for sorting/uniqueness)
   const baseCode = name.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 8) || 'ENT';
@@ -1753,7 +1753,7 @@ app.put('/api/entities/:id', auth, requireRole('Admin','Accountant'), (req, res)
   if (!name) return res.status(400).json({ error: 'Name required' });
   let entityType = ent.entity_type;
   if (req.body.entity_type !== undefined) {
-    if (!['development','accounting','shell','operating','rail_assets'].includes(req.body.entity_type)) return res.status(400).json({ error: 'entity_type must be development, accounting, shell, operating, or rail_assets' });
+    if (!['development','accounting','shell','rail_assets'].includes(req.body.entity_type)) return res.status(400).json({ error: 'entity_type must be development, accounting, shell, or rail_assets' });
     entityType = req.body.entity_type;
   }
   let displayId = ent.display_id;
