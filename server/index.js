@@ -9852,6 +9852,22 @@ require('./intercompany').registerIntercompanyRoutes(app, {
   workpapersDir: WORKPAPERS_DIR,
 });
 
+// === Consolidation (Braker and HP only) ===
+// Those two projects hand leasing to a property management company that keeps
+// its own general ledger, so their operating column comes from an uploaded
+// trial balance rather than from journal entries here. The module owns that
+// upload, the property-account-to-statement-line map, and the eliminations that
+// keep a funding transfer from being counted as both a capitalised cost and
+// contributed capital. See server/consolidation.js.
+require('./consolidation_routes').registerConsolidationRoutes(app, {
+  db,
+  auth,
+  requireRole,
+  userHasEntityAccess,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+  workpapersDir: WORKPAPERS_DIR,
+});
+
 // === Org structure (ownership tree) ===
 // Who owns whom, from the legal org charts, including holding companies that
 // hold investment balances but keep no ledger here. Drives two things the
