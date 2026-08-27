@@ -1690,9 +1690,40 @@ async function buildStatements(getBalances, opts) {
   // ── Statement of Changes in Members' Equity ───────────────────────────────
   // Beginning (year start) contributed equity by account + beginning RE, then
   // contributions (delta) and YTD net income → ending.
+  //
+  // Opening-day equity reclasses belong to the BEGINNING column, not to the
+  // year's activity. CLR Buna rolls 33011 Distribution - Ben into 39000
+  // Retained Earnings with an entry dated 1/1 (entry 17582, 148,117.07). Run
+  // through as current-year movement it prints two lines of noise: a member row
+  // that opens with a balance and is emptied by a "contribution", and a
+  // Retained Earnings row carrying the same amount back the other way — for a
+  // movement that never touched a member's capital and happened before the
+  // first day of business. Folded into the opening balances instead, Buna's
+  // 2026 statement opens at Retained Earnings (580,725.31), 33011 drops out
+  // entirely, and the contributions column stays clean.
+  //
+  // Applied ONLY when the day's equity activity nets to zero, which is what
+  // makes it a pure reclass WITHIN equity. A real 1/1 contribution or
+  // distribution (equity against cash) fails that test and flows through as
+  // activity, exactly as before. Total beginning equity is unchanged either
+  // way, so the statement's tie to the prior period's close is untouched.
+  const openReclass = new Map(); // account code → adjustment to its beginning
+  let reOpenReclass = 0;         // adjustment to beginning Retained Earnings
+  {
+    const dayRows = (await getBalancesEff({ from: ys, to: ys })).filter(x => x.type === 'Equity');
+    if (dayRows.length && isZero(r2(dayRows.reduce((a, x) => a + bal(x), 0)))) {
+      for (const x of dayRows) {
+        const amt = r2(bal(x));
+        if (isZero(amt)) continue;
+        if (bsCls(x).sub === 'Retained Earnings') reOpenReclass = r2(reOpenReclass + amt);
+        else openReclass.set(String(x.code), r2((openReclass.get(String(x.code)) || 0) + amt));
+      }
+    }
+  }
+  const begOf = (row, code) => r2((row ? bal(row) : 0) + (openReclass.get(String(code)) || 0));
   const equityMembers = equityRows.map(r => {
     const openRow = bsOpen.find(x => x.code === r.code);
-    const beg = openRow ? r2(bal(openRow)) : 0;
+    const beg = begOf(openRow, r.code);
     return { code: r.code, name: r.name, beginning: beg, contributions: r2(r.cur - beg), distributions: 0, netIncome: 0, ending: r2(r.cur) };
   });
   // An equity account can carry a balance at the START of the year and be zero
@@ -1708,10 +1739,12 @@ async function buildStatements(getBalances, opts) {
   for (const o of bsOpen) {
     if (o.type !== 'Equity' || stmtCodes.has(String(o.code))) continue;
     if (bsCls(o).sub !== 'Members Equity') continue; // RE is the reMember row below
-    const beg = r2(bal(o));
-    if (isZero(beg)) continue;
+    const beg = begOf(o, o.code);
     const cr = colCur.map.get(o.code);
     const end = cr ? r2(bal(cr)) : 0;
+    // Nothing at either end — an account emptied by a 1/1 reclass (Buna's
+    // 33011) now lands here and is simply not a line of this statement.
+    if (isZero(beg) && isZero(end)) continue;
     stmtCodes.add(String(o.code));
     equityMembers.push({ code: o.code, name: o.name, beginning: beg, contributions: r2(end - beg), distributions: 0, netIncome: 0, ending: end });
   }
@@ -1722,9 +1755,10 @@ async function buildStatements(getBalances, opts) {
   // above) is part of RE's movement for the year; taking only the opening
   // balance dropped it and broke this statement's tie to the balance sheet.
   const reOpenRows = bsOpen.filter(x => x.type === 'Equity' && bsCls(x).sub === 'Retained Earnings');
-  const reOpen = r2(reOpenRows.reduce((a, x) => a + bal(x), 0));
+  const reOpen = r2(reOpenRows.reduce((a, x) => a + bal(x), 0) + reOpenReclass);
   const reMember = { code: 're', name: 'Retained Earnings', beginning: reOpen, contributions: r2(totalRetained.cur - reOpen), distributions: 0, netIncome: niYtd, ending: r2(totalRetained.cur + niYtd) };
-  const equityStmt = [...equityMembers.filter(m => !/retained earning/i.test(m.name)), reMember];
+  const isEmptyRow = m => isZero(m.beginning) && isZero(m.contributions) && isZero(m.distributions) && isZero(m.netIncome) && isZero(m.ending);
+  const equityStmt = [...equityMembers.filter(m => !/retained earning/i.test(m.name) && !isEmptyRow(m)), reMember];
   const equityTotals = equityStmt.reduce((t, m) => ({
     beginning: r2(t.beginning + m.beginning), contributions: r2(t.contributions + m.contributions),
     distributions: r2(t.distributions + m.distributions), netIncome: r2(t.netIncome + m.netIncome), ending: r2(t.ending + m.ending),
