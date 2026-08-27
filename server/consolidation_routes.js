@@ -389,8 +389,15 @@ function registerConsolidationRoutes(app, deps) {
   // Every read spans several ledgers at once, so access is checked per member
   // rather than by the usual single-:eid middleware. A user who cannot see one
   // column cannot run the group's schedules.
+  //
+  // A trial-balance column has no ledger here and need not have an entity row
+  // at all — the property manager's books are not a CloudLedger entity. Ids
+  // with no entity are skipped rather than refused, so deleting the placeholder
+  // entity cannot lock the group out of its own schedules.
   function assertAccess(req, ids) {
     for (const eid of ids) {
+      const exists = db.prepare('SELECT 1 FROM entities WHERE id = ?').get(eid);
+      if (!exists) continue;
       if (!userHasEntityAccess(req.user.id, req.user.role, eid)) {
         throw Object.assign(new Error('No access to entity ' + eid), { status: 403 });
       }
@@ -413,9 +420,18 @@ function registerConsolidationRoutes(app, deps) {
     return { ent, group, columns };
   }
 
+  // A column's display name. A trial-balance column may have no entity row at
+  // all, so the member's own label is preferred and the entity table is only a
+  // fallback. Never falls back to a bare id, which would print on a schedule.
+  const memberLabel = (eid) => {
+    const m = db.prepare('SELECT label FROM consol_members WHERE entity_id = ? AND label IS NOT NULL AND label <> \'\' LIMIT 1').get(eid);
+    if (m && m.label) return m.label;
+    const e = db.prepare('SELECT name FROM entities WHERE id = ?').get(eid);
+    return e ? e.name : ('Entity ' + eid);
+  };
   const entName = (eid) => {
     const e = db.prepare('SELECT name FROM entities WHERE id = ?').get(eid);
-    return e ? e.name : String(eid);
+    return e ? e.name : memberLabel(eid);
   };
 
   // Which entities offer consolidation at all — drives the page's picker.
@@ -460,7 +476,7 @@ function registerConsolidationRoutes(app, deps) {
   // ── Operating trial balance ──
   app.post('/api/consolidation/:parent_eid/operating-tb', ...gate, tbUpload.single('file'), (req, res) => {
     try {
-      const { columns } = scopedGroup(req);
+      const { group, columns } = scopedGroup(req);
       if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
       const entity_id = Number(req.body.entity_id) || (columns.find(c => c.source === 'tb') || {}).entity_id;
       const as_of = String(req.body.as_of || '');
@@ -486,29 +502,33 @@ function registerConsolidationRoutes(app, deps) {
       tx();
 
       // File the original next to what was parsed from it, so the source
-      // document is one click from the schedule that used it.
+      // document is one click from the schedule that used it. It goes on the
+      // PARENT's workpapers, not the trial-balance column's: the property
+      // manager is not a CloudLedger entity, so that column may have no entity
+      // row and files written against it would be unreachable.
       let workpaper = null;
       try {
         if (workpapersDir) {
+          const fileEid = group.parent_entity_id;
           const folder = 'Operating TBs/' + eom;
           const by = who(req) || 'system';
           for (const fp of ['Operating TBs', folder]) {
-            try { db.prepare('INSERT INTO entity_folders (entity_id, folder_path, created_by) VALUES (?,?,?)').run(entity_id, fp, by); }
+            try { db.prepare('INSERT INTO entity_folders (entity_id, folder_path, created_by) VALUES (?,?,?)').run(fileEid, fp, by); }
             catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
           }
           const ext = (String(req.file.originalname || '').match(/\.[A-Za-z0-9]+$/) || ['.xlsx'])[0];
-          const originalName = eom + ' ' + entName(entity_id) + ' TB' + ext;
-          const dir = path.join(workpapersDir, String(entity_id));
+          const originalName = eom + ' ' + memberLabel(entity_id) + ' TB' + ext;
+          const dir = path.join(workpapersDir, String(fileEid));
           fs.mkdirSync(dir, { recursive: true });
-          for (const old of db.prepare('SELECT id, stored_filename FROM entity_files WHERE entity_id = ? AND folder_path = ? AND original_name = ?').all(entity_id, folder, originalName)) {
+          for (const old of db.prepare('SELECT id, stored_filename FROM entity_files WHERE entity_id = ? AND folder_path = ? AND original_name = ?').all(fileEid, folder, originalName)) {
             try { fs.unlinkSync(path.join(dir, old.stored_filename)); } catch (e) {}
             db.prepare('DELETE FROM entity_files WHERE id = ?').run(old.id);
           }
           const stored = Date.now() + '_' + Math.floor(Math.random() * 1e6) + '_' + originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
           fs.writeFileSync(path.join(dir, stored), req.file.buffer);
           db.prepare('INSERT INTO entity_files (entity_id, folder_path, stored_filename, original_name, size, mime_type, uploaded_by) VALUES (?,?,?,?,?,?,?)')
-            .run(entity_id, folder, stored, originalName, req.file.size, req.file.mimetype || null, by);
-          workpaper = { entity_id, folder_path: folder, file_name: originalName };
+            .run(fileEid, folder, stored, originalName, req.file.size, req.file.mimetype || null, by);
+          workpaper = { entity_id: fileEid, folder_path: folder, file_name: originalName };
         }
       } catch (e) { console.error('[consol] TB workpaper filing failed:', e.message); }
 
