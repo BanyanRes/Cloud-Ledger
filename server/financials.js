@@ -3216,9 +3216,17 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
   //    landscape members'-equity page (and any landscape B2A page) is measured
   //    against its long edge, not the portrait constant.
   {
+    // Turnkey: page 3 is left unnumbered (Jimmy, 2026-08-27). The page CLA
+    // supplies at that position already carries its own "Page 3" footer, so our
+    // stamp read as a duplicate. Scoped to this profile and to the absolute page
+    // number, deliberately narrow and easy to change: if the package gains or
+    // loses a leading section the suppressed page MOVES WITH THE NUMBER, not
+    // with the statement, so revisit this if the front matter changes.
+    const skipPageNumbers = new Set(statements.meta.profile === 'turnkey' ? [3] : []);
     const pnFont = await merged.embedFont(StandardFonts.Helvetica);
     merged.getPages().forEach((p, i) => {
       if (i < COVER_TOC_PAGES) return;
+      if (skipPageNumbers.has(i + 1)) return;
       const label = String(i + 1);
       const { width } = p.getSize();
       const w = pnFont.widthOfTextAtSize(label, FS.foot);
