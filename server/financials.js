@@ -3327,11 +3327,18 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   const heads = cols.map(c => c.label).concat(['Eliminations', 'Consolidated']);
   const nCols = heads.length;
   const usable = right - left;
-  const numColW = Math.min(98, Math.max(66, Math.floor((usable - 200) / nCols)));
+  // Reserve a wide name column so full account names fit, then split the rest
+  // across the figure columns. numColW is floored so the widest figure
+  // (~"(168,564,159.10)") still fits with an inset.
+  const nameWidth = Math.max(210, Math.min(330, Math.floor(usable * 0.42)));
+  const numColW = Math.max(70, Math.floor((usable - nameWidth) / nCols));
   const colRight = []; for (let i = 0; i < nCols; i++) colRight.push(right - numColW * (nCols - 1 - i));
   const nameLeft = left;
-  const nameMax = colRight[0] - numColW + 6 - nameLeft;   // room before the first figure column
-  const F = { title: 10.5, sub: 9, head: 6.8, row: 7.2, foot: 7.2 };
+  // Hard right edge for account names: a clear gap before the first figure
+  // column's band, so a long name (or its ellipsis) never runs under the
+  // column underline.
+  const nameEnd = colRight[0] - numColW - 8;
+  const F = { title: 10.5, sub: 9, head: 6.8, row: 7.0, foot: 7.2 };
   const rowH = 11.5, lineH = 8;
   let page, y, curTitle = null, curDateLine = null;
 
@@ -3378,11 +3385,14 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
 
   const accountRow = (a) => {
     ensure(rowH);
-    dtext(truncate((a.code ? a.code + ' ' : '') + (a.name || ''), reg, F.row, nameMax), nameLeft + 10, y, F.row, reg);
+    dtext(truncate((a.code ? a.code + ' ' : '') + (a.name || ''), reg, F.row, nameEnd - (nameLeft + 10)), nameLeft + 10, y, F.row, reg);
     figs(i => val(a, i)); y -= rowH;
   };
   const sectionHeader = (t) => { ensure(rowH * 2); dtext(t, nameLeft, y, F.row, bold); y -= rowH; };
-  const subtotal = (label, getVal) => { ensure(rowH); rule(); dtext(label, nameLeft + 10, y, F.row, bold); figs(getVal, bold); y -= rowH * 1.5; };
+  // A double rule under the figures (final-total convention). Drawn just below
+  // the current baseline, only under the number columns.
+  const doubleUnder = () => { for (let i = 0; i < nCols; i++) { const x0 = colRight[i] - (numColW - 10); for (const dy of [-2.4, -4.1]) page.drawLine({ start: { x: x0, y: y + dy }, end: { x: colRight[i], y: y + dy }, thickness: 0.5, color: rgb(0.3, 0.3, 0.3) }); } };
+  const subtotal = (label, getVal, opts) => { const o = opts || {}; ensure(rowH); rule(); dtext(label, nameLeft + 10, y, F.row, bold); figs(getVal, bold); if (o.double) doubleUnder(); y -= rowH * 1.5; };
 
   // Mirror the FACE statement groupings (Jimmy, 2026-08-28): the consolidating
   // schedules use the same balance-sheet classification (bsClassifyFor) and the
@@ -3399,7 +3409,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   // Indented account row (grouped layout nests accounts under a subsection).
   const acctRowAt = (a, ind) => {
     ensure(rowH);
-    dtext(truncate((a.code ? a.code + ' ' : '') + (a.name || ''), reg, F.row, nameMax - (ind - 10)), nameLeft + ind, y, F.row, reg);
+    dtext(truncate((a.code ? a.code + ' ' : '') + (a.name || ''), reg, F.row, nameEnd - (nameLeft + ind)), nameLeft + ind, y, F.row, reg);
     figs(i => val(a, i)); y -= rowH;
   };
   const subHeader = (t) => { ensure(rowH); dtext(t, nameLeft + 10, y, F.row, reg); y -= rowH; };
@@ -3460,7 +3470,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     // Assets.
     sectionHeader('Assets');
     for (const sec of groupRows(assets, BS_ASSET_ORDER)) renderGroupedSection(sec, 'Total ' + sec.section);
-    subtotal('Total Assets', i => sumCol(assets, i));
+    subtotal('Total Assets', i => sumCol(assets, i), { double: true });
     // Liabilities and Members' Equity.
     sectionHeader('Liabilities and Members’ Equity');
     for (const sec of groupRows(liabs, ['Current Liabilities', 'Long Term Liabilities'])) renderGroupedSection(sec, 'Total ' + sec.section);
@@ -3475,7 +3485,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     }
     ensure(rowH); dtext('Net Income (Loss)', nameLeft + 18, y, F.row, reg); figs(ni); y -= rowH;
     subtotal('Total Members’ Equity', i => r2(sumCol(equityAll, i) + ni(i)));
-    subtotal('Total Liabilities and Members’ Equity', i => r2(sumCol(liabs, i) + sumCol(equityAll, i) + ni(i)));
+    subtotal('Total Liabilities and Members’ Equity', i => r2(sumCol(liabs, i) + sumCol(equityAll, i) + ni(i)), { double: true });
   };
   const renderIncome = () => {
     curTitle = 'Consolidating Statement of Income'; curDateLine = 'For the Month Ended ' + meta.longDate;
@@ -3521,7 +3531,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
       it.forEach(a => acctRowAt(a, 10));
       subtotal('Total Income Taxes', i => sumCol(it, i));
     }
-    subtotal('Net Income (Loss)', i => r2(opInc(i) + (sumCol(oi, i) - sumCol(oe, i)) - sumCol(it, i)));
+    subtotal('Net Income (Loss)', i => r2(opInc(i) + (sumCol(oi, i) - sumCol(oe, i)) - sumCol(it, i)), { double: true });
   };
 
   renderBalanceSheet();
