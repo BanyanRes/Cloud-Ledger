@@ -141,6 +141,17 @@ function entityProfile(opts) {
   // (42000, a Revenue account) sat in the top line. Pinned by name/code so no
   // other entity is affected. (Jimmy, 2026-08-27.)
   if (/^turnkey[ ]*rail$/i.test(name) || code === 'TURNKEYR') return 'turnkey';
+  // Banyan QOZB development consolidations — Bridge Banyan HP QOZB (43) and
+  // Braker QOZ Business (45). Their consolidated CPA packages (CLA) present the
+  // balance sheet with Other Assets split into Soft Costs / Construction Costs /
+  // Land / Permits and fees / Other development (each with a subtotal), the
+  // Allowance for Doubtful Acct inside Other Current Assets, the intercompany
+  // Due-to lines folded into Accrued Liabilities, an equity section with
+  // separate Members' Equity and Retained Earnings subtotals, loan proceeds in
+  // Financing, and no single rule above Net Income. Pinned by parent name/code
+  // (these are the fsEntityName/fsEntityCode the consolidated package uses) so
+  // no other entity is affected. (Jimmy, 2026-08-28.)
+  if (/bridge\s*banyan\s*hp\s*qozb/i.test(name) || /braker\s*qoz\s*business/i.test(name) || code === 'BRIDGEBA' || code === 'BRAKERQO1') return 'banyandev';
   return 'srn';
 }
 
@@ -419,6 +430,7 @@ const BS_ACCOUNT_MAP_BSFRGP = {
 // heuristic fallback so no account is ever dropped.
 function bsClassifyFor(profile, row) {
   if (profile === 'banyan') return banyanBsClassify(row);
+  if (profile === 'banyandev') return banyandevBsClassify(row);
   if (profile === 'bsfrgp') {
     const explicit = BS_ACCOUNT_MAP_BSFRGP[String(row.code)];
     if (explicit) return { section: explicit[0], sub: explicit[1] };
@@ -632,6 +644,122 @@ const BS_SUB_ORDER_BANYAN = Object.assign({}, {
 
 // Accumulated-depreciation contra codes (subtracted within Fixed Assets, Net).
 const BS_CONTRA_CODES_BANYAN = new Set(['16500', '16510']);
+
+// ── Banyan QOZB development consolidation (banyandev) profile ────────────────
+// Balance-sheet section map that reproduces the CLA consolidated package for
+// Bridge Banyan HP QOZB / Braker QOZ Business exactly: Other Current Assets
+// (incl. the Allowance for Doubtful Acct, netted with AR), then Other Assets
+// split into Soft Costs / Construction Costs / Land / Permits and fees / Other
+// development, each with its own subtotal. Liabilities: Accounts Payable and a
+// single Accrued Liabilities subsection that ALSO absorbs the intercompany
+// Due-to lines (23001/23003/23004), matching CLA. Both QOZBs share the Banyan
+// development chart, so classification is by code and works for either.
+const BS_ACCOUNT_MAP_BANYANDEV = {
+  // Current Assets → Other Current Assets (AR + allowance + other receivables)
+  '12000': ['Current Assets', 'Other Current Assets'],
+  '12007': ['Current Assets', 'Other Current Assets'],
+  '12001': ['Current Assets', 'Other Current Assets'],
+  '12006': ['Current Assets', 'Other Current Assets'],
+  '12008': ['Current Assets', 'Other Current Assets'],
+  // Other Assets → Soft Costs
+  '11506': ['Other Assets', 'Soft Costs'],
+  '11640': ['Other Assets', 'Soft Costs'],
+  '11650': ['Other Assets', 'Soft Costs'],
+  '11670': ['Other Assets', 'Soft Costs'],
+  '11730': ['Other Assets', 'Soft Costs'],
+  '11760': ['Other Assets', 'Soft Costs'],
+  '11970': ['Other Assets', 'Soft Costs'],
+  '12013': ['Other Assets', 'Soft Costs'],
+  '12117': ['Other Assets', 'Soft Costs'],
+  '12127': ['Other Assets', 'Soft Costs'],
+  '12230': ['Other Assets', 'Soft Costs'],
+  '12321': ['Other Assets', 'Soft Costs'],
+  '12385': ['Other Assets', 'Soft Costs'],
+  '12410': ['Other Assets', 'Soft Costs'],
+  '12420': ['Other Assets', 'Soft Costs'],
+  '12422': ['Other Assets', 'Soft Costs'],
+  '12597': ['Other Assets', 'Soft Costs'],
+  '13420': ['Other Assets', 'Soft Costs'],
+  '13423': ['Other Assets', 'Soft Costs'],
+  '13424': ['Other Assets', 'Soft Costs'],
+  '13425': ['Other Assets', 'Soft Costs'],
+  // Other Assets → Construction Costs
+  '11210': ['Other Assets', 'Construction Costs'],
+  '11230': ['Other Assets', 'Construction Costs'],
+  // Other Assets → Land
+  '11010': ['Other Assets', 'Land'],
+  // Other Assets → Permits and fees
+  '11880': ['Other Assets', 'Permits and fees'],
+  // Other Assets → Other development
+  '12720': ['Other Assets', 'Other development'],
+  '12916': ['Other Assets', 'Other development'],
+  // Current Liabilities → Accounts Payable
+  '20000': ['Current Liabilities', 'Accounts Payable'],
+  '20001': ['Current Liabilities', 'Accounts Payable'],
+  '20002': ['Current Liabilities', 'Accounts Payable'],
+  // Current Liabilities → Accrued Liabilities (incl. intercompany Due-to)
+  '21002': ['Current Liabilities', 'Accrued Liabilities'],
+  '21003': ['Current Liabilities', 'Accrued Liabilities'],
+  '21004': ['Current Liabilities', 'Accrued Liabilities'],
+  '21006': ['Current Liabilities', 'Accrued Liabilities'],
+  '21007': ['Current Liabilities', 'Accrued Liabilities'],
+  '23001': ['Current Liabilities', 'Accrued Liabilities'],
+  '23003': ['Current Liabilities', 'Accrued Liabilities'],
+  '23004': ['Current Liabilities', 'Accrued Liabilities'],
+  '23005': ['Current Liabilities', 'Accrued Liabilities'],
+  '23007': ['Current Liabilities', 'Accrued Liabilities'],
+  '23008': ['Current Liabilities', 'Accrued Liabilities'],
+  '23010': ['Current Liabilities', 'Accrued Liabilities'],
+  // Long Term Liabilities → Loans
+  '25004': ['Long Term Liabilities', 'Loans'],
+  // Members Equity (Retained Earnings & Net Income handled specially in renderer)
+  '33022': ['Members Equity', 'Members Equity'],
+  '34010': ['Members Equity', 'Members Equity'],
+  '34106': ['Members Equity', 'Members Equity'],
+  '34109': ['Members Equity', 'Members Equity'],
+  '34168': ['Members Equity', 'Members Equity'],
+  '34187': ['Members Equity', 'Members Equity'],
+  '34188': ['Members Equity', 'Members Equity'],
+  '39000': ['Members Equity', 'Retained Earnings'],
+};
+// Presentation order. Other Assets follows the CLA order Soft Costs →
+// Construction Costs → Land → Permits and fees → Other development.
+const BS_SUB_ORDER_BANYANDEV = Object.assign({}, {
+  'Current Assets': ['Cash and Cash Equivalents', 'Accounts Receivable, Net', 'Intercompany Receivable', 'Other Current Assets'],
+  'Other Assets': ['Soft Costs', 'Construction Costs', 'Land', 'Permits and fees', 'Other development'],
+  'Current Liabilities': ['Accounts Payable', 'Accrued Liabilities'],
+});
+// Every subsection under Other Assets carries a subtotal even when it holds a
+// single account (CLA shows Total Land, Total Permits and fees), so the renderer
+// forces subtotals within Other Assets for this profile.
+const BANYANDEV_FORCE_SUBTOTAL_SECTIONS = new Set(['Other Assets']);
+function banyandevBsClassify(row) {
+  const explicit = BS_ACCOUNT_MAP_BANYANDEV[String(row.code)];
+  if (explicit) return { section: explicit[0], sub: explicit[1] };
+  // Heuristic fallback so nothing is ever dropped (a new account, or Braker's
+  // few chart differences). Mirrors the map's intent.
+  const code = String(row.code || '');
+  const name = (row.name || '').toLowerCase();
+  if (row.type === 'Asset') {
+    if (isCashAccount(row)) return { section: 'Current Assets', sub: 'Cash and Cash Equivalents' };
+    if (/receivable|allowance|deposit/.test(name)) return { section: 'Current Assets', sub: 'Other Current Assets' };
+    if (/^1121|^1123|construction cost|base construction/.test(code + ' ' + name)) return { section: 'Other Assets', sub: 'Construction Costs' };
+    if (/^1101\d|land purchase/.test(code + ' ' + name)) return { section: 'Other Assets', sub: 'Land' };
+    if (/^1188|impact fee|permit/.test(code + ' ' + name)) return { section: 'Other Assets', sub: 'Permits and fees' };
+    if (/^1291|development fee|^1272|travel - other development/.test(code + ' ' + name)) return { section: 'Other Assets', sub: 'Other development' };
+    return { section: 'Other Assets', sub: 'Soft Costs' };
+  }
+  if (row.type === 'Liability') {
+    if (/^25|loan|note payable|bond/.test(code + ' ' + name)) return { section: 'Long Term Liabilities', sub: 'Loans' };
+    if (/payable/.test(name)) return { section: 'Current Liabilities', sub: 'Accounts Payable' };
+    return { section: 'Current Liabilities', sub: 'Accrued Liabilities' };
+  }
+  if (row.type === 'Equity') {
+    if (/retained earning/.test(name)) return { section: 'Members Equity', sub: 'Retained Earnings' };
+    return { section: 'Members Equity', sub: 'Members Equity' };
+  }
+  return { section: 'Other', sub: 'Other' };
+}
 
 // Banyan Statements-of-Operations account routing. The classic broad groupings:
 // a top-line Revenue - Services section, then Operating Expenses split into
@@ -1398,6 +1526,7 @@ async function buildStatements(getBalances, opts) {
         (rows || []).filter(r => !eliminateCodes.has(String(r.code)))))
     : getBalances;
   const bsSub = (profile === 'bsfrgp') ? BS_SUB_ORDER_BSFRGP
+    : (profile === 'banyandev') ? BS_SUB_ORDER_BANYANDEV
     : (profile === 'banyan') ? BS_SUB_ORDER_BANYAN
     : (profile === 'clip') ? BS_SUB_ORDER_CLIP
     : (profile === 'silsbee') ? BS_SUB_ORDER_SILSBEE
@@ -2014,7 +2143,11 @@ async function buildStatements(getBalances, opts) {
       // payable; net change in cash is unaffected). Those statements are already
       // issued, so this is deliberately left alone here and tracked as its own
       // decision. See claude/changelog-2026-08-17-banyan-fs-cla-aug17-review.md.
-      if (/payable/i.test(nm)) cfBuckets.ap += cashEffect;
+      // banyandev (CLA): long-term debt is FINANCING even though the UMB loan
+      // account is named "... payable" — test the section before the name so the
+      // loan proceeds land in Financing, not the operating AP line.
+      if (profile === 'banyandev' && sec === 'Long Term Liabilities') cfBuckets.debtChange += cashEffect;
+      else if (/payable/i.test(nm)) cfBuckets.ap += cashEffect;
       else if (sec === 'Long Term Liabilities') cfBuckets.debtChange += cashEffect;
       else cfBuckets.accrued += cashEffect; // accrued / other current liabilities
     } else if (ref.type === 'Equity') {
@@ -2176,6 +2309,19 @@ async function buildStatements(getBalances, opts) {
     equityMembers.push({ code: o.code, name: o.name, beginning: beg, contributions: r2(end - beg), distributions: 0, netIncome: 0, ending: end });
   }
   equityMembers.sort((a, b) => String(a.code).localeCompare(String(b.code), undefined, { numeric: true }));
+  // banyandev (CLA): the Banyan HP Fund Undeployed Capital line is presented as
+  // a current-period distribution, not an opening balance — move its beginning
+  // balance into the Distributions column. The row still foots to ending
+  // (beginning + contributions + distributions + net income), and total ending
+  // equity is unchanged, so the statement's tie to the balance sheet holds.
+  if (profile === 'banyandev') {
+    for (const mrow of equityMembers) {
+      if (/undeployed/i.test(mrow.name) && !isZero(mrow.beginning)) {
+        mrow.distributions = r2(mrow.distributions + mrow.beginning);
+        mrow.beginning = 0;
+      }
+    }
+  }
   // Retained earnings row. Beginning = opening RE; ending = the RE balance the
   // BALANCE SHEET carries plus YTD net income — NOT opening + net income. A
   // current-year entry posted directly to 39000 (the Buna 1/1 roll-forward
@@ -2622,7 +2768,8 @@ async function renderStatementsPdf(s, outOffsets) {
           L.row(r.name, bsCells(r.cur, r.pri), { indent: rowIndent, dollarPrefix: bsFirstRow });
           bsFirstRow = false;
         }
-        if (showSubHeaders && su.rows.length > 1) {
+        const forceSub = m.profile === 'banyandev' && BANYANDEV_FORCE_SUBTOTAL_SECTIONS.has(sec.title);
+        if (showSubHeaders && (su.rows.length > 1 || forceSub)) {
           // GL balances are already signed; a contra subtotal (accumulated
           // amortization) is naturally negative and prints in parentheses.
           L.row('Total ' + su.title, bsCells(su.subtotal.cur, su.subtotal.pri), { indent: 20, ruleAbove: true });
@@ -2664,9 +2811,24 @@ async function renderStatementsPdf(s, outOffsets) {
     L.row('Total Liabilities', bsCells(s.balanceSheet.totalLiab.cur, s.balanceSheet.totalLiab.pri), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     L.row('Members\u2019 Equity', [], { indent: 6, boldRow: true });
     for (const r of s.balanceSheet.equityRows) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
-    for (const r of (s.balanceSheet.retainedRows || [])) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
-    L.row('Net Income (Loss)', bsCells(s.balanceSheet.niLine.cur, s.balanceSheet.niLine.pri), { indent: 16 });
-    L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    if (m.profile === 'banyandev') {
+      // CLA presentation: a contributed-capital subtotal, then a separate
+      // Retained Earnings subsection with its own subtotal, then Net Income,
+      // then the grand Total Members' Equity.
+      const tce = s.balanceSheet.totalContribEquity;
+      L.row('Total Members\u2019 Equity', bsCells(tce.cur, tce.pri), { indent: 20, ruleAbove: true, gapAfter: 4 });
+      const rr = s.balanceSheet.retainedRows || [];
+      const retTot = { cur: r2(rr.reduce((a, r) => a + r.cur, 0)), pri: r2(rr.reduce((a, r) => a + r.pri, 0)) };
+      L.row('Retained Earnings', [], { indent: 6, boldRow: true });
+      for (const r of rr) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
+      L.row('Total Retained Earnings', bsCells(retTot.cur, retTot.pri), { indent: 20, ruleAbove: true, gapAfter: 4 });
+      L.row('Net Income (Loss)', bsCells(s.balanceSheet.niLine.cur, s.balanceSheet.niLine.pri), { indent: 16 });
+      L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    } else {
+      for (const r of (s.balanceSheet.retainedRows || [])) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
+      L.row('Net Income (Loss)', bsCells(s.balanceSheet.niLine.cur, s.balanceSheet.niLine.pri), { indent: 16 });
+      L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    }
     L.row('Total Liabilities and Members\u2019 Equity', bsCells(s.balanceSheet.totalLiabEquity.cur, s.balanceSheet.totalLiabEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: wantDollar });
   }
 
@@ -2895,7 +3057,7 @@ async function renderStatementsPdf(s, outOffsets) {
       renderOie(itTree, { echoSub: true });
       L.row('Total Income Taxes', cell4oie(s.operations.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     }
-    L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+    L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: m.profile !== 'banyandev', doubleBelow: true, dollarPrefix: true });
     }
   }
 
@@ -2952,12 +3114,12 @@ async function renderStatementsPdf(s, outOffsets) {
 
     L.sectionTitle('Cash Flows from Investing Activities');
     if (!isZero(cf.capex)) L.row('Acquisition of fixed assets', [money(cf.capex)], { indent: 28 });
-    if (!isZero(cf.ltInvest)) L.row('(Increase) decrease in Other Assets', [money(cf.ltInvest)], { indent: 28 });
+    if (!isZero(cf.ltInvest)) L.row(m.profile === 'banyandev' ? 'Purchase of Long Term Investments and Other Assets' : '(Increase) decrease in Other Assets', [money(cf.ltInvest)], { indent: 28 });
     L.row('Net Cash Provided (Used) by Investing Activities', [money(cf.netInvesting)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
 
     L.sectionTitle('Cash Flows from Financing Activities');
     if (!isZero(cf.equityContrib)) L.row('Member contributions (distributions), net', [money(cf.equityContrib)], { indent: 28 });
-    if (!isZero(cf.debtChange)) L.row('Proceeds from (repayment of) long-term debt', [money(cf.debtChange)], { indent: 28 });
+    if (!isZero(cf.debtChange)) L.row(m.profile === 'banyandev' ? 'Net Proceeds from Loan Payable' : 'Proceeds from (repayment of) long-term debt', [money(cf.debtChange)], { indent: 28 });
     L.row('Net Cash Provided (Used) by Financing Activities', [money(cf.netFinancing)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
 
     L.row('Net Increase (Decrease) in Cash', [money(cf.netChange)], { indent: 6, boldRow: true, ruleAbove: true });
@@ -3222,43 +3384,139 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   const sectionHeader = (t) => { ensure(rowH * 2); dtext(t, nameLeft, y, F.row, bold); y -= rowH; };
   const subtotal = (label, getVal) => { ensure(rowH); rule(); dtext(label, nameLeft + 10, y, F.row, bold); figs(getVal, bold); y -= rowH * 1.5; };
 
+  // Mirror the FACE statement groupings (Jimmy, 2026-08-28): the consolidating
+  // schedules use the same balance-sheet classification (bsClassifyFor) and the
+  // same section/subsection order as the printed statements, so the schedule
+  // that footnotes the face statements reads with the identical grouping —
+  // Soft Costs / Construction Costs / Land / Permits and fees / Other
+  // development, Accrued Liabilities, Members' Equity + Retained Earnings — with
+  // a per-column subtotal (and its underline) at every level.
+  const profile = meta.profile || 'srn';
+  const subOrderMap = profile === 'banyandev' ? BS_SUB_ORDER_BANYANDEV
+    : profile === 'banyan' ? BS_SUB_ORDER_BANYAN
+    : BS_SUB_ORDER_SRN;
+  const forceSubSet = profile === 'banyandev' ? BANYANDEV_FORCE_SUBTOTAL_SECTIONS : new Set();
+  // Indented account row (grouped layout nests accounts under a subsection).
+  const acctRowAt = (a, ind) => {
+    ensure(rowH);
+    dtext(truncate((a.code ? a.code + ' ' : '') + (a.name || ''), reg, F.row, nameMax - (ind - 10)), nameLeft + ind, y, F.row, reg);
+    figs(i => val(a, i)); y -= rowH;
+  };
+  const subHeader = (t) => { ensure(rowH); dtext(t, nameLeft + 10, y, F.row, reg); y -= rowH; };
+  const subSubtotal = (label, getVal) => { ensure(rowH); rule(); dtext(label, nameLeft + 18, y, F.row, reg); figs(getVal, reg); y -= rowH * 1.2; };
+  // Group a set of rows into ordered { section, subs:[{sub, rows}] } using the
+  // face classification and the profile's section/subsection order.
+  const groupRows = (rows, sectionOrder) => {
+    const bySec = new Map();
+    for (const a of rows) {
+      const c = bsClassifyFor(profile, a);
+      if (!bySec.has(c.section)) bySec.set(c.section, new Map());
+      const subs = bySec.get(c.section);
+      if (!subs.has(c.sub)) subs.set(c.sub, []);
+      subs.get(c.sub).push(a);
+    }
+    const secNames = [...new Set([...sectionOrder, ...bySec.keys()])].filter(s => bySec.has(s));
+    return secNames.map(section => {
+      const subsMap = bySec.get(section);
+      const order = subOrderMap[section] || [];
+      const subNames = [...new Set([...order, ...subsMap.keys()])].filter(s => subsMap.has(s));
+      return { section, subs: subNames.map(sub => ({ sub, rows: byCode(subsMap.get(sub)) })) };
+    });
+  };
+  // Render one grouped section: header, each subsection (header + rows +
+  // subtotal when there is more than one subsection or the section forces it),
+  // then the bold section subtotal.
+  const renderGroupedSection = (secGroup, sectionTotalLabel) => {
+    sectionHeader(secGroup.section);
+    const force = forceSubSet.has(secGroup.section);
+    const showSubs = secGroup.subs.length > 1 || force;
+    for (const su of secGroup.subs) {
+      if (showSubs) subHeader(su.sub);
+      const ind = showSubs ? 18 : 10;
+      su.rows.forEach(a => acctRowAt(a, ind));
+      if (showSubs && (su.rows.length > 1 || force)) subSubtotal('Total ' + su.sub, i => sumCol(su.rows, i));
+    }
+    const allRows = secGroup.subs.reduce((s2, su) => s2.concat(su.rows), []);
+    subtotal(sectionTotalLabel, i => sumCol(allRows, i));
+  };
+
   const renderBalanceSheet = () => {
     curTitle = 'Consolidating Balance Sheet'; curDateLine = meta.longDate;
     offsets.push({ label: curTitle, page: pdf.getPageCount() });
     newPage();
     const acc = schedules.balanceSheet.accounts || [];
-    const assets = byCode(acc.filter(a => a.type === 'Asset'));
-    const liabs = byCode(acc.filter(a => a.type === 'Liability'));
-    const equity = byCode(acc.filter(a => a.type === 'Equity'));
+    const assets = acc.filter(a => a.type === 'Asset');
+    const liabs = acc.filter(a => a.type === 'Liability');
+    const equityAll = acc.filter(a => a.type === 'Equity');
     // Net income (loss) folded into equity — the balance-sheet window carries
     // P&L accounts at year-to-date, exactly as the face balance sheet does.
     const rev = acc.filter(a => a.type === 'Revenue'), exp = acc.filter(a => a.type === 'Expense');
     const ni = i => r2(sumCol(rev, i) - sumCol(exp, i));
+    // Split equity into contributed (Members Equity) and Retained Earnings by
+    // the same classifier the face statement uses.
+    const isRE = a => bsClassifyFor(profile, a).sub === 'Retained Earnings';
+    const contrib = byCode(equityAll.filter(a => !isRE(a)));
+    const retained = byCode(equityAll.filter(a => isRE(a)));
+    // Assets.
     sectionHeader('Assets');
-    assets.forEach(accountRow);
+    for (const sec of groupRows(assets, BS_ASSET_ORDER)) renderGroupedSection(sec, 'Total ' + sec.section);
     subtotal('Total Assets', i => sumCol(assets, i));
+    // Liabilities and Members' Equity.
     sectionHeader('Liabilities and Members’ Equity');
-    liabs.forEach(accountRow);
+    for (const sec of groupRows(liabs, ['Current Liabilities', 'Long Term Liabilities'])) renderGroupedSection(sec, 'Total ' + sec.section);
     subtotal('Total Liabilities', i => sumCol(liabs, i));
-    equity.forEach(accountRow);
-    ensure(rowH); dtext('Net Income (Loss)', nameLeft + 10, y, F.row, reg); figs(ni); y -= rowH;
-    subtotal('Total Members’ Equity', i => r2(sumCol(equity, i) + ni(i)));
-    subtotal('Total Liabilities and Members’ Equity', i => r2(sumCol(liabs, i) + sumCol(equity, i) + ni(i)));
+    subHeader('Members’ Equity');
+    contrib.forEach(a => acctRowAt(a, 18));
+    subSubtotal('Total Members’ Equity', i => sumCol(contrib, i));
+    if (retained.length) {
+      subHeader('Retained Earnings');
+      retained.forEach(a => acctRowAt(a, 18));
+      subSubtotal('Total Retained Earnings', i => sumCol(retained, i));
+    }
+    ensure(rowH); dtext('Net Income (Loss)', nameLeft + 18, y, F.row, reg); figs(ni); y -= rowH;
+    subtotal('Total Members’ Equity', i => r2(sumCol(equityAll, i) + ni(i)));
+    subtotal('Total Liabilities and Members’ Equity', i => r2(sumCol(liabs, i) + sumCol(equityAll, i) + ni(i)));
   };
   const renderIncome = () => {
     curTitle = 'Consolidating Statement of Income'; curDateLine = 'For the Month Ended ' + meta.longDate;
     offsets.push({ label: curTitle, page: pdf.getPageCount() });
     newPage();
     const acc = schedules.incomeMonth.accounts || [];
-    const rev = byCode(acc.filter(a => a.type === 'Revenue'));
-    const exp = byCode(acc.filter(a => a.type === 'Expense'));
+    // Mirror the statement of operations top-level groupings: Revenue, Operating
+    // Expenses, then Other Income (Expense) and Income Taxes (the shared
+    // otherIeRoute classifier picks those out), then Net Income.
+    const route = (a) => {
+      const r = (typeof otherIeRoute === 'function') ? otherIeRoute(a) : null;
+      if (r && r.bucket === 'otherIncome') return 'oi';
+      if (r && r.bucket === 'otherExpense') return 'oe';
+      if (r && r.bucket === 'incomeTax') return 'it';
+      return a.type === 'Revenue' ? 'rev' : 'exp';
+    };
+    const rev = byCode(acc.filter(a => route(a) === 'rev'));
+    const exp = byCode(acc.filter(a => route(a) === 'exp'));
+    const oi = byCode(acc.filter(a => route(a) === 'oi'));
+    const oe = byCode(acc.filter(a => route(a) === 'oe'));
+    const it = byCode(acc.filter(a => route(a) === 'it'));
     sectionHeader('Revenue');
-    rev.forEach(accountRow);
+    rev.forEach(a => acctRowAt(a, 10));
     subtotal('Total Revenue', i => sumCol(rev, i));
-    sectionHeader('Expenses');
-    exp.forEach(accountRow);
-    subtotal('Total Expenses', i => sumCol(exp, i));
-    subtotal('Net Income (Loss)', i => r2(sumCol(rev, i) - sumCol(exp, i)));
+    sectionHeader('Operating Expenses');
+    exp.forEach(a => acctRowAt(a, 10));
+    subtotal('Total Operating Expenses', i => sumCol(exp, i));
+    // Net income from operations = revenue − operating expenses.
+    const opInc = i => r2(sumCol(rev, i) - sumCol(exp, i));
+    if (oi.length || oe.length) {
+      sectionHeader('Other Income (Expense)');
+      oi.forEach(a => acctRowAt(a, 10));
+      oe.forEach(a => acctRowAt(a, 10));
+      subtotal('Total Other Income (Expense)', i => r2(sumCol(oi, i) - sumCol(oe, i)));
+    }
+    if (it.length) {
+      sectionHeader('Income Taxes');
+      it.forEach(a => acctRowAt(a, 10));
+      subtotal('Total Income Taxes', i => sumCol(it, i));
+    }
+    subtotal('Net Income (Loss)', i => r2(opInc(i) + (sumCol(oi, i) - sumCol(oe, i)) - sumCol(it, i)));
   };
 
   renderBalanceSheet();
