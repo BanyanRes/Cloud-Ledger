@@ -3051,7 +3051,12 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
   const COVER_TOC_PAGES = 2;
   const body = await PDFDocument.create();
   const tocEntries = [];
-  const appendToBody = async (bytes, label, addToc) => {
+  // Body page ranges that came from an uploaded PDF. Those pages carry the
+  // supplying firm's own footer (CLA's reads "Page N"), so stamping our number
+  // on them prints a duplicate. Recorded as { from, to } in 0-based BODY page
+  // indices and converted to absolute page numbers at stamping time.
+  const uploadedBodyRanges = [];
+  const appendToBody = async (bytes, label, addToc, uploaded) => {
     if (!bytes) return 0;
     let srcDoc;
     try { srcDoc = await PDFDocument.load(bytes, { ignoreEncryption: true }); }
@@ -3060,7 +3065,8 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
     const idx = srcDoc.getPageIndices();
     const pages = await body.copyPages(srcDoc, idx);
     pages.forEach(p => body.addPage(p));
-    info.sections.push({ label, pages: pages.length });
+    info.sections.push({ label, pages: pages.length, uploaded: !!uploaded });
+    if (uploaded && pages.length) uploadedBodyRanges.push({ from: startPage, to: startPage + pages.length - 1, label });
     if (addToc) tocEntries.push({ label, page: startPage + COVER_TOC_PAGES + 1 });
     return pages.length;
   };
@@ -3074,10 +3080,11 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
   //      date line is dynamic from the statement period.
   //   4) neither → warn as before.
   if (execSummaryBytes) {
-    await appendToBody(execSummaryBytes, 'Executive Summary', true);
+    await appendToBody(execSummaryBytes, 'Executive Summary', true, true);
     info.execSummarySource = 'uploaded';
   } else if (storedDefaultBytes) {
-    await appendToBody(storedDefaultBytes, 'Executive Summary', true);
+    // The stored default is itself a previously uploaded/split PDF.
+    await appendToBody(storedDefaultBytes, 'Executive Summary', true, true);
     info.execSummarySource = 'stored_default';
   } else {
     let defBytes = null;
@@ -3111,7 +3118,7 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
     // file that had in fact been skipped.
     const wipPagesBefore = body.getPageCount();
     try {
-      await appendToBody(wipBytes, 'Schedule of Contracts', true);
+      await appendToBody(wipBytes, 'Schedule of Contracts', true, true);
     } catch (e) {
       info.warnings.push('WIP schedule could not be merged (' + e.message + '); package generated without it.');
     }
@@ -3177,7 +3184,7 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
         if (!stripped.textDetected) info.warnings.push(label + ': ' + (stripped.parseFailed
           ? 'requisition PDF could not be parsed for invoice-log detection; all pages were kept.'
           : 'requisition PDF had no extractable text; invoice-log pages could not be detected and were left in.'));
-        await appendToBody(stripped.bytes, label, true);
+        await appendToBody(stripped.bytes, label, true, true);
       }
       info.reqReports.push(rInfo);
     }
@@ -3216,13 +3223,16 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
   //    landscape members'-equity page (and any landscape B2A page) is measured
   //    against its long edge, not the portrait constant.
   {
-    // Turnkey: page 3 is left unnumbered (Jimmy, 2026-08-27). The page CLA
-    // supplies at that position already carries its own "Page 3" footer, so our
-    // stamp read as a duplicate. Scoped to this profile and to the absolute page
-    // number, deliberately narrow and easy to change: if the package gains or
-    // loses a leading section the suppressed page MOVES WITH THE NUMBER, not
-    // with the statement, so revisit this if the front matter changes.
-    const skipPageNumbers = new Set(statements.meta.profile === 'turnkey' ? [3] : []);
+    // Pages copied in from an uploaded PDF are NOT numbered: they carry the
+    // supplying firm's own footer (CLA's reads "Page N") and our stamp landed on
+    // top of it as a second number (Jimmy, 2026-08-27). Keyed to where each
+    // uploaded section actually landed, so it holds however the front matter
+    // changes - unlike the absolute page 3 this replaces.
+    const skipPageNumbers = new Set();
+    for (const r of uploadedBodyRanges) {
+      for (let bp = r.from; bp <= r.to; bp++) skipPageNumbers.add(bp + COVER_TOC_PAGES + 1);
+    }
+    info.unnumberedPages = [...skipPageNumbers].sort((a, b) => a - b);
     const pnFont = await merged.embedFont(StandardFonts.Helvetica);
     merged.getPages().forEach((p, i) => {
       if (i < COVER_TOC_PAGES) return;
