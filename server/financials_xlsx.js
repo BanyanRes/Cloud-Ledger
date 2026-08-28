@@ -245,11 +245,14 @@ function buildOperations(s) {
       for (const g of groups) {
         sh.row(g.title, [], { indent: 12, bold: true });
         for (const su of g.subs) {
-          sh.row(su.title, [], { indent: 20 });
-          su.lines.forEach(r => { sh.row(r.name, cell4(r), { indent: 30, dollar: first.armed }); first.armed = false; });
-          if (su.lines.length > 1) sh.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true });
+          const echo = su.title === g.title;
+          if (!echo) sh.row(su.title, [], { indent: 20 });
+          su.lines.forEach(r => { sh.row(r.name, cell4(r), { indent: echo ? 26 : 30, dollar: first.armed }); first.armed = false; });
+          if (su.lines.length > 1 && !echo) sh.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true });
         }
-        if (showGroupTotal && g.subs.length > 1) sh.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true });
+        if (showGroupTotal && (g.subs.length > 1 || g.subs.some(su => su.title === g.title))) {
+          sh.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true });
+        }
       }
     };
     sh.sectionTitle('Operating Expenses');
@@ -265,9 +268,17 @@ function buildOperations(s) {
     sh.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
     sh.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true });
   } else {
-    sh.sectionTitle('Revenue');
-    op.revenue.forEach((r, i) => line(r, { dollar: i === 0 }));
-    sh.row('Total Revenue', cell4(op.totRev), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+    // The $ is armed once and spent by whichever section draws first: a
+    // development entity whose only revenue account was interest income now
+    // has no Revenue section at all, that account having moved into Other
+    // Income (Expense) (Jimmy, 2026-08-28).
+    const firstFig = { armed: true };
+    const spendDollar = () => { const d = firstFig.armed; firstFig.armed = false; return d; };
+    if (op.revenue.length) {
+      sh.sectionTitle('Revenue');
+      op.revenue.forEach(r => line(r, { dollar: spendDollar() }));
+      sh.row('Total Revenue', cell4(op.totRev), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+    }
     if (op.cogs.length) {
       sh.sectionTitle('Cost of Revenue');
       op.cogs.forEach(r => line(r));
@@ -279,13 +290,45 @@ function buildOperations(s) {
     if (groups) {
       for (const g of groups) {
         sh.row(g.title, [], { indent: 12, bold: true });
-        g.lines.forEach(r => sh.row(r.name, cell4(r), { indent: 26 }));
+        g.lines.forEach(r => sh.row(r.name, cell4(r), { indent: 26, dollar: spendDollar() }));
         if (g.lines.length > 1) sh.row('Total ' + g.title, cell4(g.subtotal), { indent: 20, ruleAbove: true });
       }
     } else {
-      op.opex.forEach(r => line(r));
+      op.opex.forEach(r => line(r, { dollar: spendDollar() }));
     }
     sh.row('Total Operating Expenses', cell4(op.totOpex), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+    // Other Income (Expense) / Income Taxes, from the shared classifier
+    // (otherIeRoute in financials.js). Same nesting as the PDF; expense lines
+    // print parenthesised as reductions of income.
+    const oiTree = op.otherIncomeTree || [];
+    const oeTree = op.otherExpenseTree || [];
+    const itTree = op.incomeTaxTree || [];
+    const negT = (t) => ({ cur: -num(t.cur), pri: -num(t.pri), ytd: -num(t.ytd) });
+    const renderOie = (groups, opts) => {
+      const o = opts || {};
+      for (const g of groups) {
+        sh.row(g.title, [], { indent: 12, bold: true });
+        for (const su of g.subs) {
+          const echo = !!o.echoSub && su.title === g.title;
+          if (!echo) sh.row(su.title, [], { indent: 20 });
+          const li = echo ? 26 : 30;
+          su.lines.forEach(r => sh.row(r.name, cell4(o.negate ? negT(r) : r), { indent: li }));
+          if (!echo) sh.row('Total ' + su.title, cell4(o.negate ? negT(su.subtotal) : su.subtotal), { indent: 24, ruleAbove: true });
+        }
+        sh.row('Total ' + g.title, cell4(o.negate ? negT(g.subtotal) : g.subtotal), { indent: 16, ruleAbove: true });
+      }
+    };
+    if (oiTree.length || oeTree.length) {
+      sh.sectionTitle('Other Income (Expense)');
+      renderOie(oiTree, { echoSub: true });
+      renderOie(oeTree, { negate: true, echoSub: true });
+      sh.row('Total Other Income (Expense)', cell4(op.totOtherIE), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+    }
+    if (itTree.length) {
+      sh.sectionTitle('Income Taxes');
+      renderOie(itTree, { echoSub: true });
+      sh.row('Total Income Taxes', cell4(op.totIncomeTax), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+    }
     sh.row('Net Income (Loss)', cell4(op.netIncome), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true });
   }
   return sh._finish();

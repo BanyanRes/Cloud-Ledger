@@ -172,6 +172,59 @@ function turnkeyIsOtherExpense(row) {
   return /other expense/.test(sub) || /interest expense/.test(nm) || String(row.code) === '70000';
 }
 
+// ── Other Income (Expense) - ONE shared classifier for every profile ────────
+// Jimmy, 2026-08-28: on EVERY entity, misc revenue / interest income / other
+// income / misc expenses come out of operating results and are presented
+// together below them, with interest expense, the non-operating gains and
+// losses and the other oddments alongside, and income taxes in their own
+// section. Defined once, on purpose: before this, the section was hand-rolled
+// three times (turnkey code pins, BSFRGP_PL_MAP, BANYAN_PL_MAP) and the srn
+// family had no section at all, so the same account was classified two ways on
+// two entities.
+//
+// Keyed off type + NAME, never a bare code range. On Turnkey Rail 70000 is
+// Interest EXPENSE and 42000 is Interest Income - the exact reverse of every
+// other chart here - so a code heuristic is guaranteed to be wrong somewhere.
+//
+// Returns null for an account that belongs in operating results.
+const OIE_INCOME  = { bucket: 'otherIncome',  group: 'Other Income',  sub: 'Other Income' };
+const OIE_EXPENSE = { bucket: 'otherExpense', group: 'Other Expense', sub: 'Other Expense' };
+const OIE_TAX     = { bucket: 'incomeTax',    group: 'State and Local Taxes', sub: 'State and Local Taxes' };
+
+function otherIeRoute(row) {
+  const name = String(row.name || '').toLowerCase().trim();
+  const sub = String(row.subtype || '').toLowerCase();
+  const type = String(row.type || '');
+  if (type === 'Revenue') {
+    // Non-operating income: interest, misc, other, gains/losses, dividends,
+    // debt forgiveness, tax refunds. Deliberately NOT matched: Banyan
+    // Residential's 40250 'Expense - Bad Debt', a Revenue-typed expense
+    // account - that is a chart problem, not a presentation one.
+    if (/interest income/.test(name)) return OIE_INCOME;
+    if (/^misc/.test(name)) return OIE_INCOME;
+    if (/other income/.test(name)) return OIE_INCOME;
+    if (/\bgain|\bloss/.test(name)) return OIE_INCOME;
+    if (/dividend/.test(name)) return OIE_INCOME;
+    if (/forgiveness/.test(name)) return OIE_INCOME;
+    if (/tax refund/.test(name)) return OIE_INCOME;
+    if (/other revenue|other income/.test(sub)) return OIE_INCOME;
+    return null;
+  }
+  if (type !== 'Expense') return null;
+  // Penalties BEFORE the tax test: 'State and Local Tax Penalties' contains
+  // 'state and local tax' but is an other expense, not an income tax.
+  if (/penalt/.test(name)) return OIE_EXPENSE;
+  if (/^miscellaneous$/.test(name)) return OIE_EXPENSE;
+  if (/expense - misc|^misc expense/.test(name)) return OIE_EXPENSE;
+  if (/interest expense/.test(name)) return OIE_EXPENSE;
+  if (/^other expense/.test(name)) return OIE_EXPENSE;
+  if (/other expense/.test(sub)) return OIE_EXPENSE;
+  // Income taxes get their own section. Property tax, tax & license and the
+  // operating 'Contract Loss' / 'Credit Loss' expenses stay where they are.
+  if (/state and local tax|franchise tax|income tax/.test(name)) return OIE_TAX;
+  return null;
+}
+
 // CLA's Turnkey cash-flow line set. Each operating/investing/financing line
 // names the accounts that roll into it. Signs are cash effects: an asset
 // increase consumes cash, a liability increase provides it.
@@ -459,19 +512,22 @@ const BS_SUB_ORDER_BSFRGP = Object.assign({}, {
 //   opex   → Operating Expenses (General and Administrative → Legal and Accounting)
 //   otherIncome / otherExpense → Other Income (Expense)
 //   incomeTax → Income Taxes (State and Local Taxes)
+// Only the OPERATING side lives here now. Interest income, the gains, the
+// penalties and the franchise tax are classified by the shared otherIeRoute
+// (2026-08-28), so they are not repeated in this map.
 const BSFRGP_PL_MAP = {
   '63000': { bucket: 'opex',         group: 'General and Administrative Expenses', sub: 'Legal and Accounting' },
-  '70000': { bucket: 'otherIncome',  group: 'Other Income',  sub: 'Interest Income' },
-  '67056': { bucket: 'otherExpense', group: 'Other Expense', sub: 'Other Expenses' },
-  '68061': { bucket: 'incomeTax',    group: 'State and Local Taxes', sub: 'State and Local Taxes' },
 };
 function bsfrgpPlRoute(row) {
+  // Shared Other Income (Expense) / Income Taxes classifier wins.
+  const oie = otherIeRoute(row);
+  if (oie) return oie;
   const m = BSFRGP_PL_MAP[String(row.code)];
   if (m) return m;
-  const name = (row.name || '').toLowerCase();
-  if (row.type === 'Revenue') return { bucket: 'otherIncome', group: 'Other Income', sub: 'Interest Income' };
-  if (/franchise tax|state and local tax|income tax/.test(name)) return { bucket: 'incomeTax', group: 'State and Local Taxes', sub: 'State and Local Taxes' };
-  if (/penalt|other expense/.test(name)) return { bucket: 'otherExpense', group: 'Other Expense', sub: 'Other Expenses' };
+  // This profile has no top-line Revenue section, so any revenue account the
+  // classifier did not claim still belongs in Other Income - dropping it into
+  // Operating Expenses would flip its sign and break net income.
+  if (row.type === 'Revenue') return OIE_INCOME;
   return { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Legal and Accounting' };
 }
 
@@ -621,25 +677,23 @@ const BANYAN_PL_MAP = {
   // Operating Expenses → Depreciation and Amortization
   '69100': { bucket: 'opex', group: 'Depreciation and Amortization Expense', sub: 'Depreciation' },
   '69000': { bucket: 'opex', group: 'Depreciation and Amortization Expense', sub: 'Amortization' },
-  // Other Income (Expense)
-  '70000': { bucket: 'otherIncome', group: 'Other Income', sub: 'Interest Income' },
-  '67056': { bucket: 'otherExpense', group: 'Other Expense', sub: 'Other Expenses' },
-  // Income Taxes → State and Local Taxes
-  '68060': { bucket: 'incomeTax', group: 'State and Local Taxes', sub: 'State and Local Taxes' },
-  '68061': { bucket: 'incomeTax', group: 'State and Local Taxes', sub: 'State and Local Taxes' },
+  // Other Income (Expense) and Income Taxes are NOT listed here - they are
+  // classified by the shared otherIeRoute (2026-08-28), which also pulls
+  // 49999 Misc Revenue out of Revenue - Services and 67150 Miscellaneous out
+  // of Office Expense.
 };
 function banyanPlRoute(row) {
+  // Shared Other Income (Expense) / Income Taxes classifier wins, so 67150
+  // Miscellaneous is no longer caught by the Office Expense pin below.
+  const oie = otherIeRoute(row);
+  if (oie) return oie;
   const m = BANYAN_PL_MAP[String(row.code)];
   if (m) return m;
-  const code = String(row.code || '');
   const name = (row.name || '').toLowerCase();
   if (row.type === 'Revenue') {
-    if (/interest income/.test(name) || /^70\d/.test(code)) return { bucket: 'otherIncome', group: 'Other Income', sub: 'Interest Income' };
     return { bucket: 'revenue', group: 'Revenue - Services', sub: 'Revenue - Services' };
   }
   // Expense name heuristics, mirroring the reference groupings.
-  if (/franchise tax|state and local tax|income tax/.test(name)) return { bucket: 'incomeTax', group: 'State and Local Taxes', sub: 'State and Local Taxes' };
-  if (/penalt/.test(name)) return { bucket: 'otherExpense', group: 'Other Expense', sub: 'Other Expenses' };
   if (/salary|salaries|wage|payroll tax|health insurance|benefit|401k|retirement/.test(name)) return { bucket: 'opex', group: 'Payroll and Related Expenses', sub: 'Payroll Expenses' };
   if (/travel/.test(name)) return { bucket: 'opex', group: 'Travel, Meals and Entertainment', sub: 'Travel Expenses' };
   if (/meals|entertainment/.test(name)) return { bucket: 'opex', group: 'Travel, Meals and Entertainment', sub: 'Meals and Entertainment' };
@@ -1584,17 +1638,31 @@ async function buildStatements(getBalances, opts) {
   // Interest Expense are lifted out of Revenue / Operating Expenses into an
   // Other Income (Expense) section. Every other profile is unchanged.
   const isTk = profile === 'turnkey';
-  const revenue = plLines(r => r.type === 'Revenue' && !(isTk && turnkeyIsOtherIncome(r)));
+  // COGS is resolved FIRST and always wins: a cost-of-construction line can
+  // never be lifted out of cost of goods sold by an Other Income (Expense)
+  // name test.
   const cogs = plLines(r => r.type === 'Expense' && (isTk
     ? turnkeyIsCogs(r)
     : /cogs|cost of goods|cost of revenue|car hire/i.test((r.subtype || '') + ' ' + (r.name || ''))));
   const cogsCodes = new Set(cogs.map(l => l.code));
-  // Other Income (Expense) lines — turnkey only; empty elsewhere so the
-  // section never renders and the arithmetic below is a no-op.
-  const otherIncomeLines = isTk ? plLines(r => turnkeyIsOtherIncome(r)) : [];
-  const otherExpenseLines = isTk ? plLines(r => turnkeyIsOtherExpense(r)) : [];
-  const otherExpCodes = new Set(otherExpenseLines.map(l => l.code));
-  const opex = plLines(r => r.type === 'Expense' && !cogsCodes.has(r.code) && !otherExpCodes.has(r.code));
+  // Other Income (Expense) + Income Taxes, from the one shared classifier
+  // (otherIeRoute). Turnkey keeps its own pins on top of it because its chart
+  // reverses 42000 / 70000 against every other entity here.
+  const oieOf = (r) => {
+    if (r.type === 'Expense' && cogsCodes.has(r.code)) return null;
+    if (isTk) {
+      if (turnkeyIsOtherIncome(r)) return OIE_INCOME;
+      if (turnkeyIsOtherExpense(r)) return OIE_EXPENSE;
+    }
+    return otherIeRoute(r);
+  };
+  const inOieBucket = (b) => plLines(r => { const x = oieOf(r); return !!x && x.bucket === b; });
+  const otherIncomeLines = inOieBucket('otherIncome');
+  const otherExpenseLines = inOieBucket('otherExpense');
+  const incomeTaxLines = inOieBucket('incomeTax');
+  const oieCodes = new Set([].concat(otherIncomeLines, otherExpenseLines, incomeTaxLines).map(l => l.code));
+  const revenue = plLines(r => r.type === 'Revenue' && !oieCodes.has(r.code));
+  const opex = plLines(r => r.type === 'Expense' && !cogsCodes.has(r.code) && !oieCodes.has(r.code));
 
   const sumCol = (lines, k) => r2(lines.reduce((s, l) => s + l[k], 0));
   const totRev = { cur: sumCol(revenue, 'cur'), pri: sumCol(revenue, 'pri'), ytd: sumCol(revenue, 'ytd') };
@@ -1606,7 +1674,24 @@ async function buildStatements(getBalances, opts) {
   const totOtherInc = { cur: sumCol(otherIncomeLines, 'cur'), pri: sumCol(otherIncomeLines, 'pri'), ytd: sumCol(otherIncomeLines, 'ytd') };
   const totOtherExp = { cur: sumCol(otherExpenseLines, 'cur'), pri: sumCol(otherExpenseLines, 'pri'), ytd: sumCol(otherExpenseLines, 'ytd') };
   const totOtherIE = { cur: r2(totOtherInc.cur - totOtherExp.cur), pri: r2(totOtherInc.pri - totOtherExp.pri), ytd: r2(totOtherInc.ytd - totOtherExp.ytd) };
-  const netIncome = { cur: r2(grossProfit.cur - totOpex.cur + totOtherIE.cur), pri: r2(grossProfit.pri - totOpex.pri + totOtherIE.pri), ytd: r2(grossProfit.ytd - totOpex.ytd + totOtherIE.ytd) };
+  // Income Taxes is its own section below Other Income (Expense). The accounts
+  // carry their natural expense sign, so a credit/benefit is negative and
+  // therefore ADDS to net income when subtracted.
+  const totIncomeTax = { cur: sumCol(incomeTaxLines, 'cur'), pri: sumCol(incomeTaxLines, 'pri'), ytd: sumCol(incomeTaxLines, 'ytd') };
+  const netIncome = { cur: r2(grossProfit.cur - totOpex.cur + totOtherIE.cur - totIncomeTax.cur), pri: r2(grossProfit.pri - totOpex.pri + totOtherIE.pri - totIncomeTax.pri), ytd: r2(grossProfit.ytd - totOpex.ytd + totOtherIE.ytd - totIncomeTax.ytd) };
+  // Group -> subsection trees, in the shape the renderers already use for the
+  // banyan / bsfrgp profiles. Every line in a bucket shares one group and one
+  // subsection (see OIE_INCOME / OIE_EXPENSE / OIE_TAX), so a single group with
+  // a single subsection is exact rather than a simplification.
+  const oieTree = (lines, route) => {
+    if (!lines.length) return [];
+    const subtotal = { cur: sumCol(lines, 'cur'), pri: sumCol(lines, 'pri'), ytd: sumCol(lines, 'ytd') };
+    const sorted = lines.slice().sort((a, b) => String(a.code).localeCompare(String(b.code), undefined, { numeric: true }));
+    return [{ title: route.group, subtotal, subs: [{ title: route.sub, lines: sorted, subtotal }] }];
+  };
+  const otherIncomeTree = oieTree(otherIncomeLines, OIE_INCOME);
+  const otherExpenseTree = oieTree(otherExpenseLines, OIE_EXPENSE);
+  const incomeTaxTree = oieTree(incomeTaxLines, OIE_TAX);
 
   // Turnkey presentation only: fold the WIP adjustment into Construction
   // Revenue and order COGS / G&A the way CLA does. Deliberately AFTER every
@@ -1661,14 +1746,22 @@ async function buildStatements(getBalances, opts) {
     const byBucket = { opex: [], otherIncome: [], otherExpense: [], incomeTax: [] };
     const routeOf = {};
     for (const l of allPl) {
-      const route = bsfrgpPlRoute({ code: l.code, name: l.name, type: (mYtd.get(l.code) || mCur.get(l.code) || mPri.get(l.code)).type });
+      const bref = mYtd.get(l.code) || mCur.get(l.code) || mPri.get(l.code);
+      const route = bsfrgpPlRoute({ code: l.code, name: l.name, type: bref.type, subtype: bref.subtype });
       routeOf[l.code] = route;
       (byBucket[route.bucket] || byBucket.opex).push(l);
     }
+    // Other-expense lines are NEGATED for presentation, matching the banyan
+    // profile and the standard shape: inside 'Other Income (Expense)' they are
+    // reductions of income, so a 455.67 penalty prints as (455.67) and the
+    // section nets to Income + (negated) Expense.
+    byBucket.otherExpense = byBucket.otherExpense.map(l => ({
+      ...l, cur: r2(-l.cur), pri: r2(-l.pri), ytd: r2(-l.ytd), change: r2(-l.change),
+    }));
     // Build a nested group→subsection tree for a bucket's lines (preserves the
     // reference's 'General and Administrative Expenses → Legal and Accounting'
-    // and 'Other Income → Interest Income' nesting). Each group carries its own
-    // subtotal; each subsection carries a subtotal too.
+    // nesting). Each group carries its own subtotal; each subsection carries a
+    // subtotal too.
     const buildTree = (lines) => {
       const groups = [];
       const gIndex = new Map();
@@ -1704,11 +1797,11 @@ async function buildStatements(getBalances, opts) {
     const tOtherIncome = sumBucket(byBucket.otherIncome);
     const tOtherExpense = sumBucket(byBucket.otherExpense);
     const tIncomeTax = sumBucket(byBucket.incomeTax);
-    // Other Income (Expense) net = Other Income − Other Expense.
+    // Other Income (Expense) net = Other Income + (already negated) Other Expense.
     const tOtherIE = {
-      cur: r2(tOtherIncome.cur - tOtherExpense.cur),
-      pri: r2(tOtherIncome.pri - tOtherExpense.pri),
-      ytd: r2(tOtherIncome.ytd - tOtherExpense.ytd),
+      cur: r2(tOtherIncome.cur + tOtherExpense.cur),
+      pri: r2(tOtherIncome.pri + tOtherExpense.pri),
+      ytd: r2(tOtherIncome.ytd + tOtherExpense.ytd),
     };
     // Net Income (Loss) = Other Income (Expense) − Operating Expenses − Income Taxes.
     // Income-tax accounts carry their natural expense sign (a credit/benefit is
@@ -1745,7 +1838,7 @@ async function buildStatements(getBalances, opts) {
     const routeOf = {};
     for (const l of allPl) {
       const ref = mYtd.get(l.code) || mCur.get(l.code) || mPri.get(l.code);
-      const route = banyanPlRoute({ code: l.code, name: l.name, type: ref.type });
+      const route = banyanPlRoute({ code: l.code, name: l.name, type: ref.type, subtype: ref.subtype });
       routeOf[l.code] = route;
       (byBucket[route.bucket] || byBucket.opex).push(l);
     }
@@ -2123,7 +2216,8 @@ async function buildStatements(getBalances, opts) {
     balanceSheet: Object.assign({ assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
       turnkeyBs ? { turnkey: turnkeyBs } : {}),
     operations: Object.assign({ revenue: revenueRows, cogs: cogsRows, opex: opexRows, opexGroups, totRev, totCogs, grossProfit, totOpex, netIncome,
-      otherIncomeLines, otherExpenseLines, totOtherInc, totOtherExp, totOtherIE },
+      otherIncomeLines, otherExpenseLines, incomeTaxLines, totOtherInc, totOtherExp, totOtherIE, totIncomeTax,
+      otherIncomeTree, otherExpenseTree, incomeTaxTree },
       bsfrgpOps ? { bsfrgp: bsfrgpOps, netIncome: bsfrgpOps.netIncome } : {},
       banyanOps ? { banyan: banyanOps, netIncome: banyanOps.netIncome } : {}),
     cashFlow,
@@ -2678,11 +2772,14 @@ async function renderStatementsPdf(s, outOffsets) {
         for (const g of groups) {
           L.row(g.title, [], { indent: 12, boldRow: true });
           for (const su of g.subs) {
-            L.row(su.title, [], { indent: 20 });
-            su.lines.forEach(r => { L.row(r.name, cell4(r), { indent: 30, dollarPrefix: plFirstRow }); plFirstRow = false; });
-            if (su.lines.length > 1) L.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true });
+            const echo = su.title === g.title;
+            if (!echo) L.row(su.title, [], { indent: 20 });
+            su.lines.forEach(r => { L.row(r.name, cell4(r), { indent: echo ? 26 : 30, dollarPrefix: plFirstRow }); plFirstRow = false; });
+            if (su.lines.length > 1 && !echo) L.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true });
           }
-          if (showGroupTotal && g.subs.length > 1) L.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true });
+          if (showGroupTotal && (g.subs.length > 1 || g.subs.some(su => su.title === g.title))) {
+            L.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true });
+          }
         }
       };
 
@@ -2705,10 +2802,18 @@ async function renderStatementsPdf(s, outOffsets) {
 
       L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
     } else {
-    L.sectionTitle('Revenue');
-    // $ on the first figure line of the statement (CLA 8/17, global).
-    s.operations.revenue.forEach((r, i) => line(r, { dollarPrefix: i === 0 }));
-    L.row('Total Revenue', [money(s.operations.totRev.cur), money(s.operations.totRev.pri), chg(s.operations.totRev.cur, s.operations.totRev.pri), money(s.operations.totRev.ytd)], { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
+    // $ on the first figure line of the statement (CLA 8/17, global). It is
+    // armed once and spent by whichever section draws first, because a
+    // development entity whose only revenue account was interest income now
+    // has no Revenue section at all - that account sits in Other Income
+    // (Expense) (Jimmy, 2026-08-28).
+    const firstFig = { armed: true };
+    const spendDollar = () => { const d = firstFig.armed; firstFig.armed = false; return d; };
+    if (s.operations.revenue.length) {
+      L.sectionTitle('Revenue');
+      s.operations.revenue.forEach(r => line(r, { dollarPrefix: spendDollar() }));
+      L.row('Total Revenue', [money(s.operations.totRev.cur), money(s.operations.totRev.pri), chg(s.operations.totRev.cur, s.operations.totRev.pri), money(s.operations.totRev.ytd)], { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
+    }
     if (s.operations.cogs.length) {
       const cogsLabel = m.profile === 'turnkey' ? 'Cost of Goods Sold' : 'Cost of Revenue';
       L.sectionTitle(cogsLabel);
@@ -2736,25 +2841,59 @@ async function renderStatementsPdf(s, outOffsets) {
         const groupH = 12 /* header */ + nLines * 12 + (hasSubtotal ? 12 : 0) + 4 /* subtotal rule buffer */;
         L.keepTogether(groupH);
         L.row(g.title, [], { indent: 12, boldRow: true });
-        g.lines.forEach(r => L.row(r.name, [money(r.cur), money(r.pri), chg(r.cur, r.pri), money(r.ytd)], { indent: 26 }));
+        g.lines.forEach(r => L.row(r.name, [money(r.cur), money(r.pri), chg(r.cur, r.pri), money(r.ytd)], { indent: 26, dollarPrefix: spendDollar() }));
         if (hasSubtotal) {
           L.row('Total ' + g.title, [money(g.subtotal.cur), money(g.subtotal.pri), chg(g.subtotal.cur, g.subtotal.pri), money(g.subtotal.ytd)], { indent: 20, ruleAbove: true });
         }
       }
     } else {
-      s.operations.opex.forEach(r => line(r));
+      s.operations.opex.forEach(r => line(r, { dollarPrefix: spendDollar() }));
     }
     L.row('Total ' + (m.profile === 'turnkey' ? 'General & Administrative Expenses' : 'Operating Expenses'), [money(s.operations.totOpex.cur), money(s.operations.totOpex.pri), chg(s.operations.totOpex.cur, s.operations.totOpex.pri), money(s.operations.totOpex.ytd)], { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
-    // Other Income (Expense) - income lines then expense lines, netted. Only
-    // turnkey populates these, so this block is inert for every other profile.
-    const oiLines = s.operations.otherIncomeLines || [];
-    const oeLines = s.operations.otherExpenseLines || [];
-    if (oiLines.length || oeLines.length) {
+    // ── Other Income (Expense) / Income Taxes ──────────────────────────
+    // Populated for EVERY profile now by the shared classifier
+    // (otherIeRoute), not just turnkey: misc revenue, interest income,
+    // other income, the non-operating gains, misc / other / interest
+    // expense and the penalties. Rendered as group -> subsection -> lines,
+    // the same nesting the source P&L uses, so the section reads:
+    //   Other Income (Expense)
+    //     Other Income / Other Income / <lines> / Total Other Income x2
+    //     Other Expense / Other Expenses / <lines> / Total ... x2
+    //   Total Other Income (Expense)
+    //   Income Taxes / State and Local Taxes / <lines> / Total x2
+    // Expense lines print parenthesised, as reductions of income.
+    const oiTree = s.operations.otherIncomeTree || [];
+    const oeTree = s.operations.otherExpenseTree || [];
+    const itTree = s.operations.incomeTaxTree || [];
+    const negT = (t) => ({ cur: -t.cur, pri: -t.pri, ytd: -t.ytd });
+    const cell4oie = (t) => [money(t.cur), money(t.pri), chg(t.cur, t.pri), money(t.ytd)];
+    const renderOie = (groups, opts) => {
+      const o = opts || {};
+      for (const g of groups) {
+        const nSub = g.subs.length;
+        const nLine = g.subs.reduce((s2, su) => s2 + su.lines.length, 0);
+        L.keepTogether(12 + nSub * 24 + nLine * 12 + 16);
+        L.row(g.title, [], { indent: 12, boldRow: true });
+        for (const su of g.subs) {
+          const echo = !!o.echoSub && su.title === g.title;
+          if (!echo) L.row(su.title, [], { indent: 20 });
+          const li = echo ? 26 : 30;
+          su.lines.forEach(r => L.row(r.name, cell4oie(o.negate ? negT(r) : r), { indent: li }));
+          if (!echo) L.row('Total ' + su.title, cell4oie(o.negate ? negT(su.subtotal) : su.subtotal), { indent: 24, ruleAbove: true });
+        }
+        L.row('Total ' + g.title, cell4oie(o.negate ? negT(g.subtotal) : g.subtotal), { indent: 16, ruleAbove: true });
+      }
+    };
+    if (oiTree.length || oeTree.length) {
       L.sectionTitle('Other Income (Expense)');
-      oiLines.forEach(r => line(r));
-      // Expense lines are shown parenthesised as reductions of income.
-      oeLines.forEach(r => L.row(r.name, [money(-r.cur), money(-r.pri), chg(-r.cur, -r.pri), money(-r.ytd)], { indent: 26 }));
-      L.row('Total Other Income (Expense)', [money(s.operations.totOtherIE.cur), money(s.operations.totOtherIE.pri), chg(s.operations.totOtherIE.cur, s.operations.totOtherIE.pri), money(s.operations.totOtherIE.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      renderOie(oiTree, { echoSub: true });
+      renderOie(oeTree, { negate: true, echoSub: true });
+      L.row('Total Other Income (Expense)', cell4oie(s.operations.totOtherIE), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
+    }
+    if (itTree.length) {
+      L.sectionTitle('Income Taxes');
+      renderOie(itTree, { echoSub: true });
+      L.row('Total Income Taxes', cell4oie(s.operations.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     }
     L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
     }
