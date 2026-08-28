@@ -3492,11 +3492,16 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
       if (r && r.bucket === 'incomeTax') return 'it';
       return a.type === 'Revenue' ? 'rev' : 'exp';
     };
-    const rev = byCode(acc.filter(a => route(a) === 'rev'));
-    const exp = byCode(acc.filter(a => route(a) === 'exp'));
-    const oi = byCode(acc.filter(a => route(a) === 'oi'));
-    const oe = byCode(acc.filter(a => route(a) === 'oe'));
-    const it = byCode(acc.filter(a => route(a) === 'it'));
+    // Only P&L accounts belong on the statement of income. The month window
+    // (buildColumns) also carries every balance-sheet account's month delta, so
+    // restrict to Revenue/Expense BEFORE routing — otherwise asset/liability
+    // accounts fall through the route() default and print as expenses.
+    const pl = acc.filter(a => a.type === 'Revenue' || a.type === 'Expense');
+    const rev = byCode(pl.filter(a => route(a) === 'rev'));
+    const exp = byCode(pl.filter(a => route(a) === 'exp'));
+    const oi = byCode(pl.filter(a => route(a) === 'oi'));
+    const oe = byCode(pl.filter(a => route(a) === 'oe'));
+    const it = byCode(pl.filter(a => route(a) === 'it'));
     sectionHeader('Revenue');
     rev.forEach(a => acctRowAt(a, 10));
     subtotal('Total Revenue', i => sumCol(rev, i));
