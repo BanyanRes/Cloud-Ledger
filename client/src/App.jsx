@@ -5373,8 +5373,8 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
         {operGrp&&<div>
           <label style={S.label}>Operating trial balance <span style={{fontWeight:400,color:T.textMuted}}>({operGrp.colLabel} &mdash; feeds the consolidated schedules on Intercompany &rarr; Consolidation)</span></label>
           <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
-            <input type="file" accept=".xlsx,.xls,.csv" disabled={!canEdit||operBusy} onChange={e=>setOperFile(e.target.files&&e.target.files[0]?e.target.files[0]:null)} style={{fontSize:13}}/>
-            <button style={{...S.btnS,padding:'6px 12px',opacity:(!operFile||operBusy||!canEdit)?0.6:1}} disabled={!operFile||operBusy||!canEdit} onClick={()=>uploadOperTb(operFile)}>{operBusy?'Uploading…':'Upload operating TB'}</button>
+            <input type="file" accept=".xlsx,.xls,.csv" disabled={!canEdit||operBusy} onChange={e=>{const f=e.target.files&&e.target.files[0]?e.target.files[0]:null;setOperFile(f);if(f)uploadOperTb(f);}} style={{fontSize:13}}/>
+            {operBusy&&<span style={{fontSize:12,color:T.textMuted}}>Uploading&hellip;</span>}
           </div>
           {operOnFile&&<div style={{marginTop:6,fontSize:12,color:T.green}}>&#10003; On file for {operOnFile.as_of} ({operOnFile.lines} accounts{operOnFile.uploaded_at?(', uploaded '+String(operOnFile.uploaded_at).slice(0,10)):''}) &mdash; the consolidated schedules use it.</div>}
           {!operOnFile&&!operFile&&<div style={{marginTop:6,fontSize:12,color:T.textMuted}}>Nothing on file for {asOf.slice(0,7)} yet. Columns are detected automatically (account code + name, then Debit/Credit or a single Ending balance). Re-uploading a month replaces it.</div>}
