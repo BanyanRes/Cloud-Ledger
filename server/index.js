@@ -9999,13 +9999,24 @@ async function buildTtmAnalysis(d, entityName, asOf) {
     lines.push('    ' + fmtRow('Total ' + g.title, g.subtotal.vals, g.subtotal.total));
   });
   lines.push('  ' + fmtRow('TOTAL OPERATING EXPENSES', d.totOpex.vals, d.totOpex.total));
+  if ((d.otherIncome && d.otherIncome.length) || (d.otherExpense && d.otherExpense.length)) {
+    lines.push('OTHER INCOME (EXPENSE):  (expense lines shown negative)');
+    (d.otherIncome || []).forEach(l => lines.push('  ' + fmtRow(l.name, l.vals, l.total)));
+    (d.otherExpense || []).forEach(l => lines.push('  ' + fmtRow(l.name, l.vals, l.total)));
+    lines.push('  ' + fmtRow('TOTAL OTHER INCOME (EXPENSE)', d.totOtherIE.vals, d.totOtherIE.total));
+  }
+  if (d.incomeTax && d.incomeTax.length) {
+    lines.push('INCOME TAXES:');
+    d.incomeTax.forEach(l => lines.push('  ' + fmtRow(l.name, l.vals, l.total)));
+    lines.push('  ' + fmtRow('TOTAL INCOME TAXES', d.totIncomeTax.vals, d.totIncomeTax.total));
+  }
   lines.push('  ' + fmtRow('NET INCOME (LOSS)', d.netIncome.vals, d.netIncome.total));
   const matrixText = lines.join('\n');
 
   const instruction =
     'You are a senior accountant reviewing a Trailing 12 Months profit-and-loss report for ' + entityName +
     ', ending ' + asOf + '. Each line shows 12 monthly amounts (oldest to newest) then the trailing-12-month total. ' +
-    'Revenue and expenses are shown as positive magnitudes; Net Income is revenue minus expenses.\n\n' +
+    'Revenue and operating expenses are shown as positive magnitudes; Other Income (Expense) expense lines and Income Taxes reduce Net Income. Net Income is gross profit less operating expenses, plus Other Income (Expense), less Income Taxes.\n\n' +
     'Identify the items that NEED ATTENTION — focus on UNFAVORABLE things a CAO would want flagged: ' +
     'expenses trending or spiking up, revenue declining or dropping to zero, unusual one-off movements, ' +
     'volatile lines, negative gross profit or net losses, and anything that looks like a possible posting gap ' +
@@ -10160,10 +10171,14 @@ app.post('/api/entities/:eid/ttm-pl.xlsx', auth, requireEntityAccess(), requireR
       return rowIdx;
     };
 
-    // Revenue
-    emit('Revenue', null, null, { header: true });
-    d.revenue.forEach(l => emit(l.name, l.vals, l.total, { indent: 1 }));
-    emit('Total Revenue', d.totRev.vals, d.totRev.total, { bold: true, underline: 'single' });
+    // Revenue (suppressed when the entity has no operating revenue — e.g. a
+    // development entity whose only revenue account was interest income, now
+    // in Other Income (Expense)).
+    if (d.revenue.length) {
+      emit('Revenue', null, null, { header: true });
+      d.revenue.forEach(l => emit(l.name, l.vals, l.total, { indent: 1 }));
+      emit('Total Revenue', d.totRev.vals, d.totRev.total, { bold: true, underline: 'single' });
+    }
     // Cost of Revenue (only if present)
     if (d.hasCogs) {
       emit('Cost of Revenue', null, null, { header: true });
@@ -10183,6 +10198,21 @@ app.post('/api/entities/:eid/ttm-pl.xlsx', auth, requireEntityAccess(), requireR
       }
     });
     emit('Total Operating Expenses', d.totOpex.vals, d.totOpex.total, { bold: true, underline: 'single' });
+    // Other Income (Expense) — misc revenue, interest income, other income and
+    // the gains, then misc / other / interest expense and penalties (already
+    // negated by buildTtmPL). Only rendered when the entity has any.
+    if ((d.otherIncome && d.otherIncome.length) || (d.otherExpense && d.otherExpense.length)) {
+      emit('Other Income (Expense)', null, null, { header: true });
+      (d.otherIncome || []).forEach(l => emit(l.name, l.vals, l.total, { indent: 1 }));
+      (d.otherExpense || []).forEach(l => emit(l.name, l.vals, l.total, { indent: 1 }));
+      emit('Total Other Income (Expense)', d.totOtherIE.vals, d.totOtherIE.total, { bold: true, underline: 'single' });
+    }
+    // Income Taxes — state / local / franchise, in their own section.
+    if (d.incomeTax && d.incomeTax.length) {
+      emit('Income Taxes', null, null, { header: true });
+      d.incomeTax.forEach(l => emit(l.name, l.vals, l.total, { indent: 1 }));
+      emit('Total Income Taxes', d.totIncomeTax.vals, d.totIncomeTax.total, { bold: true, underline: 'single' });
+    }
     // Net Income (grand total) — double underline.
     emit('Net Income (Loss)', d.netIncome.vals, d.netIncome.total, { bold: true, underline: 'double' });
     // -- Analysis: Items Needing Attention (generated automatically) -----------

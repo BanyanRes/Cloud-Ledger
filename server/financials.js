@@ -3434,10 +3434,21 @@ async function buildTtmPL(getBalances, opts) {
   }
   const allLines = allCodes.map(lineFor).filter(Boolean);
 
-  const revenue = allLines.filter(l => l.type === 'Revenue');
+  // COGS first, so a cost-of-revenue line can never be lifted out by an Other
+  // Income (Expense) name test.
   const cogs = allLines.filter(l => l.type === 'Expense' && /cogs|cost of goods|cost of revenue|car hire/i.test((l.subtype || '') + ' ' + (l.name || '')));
   const cogsCodes = new Set(cogs.map(l => l.code));
-  const opex = allLines.filter(l => l.type === 'Expense' && !cogsCodes.has(l.code));
+  // Other Income (Expense) + Income Taxes, from the same shared classifier
+  // (otherIeRoute) the monthly statements use. Keyed off type + name, so a
+  // Turnkey-style chart where 42000 is Interest Income and 70000 is Interest
+  // Expense classifies correctly here without profile-specific pins.
+  const oieRouteFor = (l) => (l.type === 'Expense' && cogsCodes.has(l.code)) ? null : otherIeRoute(l);
+  const otherIncome = allLines.filter(l => { const r = oieRouteFor(l); return r && r.bucket === 'otherIncome'; });
+  const otherExpenseRaw = allLines.filter(l => { const r = oieRouteFor(l); return r && r.bucket === 'otherExpense'; });
+  const incomeTax = allLines.filter(l => { const r = oieRouteFor(l); return r && r.bucket === 'incomeTax'; });
+  const oieCodes = new Set([].concat(otherIncome, otherExpenseRaw, incomeTax).map(l => l.code));
+  const revenue = allLines.filter(l => l.type === 'Revenue' && !oieCodes.has(l.code));
+  const opex = allLines.filter(l => l.type === 'Expense' && !cogsCodes.has(l.code) && !oieCodes.has(l.code));
 
   const sumLines = lines => {
     const vals = new Array(12).fill(0);
@@ -3449,7 +3460,24 @@ async function buildTtmPL(getBalances, opts) {
   const totCogs = sumLines(cogs);
   const grossProfit = { vals: totRev.vals.map((v, i) => r2(v - totCogs.vals[i])), total: r2(totRev.total - totCogs.total) };
   const totOpex = sumLines(opex);
-  const netIncome = { vals: grossProfit.vals.map((v, i) => r2(v - totOpex.vals[i])), total: r2(grossProfit.total - totOpex.total) };
+  // Other-expense and income-tax lines carry their natural (positive-magnitude)
+  // sign in the ledger. Other-expense lines are negated for PRESENTATION so the
+  // Other Income (Expense) section reads as income less expense, matching the
+  // monthly package; income taxes print at natural magnitude in their own
+  // section and are subtracted from net income.
+  const negLine = (l) => ({ ...l, vals: l.vals.map(v => r2(-v)), total: r2(-l.total) });
+  const otherExpense = otherExpenseRaw.map(negLine);
+  const totOtherIncome = sumLines(otherIncome);
+  const totOtherExpense = sumLines(otherExpense);        // already negated
+  const totIncomeTax = sumLines(incomeTax);              // natural (positive = expense)
+  const totOtherIE = {
+    vals: totOtherIncome.vals.map((v, i) => r2(v + totOtherExpense.vals[i])),
+    total: r2(totOtherIncome.total + totOtherExpense.total),
+  };
+  const netIncome = {
+    vals: grossProfit.vals.map((v, i) => r2(v - totOpex.vals[i] + totOtherIE.vals[i] - totIncomeTax.vals[i])),
+    total: r2(grossProfit.total - totOpex.total + totOtherIE.total - totIncomeTax.total),
+  };
 
   const opexByCat = new Map();
   for (const l of opex) {
@@ -3481,6 +3509,8 @@ async function buildTtmPL(getBalances, opts) {
     revenue, totRev,
     cogs, totCogs, grossProfit, hasCogs: cogs.length > 0,
     opex, opexGroups, totOpex,
+    otherIncome, otherExpense, incomeTax,
+    totOtherIncome, totOtherExpense, totOtherIE, totIncomeTax,
     netIncome,
   };
 }

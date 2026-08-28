@@ -5108,10 +5108,12 @@ function TrailingTwelveMonths({entityId,entityName}){
     if(!data)return[];
     const rows=[];
     const line=(label,vals,total,opt={})=>rows.push({label,vals,total,...opt});
-    // Revenue
-    line('Revenue',null,null,{header:true});
-    data.revenue.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
-    line('Total Revenue',data.totRev.vals,data.totRev.total,{bold:true,rule:true});
+    // Revenue (suppressed when the entity has no operating revenue).
+    if(data.revenue.length){
+      line('Revenue',null,null,{header:true});
+      data.revenue.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+      line('Total Revenue',data.totRev.vals,data.totRev.total,{bold:true,rule:true});
+    }
     // Cost of Revenue (only if present)
     if(data.hasCogs){
       line('Cost of Revenue',null,null,{header:true});
@@ -5131,6 +5133,19 @@ function TrailingTwelveMonths({entityId,entityName}){
       }
     });
     line('Total Operating Expenses',data.totOpex.vals,data.totOpex.total,{bold:true,rule:true});
+    // Other Income (Expense) — expense lines already negated by the server.
+    if((data.otherIncome&&data.otherIncome.length)||(data.otherExpense&&data.otherExpense.length)){
+      line('Other Income (Expense)',null,null,{header:true});
+      (data.otherIncome||[]).forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+      (data.otherExpense||[]).forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+      line('Total Other Income (Expense)',data.totOtherIE.vals,data.totOtherIE.total,{bold:true,rule:true});
+    }
+    // Income Taxes
+    if(data.incomeTax&&data.incomeTax.length){
+      line('Income Taxes',null,null,{header:true});
+      data.incomeTax.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+      line('Total Income Taxes',data.totIncomeTax.vals,data.totIncomeTax.total,{bold:true,rule:true});
+    }
     // Net Income
     line('Net Income (Loss)',data.netIncome.vals,data.netIncome.total,{bold:true,rule:true,dbl:true});
     return rows;
