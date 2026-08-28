@@ -172,6 +172,161 @@ function turnkeyIsOtherExpense(row) {
   return /other expense/.test(sub) || /interest expense/.test(nm) || String(row.code) === '70000';
 }
 
+// CLA's Turnkey cash-flow line set. Each operating/investing/financing line
+// names the accounts that roll into it. Signs are cash effects: an asset
+// increase consumes cash, a liability increase provides it.
+const TURNKEY_CF = {
+  depreciation: ['15100'],                 // contra-asset movement, added back
+  accountsReceivable: ['11000'],
+  accountsPayable: ['20000'],
+  contractAssets: ['11010', '14500'],
+  prepaidExpenses: ['13000'],
+  contractLiabilities: ['24000'],
+  fixedAssets: ['15000', '15005'],         // gross additions (investing)
+  memberCapital: ['30000', '32000'],
+};
+
+// CLA's Turnkey balance sheet, in order. Each entry is either a bare row or a
+// titled group carrying its own subtotal. `name` overrides the ledger account
+// name where CLA words it differently (11000 'Accounts Receivable' prints as
+// 'Contract Receivables'). `always` keeps a row visible when both columns are
+// zero, which CLA does for Costs and Estimated Earnings in Excess of Billings
+// (it prints a dash).
+const TURNKEY_BS_ASSETS = [
+  { kind: 'row', code: '10100', name: 'Operating Checking' },
+  { kind: 'row', code: '11000', name: 'Contract Receivables' },
+  { kind: 'group', title: 'Contract Assets', rows: [
+      { code: '14500', name: 'Costs and Estimated Earnings in Excess of Billings', always: true },
+      { code: '11010', name: 'Retainage Receivable' },
+  ] },
+  { kind: 'row', code: '13000', name: 'Prepaid Expenses' },
+  { kind: 'group', title: 'Fixed Assets', rows: [
+      { code: '15000', name: 'Property & Equipment' },
+      { code: '15005', name: 'Vehicles' },
+      { code: '15100', name: 'Accumulated Depreciation' },
+  ] },
+];
+// CLA's caption for the capital account on both the balance sheet and the
+// statement of changes in members' equity.
+const TURNKEY_EQUITY_NAMES = { '30000': "Members' Capital" };
+const TURNKEY_BS_LIABS = [
+  { kind: 'row', code: '20000', name: 'Accounts Payable' },
+  { kind: 'group', title: 'Contract Liabilities', rows: [
+      { code: '24000', name: 'Billings in Excess of Costs and Estimated Earnings' },
+  ] },
+];
+
+// Build the block structure for one side of the balance sheet.
+// valueOf(code) -> { cur, pri, name, zero } for an account that exists in
+// either column, or null if it does not exist at all.
+// An account with a balance that the spec does not name is appended as a bare
+// row rather than dropped: a silently omitted account would unbalance the
+// statement with nothing on the page to show it, so the caller also asserts
+// the block totals against totalAssets / totalLiab.
+function buildTurnkeyBlocks(spec, valueOf, codesOnSide) {
+  const named = new Set();
+  const blocks = [];
+  const take = (entry) => {
+    named.add(String(entry.code));
+    const v = valueOf(String(entry.code));
+    if (!v) return entry.always ? { code: entry.code, name: entry.name, cur: 0, pri: 0 } : null;
+    if (v.zero && !entry.always) return null;
+    return { code: entry.code, name: entry.name, cur: v.cur, pri: v.pri };
+  };
+  for (const b of spec) {
+    if (b.kind === 'row') {
+      const row = take(b);
+      if (row) blocks.push(Object.assign({ kind: 'row' }, row));
+      continue;
+    }
+    const rows = b.rows.map(take).filter(Boolean);
+    if (!rows.length) continue;
+    blocks.push({ kind: 'group', title: b.title, rows,
+      subtotal: { cur: r2(rows.reduce((s, r) => s + r.cur, 0)),
+                  pri: r2(rows.reduce((s, r) => s + r.pri, 0)) } });
+  }
+  const extras = [];
+  for (const code of codesOnSide) {
+    const c = String(code);
+    if (named.has(c)) continue;
+    const v = valueOf(c);
+    if (!v || v.zero) continue;
+    extras.push({ kind: 'row', code: c, name: v.name, cur: v.cur, pri: v.pri, unmapped: true });
+  }
+  extras.sort((a, b) => String(a.code).localeCompare(String(b.code)));
+  return { blocks: blocks.concat(extras), unmapped: extras.map(e => e.code) };
+}
+
+// CLA's row order for the Turnkey statements of operations. Explicit because
+// it is not derivable: COGS runs Track Materials, Administrative Costs,
+// Maintenance, Insurance, Fuel & Disposals, Truck, Staffing Labor - not code
+// order (55020, 55140, 55170, 55010, 55050, 55060, 55130), not alphabetical,
+// not by amount. Any account not listed sorts after the listed ones, in code
+// order, so a new account appears rather than vanishing.
+const TURNKEY_COGS_ORDER = ['55020', '55140', '55170', '55010', '55050', '55060', '55130'];
+const TURNKEY_GA_ORDER = ['64000', '63000'];
+
+// Construction Revenue is presented net of the Work in Progress Adjustment.
+// 45000 carries gross billings to date and 49999 the WIP true-up (negative,
+// and equal to Billings in Excess of Costs on the balance sheet). CLA shows one
+// line, so the two are summed and labelled 'Construction Revenue'.
+const TURNKEY_REVENUE_NET_INTO = '45000';
+const TURNKEY_REVENUE_NET_FROM = ['49999'];
+
+// Reorder `lines` by an explicit code order; unlisted codes keep code order
+// and follow the listed ones.
+function orderByCodes(lines, order) {
+  const rank = new Map(order.map((c, i) => [String(c), i]));
+  return lines.slice().sort((a, b) => {
+    const ra = rank.has(String(a.code)) ? rank.get(String(a.code)) : order.length;
+    const rb = rank.has(String(b.code)) ? rank.get(String(b.code)) : order.length;
+    if (ra !== rb) return ra - rb;
+    return String(a.code).localeCompare(String(b.code));
+  });
+}
+
+// Fold the WIP adjustment into the Construction Revenue line. Returns a new
+// array; the totals are unaffected (it is a pure re-presentation of two lines
+// that were already both in revenue), which is why Total Revenue and net income
+// do not move.
+function turnkeyNetRevenue(revenueLines) {
+  const from = new Set(TURNKEY_REVENUE_NET_FROM);
+  const netted = revenueLines.filter(l => from.has(String(l.code)));
+  if (!netted.length) return revenueLines;
+  return revenueLines.filter(l => !from.has(String(l.code))).map(l => {
+    if (String(l.code) !== TURNKEY_REVENUE_NET_INTO) return l;
+    const add = k => netted.reduce((s, n) => s + (n[k] || 0), l[k] || 0);
+    return Object.assign({}, l, { cur: r2(add('cur')), pri: r2(add('pri')), ytd: r2(add('ytd')) });
+  });
+}
+
+// Turnkey Rail began operations 2026-04-16. Its first period is a stub, so
+// every statement in CLA's package is dated from inception rather than from
+// the calendar year start:
+//   Operations:  For the One Month Ended June 30, 2026, the Period
+//                April 16 - May 31, 2026, and the Period April 16 - June 30, 2026
+//   Cash flows / equity:  For the Period April 16 - June 30, 2026
+//   Equity opening row:   Equity Balances at April 16, 2026
+// Kept as a constant rather than an entities column because the request was
+// scoped to Turnkey; a second entity needing this should get a real
+// inception_date field instead of a second constant here.
+const TURNKEY_INCEPTION = '2026-04-16';
+function inceptionFor(profile) { return profile === 'turnkey' ? TURNKEY_INCEPTION : null; }
+
+// 'April 16' - month and day, no year (the year is carried by the date that
+// follows it in every label that uses this).
+function monthDay(d) {
+  const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const mm = parseInt(String(d).slice(5, 7), 10), dd = parseInt(String(d).slice(8, 10), 10);
+  return MONTHS[mm - 1] + ' ' + dd;
+}
+// 'April 16 - June 30, 2026'
+function inceptionRange(inception, to) { return monthDay(inception) + ' - ' + longDate(to); }
+// m/d/yyyy, for the landscape equity header's opening column.
+function slashDate(d) {
+  return parseInt(String(d).slice(5, 7), 10) + '/' + parseInt(String(d).slice(8, 10), 10) + '/' + String(d).slice(0, 4);
+}
+
 // Which profiles present the intercompany balances as their own balance-sheet
 // subsections — Current Assets › Intercompany Receivable (immediately before
 // Other Current Assets) and Current Liabilities › Intercompany Payable
@@ -1219,6 +1374,16 @@ async function buildStatements(getBalances, opts) {
   const ys = yearStart(asOf);
   const period = resolvePeriod(asOf, opts.period);
   const priorBsDate = period.bsPriorDate;
+  // Inception-dated entity: the prior P&L column runs from inception to the
+  // prior period end (cumulative), matching CLA's 'the Period April 16 -
+  // May 31, 2026' heading. ys is deliberately left at the calendar year start:
+  // it also feeds close_pl_before (retained-earnings closing), and there can be
+  // no pre-inception activity for the YTD window to pick up, so moving it would
+  // change nothing numerically while touching the RE path.
+  const inception = inceptionFor(profile);
+  // Declared here because the balance-sheet block below needs it.
+  const isTkProfile = profile === 'turnkey';
+  if (inception && inception < priorBsDate) period.pri = { from: inception, to: priorBsDate };
 
   // Snapshots:
   //  bsCur / bsPri — balance sheet as of period-end and the prior COMPARABLE
@@ -1333,7 +1498,11 @@ async function buildStatements(getBalances, opts) {
         if (cls.sub !== sub) return null;
         const cur = rc ? bal(rc) : 0, pri = rp ? bal(rp) : 0;
         if (isZero(cur) && isZero(pri)) return null;
-        return { code, name: ref.name, cur: r2(cur), pri: r2(pri), change: r2(cur - pri) };
+        // Turnkey prints CLA's caption for the capital account: the ledger name
+        // is 'Common Stock / Member's Capital', CLA's statements say
+        // 'Members' Capital'. Display only - the code and balances are untouched.
+        const nm = (isTkProfile && TURNKEY_EQUITY_NAMES[String(code)]) || ref.name;
+        return { code, name: nm, cur: r2(cur), pri: r2(pri), change: r2(cur - pri) };
       })
       .filter(Boolean);
   }
@@ -1355,6 +1524,40 @@ async function buildStatements(getBalances, opts) {
   const niLine = { cur: niYtd, pri: niPriYtd };
   const totalEquity = { cur: r2(totalContribEquity.cur + totalRetained.cur + niLine.cur), pri: r2(totalContribEquity.pri + totalRetained.pri + niLine.pri) };
   const totalLiabEquity = { cur: r2(totalLiab.cur + totalEquity.cur), pri: r2(totalLiab.pri + totalEquity.pri) };
+
+  // Turnkey block-shaped balance sheet (CLA presentation). Built from the same
+  // two snapshots the generic sections use, so it cannot disagree with them,
+  // and tied against totalAssets / totalLiab - which is what would catch a spec
+  // typo that otherwise silently hides an account.
+  let turnkeyBs = null;
+  if (isTkProfile) {
+    const tkValueOf = (code) => {
+      const rc = colCur.map.get(code), rp = colPri.map.get(code);
+      const ref = rc || rp;
+      if (!ref || ref.type === 'Equity') return null;
+      const cur = rc ? bsBal(ref, bal(rc)) : 0, pri = rp ? bsBal(ref, bal(rp)) : 0;
+      const zero = isZero(cur) && isZero(pri);
+      return { cur: r2(cur), pri: r2(pri), name: ref.name, zero };
+    };
+    const sideCodes = (side) => bsCodes.filter(code => {
+      const ref = colCur.map.get(code) || colPri.map.get(code);
+      return ref && ref.type !== 'Equity' && bsSideOf(ref) === side;
+    });
+    const tkAssets = buildTurnkeyBlocks(TURNKEY_BS_ASSETS, tkValueOf, sideCodes('Asset'));
+    const tkLiabs = buildTurnkeyBlocks(TURNKEY_BS_LIABS, tkValueOf, sideCodes('Liability'));
+    const blockTotal = (blocks, k) => r2(blocks.reduce((s, b) =>
+      s + (b.kind === 'row' ? b[k] : b.subtotal[k]), 0));
+    turnkeyBs = {
+      assetBlocks: tkAssets.blocks, liabBlocks: tkLiabs.blocks,
+      unmapped: tkAssets.unmapped.concat(tkLiabs.unmapped),
+      tie: {
+        assetsCur: r2(blockTotal(tkAssets.blocks, 'cur') - totalAssets.cur),
+        assetsPri: r2(blockTotal(tkAssets.blocks, 'pri') - totalAssets.pri),
+        liabsCur: r2(blockTotal(tkLiabs.blocks, 'cur') - totalLiab.cur),
+        liabsPri: r2(blockTotal(tkLiabs.blocks, 'pri') - totalLiab.pri),
+      },
+    };
+  }
 
   // ── Statements of Operations ───────────────────────────────────────────────
   // Build a P&L line set keyed by code, with current-month / prior-month / YTD.
@@ -1404,6 +1607,14 @@ async function buildStatements(getBalances, opts) {
   const totOtherExp = { cur: sumCol(otherExpenseLines, 'cur'), pri: sumCol(otherExpenseLines, 'pri'), ytd: sumCol(otherExpenseLines, 'ytd') };
   const totOtherIE = { cur: r2(totOtherInc.cur - totOtherExp.cur), pri: r2(totOtherInc.pri - totOtherExp.pri), ytd: r2(totOtherInc.ytd - totOtherExp.ytd) };
   const netIncome = { cur: r2(grossProfit.cur - totOpex.cur + totOtherIE.cur), pri: r2(grossProfit.pri - totOpex.pri + totOtherIE.pri), ytd: r2(grossProfit.ytd - totOpex.ytd + totOtherIE.ytd) };
+
+  // Turnkey presentation only: fold the WIP adjustment into Construction
+  // Revenue and order COGS / G&A the way CLA does. Deliberately AFTER every
+  // total above - these rebind the ROW LISTS, never the arithmetic, so Total
+  // Revenue, Gross Profit and Net Income cannot move.
+  const revenueRows = isTk ? turnkeyNetRevenue(revenue) : revenue;
+  const cogsRows = isTk ? orderByCodes(cogs, TURNKEY_COGS_ORDER) : cogs;
+  const opexRows = isTk ? orderByCodes(opex, TURNKEY_GA_ORDER) : opex;
 
   // Group operating expenses into the 11 presentation categories (per the CLR
   // operating-expense restructure). Category subtotals sum to totOpex exactly —
@@ -1748,6 +1959,68 @@ async function buildStatements(getBalances, opts) {
   cashFlow.actualCashChange = r2(cashEnd - cashBeg);
   cashFlow.tieOut = r2(cashFlow.netChange - cashFlow.actualCashChange);
 
+  // Turnkey presentation: CLA's own line set, built from named account groups
+  // rather than the name/section heuristics. Deliberately additive - the
+  // generic cashFlow above is untouched, and tie.netChange below asserts the
+  // two agree on the bottom line.
+  if (isTkProfile) {
+    // Movement over the cash-flow window in natural (computeBalances) sign:
+    // assets debit-positive, liabilities and equity credit-positive.
+    const mv = (codes) => r2(codes.reduce((s, c) => {
+      const rc = colCur.map.get(c), ro = openMap.get(c);
+      return s + ((rc ? bal(rc) : 0) - (ro ? bal(ro) : 0));
+    }, 0));
+    // 'Increase'/'Decrease' follows the direction of the BALANCE, not the cash
+    // effect, so the wording still reads correctly in a month that reverses.
+    const word = (delta) => (delta < 0 ? 'Decrease' : 'Increase');
+    const dAR = mv(TURNKEY_CF.accountsReceivable);
+    const dCA = mv(TURNKEY_CF.contractAssets);
+    const dPre = mv(TURNKEY_CF.prepaidExpenses);
+    const dAP = mv(TURNKEY_CF.accountsPayable);
+    const dCL = mv(TURNKEY_CF.contractLiabilities);
+    // 15100 is a contra asset: its balance goes more negative as depreciation
+    // accrues, so the add-back is the negated movement.
+    const dep = r2(-mv(TURNKEY_CF.depreciation));
+    const capex = r2(-mv(TURNKEY_CF.fixedAssets));
+    const equityMv = mv(TURNKEY_CF.memberCapital);
+    const contributions = equityMv > 0 ? equityMv : 0;
+    const distributions = equityMv < 0 ? equityMv : 0;
+
+    const netOperating = r2(cashFlow.netIncome + dep - dAR + dAP - dCA - dPre + dCL);
+    const netInvesting = r2(capex);
+    const netFinancing = r2(contributions + distributions);
+    const netChange = r2(netOperating + netInvesting + netFinancing);
+
+    const lines = [
+      { label: 'Cash Flows from Operating Activities:', header: true },
+      { label: 'Net Income (Loss)', value: cashFlow.netIncome },
+      { label: 'Changes in Operating Assets and Liabilities:', header: true },
+      { label: 'Depreciation', value: dep, indent: true },
+      { label: word(dAR) + ' in Accounts Receivable', value: r2(-dAR), indent: true },
+      { label: word(dAP) + ' in Accounts Payable', value: dAP, indent: true },
+      { label: word(dCA) + ' in Contract Assets', value: r2(-dCA), indent: true },
+      { label: word(dPre) + ' in Prepaid Expenses', value: r2(-dPre), indent: true },
+      { label: word(dCL) + ' in Contract Liabilities', value: dCL, indent: true },
+      { label: (netOperating < 0 ? 'Net Cash Used by Operating Activities' : 'Net Cash Provided by Operating Activities'), value: netOperating, bold: true, rule: true },
+      { label: 'Cash Flows from Investing Activities:', header: true, gapBefore: true },
+      { label: 'Purchase of Fixed Assets', value: capex, indent: true },
+      { label: (netInvesting < 0 ? 'Net Cash Used by Investing Activities' : 'Net Cash Provided by Investing Activities'), value: netInvesting, bold: true, rule: true },
+      { label: 'Cash Flows from Financing Activities', header: true, gapBefore: true },
+      { label: 'Contributions From Members', value: contributions, indent: true },
+      { label: 'Distributions To Members', value: distributions, indent: true },
+      { label: (netFinancing < 0 ? 'Net Cash Used by Financing Activities' : 'Net Cash Provided by Financing Activities'), value: netFinancing, bold: true, rule: true },
+      { label: 'Net Increase (Decrease) in Cash', value: netChange, bold: true, gapBefore: true, rule: true },
+      { label: 'Cash - Beginning of Period', value: cashFlow.cashBeg, gapBefore: true },
+      { label: 'Cash - End of Period', value: cashFlow.cashEnd, bold: true, dollar: true, rule: true },
+    ];
+    cashFlow.turnkey = {
+      lines, netOperating, netInvesting, netFinancing, netChange,
+      // Must be zero: the explicit line set and the generic buckets are two
+      // independent routes to the same bottom line.
+      tie: r2(netChange - cashFlow.netChange),
+    };
+  }
+
   // ── Statement of Changes in Members' Equity ───────────────────────────────
   // Beginning (year start) contributed equity by account + beginning RE, then
   // contributions (delta) and YTD net income → ending.
@@ -1827,11 +2100,23 @@ async function buildStatements(getBalances, opts) {
 
   return {
     meta: { entityName: displayEntityName(opts.entityName), rawEntityName: opts.entityName || '', entityCode: (opts.entityCode || ''), asOf, priorDate: priorBsDate, longDate: longDate(asOf),
-            priorLongDate: longDate(priorBsDate), monthsEnded: monthsEndedLabel(asOf),
+            priorLongDate: longDate(priorBsDate),
+            // Inception-dated entities date every statement from inception.
+            monthsEnded: inception
+              ? ('For the Period ' + inceptionRange(inception, asOf))
+              : monthsEndedLabel(asOf),
             period: (opts.period || 'monthly').toLowerCase(), periodLabel: period.periodLabel, colLabel: period.colLabel,
-            opsDateLine: opsHeadingLine(period.colLabel, longDate(asOf), longDate(priorBsDate)), profile },
-    balanceSheet: { assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
-    operations: Object.assign({ revenue, cogs, opex, opexGroups, totRev, totCogs, grossProfit, totOpex, netIncome,
+            opsDateLine: inception
+              ? ('For the One Month Ended ' + longDate(asOf) + ', the Period ' + inceptionRange(inception, priorBsDate) + ', and the Period ' + inceptionRange(inception, asOf))
+              : opsHeadingLine(period.colLabel, longDate(asOf), longDate(priorBsDate)),
+            // Header for the operations statement's prior column, and the
+            // opening column of the equity statement.
+            opsPriorColLabel: inception ? inceptionRange(inception, priorBsDate) : longDate(priorBsDate),
+            equityBegDate: inception ? slashDate(inception) : null,
+            inception: inception || null, profile },
+    balanceSheet: Object.assign({ assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
+      turnkeyBs ? { turnkey: turnkeyBs } : {}),
+    operations: Object.assign({ revenue: revenueRows, cogs: cogsRows, opex: opexRows, opexGroups, totRev, totCogs, grossProfit, totOpex, netIncome,
       otherIncomeLines, otherExpenseLines, totOtherInc, totOtherExp, totOtherIE },
       bsfrgpOps ? { bsfrgp: bsfrgpOps, netIncome: bsfrgpOps.netIncome } : {},
       banyanOps ? { banyan: banyanOps, netIncome: banyanOps.netIncome } : {}),
@@ -2242,13 +2527,37 @@ async function renderStatementsPdf(s, outOffsets) {
       }
       L.row(sectionTotalLabel, bsCells(sec.total.cur, sec.total.pri), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: RULE_BELOW_SECTIONS.test(sectionTotalLabel), gapAfter: 6 });
     };
+    // Turnkey (CLA presentation): a flat list of bare rows under Assets, with
+    // only Contract Assets and Fixed Assets carrying a header and a subtotal.
+    // No section header and no section total, which is why this cannot go
+    // through renderBsSection.
+    const tkBs = (m.profile === 'turnkey') ? s.balanceSheet.turnkey : null;
+    const renderTkBlocks = (blocks) => {
+      for (const blk of blocks) {
+        if (blk.kind === 'row') {
+          L.row(blk.name, bsCells(blk.cur, blk.pri), { indent: 10, dollarPrefix: bsFirstRow });
+          bsFirstRow = false;
+          continue;
+        }
+        // Keep a group and its subtotal on one page.
+        L.keepTogether(12 + blk.rows.length * 12 + 12 + 4);
+        L.row(blk.title, [], { indent: 10 });
+        for (const r of blk.rows) {
+          L.row(r.name, bsCells(r.cur, r.pri), { indent: 22, dollarPrefix: bsFirstRow });
+          bsFirstRow = false;
+        }
+        L.row('Total ' + blk.title, bsCells(blk.subtotal.cur, blk.subtotal.pri), { indent: 16, ruleAbove: true });
+      }
+    };
     bsFirstRow = wantDollar;
-    for (const sec of s.balanceSheet.assetSections) renderBsSection(sec, 'Total ' + sec.title);
+    if (tkBs) renderTkBlocks(tkBs.assetBlocks);
+    else for (const sec of s.balanceSheet.assetSections) renderBsSection(sec, 'Total ' + sec.title);
     L.row('Total Assets', bsCells(s.balanceSheet.totalAssets.cur, s.balanceSheet.totalAssets.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, gapAfter: 8, dollarPrefix: wantDollar });
 
     L.sectionTitle('LIABILITIES AND MEMBERS\u2019 EQUITY');
     bsFirstRow = wantDollar;
-    for (const sec of s.balanceSheet.liabSections) renderBsSection(sec, 'Total ' + sec.title);
+    if (tkBs) renderTkBlocks(tkBs.liabBlocks);
+    else for (const sec of s.balanceSheet.liabSections) renderBsSection(sec, 'Total ' + sec.title);
     L.row('Total Liabilities', bsCells(s.balanceSheet.totalLiab.cur, s.balanceSheet.totalLiab.pri), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     L.row('Members\u2019 Equity', [], { indent: 6, boldRow: true });
     for (const r of s.balanceSheet.equityRows) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
@@ -2276,7 +2585,7 @@ async function renderStatementsPdf(s, outOffsets) {
     // Period columns show just the period-end DATE. The period type is already
     // stated in the date line above ("For the Months Ended ..."), so repeating
     // "Month Ended" / "Quarter Ended" over each column was redundant.
-    L.colHeaders([m.longDate, m.priorLongDate, 'Change', 'Year to Date'], { underline: true });
+    L.colHeaders([m.longDate, m.opsPriorColLabel || m.priorLongDate, 'Change', 'Year to Date'], { underline: true });
     const chg = (cur, pri) => money(r2(cur - pri));
     const line = (r, o = {}) => L.row(r.name, [money(r.cur), money(r.pri), chg(r.cur, r.pri), money(r.ytd)], { indent: 16, ...o });
 
@@ -2456,6 +2765,20 @@ async function renderStatementsPdf(s, outOffsets) {
     // No column heading: the single YTD column is self-evident from the
     // statement title, so no "Year to Date" label is drawn above it.
     const cf = s.cashFlow;
+    // Turnkey (CLA presentation): an explicit ordered line set rather than the
+    // generic section-by-section build below.
+    if (cf.turnkey) {
+      for (const ln of cf.turnkey.lines) {
+        if (ln.gapBefore) L.row('', [], { gapAfter: 4 });
+        if (ln.header) { L.row(ln.label, [], { indent: 6, boldRow: true }); continue; }
+        L.row(ln.label, [money(ln.value)], {
+          indent: ln.indent ? 16 : 6,
+          boldRow: !!ln.bold,
+          ruleAbove: !!ln.rule,
+          dollarPrefix: !!ln.dollar,
+        });
+      }
+    } else {
     L.sectionTitle('Cash Flows from Operating Activities');
     L.row('Net Income (Loss)', [money(cf.netIncome)], { indent: 16, dollarPrefix: true });
     L.row('Adjustments to reconcile net income to net cash:', [], { indent: 16 });
@@ -2495,6 +2818,7 @@ async function renderStatementsPdf(s, outOffsets) {
       L.space(6);
       L.row('Note: reconciled change differs from cash movement by ' + money(cf.tieOut) + ' (see notes).', [], { indent: 6 });
     }
+    } // end generic cash-flow branch (turnkey renders its own line set above)
   }
 
   // ── 4. Statement of Changes in Members' Equity ──────────────────────────────
@@ -2520,7 +2844,7 @@ async function renderStatementsPdf(s, outOffsets) {
       if (!mm) return long;
       return map[mm[1]] + '/' + mm[2] + '/' + mm[3];
     };
-    const begDate = '1/1/' + String(m.asOf).slice(0, 4);
+    const begDate = m.equityBegDate || ('1/1/' + String(m.asOf).slice(0, 4));
     const endDate = shortMD(m.longDate);
     // Right-edges anchored at the printable right edge and marched LEFT by a
     // fixed pitch. The first numeric column (c1) is placed far enough right that
