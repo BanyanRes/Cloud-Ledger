@@ -408,6 +408,18 @@ function groupForParent(db, parentEntityId) {
   return db.prepare('SELECT * FROM consol_groups WHERE parent_entity_id = ?').get(parentEntityId);
 }
 
+// Resolve the group an entity belongs to, whether it is the parent OR one of the
+// ledger members. Lets a user generate the consolidated package from the
+// development entity they work in (e.g. HP Property Owner) and get the parent-
+// titled group package, not that member's standalone statements.
+function groupForEntity(db, entityId) {
+  const asParent = groupForParent(db, entityId);
+  if (asParent) return asParent;
+  const mem = db.prepare('SELECT group_id FROM consol_members WHERE entity_id = ?').get(entityId);
+  if (!mem) return null;
+  return db.prepare('SELECT * FROM consol_groups WHERE id = ?').get(mem.group_id);
+}
+
 function membersOf(db, groupId) {
   return db.prepare('SELECT * FROM consol_members WHERE group_id = ? ORDER BY sort_order, entity_id').all(groupId);
 }
@@ -724,6 +736,7 @@ module.exports = {
   buildScheduleSet,
   scopeKeyFor,
   groupForParent,
+  groupForEntity,
   membersOf,
   columnsOf,
   operatingBalances,

@@ -9933,12 +9933,13 @@ app.post('/api/workpapers/financial-statements/:entity_id/preview', auth, requir
     const period = ((req.body && req.body.period) || (req.query && req.query.period) || 'monthly');
     if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
     const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
-    const consolGroup = consolidation.groupForParent(db, Number(eid));
-    const isConsolidated = !!(consolGroup && consolidation.scopeKeyFor(ent));
+    const consolGroup = consolidation.groupForEntity(db, Number(eid));
+    const consolParent = consolGroup ? db.prepare('SELECT name, code FROM entities WHERE id=?').get(consolGroup.parent_entity_id) : null;
+    const isConsolidated = !!(consolGroup && consolParent && consolidation.scopeKeyFor(consolParent));
     const getBalances = isConsolidated
       ? (o) => Promise.resolve(consolidation.consolidatedBalances(db, consolGroup, o, (id, oo) => computeBalances(id, oo)))
       : (o) => Promise.resolve(computeBalances(eid, o));
-    const s = await financials.buildStatements(getBalances, { asOf, period, entityName: ent ? ent.name : ('Entity ' + eid), entityCode: ent ? ent.code : '', isConsolidated });
+    const s = await financials.buildStatements(getBalances, { asOf, period, entityName: isConsolidated ? consolParent.name : (ent ? ent.name : ('Entity ' + eid)), entityCode: isConsolidated ? (consolParent.code || '') : (ent ? ent.code : ''), isConsolidated });
     res.json({
       meta: s.meta,
       checks: s.checks,
@@ -10393,16 +10394,21 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       const entityName = ent ? ent.name : ('Entity ' + eid);
       const entityCode = ent ? ent.code : '';
 
-      // Consolidation parents (Braker QOZ Business, Bridge Banyan HP QOZB) get
-      // a CONSOLIDATED package: the face statements are built from the group's
+      // Any entity in a consolidation group (Braker, HP) — the parent OR a
+      // development member the user works in, e.g. HP Property Owner — generates
+      // the group's CONSOLIDATED package: the face statements come from the
       // consolidated column (parent + members + operating TB - eliminations),
-      // titled "Consolidated ...", and the consolidating schedules are appended.
-      const consolGroup = consolidation.groupForParent(db, Number(eid));
-      const isConsolidated = !!(consolGroup && consolidation.scopeKeyFor(ent));
+      // titled "Consolidated ..." under the PARENT's name, with the
+      // consolidating schedules appended.
+      const consolGroup = consolidation.groupForEntity(db, Number(eid));
+      const consolParent = consolGroup ? db.prepare('SELECT name, code FROM entities WHERE id=?').get(consolGroup.parent_entity_id) : null;
+      const isConsolidated = !!(consolGroup && consolParent && consolidation.scopeKeyFor(consolParent));
+      const fsEntityName = isConsolidated ? consolParent.name : entityName;
+      const fsEntityCode = isConsolidated ? (consolParent.code || '') : entityCode;
       const getBalances = isConsolidated
         ? (o) => Promise.resolve(consolidation.consolidatedBalances(db, consolGroup, o, (id, oo) => computeBalances(id, oo)))
         : (o) => Promise.resolve(computeBalances(eid, o));
-      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName, entityCode, isConsolidated });
+      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: fsEntityCode, isConsolidated });
       const consolSchedules = isConsolidated ? consolidation.buildScheduleSet(db, consolGroup, asOf, (id, oo) => computeBalances(id, oo)) : null;
 
       const files = req.files || {};
@@ -10452,7 +10458,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName, consolSchedules });
 
       const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
-      const safeName = entityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      const safeName = fsEntityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
       const fname = safeName + '_Financial_Statements_' + mm + '_' + yyyy + '.pdf';
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
@@ -10486,15 +10492,17 @@ app.get('/api/workpapers/financial-statements/:entity_id/excel', auth, requireEn
     const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
     const entityName = ent ? ent.name : ('Entity ' + eid);
     const entityCode = ent ? ent.code : '';
-    const consolGroup = consolidation.groupForParent(db, Number(eid));
-    const isConsolidated = !!(consolGroup && consolidation.scopeKeyFor(ent));
+    const consolGroup = consolidation.groupForEntity(db, Number(eid));
+    const consolParent = consolGroup ? db.prepare('SELECT name, code FROM entities WHERE id=?').get(consolGroup.parent_entity_id) : null;
+    const isConsolidated = !!(consolGroup && consolParent && consolidation.scopeKeyFor(consolParent));
+    const fsEntityName = isConsolidated ? consolParent.name : entityName;
     const getBalances = isConsolidated
       ? (o) => Promise.resolve(consolidation.consolidatedBalances(db, consolGroup, o, (id, oo) => computeBalances(id, oo)))
       : (o) => Promise.resolve(computeBalances(eid, o));
-    const statements = await financials.buildStatements(getBalances, { asOf, period, entityName, entityCode, isConsolidated });
+    const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: isConsolidated ? (consolParent.code || '') : entityCode, isConsolidated });
     const buf = await financialsXlsx.buildStatementsWorkbook(statements);
     const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
-    const safeName = entityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const safeName = fsEntityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
     const fname = safeName + '_Financial_Statements_' + mm + '_' + yyyy + '.xlsx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
