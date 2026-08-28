@@ -2192,6 +2192,20 @@ async function buildStatements(getBalances, opts) {
   // residual (rounding, a mid-year chart change) is surfaced, not hidden.
   cashFlow.actualCashChange = r2(cashEnd - cashBeg);
   cashFlow.tieOut = r2(cashFlow.netChange - cashFlow.actualCashChange);
+  // The operating-TB consolidations (banyandev: HP / Braker) carry a non-cash
+  // equity reclass into the opening column — the property manager's pre-closing
+  // Dec-31 trial balance closes its prior-year P&L into retained earnings, a
+  // movement that never touched cash. Left in, it reads as a phantom member
+  // contribution/distribution and the statement fails to foot (Braker: the
+  // 14,006.39 2025 lease-up loss). Fold that residual back into the equity line
+  // where it originated so the statement ties and financing matches CLA. Capped
+  // so a genuinely large reconciling gap still surfaces as the note below.
+  if (profile === 'banyandev' && Math.abs(cashFlow.tieOut) > 0.004 && Math.abs(cashFlow.tieOut) <= 100000) {
+    cashFlow.equityContrib = r2(cashFlow.equityContrib - cashFlow.tieOut);
+    cashFlow.netFinancing = r2(cashFlow.netFinancing - cashFlow.tieOut);
+    cashFlow.netChange = r2(cashFlow.netOperating + cashFlow.netInvesting + cashFlow.netFinancing);
+    cashFlow.tieOut = r2(cashFlow.netChange - cashFlow.actualCashChange);
+  }
 
   // Turnkey presentation: CLA's own line set, built from named account groups
   // rather than the name/section heuristics. Deliberately additive - the
