@@ -693,6 +693,14 @@ const BS_ACCOUNT_MAP_BANYANDEV = {
   // Other Assets → Other development
   '12720': ['Other Assets', 'Other development'],
   '12916': ['Other Assets', 'Other development'],
+  // Braker-specific codes (same profile, different chart) matched to the CLA
+  // Braker package: Prepaid to Current Assets; Permits/Approval into Soft Costs
+  // (Braker's CLA has no separate Permits group); Rate Cap Fees and Arbor Admin
+  // Fee to Other development. HP does not use these codes, so it is unaffected.
+  '13000': ['Current Assets', 'Other Current Assets'],
+  '12180': ['Other Assets', 'Soft Costs'],
+  '12411': ['Other Assets', 'Other development'],
+  '12770': ['Other Assets', 'Other development'],
   // Current Liabilities → Accounts Payable
   '20000': ['Current Liabilities', 'Accounts Payable'],
   '20001': ['Current Liabilities', 'Accounts Payable'],
