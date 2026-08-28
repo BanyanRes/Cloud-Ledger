@@ -913,7 +913,7 @@ export default function App(){
         {page==='wp_gpfees'&&activeEntity&&isCLRF&&<GpFeesWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_valuation'&&activeEntity&&isCLRF&&<ValuationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} isDevEntity={isReqEntity} key={activeEntity+'-'+rk}/>}
+        {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} key={activeEntity+'-'+rk}/>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='fundrep'&&activeEntity&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
       </>})()}</div></div>
@@ -5200,7 +5200,7 @@ function TrailingTwelveMonths({entityId,entityName}){
 }
 
 // ═══ Workpapers › Financial Statements — GL-derived statement package (PDF) ═══
-function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false}){
+function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false,isDev=false}){
   const[asOf,setAsOf]=useState(today());
   const[period,setPeriod]=useState('monthly');
   const[execFile,setExecFile]=useState(null);
@@ -5213,6 +5213,16 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
   const[wipStatus,setWipStatus]=useState(null);
   const[wipBusy,setWipBusy]=useState(false);
   const[wipMsg,setWipMsg]=useState('');
+  // Operating trial balance (consolidation parents only: Braker / HP). The
+  // upload stores the operating column's TB; the consolidated schedules render
+  // on Intercompany -> Consolidation. operGrp resolves the group whose parent
+  // or member columns include this entity, so the button appears on either the
+  // parent's or a member's Financial Statements page.
+  const[operGrp,setOperGrp]=useState(null);
+  const[operFile,setOperFile]=useState(null);
+  const[operBusy,setOperBusy]=useState(false);
+  const[operMsg,setOperMsg]=useState('');
+  const[operMonths,setOperMonths]=useState([]);
   const[preview,setPreview]=useState(null);
   const[busy,setBusy]=useState(false);
   const[gen,setGen]=useState(false);
@@ -5248,6 +5258,42 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
       const st=await api.financialStatementsWipStatus(entityId,asOf).catch(()=>null);
       if(st)setWipStatus(st);
     }catch(e){setWipMsg(e.message);}finally{setWipBusy(false);}
+  };
+  // Resolve the consolidation group this entity belongs to (as parent or as a
+  // ledger column). Only Braker and HP are configured, so operGrp stays null
+  // everywhere else and the upload block never renders.
+  useEffect(()=>{let cancelled=false;setOperGrp(null);
+    if(!entityId)return;
+    api.getConsolGroups().then(gs=>{
+      if(cancelled)return;
+      const g=(gs||[]).find(x=>x.parent_entity_id===entityId||(x.columns||[]).some(c=>c.entity_id===entityId));
+      const col=g&&(g.columns||[]).find(c=>c.source==='tb');
+      setOperGrp(g&&col?{parentEid:g.parent_entity_id,colEid:col.entity_id,colLabel:col.label}:null);
+    }).catch(()=>{});
+    return()=>{cancelled=true;};
+  },[entityId]);
+  // Which operating months are already on file (drives the status line).
+  useEffect(()=>{let cancelled=false;setOperMonths([]);setOperFile(null);setOperMsg('');
+    if(!operGrp||!/^\d{4}-\d{2}-\d{2}$/.test(asOf))return;
+    api.getConsolTb(operGrp.parentEid,operGrp.colEid,asOf)
+      .then(r=>{if(!cancelled)setOperMonths((r&&r.months)||[]);})
+      .catch(()=>{});
+    return()=>{cancelled=true;};
+  },[operGrp,asOf]);
+  const operOnFile=operMonths.find(m=>String(m.as_of).slice(0,7)===asOf.slice(0,7));
+  const uploadOperTb=async(f)=>{
+    if(!f||!operGrp)return;
+    setOperMsg('');setOperBusy(true);
+    try{
+      const out=await api.uploadConsolTb(operGrp.parentEid,operGrp.colEid,asOf,f);
+      setOperFile(null);
+      const bits=['Uploaded '+((out&&out.count)||0)+' accounts for '+asOf.slice(0,7)+'.'];
+      if(out&&out.unmapped_count)bits.push(out.unmapped_count+' unmapped'+(out.unmapped_nonzero&&out.unmapped_nonzero.length?' ('+out.unmapped_nonzero.length+' with a balance)':'')+' — map them on Intercompany → Consolidation.');
+      if(out&&out.balanced===false)bits.push('Note: the trial balance does not foot on its own.');
+      setOperMsg(bits.join(' '));
+      const r=await api.getConsolTb(operGrp.parentEid,operGrp.colEid,asOf).catch(()=>null);
+      if(r)setOperMonths(r.months||[]);
+    }catch(e){setOperMsg(e.message);}finally{setOperBusy(false);}
   };
   const generate=async()=>{
     setErr('');setGen(true);setResult(null);
@@ -5319,10 +5365,20 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
           <input type="file" accept=".pdf,.xlsx,.xls" disabled={!canEdit} onChange={e=>setReqFile(e.target.files[0]||null)} style={{fontSize:13}}/>
           {reqFile&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{reqFile.name}</span>}
         </div>}
-        {isDevEntity&&<div>
+        {isDevEntity&&!isDev&&<div>
           <label style={S.label}>Second requisition report <span style={{fontWeight:400,color:T.textMuted}}>(optional &mdash; adds a second Budget to Actual to the package)</span></label>
           <input type="file" accept=".pdf,.xlsx,.xls" disabled={!canEdit} onChange={e=>setReqFile2(e.target.files[0]||null)} style={{fontSize:13}}/>
           {reqFile2&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{reqFile2.name}</span>}
+        </div>}
+        {operGrp&&<div>
+          <label style={S.label}>Operating trial balance <span style={{fontWeight:400,color:T.textMuted}}>({operGrp.colLabel} &mdash; feeds the consolidated schedules on Intercompany &rarr; Consolidation)</span></label>
+          <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+            <input type="file" accept=".xlsx,.xls,.csv" disabled={!canEdit||operBusy} onChange={e=>setOperFile(e.target.files&&e.target.files[0]?e.target.files[0]:null)} style={{fontSize:13}}/>
+            <button style={{...S.btnS,padding:'6px 12px',opacity:(!operFile||operBusy||!canEdit)?0.6:1}} disabled={!operFile||operBusy||!canEdit} onClick={()=>uploadOperTb(operFile)}>{operBusy?'Uploading…':'Upload operating TB'}</button>
+          </div>
+          {operOnFile&&<div style={{marginTop:6,fontSize:12,color:T.green}}>&#10003; On file for {operOnFile.as_of} ({operOnFile.lines} accounts{operOnFile.uploaded_at?(', uploaded '+String(operOnFile.uploaded_at).slice(0,10)):''}) &mdash; the consolidated schedules use it.</div>}
+          {!operOnFile&&!operFile&&<div style={{marginTop:6,fontSize:12,color:T.textMuted}}>Nothing on file for {asOf.slice(0,7)} yet. Columns are detected automatically (account code + name, then Debit/Credit or a single Ending balance). Re-uploading a month replaces it.</div>}
+          {operMsg&&<div style={{marginTop:6,fontSize:12,color:T.textBright}}>{operMsg}</div>}
         </div>}
         {isTurnkey&&<div>
           <label style={S.label}>WIP schedule <span style={{fontWeight:400,color:T.textMuted}}>(PDF &mdash; merged as &ldquo;Schedule of Contracts&rdquo; at the end of the statements)</span></label>
@@ -8052,7 +8108,7 @@ function ConsolidationPage({entities,activeEntity,canEdit=true}){
       {sched&&<>
         {sched.balance_sheet&&sched.balance_sheet.unavailable&&sched.balance_sheet.unavailable.length>0&&
           <div style={{...S.card,borderColor:T.orange+'40',padding:12,color:T.orange,fontSize:12.5}}>
-            No trial balance is uploaded for {asOf} on the operating column, so it shows as zero. Upload it under the Trial balance tab.</div>}
+            No trial balance is uploaded for {asOf} on the operating column, so it shows as zero. Upload it from the development entity&rsquo;s Financial Statements page (3 &middot; Attach supporting PDFs &rarr; Operating trial balance).</div>}
         <div style={S.h2}>Consolidating Balance Sheet — {sched.balance_sheet.period}</div>
         {scheduleTable(sched.balance_sheet,'bs')}
         <div style={S.h2}>Consolidating Statement of Operations — {sched.operations_month.period}</div>
@@ -8063,15 +8119,8 @@ function ConsolidationPage({entities,activeEntity,canEdit=true}){
     </div>}
 
     {tab==='tb'&&<div>
-      {canEdit&&<div style={{...S.card,padding:16,marginBottom:16}}>
-        <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
-          <div><label style={S.label}>Operating trial balance ({operCol?operCol.label:'operating column'})</label>
-            <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{fontSize:12.5,display:'block'}}
-              onChange={e=>setFile(e.target.files&&e.target.files[0]?e.target.files[0]:null)}/></div>
-          <div><label style={S.label}>As of</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(monthEndStr(e.target.value))}/></div>
-          <button style={S.btnP} onClick={upload} disabled={busy}>{busy?'Uploading…':'Upload TB'}</button>
-        </div>
-        <div style={{fontSize:11.5,color:T.textDim,marginTop:10}}>Columns detected automatically: account code + name, then Forward / Debit / Credit / Ending (or a single Balance). Re-uploading the same month replaces it.</div>
+      {canEdit&&<div style={{...S.card,padding:16,marginBottom:16,fontSize:12.5,color:T.textMuted,lineHeight:1.5}}>
+        The operating trial balance is uploaded from the development entity&rsquo;s <b style={{color:T.textBright}}>Financial Statements</b> page, under <b style={{color:T.textBright}}>3 &middot; Attach supporting PDFs &rarr; Operating trial balance</b>. Any months already on file are listed below, where you can review or remove them.
       </div>}
       {TB_MONTHS.length>0&&<div style={{...S.card,padding:0,marginBottom:16}}>
         <div style={{padding:'10px 14px',fontWeight:700,color:T.textBright,fontSize:13,borderBottom:'1px solid '+T.border}}>Uploaded months</div>
