@@ -358,19 +358,19 @@ async function worksheetToPdfBytes(ws, opts = {}) {
   let scale = Math.min(1, printableW / natTotalW);
   let L = layoutAt(scale);
   if (L.totalH > printableH) {
-    scale = scale * (printableH / L.totalH);
-    L = layoutAt(scale);
-    // A tiny safety margin in case rounding leaves it a hair over.
-    let guard = 0;
-    while (L.totalH > printableH && guard++ < 4) {
-      scale *= 0.98;
-      L = layoutAt(scale);
-    }
+    // Try to fit the height by shrinking the font too — but only while it stays
+    // at or above the legibility floor. If fitting one page would require a
+    // sub-floor font, keep this (width-fit) scale and let the render loop
+    // paginate onto additional pages rather than cram illegibly or clip the
+    // lower rows (which was dropping the Budget-to-Actual reconciliation block
+    // off the bottom of the page).
+    const tightened = scale * (printableH / L.totalH);
+    if (BASE_FONT * tightened >= MIN_FONT) { scale = tightened; L = layoutAt(scale); }
   }
 
   const { fontSize, lineH, rowPad, cellPad, colX, mergedWidth, wrapped, rowHeights } = L;
 
-  const page = pdf.addPage([LP.w, LP.h]);
+  let page = pdf.addPage([LP.w, LP.h]);
   let y = LP.h - LP.mT;
   if (opts.title) {
     page.drawText(String(opts.title), { x: LP.mL, y, size: Math.max(8, 11 * scale), font: bold });
@@ -379,6 +379,12 @@ async function worksheetToPdfBytes(ws, opts = {}) {
 
   for (let ri = 0; ri < wrapped.length; ri++) {
     const rowH = rowHeights[ri];
+    // Paginate instead of clipping: when a row would fall below the bottom
+    // margin and at least one row is already on this page, spill onto a new
+    // page. (A single row taller than the whole page still prints, to avoid an
+    // infinite loop.) This is what keeps the Budget-to-Actual reconciliation
+    // block, which sits at the bottom of a tall sheet, from being cut off.
+    if (y - rowH < LP.mB && y < (LP.h - LP.mT)) { page = pdf.addPage([LP.w, LP.h]); y = LP.h - LP.mT; }
     const { cells } = wrapped[ri];
     // Pass 1: paint cell background fills BEFORE any text, so colored bands sit
     // behind their values. A merged region is painted once, across the merged
