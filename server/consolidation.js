@@ -356,7 +356,7 @@ function operatingBalances(db, entityId, o = {}) {
       if (!hasTbAt(db, entityId, bd)) return null;
       base = new Map(tbAt(db, entityId, bd).map(l => [String(l.source_code), l.ending]));
     }
-    return rollUp(db, entityId, lines, l => {
+    const rows = rollUp(db, entityId, lines, l => {
       const code = String(l.source_code);
       const lead = parseInt(code.replace(/[^0-9]/g, '').slice(0, 1), 10);
       const isPl = lead >= 4;
@@ -364,6 +364,34 @@ function operatingBalances(db, entityId, o = {}) {
       if (!base) return l.ending;
       return l.ending - (base.get(code) || 0);
     });
+    // Closing the books into retained earnings. When close_pl_before falls in a
+    // LATER fiscal year than this snapshot — an opening balance sheet built from
+    // a prior-year trial balance (e.g. a Dec-2025 operating TB used as the 2026
+    // opening) — the pre-floor income was zeroed above, but its net result must
+    // be CLOSED INTO RETAINED EARNINGS, or the opening column is short that
+    // amount and the cash-flow statement shows a phantom equity movement. The
+    // property system leaves its Dec-31 books pre-closing (current-year earnings
+    // still sit in the P&L accounts, retained earnings at the prior-year
+    // figure), so do the close here. Net income = -(sum of pre-floor income
+    // endings): a loss reduces RE, a gain raises it. Runs only on that opening
+    // snapshot — the current and prior period statements use a year-start floor
+    // (base null) and are untouched, as is any entity with no prior-year TB.
+    if (base) {
+      const map = mapFor(db, entityId);
+      let netIncome = 0;
+      for (const [code, ending] of base) {
+        const lead = parseInt(String(code).replace(/[^0-9]/g, '').slice(0, 1), 10);
+        if (lead < 4) continue;                 // balance-sheet account, not P&L
+        if (!map.has(String(code))) continue;   // unmapped — reported elsewhere
+        netIncome = r2(netIncome - ending);
+      }
+      if (Math.abs(netIncome) > 0.004) {
+        let re = rows.find(r => r.type === 'Equity' && /retained/i.test(r.name || ''));
+        if (!re) { re = { code: '39000', name: 'Retained Earnings', type: 'Equity', balance: 0, total_debit: 0, total_credit: 0 }; rows.push(re); }
+        re.balance = r2(re.balance + netIncome);
+      }
+    }
+    return rows;
   }
 
   if (from && to) {
