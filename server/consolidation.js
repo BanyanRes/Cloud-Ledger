@@ -228,11 +228,18 @@ function ensureSchema(db) {
       account_code TEXT NOT NULL,
       account_name TEXT,
       notes TEXT,
+      -- One row may be flagged the balancer: it absorbs the mirror set's
+      -- residual so the elimination column foots and the consolidated balance
+      -- sheet balances (HP plugs it into mortgage interest, as CLA does).
+      is_balancer INTEGER NOT NULL DEFAULT 0,
       sort_order INTEGER NOT NULL DEFAULT 0,
       created_at TEXT, created_by TEXT, updated_at TEXT, updated_by TEXT,
       UNIQUE (group_id, entity_id, account_code)
     );
   `);
+  // Older databases created the table before is_balancer existed.
+  try { db.exec('ALTER TABLE consol_full_eliminations ADD COLUMN is_balancer INTEGER NOT NULL DEFAULT 0'); }
+  catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
 }
 
 // ══════════════════════════ Date helpers ══════════════════════════
@@ -538,40 +545,90 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
   // between development and operating, so there is no second side to agree to,
   // and pairing would only invent a constraint the books do not have.
   //
-  // Because it is one-sided by design, the debit and credit legs need not
-  // agree, and on HP they do not: CLA's July operating column is itself out of
-  // balance, so the mirror is too. `residual` states that difference instead of
-  // hiding it. The schedule still cross-foots, because the consolidated column
-  // is the arithmetic sum of the member columns and this one — the same
-  // imbalance is on both sides of that sum.
+  // The mirrored set is not automatically a balanced journal entry: the
+  // operating book's copy of the development book need not net to zero, and on
+  // HP it does not — CLA's own July operating column, mirrored, is off by
+  // 2,635.75 (a mortgage-interest reconciling item between the two books).
+  //
+  // One account may be flagged `is_balancer`. When it is, that account absorbs
+  // the residual so the elimination column foots and the consolidated balance
+  // sheet balances — exactly what CLA does, plugging the difference into the
+  // mortgage-interest elimination rather than removing operating's interest in
+  // full. Every other account still comes out for its whole balance. With no
+  // balancer flagged the rule stays one-sided by design and reports the
+  // residual (the earlier behaviour, kept for a column CLA prints one-sided).
   const mirrorRows = db.prepare('SELECT * FROM consol_full_eliminations WHERE group_id = ? ORDER BY sort_order, entity_id, account_code').all(group.id);
   if (mirrorRows.length) {
     const legs = mirrorRows.map(m => {
       const row = (rowsFor(m.entity_id) || []).find(x => String(x.code) === String(m.account_code));
       const bal = row ? r2(row.balance) : 0;
+      return {
+        entity_id: m.entity_id, code: m.account_code,
+        name: (row && row.name) || m.account_name || null,
+        type: row ? row.type : null, balance: bal, amount: bal,
+        present: !!row, is_balancer: !!m.is_balancer,
+      };
+    });
+    // The plug is a BALANCE-SHEET (stock) reconciling item — the amount by
+    // which the operating book's copy of the development book fails to net to
+    // zero at the period end. It is always measured from ENDING balances, never
+    // from a window's movements, so the same figure (2,635.75 on HP at July)
+    // applies to the balance sheet and to the year-to-date statement of
+    // operations, keeping consolidated net income the same on both — as CLA's
+    // package does. A single-month statement carries no plug: it eliminates the
+    // operating mortgage interest at that month's own activity, which ties to
+    // CLA's month schedule directly.
+    const balancer = legs.find(l => l.is_balancer && l.present && l.type);
+    let plugged = 0;
+    let plugAsOf = null;
+    if (o && o.as_of) plugAsOf = o.as_of;
+    else if (o && o.from && o.to && o.from <= yearStart(o.to)) plugAsOf = o.to;   // year to date
+    if (balancer && plugAsOf) {
+      // Mirror accounts all sit on one member; snapshot its ending balances.
+      const snap = new Map();
+      for (const eid of new Set(mirrorRows.map(m => m.entity_id))) {
+        const mem = membersOf(db, group.id).find(x => x.entity_id === eid) || { entity_id: eid, source: 'tb' };
+        snap.set(eid, memberBalances(db, mem, { as_of: plugAsOf, close_pl_before: yearStart(plugAsOf) }, computeBalances) || []);
+      }
+      let bsDr = 0, bsCr = 0;
+      for (const m of mirrorRows) {
+        const row = (snap.get(m.entity_id) || []).find(x => String(x.code) === String(m.account_code));
+        if (!row || !row.type) continue;
+        if (isDrType(row.type)) bsDr = r2(bsDr + row.balance); else bsCr = r2(bsCr + row.balance);
+      }
+      const bsResidual = r2(bsDr - bsCr);
+      if (Math.abs(bsResidual) > 0.004) {
+        plugged = bsResidual;
+        balancer.amount = r2(balancer.balance - (isDrType(balancer.type) ? bsResidual : -bsResidual));
+      }
+    }
+
+    for (const l of legs) {
       // A listed account absent from the window is normal, not an error: a
       // balance-sheet mirror account has no place on a statement of operations,
       // and an account can carry nothing in a given month. It is reported so a
       // code that has quietly stopped appearing — a renamed mapping target,
       // say — can be seen rather than silently eliminating nothing forever.
-      if (row) adjustments.push({ entity_id: m.entity_id, code: m.account_code, type: row.type, amount: bal });
-      return {
-        entity_id: m.entity_id, code: m.account_code,
-        name: (row && row.name) || m.account_name || null,
-        type: row ? row.type : null, balance: bal, amount: bal, present: !!row,
-      };
-    });
-    const sideSum = pred => r2(legs.filter(l => l.type && pred(l.type)).reduce((s, l) => s + l.balance, 0));
-    const drSide = sideSum(isDrType);
-    const crSide = sideSum(t => !isDrType(t));
+      if (l.present) adjustments.push({ entity_id: l.entity_id, code: l.code, type: l.type, amount: l.amount });
+    }
+
+    // Sides after any plug — this is what actually hits the elimination column.
+    const drSide = r2(legs.filter(l => l.type && isDrType(l.type)).reduce((s, l) => s + l.amount, 0));
+    const crSide = r2(legs.filter(l => l.type && !isDrType(l.type)).reduce((s, l) => s + l.amount, 0));
+    // Sides at full removal, before the plug — the raw mirror imbalance.
+    const drFull = r2(legs.filter(l => l.type && isDrType(l.type)).reduce((s, l) => s + l.balance, 0));
+    const crFull = r2(legs.filter(l => l.type && !isDrType(l.type)).reduce((s, l) => s + l.balance, 0));
     rules.push({
       type: 'full_elimination',
       label: 'Development accounts mirrored on the operating ledger',
       legs,
-      eliminated: r2(legs.reduce((s, l) => s + Math.abs(l.balance), 0)),
+      eliminated: r2(legs.reduce((s, l) => s + Math.abs(l.amount), 0)),
       debit_side: drSide,
       credit_side: crSide,
-      residual: r2(drSide - crSide),
+      residual: r2(drSide - crSide),   // 0 in a plugged window; the imbalance otherwise
+      gross_residual: r2(drFull - crFull),   // the raw mirror imbalance, before the plug
+      plugged: r2(plugged),
+      balancer: balancer ? balancer.code : null,
       absent: legs.filter(l => !l.present).map(l => l.code),
     });
   }

@@ -324,24 +324,31 @@ const BRAKER_FUNDING = [
 // — a free CloudLedger code — so the two never collide on the unioned schedule.
 // No renumbering of the UMB loan is wanted; 25004 stays the loan.
 //
-// [ code, name, sort ]
+// The operating book's mirror of the development book does not net to zero on
+// its own — CLA's July operating column, mirrored, is off by 2,635.75, a
+// mortgage-interest reconciling item between the two books. 75000 is flagged the
+// BALANCER: it absorbs that residual so the elimination foots and the
+// consolidated balance sheet balances, exactly as CLA does (eliminating a hair
+// less than the full operating mortgage interest). Decision by Jimmy 2026-08-28.
+//
+// [ code, name, sort, is_balancer ]
 const HP_FULL_ELIMINATIONS = [
-  ['10132', 'Cash Ozone JV Non-Controlled Account', 10],
-  ['12002', 'Construction in Progress', 20],
-  ['12004', 'Accrued WIP 2', 30],
-  ['12005', 'WIP Contra Acct - Operating Deficit Off-Set', 40],
-  ['21003', 'Retention Liability', 50],
-  ['23002', 'Development Intercompany Payable', 60],
-  ['23009', 'Development Construction Loan Interest Payable', 70],
-  ['25001', 'Fund Capital Deployed', 80],
-  ['25002', 'Deployed Fund Capital', 90],
-  ['25003', 'Fund Sponsor Capital Deployed', 100],
-  ['25007', 'Deployed Funds Sponsor Capital', 110],
-  ['25005', 'Construction Loan 1', 120],
-  ['31001', 'Capital Contributions', 130],
-  ['32001', 'Distributions', 140],
-  ['39000', 'Retained Earnings', 150],
-  ['75000', 'Interest Expense', 160],
+  ['10132', 'Cash Ozone JV Non-Controlled Account', 10, 0],
+  ['12002', 'Construction in Progress', 20, 0],
+  ['12004', 'Accrued WIP 2', 30, 0],
+  ['12005', 'WIP Contra Acct - Operating Deficit Off-Set', 40, 0],
+  ['21003', 'Retention Liability', 50, 0],
+  ['23002', 'Development Intercompany Payable', 60, 0],
+  ['23009', 'Development Construction Loan Interest Payable', 70, 0],
+  ['25001', 'Fund Capital Deployed', 80, 0],
+  ['25002', 'Deployed Fund Capital', 90, 0],
+  ['25003', 'Fund Sponsor Capital Deployed', 100, 0],
+  ['25007', 'Deployed Funds Sponsor Capital', 110, 0],
+  ['25005', 'Construction Loan 1', 120, 0],
+  ['31001', 'Capital Contributions', 130, 0],
+  ['32001', 'Distributions', 140, 0],
+  ['39000', 'Retained Earnings', 150, 0],
+  ['75000', 'Mortgage Interest', 160, 1],
 ];
 
 function findEntity(db, rx, codes) {
@@ -458,15 +465,20 @@ function seedHp(db) {
   } catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
 
   const insFull = db.prepare(`INSERT INTO consol_full_eliminations
-    (group_id, entity_id, account_code, account_name, notes, sort_order, created_at, created_by, updated_at, updated_by)
-    VALUES (?,?,?,?,?,?,?,?,?,?)`);
+    (group_id, entity_id, account_code, account_name, notes, is_balancer, sort_order, created_at, created_by, updated_at, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+  const setBalancer = db.prepare('UPDATE consol_full_eliminations SET is_balancer=? WHERE group_id=? AND entity_id=? AND account_code=?');
   let mirrors = 0;
-  for (const [code, name, sort] of HP_FULL_ELIMINATIONS) {
+  for (const [code, name, sort, isBal] of HP_FULL_ELIMINATIONS) {
     try {
       insFull.run(g.id, operId, code, name,
-        'Seeded from the CLA July 2026 consolidating schedules', sort, now, 'seed', now, 'seed');
+        'Seeded from the CLA July 2026 consolidating schedules', isBal ? 1 : 0, sort, now, 'seed', now, 'seed');
       mirrors++;
-    } catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
+    } catch (e) {
+      if (!/UNIQUE/i.test(e.message)) throw e;
+      // Already seeded before is_balancer existed: set the flag on the plug row.
+      if (isBal) setBalancer.run(1, g.id, operId, code);
+    }
   }
 
   // No operating_tb_map is seeded. The property manager's own account codes are
@@ -854,12 +866,15 @@ function registerConsolidationRoutes(app, deps) {
           // still reads sensibly in a month the account carries nothing.
           const name = String(r.account_name || (prev ? prev.account_name : '') || '').trim();
           const sort = Number.isFinite(Number(r.sort_order)) ? Number(r.sort_order) : (prev ? prev.sort_order : 999);
+          // The balancer flag marks the one account that absorbs the mirror
+          // residual so the elimination foots; only meaningful on one row.
+          const isBal = r.is_balancer != null ? (r.is_balancer ? 1 : 0) : (prev ? prev.is_balancer : 0);
           if (prev) {
-            db.prepare('UPDATE consol_full_eliminations SET account_name=?, notes=?, sort_order=?, updated_at=?, updated_by=? WHERE id=?')
-              .run(name, r.notes != null ? r.notes : prev.notes, sort, now, by, prev.id);
+            db.prepare('UPDATE consol_full_eliminations SET account_name=?, notes=?, is_balancer=?, sort_order=?, updated_at=?, updated_by=? WHERE id=?')
+              .run(name, r.notes != null ? r.notes : prev.notes, isBal, sort, now, by, prev.id);
           } else {
-            db.prepare(`INSERT INTO consol_full_eliminations (group_id, entity_id, account_code, account_name, notes, sort_order, created_at, created_by, updated_at, updated_by)
-              VALUES (?,?,?,?,?,?,?,?,?,?)`).run(group.id, eid, code, name, r.notes || null, sort, now, by, now, by);
+            db.prepare(`INSERT INTO consol_full_eliminations (group_id, entity_id, account_code, account_name, notes, is_balancer, sort_order, created_at, created_by, updated_at, updated_by)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(group.id, eid, code, name, r.notes || null, isBal, sort, now, by, now, by);
           }
           changed++;
         }
