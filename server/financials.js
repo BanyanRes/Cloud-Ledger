@@ -2011,7 +2011,7 @@ async function buildStatements(getBalances, opts) {
       { label: (netFinancing < 0 ? 'Net Cash Used by Financing Activities' : 'Net Cash Provided by Financing Activities'), value: netFinancing, bold: true, rule: true },
       { label: 'Net Increase (Decrease) in Cash', value: netChange, bold: true, gapBefore: true, rule: true },
       { label: 'Cash - Beginning of Period', value: cashFlow.cashBeg, gapBefore: true },
-      { label: 'Cash - End of Period', value: cashFlow.cashEnd, bold: true, dollar: true, rule: true },
+      { label: 'Cash - End of Period', value: cashFlow.cashEnd, bold: true, dollar: true, rule: true, doubleBelow: true },
     ];
     cashFlow.turnkey = {
       lines, netOperating, netInvesting, netFinancing, netChange,
@@ -2111,7 +2111,13 @@ async function buildStatements(getBalances, opts) {
               : opsHeadingLine(period.colLabel, longDate(asOf), longDate(priorBsDate)),
             // Header for the operations statement's prior column, and the
             // opening column of the equity statement.
-            opsPriorColLabel: inception ? inceptionRange(inception, priorBsDate) : longDate(priorBsDate),
+            // Pre-wrapped so it cannot collide with the current-column heading:
+            // 'April 16 -' on the first row, 'May 31, 2026' on the row below.
+            opsPriorColLabel: inception
+              ? (monthDay(inception) + ' -\n' + longDate(priorBsDate))
+              : longDate(priorBsDate),
+            // Unwrapped form, for callers that want it as one string.
+            opsPriorColLabelFlat: inception ? inceptionRange(inception, priorBsDate) : longDate(priorBsDate),
             equityBegDate: inception ? slashDate(inception) : null,
             inception: inception || null, profile },
     balanceSheet: Object.assign({ assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
@@ -2288,7 +2294,10 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       // date label wraps, so a June/December pair can never render half-wrapped.
       const MIN_HDR_GUTTER = 10;
       const DATE_LABEL = /^([A-Z][a-z]+ \d{1,2},) (\d{4})$/;
-      if (Number.isFinite(pitch)) {
+      // A caller-supplied '\n' means the heading was deliberately pre-wrapped
+      // (Turnkey's inception range). Trust it and do not auto-wrap on top of it.
+      const preWrapped = labels.some(l => String(l).indexOf('\n') >= 0);
+      if (Number.isFinite(pitch) && !preWrapped) {
         const avail = pitch - MIN_HDR_GUTTER;
         const anyTooWide = labels.some(l => DATE_LABEL.test(String(l))
           && bold.widthOfTextAtSize(String(l), FS.head) > avail);
@@ -2745,7 +2754,7 @@ async function renderStatementsPdf(s, outOffsets) {
       oiLines.forEach(r => line(r));
       // Expense lines are shown parenthesised as reductions of income.
       oeLines.forEach(r => L.row(r.name, [money(-r.cur), money(-r.pri), chg(-r.cur, -r.pri), money(-r.ytd)], { indent: 26 }));
-      L.row('Total Other Income (Expense)', [money(s.operations.totOtherIE.cur), money(s.operations.totOtherIE.pri), chg(s.operations.totOtherIE.cur, s.operations.totOtherIE.pri), money(s.operations.totOtherIE.ytd)], { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
+      L.row('Total Other Income (Expense)', [money(s.operations.totOtherIE.cur), money(s.operations.totOtherIE.pri), chg(s.operations.totOtherIE.cur, s.operations.totOtherIE.pri), money(s.operations.totOtherIE.ytd)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     }
     L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
     }
@@ -2775,6 +2784,7 @@ async function renderStatementsPdf(s, outOffsets) {
           indent: ln.indent ? 16 : 6,
           boldRow: !!ln.bold,
           ruleAbove: !!ln.rule,
+          doubleBelow: !!ln.doubleBelow,
           dollarPrefix: !!ln.dollar,
         });
       }
