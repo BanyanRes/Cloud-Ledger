@@ -699,8 +699,29 @@ function consolidatedBalances(db, group, o, computeBalances) {
     .filter(r => Math.abs(r.balance) > 0.004 || true);
 }
 
+// A print-ready pair of consolidating schedules for the financial-statement
+// package: the balance sheet as of the month end, and the statement of income
+// for the month. One column per member plus an eliminations column and the
+// consolidated cross-foot — the very same buildColumns the on-screen schedules
+// use, so the printed schedules tie to the client (and to CLA) to the penny.
+function buildScheduleSet(db, group, asOf, computeBalances) {
+  const labelFor = (c) => {
+    if (c.label) return c.label;
+    const m = db.prepare("SELECT label FROM consol_members WHERE entity_id = ? AND label IS NOT NULL AND label <> '' LIMIT 1").get(c.entity_id);
+    if (m && m.label) return m.label;
+    const e = db.prepare('SELECT name FROM entities WHERE id = ?').get(c.entity_id);
+    return e ? e.name : ('Entity ' + c.entity_id);
+  };
+  const columns = columnsOf(db, group).map(c => ({ entity_id: c.entity_id, label: labelFor(c), source: c.source }));
+  const balanceSheet = buildColumns(db, group, { as_of: asOf, close_pl_before: yearStart(asOf) }, computeBalances);
+  const incomeMonth = buildColumns(db, group, { from: monthStart(asOf), to: asOf }, computeBalances);
+  const parent = db.prepare('SELECT name FROM entities WHERE id = ?').get(group.parent_entity_id);
+  return { parentName: parent ? parent.name : '', asOf, columns, balanceSheet, incomeMonth };
+}
+
 module.exports = {
   ensureSchema,
+  buildScheduleSet,
   scopeKeyFor,
   groupForParent,
   membersOf,

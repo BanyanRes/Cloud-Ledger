@@ -2192,7 +2192,7 @@ async function buildStatements(getBalances, opts) {
   }), { beginning: 0, contributions: 0, distributions: 0, netIncome: 0, ending: 0 });
 
   return {
-    meta: { entityName: displayEntityName(opts.entityName), rawEntityName: opts.entityName || '', entityCode: (opts.entityCode || ''), asOf, priorDate: priorBsDate, longDate: longDate(asOf),
+    meta: { entityName: displayEntityName(opts.entityName), rawEntityName: opts.entityName || '', entityCode: (opts.entityCode || ''), isConsolidated: !!opts.isConsolidated, asOf, priorDate: priorBsDate, longDate: longDate(asOf),
             priorLongDate: longDate(priorBsDate),
             // Inception-dated entities date every statement from inception.
             monthsEnded: inception
@@ -2577,9 +2577,9 @@ async function renderStatementsPdf(s, outOffsets) {
   {
     // Heading date-line repeats on every page (incl. continuation pages) and a
     // blank space follows it before the first row. Dates are NOT underlined.
-    const bsTitle = m.profile === 'banyan'
+    const bsTitle = (m.isConsolidated ? 'Consolidated ' : '') + (m.profile === 'banyan'
       ? 'Statements of Assets, Liabilities, and Members\u2019 Equity \u2013 Tax Basis'
-      : 'Balance Sheets';
+      : 'Balance Sheets');
     const L = makeLayout(pdf, fonts, m, bsTitle, { dateLine: m.longDate + ' and ' + m.priorLongDate });
     // TOC label must be the statement title verbatim \u2014 passing a separate string
     // here is how the TOC drifted out of sync with the heading (CLA 8/17: the TOC
@@ -2678,9 +2678,9 @@ async function renderStatementsPdf(s, outOffsets) {
     // the two period columns so a quarterly report reads 'For the Quarters Ended
     // 6/30/26 and 3/31/26' with 'Quarter Ended' columns (matches the CPA package).
     const opsDateLine = m.opsDateLine || opsHeadingLine(m.colLabel, m.longDate, m.priorLongDate);
-    const opsTitle = m.profile === 'banyan'
+    const opsTitle = (m.isConsolidated ? 'Consolidated ' : '') + (m.profile === 'banyan'
       ? 'Statements of Revenues and Expenses \u2013 Tax Basis'
-      : 'Statements of Operations';
+      : 'Statements of Operations');
     const L = makeLayout(pdf, fonts, m, opsTitle, { dateLine: opsDateLine });
     track(opsTitle);
     L.start();
@@ -2901,9 +2901,9 @@ async function renderStatementsPdf(s, outOffsets) {
 
   // ── 3. Statement of Cash Flows ──────────────────────────────────────────────
   {
-    const cfTitle = m.profile === 'banyan'
+    const cfTitle = (m.isConsolidated ? 'Consolidated ' : '') + (m.profile === 'banyan'
       ? 'Statement of Cash Flows \u2013 Tax Basis'
-      : 'Statement of Cash Flows';
+      : 'Statement of Cash Flows');
     const L = makeLayout(pdf, fonts, m, cfTitle, { dateLine: m.monthsEnded });
     // TOC label is the title verbatim (CLA 8/17: the TOC was dropping
     // "\u2013 Tax Basis" because this override hardcoded the old string).
@@ -2976,9 +2976,9 @@ async function renderStatementsPdf(s, outOffsets) {
     // column shown even when all zero, and a Net Income (Loss) column wide enough
     // to keep the value on one row. Only the first member row and the Total row
     // carry a "$" (CLA 8/17); the rows between them are bare figures.
-    const eqTitle = m.profile === 'banyan'
+    const eqTitle = (m.isConsolidated ? 'Consolidated ' : '') + (m.profile === 'banyan'
       ? 'Statement of Changes in Members\u2019 Equity \u2013 Tax Basis'
-      : 'Statement of Changes in Members\u2019 Equity';
+      : 'Statement of Changes in Members\u2019 Equity');
     const L = makeLayout(pdf, fonts, m, eqTitle,
       { landscape: true, dateLine: m.monthsEnded });
     const LRIGHT = PAGE.h - PAGE.mR; // landscape printable right edge (PAGE.h is the long side)
@@ -3107,7 +3107,7 @@ async function renderCoverPdf(meta, tocEntries) {
   // ── Cover page ────────────────────────────────────────────────────────────
   center(meta.entityName, 22, bold, 512);
   page.drawLine({ start: { x: 150, y: 494 }, end: { x: PAGE.w - 150, y: 494 }, thickness: 0.8, color: rgb(0.3, 0.3, 0.3) });
-  center('Financial Statements', 15, reg, 470);
+  center(meta.isConsolidated ? 'Consolidated Financial Statements' : 'Financial Statements', 15, reg, 470);
   center(meta.longDate, 12, reg, 448);
   page.drawLine({ start: { x: 150, y: 430 }, end: { x: PAGE.w - 150, y: 430 }, thickness: 0.8, color: rgb(0.3, 0.3, 0.3) });
 
@@ -3148,6 +3148,125 @@ async function renderCoverPdf(meta, tocEntries) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Consolidating schedules (landscape) for a consolidated package: one column
+// per member, an eliminations column, and the consolidated cross-foot. Figures
+// come straight from the consolidation engine's buildColumns (schedules arg),
+// so they tie to the on-screen schedules and to CLA to the penny. Records each
+// schedule's 0-based start page in `offsets` for the Table of Contents.
+//   schedules: { columns:[{entity_id,label}], balanceSheet:{accounts}, incomeMonth:{accounts} }
+// ═══════════════════════════════════════════════════════════════════════════
+async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
+  const pdf = await PDFDocument.create();
+  const reg = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const PW = PAGE.h, PH = PAGE.w;                 // landscape
+  const left = PAGE.mL, right = PW - PAGE.mR;
+  const cols = schedules.columns || [];
+  const heads = cols.map(c => c.label).concat(['Eliminations', 'Consolidated']);
+  const nCols = heads.length;
+  const usable = right - left;
+  const numColW = Math.min(98, Math.max(66, Math.floor((usable - 200) / nCols)));
+  const colRight = []; for (let i = 0; i < nCols; i++) colRight.push(right - numColW * (nCols - 1 - i));
+  const nameLeft = left;
+  const nameMax = colRight[0] - numColW + 6 - nameLeft;   // room before the first figure column
+  const F = { title: 10.5, sub: 9, head: 6.8, row: 7.2, foot: 7.2 };
+  const rowH = 11.5, lineH = 8;
+  let page, y, curTitle = null, curDateLine = null;
+
+  const dtext = (s, x, yy, size, font, color) => page.drawText(String(s), { x, y: yy, size, font, color: color || rgb(0.1, 0.1, 0.1) });
+  const dright = (s, xr, yy, size, font, color) => dtext(s, xr - font.widthOfTextAtSize(String(s), size), yy, size, font, color);
+  const dcenter = (s, size, font, yy) => dtext(s, (PW - font.widthOfTextAtSize(String(s), size)) / 2, yy, size, font);
+  const truncate = (s, font, size, max) => { let t = String(s); if (font.widthOfTextAtSize(t, size) <= max) return t; while (t.length > 3 && font.widthOfTextAtSize(t + '…', size) > max) t = t.slice(0, -1); return t + '…'; };
+  const wrapHead = (label) => {
+    const maxW = numColW - 6, words = String(label).split(/\s+/), lines = []; let cur = '';
+    for (const w of words) { const t = cur ? cur + ' ' + w : w; if (bold.widthOfTextAtSize(t, F.head) > maxW && cur) { lines.push(cur); cur = w; } else cur = t; }
+    if (cur) lines.push(cur);
+    return lines.slice(0, 3);
+  };
+  const footer = () => {
+    const period = meta.asOf ? monthYearLabel(meta.asOf) : meta.longDate;
+    const label = meta.entityName + ', ' + period + '  |  See Executive Summary';
+    dtext(label, (PW - reg.widthOfTextAtSize(label, F.foot)) / 2, PAGE.mB - 12, F.foot, reg, rgb(0.4, 0.4, 0.4));
+  };
+  const colHeaders = () => {
+    const hl = heads.map(wrapHead), maxLines = Math.max(...hl.map(l => l.length));
+    for (let i = 0; i < nCols; i++) {
+      for (let j = 0; j < hl[i].length; j++) dright(hl[i][j], colRight[i], y - (maxLines - hl[i].length + j) * lineH, F.head, bold);
+      const uy = y - (maxLines - 1) * lineH - 2.5;
+      page.drawLine({ start: { x: colRight[i] - (numColW - 8), y: uy }, end: { x: colRight[i], y: uy }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
+    }
+    y -= maxLines * lineH + 5;
+  };
+  const newPage = () => {
+    page = pdf.addPage([PW, PH]);
+    y = PH - PAGE.mT;
+    dcenter(meta.entityName, F.title, bold, PH - PAGE.mT + 22);
+    dcenter(curTitle, F.sub, bold, PH - PAGE.mT + 10);
+    if (curDateLine) dcenter(curDateLine, F.sub, reg, PH - PAGE.mT - 1);
+    footer();
+    y -= 24; colHeaders();
+  };
+  const ensure = (space) => { if (y - space < PAGE.mB + 8) newPage(); };
+  const figs = (getVal, font) => { for (let i = 0; i < nCols; i++) dright(acct(getVal(i)), colRight[i], y, F.row, font || reg); };
+  const rule = () => { for (let i = 0; i < nCols; i++) page.drawLine({ start: { x: colRight[i] - (numColW - 10), y: y + 8 }, end: { x: colRight[i], y: y + 8 }, thickness: 0.5, color: rgb(0.3, 0.3, 0.3) }); };
+  // Column value accessor for one account across member / elimination / consolidated columns.
+  const val = (a, i) => i < cols.length ? (a.byEntity[cols[i].entity_id] || 0) : (i === cols.length ? (a.elimination || 0) : (a.consolidated || 0));
+  const sumCol = (rows, i) => r2(rows.reduce((s, a) => s + val(a, i), 0));
+  const byCode = (rows) => rows.slice().sort((a, b) => String(a.code).localeCompare(String(b.code), undefined, { numeric: true }));
+
+  const accountRow = (a) => {
+    ensure(rowH);
+    dtext(truncate((a.code ? a.code + ' ' : '') + (a.name || ''), reg, F.row, nameMax), nameLeft + 10, y, F.row, reg);
+    figs(i => val(a, i)); y -= rowH;
+  };
+  const sectionHeader = (t) => { ensure(rowH * 2); dtext(t, nameLeft, y, F.row, bold); y -= rowH; };
+  const subtotal = (label, getVal) => { ensure(rowH); rule(); dtext(label, nameLeft + 10, y, F.row, bold); figs(getVal, bold); y -= rowH * 1.5; };
+
+  const renderBalanceSheet = () => {
+    curTitle = 'Consolidating Balance Sheet'; curDateLine = meta.longDate;
+    offsets.push({ label: curTitle, page: pdf.getPageCount() });
+    newPage();
+    const acc = schedules.balanceSheet.accounts || [];
+    const assets = byCode(acc.filter(a => a.type === 'Asset'));
+    const liabs = byCode(acc.filter(a => a.type === 'Liability'));
+    const equity = byCode(acc.filter(a => a.type === 'Equity'));
+    // Net income (loss) folded into equity — the balance-sheet window carries
+    // P&L accounts at year-to-date, exactly as the face balance sheet does.
+    const rev = acc.filter(a => a.type === 'Revenue'), exp = acc.filter(a => a.type === 'Expense');
+    const ni = i => r2(sumCol(rev, i) - sumCol(exp, i));
+    sectionHeader('Assets');
+    assets.forEach(accountRow);
+    subtotal('Total Assets', i => sumCol(assets, i));
+    sectionHeader('Liabilities and Members’ Equity');
+    liabs.forEach(accountRow);
+    subtotal('Total Liabilities', i => sumCol(liabs, i));
+    equity.forEach(accountRow);
+    ensure(rowH); dtext('Net Income (Loss)', nameLeft + 10, y, F.row, reg); figs(ni); y -= rowH;
+    subtotal('Total Members’ Equity', i => r2(sumCol(equity, i) + ni(i)));
+    subtotal('Total Liabilities and Members’ Equity', i => r2(sumCol(liabs, i) + sumCol(equity, i) + ni(i)));
+  };
+  const renderIncome = () => {
+    curTitle = 'Consolidating Statement of Income'; curDateLine = 'For the Month Ended ' + meta.longDate;
+    offsets.push({ label: curTitle, page: pdf.getPageCount() });
+    newPage();
+    const acc = schedules.incomeMonth.accounts || [];
+    const rev = byCode(acc.filter(a => a.type === 'Revenue'));
+    const exp = byCode(acc.filter(a => a.type === 'Expense'));
+    sectionHeader('Revenue');
+    rev.forEach(accountRow);
+    subtotal('Total Revenue', i => sumCol(rev, i));
+    sectionHeader('Expenses');
+    exp.forEach(accountRow);
+    subtotal('Total Expenses', i => sumCol(exp, i));
+    subtotal('Net Income (Loss)', i => r2(sumCol(rev, i) - sumCol(exp, i)));
+  };
+
+  renderBalanceSheet();
+  renderIncome();
+  return await pdf.save();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // generatePackage — assemble the full merged PDF:
 //   cover → executive summary (uploaded) → GL statements → requisition report
 //   (uploaded, with invoice-log pages stripped).
@@ -3167,7 +3286,7 @@ async function renderCoverPdf(meta, tocEntries) {
 // }
 // Returns { bytes, info: { pages, reqRemoved, reqKept, cashFlowTies, ... } }.
 // ═══════════════════════════════════════════════════════════════════════════
-async function generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName }) {
+async function generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName, consolSchedules }) {
   const merged = await PDFDocument.create();
   const info = { sections: [], warnings: [] };
 
@@ -3339,6 +3458,25 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
     }
   } else {
     info.warnings.push('No requisition report uploaded.');
+  }
+
+  // ── Consolidating schedules (consolidated packages only) ────────────────────
+  // Rendered from the consolidation engine and appended at the very back of the
+  // package, matching the CPA layout. Each schedule adds its own TOC entry.
+  if (consolSchedules) {
+    try {
+      const schedOffsets = [];
+      const schedBytes = await renderConsolidatingSchedulesPdf(consolSchedules, statements.meta, schedOffsets);
+      const schedBodyStart = body.getPageCount();
+      await appendToBody(schedBytes, 'Consolidating Schedules', false);
+      for (const off of schedOffsets) {
+        tocEntries.push({ label: off.label, page: schedBodyStart + off.page + COVER_TOC_PAGES + 1 });
+      }
+      info.consolidatingSchedules = { included: true };
+    } catch (e) {
+      info.warnings.push('Consolidating schedules could not be rendered (' + e.message + '); package generated without them.');
+      info.consolidatingSchedules = { included: false, error: e.message };
+    }
   }
 
   // Phase 2: render cover + TOC (with page references) and assemble the final
@@ -4171,6 +4309,7 @@ async function renderFundStatementsPdf(s, outOffsets) {
 
 module.exports = {
   buildStatements,
+  renderConsolidatingSchedulesPdf,
   buildTtmPL,
   buildFundStatements,
   renderFundStatementsPdf,

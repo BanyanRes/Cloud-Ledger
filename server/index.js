@@ -23,6 +23,7 @@ const reqDraft = require('./requisition_draft');
 const { computeAllocation, buildAllocationWorkbook } = require('./insurance_allocation');
 const financials = require('./financials');
 const financialsXlsx = require('./financials_xlsx');
+const consolidation = require('./consolidation');
 const execSummaries = require('./execSummaries');
 const ExcelJS = require('exceljs');
 const xlsxStyledReport = require('./xlsxStyledReport.js');
@@ -9932,8 +9933,12 @@ app.post('/api/workpapers/financial-statements/:entity_id/preview', auth, requir
     const period = ((req.body && req.body.period) || (req.query && req.query.period) || 'monthly');
     if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
     const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
-    const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
-    const s = await financials.buildStatements(getBalances, { asOf, period, entityName: ent ? ent.name : ('Entity ' + eid), entityCode: ent ? ent.code : '' });
+    const consolGroup = consolidation.groupForParent(db, Number(eid));
+    const isConsolidated = !!(consolGroup && consolidation.scopeKeyFor(ent));
+    const getBalances = isConsolidated
+      ? (o) => Promise.resolve(consolidation.consolidatedBalances(db, consolGroup, o, (id, oo) => computeBalances(id, oo)))
+      : (o) => Promise.resolve(computeBalances(eid, o));
+    const s = await financials.buildStatements(getBalances, { asOf, period, entityName: ent ? ent.name : ('Entity ' + eid), entityCode: ent ? ent.code : '', isConsolidated });
     res.json({
       meta: s.meta,
       checks: s.checks,
@@ -10388,8 +10393,17 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       const entityName = ent ? ent.name : ('Entity ' + eid);
       const entityCode = ent ? ent.code : '';
 
-      const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
-      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName, entityCode });
+      // Consolidation parents (Braker QOZ Business, Bridge Banyan HP QOZB) get
+      // a CONSOLIDATED package: the face statements are built from the group's
+      // consolidated column (parent + members + operating TB - eliminations),
+      // titled "Consolidated ...", and the consolidating schedules are appended.
+      const consolGroup = consolidation.groupForParent(db, Number(eid));
+      const isConsolidated = !!(consolGroup && consolidation.scopeKeyFor(ent));
+      const getBalances = isConsolidated
+        ? (o) => Promise.resolve(consolidation.consolidatedBalances(db, consolGroup, o, (id, oo) => computeBalances(id, oo)))
+        : (o) => Promise.resolve(computeBalances(eid, o));
+      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName, entityCode, isConsolidated });
+      const consolSchedules = isConsolidated ? consolidation.buildScheduleSet(db, consolGroup, asOf, (id, oo) => computeBalances(id, oo)) : null;
 
       const files = req.files || {};
       const execSummaryBytes = files.execSummary && files.execSummary[0] ? files.execSummary[0].buffer : null;
@@ -10435,7 +10449,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
         if (stored) { wipBytes = stored.bytes; wipName = wipFilename(asOf); }
       }
 
-      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName });
+      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName, consolSchedules });
 
       const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
       const safeName = entityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
@@ -10472,8 +10486,12 @@ app.get('/api/workpapers/financial-statements/:entity_id/excel', auth, requireEn
     const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
     const entityName = ent ? ent.name : ('Entity ' + eid);
     const entityCode = ent ? ent.code : '';
-    const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
-    const statements = await financials.buildStatements(getBalances, { asOf, period, entityName, entityCode });
+    const consolGroup = consolidation.groupForParent(db, Number(eid));
+    const isConsolidated = !!(consolGroup && consolidation.scopeKeyFor(ent));
+    const getBalances = isConsolidated
+      ? (o) => Promise.resolve(consolidation.consolidatedBalances(db, consolGroup, o, (id, oo) => computeBalances(id, oo)))
+      : (o) => Promise.resolve(computeBalances(eid, o));
+    const statements = await financials.buildStatements(getBalances, { asOf, period, entityName, entityCode, isConsolidated });
     const buf = await financialsXlsx.buildStatementsWorkbook(statements);
     const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
     const safeName = entityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
