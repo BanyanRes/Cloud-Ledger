@@ -314,17 +314,15 @@ const BRAKER_FUNDING = [
 // These are STATEMENT-LINE codes — the targets the operating TB maps to, not
 // the property system's own source codes. Three of them are deliberately shared
 // with the development ledger, because both books carry the same account and
-// CLA unions them into one row: 21003 Retention Liability, 39000 Retained
+// the union prints them on one row: 21003 Retention Liability, 39000 Retained
 // Earnings, 75000 Interest Expense.
 //
-// 25004 is the exception and the one place this list departs from CLA's
-// numbering. CLA prints "25004 Deployed Funds Sponsor Capital" on the operating
-// column and "25006 Loan Payable - UMB Bank Loan" on HP Property Owner;
-// CloudLedger's entity 55 carries that same UMB loan at 25004. Mapping the
-// mirror to 25004 would merge a 5.7m capital account into a 60.07m loan, so it
-// is seeded at 25007 instead. The tidy fix is to renumber 55's UMB loan to
-// 25006 to match CLA and move this row back to 25004 — a production account
-// renumber, so it waits for Jimmy.
+// NUMBERS AND NAMES FOLLOW CLOUDLEDGER, not CLA (Jimmy, 2026-08-28). CLA's
+// package numbers the mirrored capital account 25004 and HP Property Owner's
+// UMB loan 25006; CloudLedger keeps the UMB loan at its own 25004 and prints it
+// that way. The mirrored "Deployed Funds Sponsor Capital" therefore takes 25007
+// — a free CloudLedger code — so the two never collide on the unioned schedule.
+// No renumbering of the UMB loan is wanted; 25004 stays the loan.
 //
 // [ code, name, sort ]
 const HP_FULL_ELIMINATIONS = [

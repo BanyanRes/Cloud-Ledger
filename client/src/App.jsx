@@ -734,7 +734,7 @@ export default function App(){
   useEffect(()=>{if(user)Promise.all([api.getEntities(),api.getMyPrefs().catch(()=>({}))]).then(([e,p])=>{setEntities(e);if(p&&p.defaultEntityId!=null)setDefaultEntityId(p.defaultEntityId);if(e.length>0&&!activeEntity){const def=p&&p.defaultEntityId;setActiveEntity((def!=null&&e.find(x=>x.id===def))?def:e[0].id);}});},[user]);
   const setDefaultEntity=(id)=>{setDefaultEntityId(id);api.saveMyPrefs({defaultEntityId:id}).catch(err=>console.error('[prefs] save default entity failed:',err.message));};
   const refreshEntities=useCallback(async()=>{const e=await api.getEntities();setEntities(e);return e;},[]);
-  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers','intercompany'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
+  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers','intercompany','consolidation'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
   // Read-only users (Viewer) SEE the same sections as an Accountant but cannot edit.
   // canEdit gates every write control; it must never be derived from mere visibility.
   const canEdit = !!user && (user.role==='Admin' || (()=>{ const ae=activeEntity?entities.find(e=>e.id===activeEntity):null; return ae&&ae.access_level ? ae.access_level==='full' : user.role==='Accountant'; })());
@@ -800,6 +800,7 @@ export default function App(){
       {id:'ic_mapping',label:'IC Mapping',icon:'🗺️',section:'intercompany'},
       {id:'external_tb',label:'External Entities TB',icon:'📥',section:'intercompany'},
       {id:'org_structure',label:'Org Structure',icon:'🏛️',section:'intercompany'},
+      {id:'consolidation',label:'Consolidation',icon:'🧩',section:'consolidation'},
     ]},
     {key:'REPORTS',label:'Reports',icon:'📊',items:[
       {id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},
@@ -897,6 +898,7 @@ export default function App(){
         {page==='ic_recon'&&canAccess('intercompany')&&<IntercompanyReconciliation entities={entities} activeEntity={activeEntity} setPage={setPage} key={'icr-'+rk}/>}
         {page==='external_tb'&&canAccess('intercompany')&&<ExternalTbPage canEdit={canEdit} key={'etb-'+rk}/>}
         {page==='org_structure'&&canAccess('intercompany')&&<OrgStructurePage entities={entities} canEdit={canEdit} key={'org-'+rk}/>}
+        {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='commitments'&&activeEntity&&<CommitmentsPage entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
@@ -7876,6 +7878,282 @@ function OrgTreeRows({node,onEdit,canEdit,depth=0}){
     </tr>
     {(node.children||[]).map(c=><OrgTreeRows key={c.id+'-'+c.edge_id} node={c} onEdit={onEdit} canEdit={canEdit} depth={depth+1}/>)}
   </>);
+}
+
+// ── Consolidation (Braker / HP) ──
+// Upload the property manager's operating trial balance, map its accounts to
+// CloudLedger statement lines, and read the two consolidating schedules the CPA
+// package produces. Scoped server-side to Braker and HP; the page just drives
+// those routes.
+function ConsolidationPage({entities,activeEntity,canEdit=true}){
+  const monthEndStr=(d)=>{const x=new Date(d);x.setDate(1);x.setMonth(x.getMonth()+1);x.setDate(0);return x.toISOString().slice(0,10);};
+  const priorMonthEnd=()=>{const x=new Date();x.setDate(1);x.setDate(0);return x.toISOString().slice(0,10);};
+  const[groups,setGroups]=useState([]);
+  const[peid,setPeid]=useState(null);
+  const[setup,setSetup]=useState(null);
+  const[asOf,setAsOf]=useState(priorMonthEnd());
+  const[tab,setTab]=useState('schedules');
+  const[err,setErr]=useState('');const[msg,setMsg]=useState('');const[busy,setBusy]=useState(false);
+  const fileRef=useRef(null);const[file,setFile]=useState(null);
+  const[tb,setTb]=useState(null);
+  const[mapRows,setMapRows]=useState([]);const[unmapped,setUnmapped]=useState([]);
+  const[sched,setSched]=useState(null);
+  const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:('Entity '+id);};
+
+  const loadGroups=useCallback(async()=>{
+    try{const g=await api.getConsolGroups();setGroups(g);
+      if(g.length){const mine=g.find(x=>x.parent_entity_id===activeEntity);setPeid((mine||g[0]).parent_entity_id);}
+      else setErr('No consolidation group is set up. This feature is for Braker and HP only.');
+    }catch(e){setErr(e.message);}
+  },[activeEntity]);
+  useEffect(()=>{loadGroups();},[loadGroups]);
+
+  const loadSetup=useCallback(async()=>{
+    if(!peid)return;
+    try{setSetup(await api.getConsol(peid));}catch(e){setErr(e.message);}
+  },[peid]);
+  useEffect(()=>{loadSetup();},[loadSetup]);
+
+  const operCol=setup&&setup.columns?setup.columns.find(c=>c.source==='tb'):null;
+  const operEid=operCol?operCol.entity_id:null;
+
+  const loadSchedules=useCallback(async()=>{
+    if(!peid||!asOf)return;
+    setErr('');setSched(null);
+    try{setSched(await api.getConsolSchedules(peid,asOf));}catch(e){setErr(e.message);}
+  },[peid,asOf]);
+  const loadTb=useCallback(async()=>{
+    if(!peid||!operEid)return;
+    try{const t=await api.getConsolTb(peid,operEid,asOf);setTb(t);setUnmapped(t.unmapped||[]);}catch(e){setErr(e.message);}
+  },[peid,operEid,asOf]);
+  const loadMap=useCallback(async()=>{
+    if(!peid||!operEid)return;
+    try{const m=await api.getConsolMap(peid,operEid);setMapRows(m.rows||[]);}catch(e){setErr(e.message);}
+  },[peid,operEid]);
+
+  useEffect(()=>{if(tab==='schedules')loadSchedules();if(tab==='tb')loadTb();if(tab==='mapping'){loadMap();loadTb();}},[tab,loadSchedules,loadTb,loadMap]);
+
+  const upload=async()=>{
+    if(!file){setErr('Choose the operating trial balance file (.xlsx or .csv).');return;}
+    if(!operEid){setErr('This group has no operating (uploaded) column.');return;}
+    setBusy(true);setErr('');setMsg('');
+    try{const r=await api.uploadConsolTb(peid,operEid,asOf,file);
+      const bits=[r.count+' lines saved as of '+r.as_of+'.'];
+      if(r.balanced===false)bits.push('⚠ The trial balance does not foot — debits and credits are off by '+fmt(r.residual)+'. Check for a subtotal row or a misread column.');
+      else bits.push('It foots.');
+      if(r.unmapped_count)bits.push(r.unmapped_count+' source accounts are unmapped'+(r.unmapped_nonzero&&r.unmapped_nonzero.length?' ('+r.unmapped_nonzero.length+' carry a balance)':'')+' — map them under the Mapping tab so they flow into the schedules.');
+      if(r.workpaper)bits.push('Filed to '+r.workpaper.folder_path+' / '+r.workpaper.file_name+'.');
+      setMsg(bits.join(' '));
+      setFile(null);if(fileRef.current)fileRef.current.value='';
+      await loadTb();await loadSetup();
+    }catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+
+  const setMapField=(i,k,v)=>setMapRows(rows=>rows.map((r,ix)=>ix===i?{...r,[k]:v,_dirty:true}:r));
+  const saveMap=async()=>{
+    const dirty=mapRows.filter(r=>r._dirty);
+    if(!dirty.length){setMsg('No mapping changes to save.');return;}
+    setBusy(true);setErr('');setMsg('');
+    try{await api.saveConsolMap(peid,operEid,dirty.map(r=>({source_code:r.source_code,target_code:r.target_code,target_name:r.target_name,target_type:r.target_type})));
+      setMsg(dirty.length+' mapping row(s) saved.');await loadMap();await loadTb();
+    }catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+  const addMapping=async(u,target_code,target_name,target_type)=>{
+    if(!target_code||!target_name||!target_type){setErr('A new mapping needs a target code, name and type.');return;}
+    setBusy(true);setErr('');setMsg('');
+    try{await api.saveConsolMap(peid,operEid,[{source_code:u.source_code,target_code,target_name,target_type}]);
+      setMsg('Mapped '+u.source_code+' → '+target_code+' '+target_name+'.');await loadMap();await loadTb();
+    }catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+
+  const TYPES=['Asset','Liability','Equity','Revenue','Expense'];
+  const scheduleTable=(sec,kind)=>{
+    if(!sec)return null;
+    const cols=(sched&&sched.columns)||[];
+    const accts=sec.accounts||[];
+    const money=v=>Math.abs(v||0)<0.005?'-':fmt(v);
+    const colSum=(pred,pick)=>accts.filter(pred).reduce((s,a)=>s+(pick(a)||0),0);
+    const groups=kind==='bs'?['Asset','Liability','Equity']:['Revenue','Expense'];
+    const label={Asset:'Assets',Liability:'Liabilities',Equity:"Members' Equity",Revenue:'Revenue',Expense:'Expenses'};
+    const rowsFor=t=>accts.filter(a=>a.type===t&&(Math.abs(a.consolidated||0)>0.005||cols.some(c=>Math.abs((a.byEntity||{})[c.entity_id]||0)>0.005)||Math.abs(a.elimination||0)>0.005));
+    const nCols=cols.length+2;
+    return(<div style={{...scrollBox(),marginBottom:16}} className="cl-scroll">
+      <table style={S.table}><thead><tr>
+        <th style={{...S.th,minWidth:230}}>{sec.period}</th>
+        {cols.map(c=><th key={c.entity_id} style={{...S.thR,minWidth:130}}>{c.label}</th>)}
+        <th style={S.thR}>Eliminations</th><th style={S.thR}>Consolidated</th>
+      </tr></thead><tbody>
+      {groups.map(t=>{
+        const rows=rowsFor(t);
+        return(<Fragment key={t}>
+          <tr><td colSpan={nCols} style={{...S.td,fontWeight:700,color:T.textBright,background:T.bgElevated}}>{label[t]}</td></tr>
+          {rows.map(a=><tr key={t+a.code}>
+            <td style={{...S.td,whiteSpace:'normal'}}><span style={{color:T.textMuted,fontVariantNumeric:'tabular-nums'}}>{a.code}</span>{'  '}{a.name}</td>
+            {cols.map(c=><td key={c.entity_id} style={S.tdR}>{money((a.byEntity||{})[c.entity_id])}</td>)}
+            <td style={S.tdR}>{money(a.elimination)}</td>
+            <td style={{...S.tdR,fontWeight:600}}>{money(a.consolidated)}</td>
+          </tr>)}
+          <tr style={{borderTop:'2px solid '+T.border}}>
+            <td style={{...S.td,fontWeight:700}}>Total {label[t]}</td>
+            {cols.map(c=><td key={c.entity_id} style={{...S.tdR,fontWeight:700}}>{money(colSum(a=>a.type===t,a=>(a.byEntity||{})[c.entity_id]))}</td>)}
+            <td style={{...S.tdR,fontWeight:700}}>{money(colSum(a=>a.type===t,a=>a.elimination))}</td>
+            <td style={{...S.tdR,fontWeight:700}}>{money(colSum(a=>a.type===t,a=>a.consolidated))}</td>
+          </tr>
+        </Fragment>);
+      })}
+      {kind==='is'&&(()=>{
+        const ni=(pick)=>colSum(a=>a.type==='Revenue',pick)-colSum(a=>a.type==='Expense',pick);
+        return(<tr style={{borderTop:'3px double '+T.border,background:T.accentDim}}>
+          <td style={{...S.td,fontWeight:800,color:T.textBright}}>Net Income (Loss)</td>
+          {cols.map(c=><td key={c.entity_id} style={{...S.tdR,fontWeight:800}}>{money(ni(a=>(a.byEntity||{})[c.entity_id]))}</td>)}
+          <td style={{...S.tdR,fontWeight:800}}>{money(ni(a=>a.elimination))}</td>
+          <td style={{...S.tdR,fontWeight:800}}>{money(ni(a=>a.consolidated))}</td>
+        </tr>);
+      })()}
+      {kind==='bs'&&(()=>{
+        const le=(pick)=>colSum(a=>a.type==='Liability',pick)+colSum(a=>a.type==='Equity',pick)+colSum(a=>a.type==='Revenue',pick)-colSum(a=>a.type==='Expense',pick);
+        return(<tr style={{borderTop:'3px double '+T.border,background:T.accentDim}}>
+          <td style={{...S.td,fontWeight:800,color:T.textBright}}>Total Liabilities &amp; Equity</td>
+          {cols.map(c=><td key={c.entity_id} style={{...S.tdR,fontWeight:800}}>{money(le(a=>(a.byEntity||{})[c.entity_id]))}</td>)}
+          <td style={{...S.tdR,fontWeight:800}}>{money(le(a=>a.elimination))}</td>
+          <td style={{...S.tdR,fontWeight:800}}>{money(le(a=>a.consolidated))}</td>
+        </tr>);
+      })()}
+      </tbody></table>
+    </div>);
+  };
+
+  const TB_MONTHS=operCol&&operCol.tb_months?operCol.tb_months:[];
+  const tabs=[['schedules','Consolidating schedules'],['tb','Trial balance'],['mapping','Mapping'],['setup','Setup']];
+
+  return(<div>
+    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:10}}>
+      <div><div style={S.h1}>Consolidation</div>
+        <div style={S.sub}>{setup?setup.parent_name:''} — the operating column is an uploaded trial balance; the ledger columns come straight from CloudLedger.</div></div>
+      <div style={{display:'flex',alignItems:'flex-end',gap:10}}>
+        {groups.length>1&&<div><label style={S.label}>Group</label>
+          <select style={S.selectSm} value={peid||''} onChange={e=>{setPeid(Number(e.target.value));setSched(null);setTb(null);}}>
+            {groups.map(g=><option key={g.parent_entity_id} value={g.parent_entity_id}>{g.parent_name}</option>)}</select></div>}
+        <div><label style={S.label}>As of (month end)</label>
+          <input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(monthEndStr(e.target.value))}/></div>
+      </div>
+    </div>
+
+    <div style={{display:'flex',gap:0,borderBottom:'1px solid '+T.border,margin:'14px 0 16px'}}>
+      {tabs.map(([k,l])=><button key={k} onClick={()=>{setTab(k);setErr('');setMsg('');}}
+        style={{background:'none',border:'none',borderBottom:'2px solid '+(tab===k?T.accent:'transparent'),color:tab===k?T.accent:T.textMuted,fontWeight:tab===k?700:500,fontSize:13,padding:'9px 16px',cursor:'pointer',marginBottom:-1}}>{l}</button>)}
+    </div>
+
+    {err&&<div style={{...S.card,borderColor:T.red+'40'}}><div style={S.err}>{err}</div></div>}
+    {msg&&<div style={{...S.card,borderColor:T.green+'40',padding:14}}><div style={S.success}>{msg}</div></div>}
+
+    {tab==='schedules'&&<div>
+      {!sched&&!err&&<div style={{...S.card,color:T.textDim,fontSize:12.5}}>Loading schedules for {asOf}…</div>}
+      {sched&&<>
+        {sched.balance_sheet&&sched.balance_sheet.unavailable&&sched.balance_sheet.unavailable.length>0&&
+          <div style={{...S.card,borderColor:T.orange+'40',padding:12,color:T.orange,fontSize:12.5}}>
+            No trial balance is uploaded for {asOf} on the operating column, so it shows as zero. Upload it under the Trial balance tab.</div>}
+        <div style={S.h2}>Consolidating Balance Sheet — {sched.balance_sheet.period}</div>
+        {scheduleTable(sched.balance_sheet,'bs')}
+        <div style={S.h2}>Consolidating Statement of Operations — {sched.operations_month.period}</div>
+        {scheduleTable(sched.operations_month,'is')}
+        <div style={S.h2}>Consolidating Statement of Operations — {sched.operations_ytd.period}</div>
+        {scheduleTable(sched.operations_ytd,'is')}
+      </>}
+    </div>}
+
+    {tab==='tb'&&<div>
+      {canEdit&&<div style={{...S.card,padding:16,marginBottom:16}}>
+        <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
+          <div><label style={S.label}>Operating trial balance ({operCol?operCol.label:'operating column'})</label>
+            <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" style={{fontSize:12.5,display:'block'}}
+              onChange={e=>setFile(e.target.files&&e.target.files[0]?e.target.files[0]:null)}/></div>
+          <div><label style={S.label}>As of</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(monthEndStr(e.target.value))}/></div>
+          <button style={S.btnP} onClick={upload} disabled={busy}>{busy?'Uploading…':'Upload TB'}</button>
+        </div>
+        <div style={{fontSize:11.5,color:T.textDim,marginTop:10}}>Columns detected automatically: account code + name, then Forward / Debit / Credit / Ending (or a single Balance). Re-uploading the same month replaces it.</div>
+      </div>}
+      {TB_MONTHS.length>0&&<div style={{...S.card,padding:0,marginBottom:16}}>
+        <div style={{padding:'10px 14px',fontWeight:700,color:T.textBright,fontSize:13,borderBottom:'1px solid '+T.border}}>Uploaded months</div>
+        <table style={S.table}><thead><tr><th style={S.th}>As of</th><th style={S.thR}>Lines</th><th style={S.th}>Uploaded</th><th style={S.th}></th></tr></thead>
+          <tbody>{TB_MONTHS.map(m=><tr key={m.as_of}>
+            <td style={S.td}>{m.as_of}</td><td style={S.tdR}>{m.lines}</td>
+            <td style={{...S.td,color:T.textMuted,fontSize:11.5}}>{String(m.uploaded_at||'').slice(0,10)}{m.uploaded_by?' · '+m.uploaded_by:''}</td>
+            <td style={{...S.td,textAlign:'right'}}>{canEdit&&<button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={async()=>{if(!window.confirm('Delete the '+m.as_of+' operating TB?'))return;try{await api.deleteConsolTb(peid,operEid,m.as_of);setMsg('Deleted '+m.as_of+'.');await loadSetup();await loadTb();}catch(e){setErr(e.message);}}}>delete</button>}</td>
+          </tr>)}</tbody></table></div>}
+      {tb&&tb.lines&&tb.lines.length>0&&<div style={{...scrollBox()}} className="cl-scroll">
+        <table style={S.table}><thead><tr>
+          <th style={S.th}>Source</th><th style={S.th}>Name</th><th style={S.thR}>Ending</th><th style={S.th}>Maps to</th></tr></thead>
+          <tbody>{tb.lines.map(l=><tr key={l.source_code}>
+            <td style={{...S.td,fontWeight:600}}>{l.source_code}</td>
+            <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{l.source_name}</td>
+            <td style={S.tdR}>{fmt(l.ending)}</td>
+            <td style={{...S.td,fontSize:11.5}}>{l.target_code?<span>{l.target_code} {l.target_name} <span style={{color:T.textDim}}>({l.target_type})</span></span>:<span style={{color:T.orange}}>unmapped</span>}</td>
+          </tr>)}</tbody></table></div>}
+      {tb&&(!tb.lines||!tb.lines.length)&&<div style={{...S.card,color:T.textDim,fontSize:12.5}}>No trial balance uploaded for {asOf} yet.</div>}
+    </div>}
+
+    {tab==='mapping'&&<div>
+      {unmapped&&unmapped.length>0&&<div style={{...S.card,padding:0,marginBottom:16,borderColor:T.orange+'40'}}>
+        <div style={{padding:'10px 14px',fontWeight:700,color:T.orange,fontSize:13,borderBottom:'1px solid '+T.border}}>Unmapped ({unmapped.length}) — these do not flow into the schedules until mapped</div>
+        <table style={S.table}><thead><tr><th style={S.th}>Source</th><th style={S.th}>Name</th><th style={S.thR}>Ending</th><th style={S.th}>Target code</th><th style={S.th}>Target name</th><th style={S.th}>Type</th><th style={S.th}></th></tr></thead>
+          <tbody>{unmapped.map(u=><UnmappedRow key={u.source_code} u={u} canEdit={canEdit} onAdd={addMapping}/>)}</tbody></table></div>}
+      <div style={{...scrollBox()}} className="cl-scroll">
+        <table style={S.table}><thead><tr><th style={S.th}>Source</th><th style={S.th}>Target code</th><th style={S.th}>Target name</th><th style={S.th}>Type</th></tr></thead>
+          <tbody>{mapRows.map((r,i)=><tr key={r.source_code}>
+            <td style={{...S.td,fontWeight:600}}>{r.source_code}</td>
+            <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:90}} value={r.target_code||''} onChange={e=>setMapField(i,'target_code',e.target.value)}/>:r.target_code}</td>
+            <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:240}} value={r.target_name||''} onChange={e=>setMapField(i,'target_name',e.target.value)}/>:r.target_name}</td>
+            <td style={S.td}>{canEdit?<select style={S.selectSm} value={r.target_type||''} onChange={e=>setMapField(i,'target_type',e.target.value)}>{TYPES.map(t=><option key={t}>{t}</option>)}</select>:r.target_type}</td>
+          </tr>)}
+          {!mapRows.length&&<tr><td colSpan={4} style={{...S.td,color:T.textDim,textAlign:'center'}}>No mappings yet. Upload a trial balance, then map its accounts above.</td></tr>}
+          </tbody></table></div>
+      {canEdit&&mapRows.some(r=>r._dirty)&&<button style={{...S.btnP,marginTop:12}} onClick={saveMap} disabled={busy}>{busy?'Saving…':'Save mapping changes'}</button>}
+    </div>}
+
+    {tab==='setup'&&setup&&<div>
+      <div style={S.h2}>Columns</div>
+      <div style={{...S.card,padding:0,marginBottom:16}}><table style={S.table}>
+        <thead><tr><th style={S.th}>Column</th><th style={S.th}>Source</th></tr></thead>
+        <tbody>{setup.columns.map(c=><tr key={c.entity_id}><td style={{...S.td,fontWeight:600,color:T.textBright}}>{c.label||c.entity_name}</td><td style={S.td}>{c.source==='tb'?'Uploaded trial balance':'CloudLedger ledger'}</td></tr>)}</tbody></table></div>
+      <div style={S.h2}>Investment / capital eliminations</div>
+      <div style={{...S.card,padding:0,marginBottom:16}}><table style={S.table}>
+        <thead><tr><th style={S.th}>Holder</th><th style={S.th}>Acct</th><th style={S.th}>Issuer</th><th style={S.th}>Acct</th></tr></thead>
+        <tbody>{(setup.investment_pairs||[]).map(p=><tr key={p.id}>
+          <td style={S.td}>{entName(p.holder_entity_id)}</td><td style={S.td}>{p.holder_account_code}</td>
+          <td style={S.td}>{entName(p.issuer_entity_id)}</td><td style={S.td}>{p.issuer_account_code}</td></tr>)}
+          {!(setup.investment_pairs||[]).length&&<tr><td colSpan={4} style={{...S.td,color:T.textDim}}>None.</td></tr>}</tbody></table></div>
+      {setup.full_eliminations&&<>
+        <div style={S.h2}>Mirrored development accounts (removed in full)</div>
+        <div style={S.sub}>These operating accounts mirror the development ledger and come out for whatever they carry each month.</div>
+        <div style={{...S.card,padding:0,marginBottom:16}}><table style={S.table}>
+          <thead><tr><th style={S.th}>Code</th><th style={S.th}>Name</th></tr></thead>
+          <tbody>{setup.full_eliminations.map(f=><tr key={f.id}><td style={{...S.td,fontWeight:600}}>{f.account_code}</td><td style={S.td}>{f.account_name}</td></tr>)}
+            {!setup.full_eliminations.length&&<tr><td colSpan={2} style={{...S.td,color:T.textDim}}>None.</td></tr>}</tbody></table></div>
+      </>}
+      {setup.funding_accounts&&setup.funding_accounts.length>0&&<>
+        <div style={S.h2}>Funding accounts (matched against operating contributed capital)</div>
+        <div style={{...S.card,padding:0,marginBottom:16}}><table style={S.table}>
+          <thead><tr><th style={S.th}>Entity</th><th style={S.th}>Code</th><th style={S.th}>Name</th><th style={S.th}>Mode</th><th style={S.thR}>Amount</th></tr></thead>
+          <tbody>{setup.funding_accounts.map(f=><tr key={f.id}><td style={S.td}>{entName(f.entity_id)}</td><td style={{...S.td,fontWeight:600}}>{f.account_code}</td><td style={S.td}>{f.account_name}</td><td style={S.td}>{f.mode}</td><td style={S.tdR}>{f.mode==='full'?'full balance':fmt(f.amount)}</td></tr>)}</tbody></table></div>
+      </>}
+    </div>}
+  </div>);
+}
+
+// One unmapped operating account, with inline inputs to give it a target.
+function UnmappedRow({u,canEdit,onAdd}){
+  const[tc,setTc]=useState('');const[tn,setTn]=useState(u.source_name||'');const[tt,setTt]=useState('Asset');
+  const TYPES=['Asset','Liability','Equity','Revenue','Expense'];
+  return(<tr>
+    <td style={{...S.td,fontWeight:600}}>{u.source_code}</td>
+    <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{u.source_name}</td>
+    <td style={S.tdR}>{fmt(u.ending)}</td>
+    <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:80}} value={tc} onChange={e=>setTc(e.target.value)} placeholder="code"/>:''}</td>
+    <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:200}} value={tn} onChange={e=>setTn(e.target.value)} placeholder="name"/>:''}</td>
+    <td style={S.td}>{canEdit?<select style={S.selectSm} value={tt} onChange={e=>setTt(e.target.value)}>{TYPES.map(t=><option key={t}>{t}</option>)}</select>:''}</td>
+    <td style={S.td}>{canEdit?<button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>onAdd(u,tc.trim(),tn.trim(),tt)}>map</button>:''}</td>
+  </tr>);
 }
 
 function OrgStructurePage({entities,canEdit=true}){

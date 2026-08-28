@@ -759,5 +759,35 @@ export const api = {
   reconcileOrgInvestments: (root_node_id, as_of) =>
     request('/org-structure/reconcile/investments?root_node_id=' + root_node_id + (as_of ? '&as_of=' + as_of : '')),
 
+  // ── Consolidation (Braker / HP) ──
+  // The operating column is an uploaded trial balance; every route is scoped to
+  // the parent entity and refuses anything outside Braker and HP server-side.
+  getConsolGroups: () => request('/consolidation/groups'),
+  getConsol: (parentEid) => request('/consolidation/' + parentEid),
+  getConsolTb: (parentEid, entityId, asOf) =>
+    request('/consolidation/' + parentEid + '/operating-tb'
+      + (entityId ? '?entity_id=' + entityId : '') + (asOf ? (entityId ? '&' : '?') + 'as_of=' + asOf : '')),
+  uploadConsolTb: (parentEid, entityId, asOf, file) => {
+    const fd = new FormData();
+    fd.append('file', file); fd.append('entity_id', entityId); fd.append('as_of', asOf);
+    return request('/consolidation/' + parentEid + '/operating-tb', { method: 'POST', body: fd });
+  },
+  deleteConsolTb: (parentEid, entityId, asOf) =>
+    request('/consolidation/' + parentEid + '/operating-tb?entity_id=' + entityId + '&as_of=' + asOf, { method: 'DELETE' }),
+  getConsolMap: (parentEid, entityId) =>
+    request('/consolidation/' + parentEid + '/map' + (entityId ? '?entity_id=' + entityId : '')),
+  saveConsolMap: (parentEid, entityId, rows) =>
+    request('/consolidation/' + parentEid + '/map', { method: 'PUT', body: { entity_id: entityId, rows } }),
+  getConsolFundingAccounts: (parentEid) => request('/consolidation/' + parentEid + '/funding-accounts'),
+  saveConsolFundingAccounts: (parentEid, rows) =>
+    request('/consolidation/' + parentEid + '/funding-accounts', { method: 'PUT', body: { rows } }),
+  getConsolFullEliminations: (parentEid) => request('/consolidation/' + parentEid + '/full-eliminations'),
+  saveConsolFullEliminations: (parentEid, rows) =>
+    request('/consolidation/' + parentEid + '/full-eliminations', { method: 'PUT', body: { rows } }),
+  getConsolEliminations: (parentEid, asOf) =>
+    request('/consolidation/' + parentEid + '/eliminations?as_of=' + asOf),
+  getConsolSchedules: (parentEid, asOf) =>
+    request('/consolidation/' + parentEid + '/schedules?as_of=' + asOf),
+
   setToken, getToken, clearToken,
 };
