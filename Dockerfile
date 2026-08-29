@@ -12,7 +12,7 @@ WORKDIR /app
 
 # Install root dependencies
 COPY package.json ./
-RUN npm install --production=false && echo "rebuild-1"
+RUN npm install --production=false && echo "rebuild-2"
 
 # Install client dependencies and build
 COPY client/package.json client/
