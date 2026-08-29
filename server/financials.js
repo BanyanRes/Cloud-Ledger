@@ -2427,12 +2427,14 @@ async function buildStatements(getBalances, opts) {
     equityMembers.push({ code: o.code, name: o.name, beginning: beg, contributions: r2(end - beg), distributions: 0, netIncome: 0, ending: end });
   }
   equityMembers.sort((a, b) => String(a.code).localeCompare(String(b.code), undefined, { numeric: true }));
-  // banyandev (CLA): the Banyan HP Fund Undeployed Capital line is presented as
-  // a current-period distribution, not an opening balance — move its beginning
+  // HP (CLA): the Banyan HP Fund Undeployed Capital line is presented as a
+  // current-period distribution, not an opening balance — move its beginning
   // balance into the Distributions column. The row still foots to ending
   // (beginning + contributions + distributions + net income), and total ending
   // equity is unchanged, so the statement's tie to the balance sheet holds.
-  if (profile === 'banyandev') {
+  // Braker keeps Undeployed Capital in the opening (beginning) column (Jimmy) —
+  // so the move is HP-only within banyandev.
+  if (profile === 'banyandev' && !/braker/i.test(String(opts.entityName || ''))) {
     for (const mrow of equityMembers) {
       if (/undeployed/i.test(mrow.name) && !isZero(mrow.beginning)) {
         mrow.distributions = r2(mrow.distributions + mrow.beginning);
@@ -2730,8 +2732,12 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     //                line across all columns. Defaults ON so every statement's
     //                subtotal/total underlines sit under each number separately,
     //                never as one long line running across the whole row.
-    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapAfter = 0, dollarPrefix = false, valueInset = 0, colRules = true } = {}) {
-      ensure(13);
+    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapAfter = 0, dollarPrefix = false, valueInset = 0, colRules = true, keepWithNext = 0 } = {}) {
+      // keepWithNext reserves extra space so this row and the row(s) that follow
+      // land on the SAME page — used to keep a section grand-total from being
+      // orphaned alone at the top of a continuation page: the closest subtotal
+      // above it reserves the total's height and the two break together.
+      ensure(13 + keepWithNext);
       const font = boldRow ? bold : reg;
       // Per-column rule width. For the per-column rules we want a uniform box
       // sized to the numeric columns (the inter-column pitch), NOT the wide
@@ -2876,7 +2882,7 @@ async function renderStatementsPdf(s, outOffsets) {
     // -- these rows always had the rule ABOVE (separating them from the detail
     // lines), which is a different thing.
     const RULE_BELOW_SECTIONS = /^Total (Current Assets|Fixed Assets, Net)$/;
-    const renderBsSection = (sec, sectionTotalLabel) => {
+    const renderBsSection = (sec, sectionTotalLabel, reserveTail = 0) => {
       L.row(sec.title, [], { indent: 6, boldRow: true });
       const showSubHeaders = sec.subs.length > 1 || sec.subs.some(su => su.contra) || m.profile === 'bsfrgp' || m.profile === 'banyan';
       for (const su of sec.subs) {
@@ -2893,7 +2899,7 @@ async function renderStatementsPdf(s, outOffsets) {
           L.row('Total ' + su.title, bsCells(su.subtotal.cur, su.subtotal.pri), { indent: 20, ruleAbove: true });
         }
       }
-      L.row(sectionTotalLabel, bsCells(sec.total.cur, sec.total.pri), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: RULE_BELOW_SECTIONS.test(sectionTotalLabel), gapAfter: 6 });
+      L.row(sectionTotalLabel, bsCells(sec.total.cur, sec.total.pri), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: RULE_BELOW_SECTIONS.test(sectionTotalLabel), gapAfter: 6, keepWithNext: reserveTail });
     };
     // Turnkey (CLA presentation): a flat list of bare rows under Assets, with
     // only Contract Assets and Fixed Assets carrying a header and a subtotal.
@@ -2917,9 +2923,21 @@ async function renderStatementsPdf(s, outOffsets) {
         L.row('Total ' + blk.title, bsCells(blk.subtotal.cur, blk.subtotal.pri), { indent: 16, ruleAbove: true });
       }
     };
+    // Height reserved by the closest subtotal above each grand total so the
+    // grand total never lands alone atop a continuation page (>= gapAfter + a
+    // grand-total row; see keepWithNext in makeLayout.row).
+    const BS_GRAND_RESERVE = 22;
     bsFirstRow = wantDollar;
     if (tkBs) renderTkBlocks(tkBs.assetBlocks);
-    else for (const sec of s.balanceSheet.assetSections) renderBsSection(sec, 'Total ' + sec.title);
+    else {
+      // Keep the grand "Total Assets" line from being orphaned alone at the top
+      // of a continuation page: the LAST asset section's section-total reserves
+      // the grand total's height (BS_GRAND_RESERVE), so if both won't fit they
+      // break to the next page together (CLA/Jimmy 8/28 — "move the closest
+      // subtotal with the total line to the subsequent page").
+      const asecs = s.balanceSheet.assetSections;
+      asecs.forEach((sec, i) => renderBsSection(sec, 'Total ' + sec.title, i === asecs.length - 1 ? BS_GRAND_RESERVE : 0));
+    }
     L.row('Total Assets', bsCells(s.balanceSheet.totalAssets.cur, s.balanceSheet.totalAssets.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, gapAfter: 8, dollarPrefix: wantDollar });
 
     L.sectionTitle('LIABILITIES AND MEMBERS\u2019 EQUITY');
@@ -2941,11 +2959,11 @@ async function renderStatementsPdf(s, outOffsets) {
       for (const r of rr) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
       L.row('Total Retained Earnings', bsCells(retTot.cur, retTot.pri), { indent: 20, ruleAbove: true, gapAfter: 4 });
       L.row('Net Income (Loss)', bsCells(s.balanceSheet.niLine.cur, s.balanceSheet.niLine.pri), { indent: 16 });
-      L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6, keepWithNext: BS_GRAND_RESERVE });
     } else {
       for (const r of (s.balanceSheet.retainedRows || [])) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
       L.row('Net Income (Loss)', bsCells(s.balanceSheet.niLine.cur, s.balanceSheet.niLine.pri), { indent: 16 });
-      L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6, keepWithNext: BS_GRAND_RESERVE });
     }
     L.row('Total Liabilities and Members\u2019 Equity', bsCells(s.balanceSheet.totalLiabEquity.cur, s.balanceSheet.totalLiabEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: wantDollar });
   }
@@ -3458,6 +3476,8 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   const nameEnd = colRight[0] - numColW - 8;
   const F = { title: 10.5, sub: 9, head: 6.8, row: 7.0, foot: 7.2 };
   const rowH = 11.5, lineH = 8;
+  // Space a section subtotal reserves so the following grand total shares its page.
+  const GRAND_RESERVE = rowH * 1.5;
   let page, y, curTitle = null, curDateLine = null;
 
   const dtext = (s, x, yy, size, font, color) => page.drawText(String(s), { x, y: yy, size, font, color: color || rgb(0.1, 0.1, 0.1) });
@@ -3510,7 +3530,11 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   // A double rule under the figures (final-total convention). Drawn just below
   // the current baseline, only under the number columns.
   const doubleUnder = () => { for (let i = 0; i < nCols; i++) { const x0 = colRight[i] - (numColW - 10); for (const dy of [-2.4, -4.1]) page.drawLine({ start: { x: x0, y: y + dy }, end: { x: colRight[i], y: y + dy }, thickness: 0.5, color: rgb(0.3, 0.3, 0.3) }); } };
-  const subtotal = (label, getVal, opts) => { const o = opts || {}; ensure(rowH); if (!o.noTopRule) rule(); dtext(label, nameLeft + 10, y, F.row, bold); figs(getVal, bold); if (o.double) doubleUnder(); y -= rowH * 1.5; };
+  // reserveAfter (pt) makes this subtotal reserve extra space so the row that
+  // follows it (a grand total) lands on the SAME page — keeps "Total Assets" /
+  // "Total Liabilities and Members' Equity" from being orphaned alone at the
+  // top of a continuation page (CLA/Jimmy 8/28).
+  const subtotal = (label, getVal, opts) => { const o = opts || {}; ensure(rowH + (o.reserveAfter || 0)); if (!o.noTopRule) rule(); dtext(label, nameLeft + 10, y, F.row, bold); figs(getVal, bold); if (o.double) doubleUnder(); y -= rowH * 1.5; };
 
   // Mirror the FACE statement groupings (Jimmy, 2026-08-28): the consolidating
   // schedules use the same balance-sheet classification (bsClassifyFor) and the
@@ -3554,7 +3578,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   // Render one grouped section: header, each subsection (header + rows +
   // subtotal when there is more than one subsection or the section forces it),
   // then the bold section subtotal.
-  const renderGroupedSection = (secGroup, sectionTotalLabel) => {
+  const renderGroupedSection = (secGroup, sectionTotalLabel, reserveTail = 0) => {
     sectionHeader(secGroup.section);
     const force = forceSubSet.has(secGroup.section);
     const showSubs = secGroup.subs.length > 1 || force;
@@ -3565,14 +3589,20 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
       if (showSubs && (su.rows.length > 1 || force)) subSubtotal('Total ' + su.sub, i => sumCol(su.rows, i));
     }
     const allRows = secGroup.subs.reduce((s2, su) => s2.concat(su.rows), []);
-    subtotal(sectionTotalLabel, i => sumCol(allRows, i));
+    subtotal(sectionTotalLabel, i => sumCol(allRows, i), reserveTail ? { reserveAfter: reserveTail } : undefined);
   };
 
   const renderBalanceSheet = () => {
     curTitle = 'Consolidating Balance Sheet'; curDateLine = meta.longDate;
     offsets.push({ label: curTitle, page: pdf.getPageCount() });
     newPage();
-    const acc = schedules.balanceSheet.accounts || [];
+    // Drop accounts with no balance in ANY column (members, eliminations, or
+    // consolidated) — a row of all dashes carries no information and only pads
+    // the schedule (Jimmy). Subtotals are unaffected: a zero row adds nothing.
+    const acc = (schedules.balanceSheet.accounts || []).filter(a => {
+      for (let i = 0; i < nCols; i++) if (Math.abs(val(a, i)) > 0.004) return true;
+      return false;
+    });
     const assets = acc.filter(a => a.type === 'Asset');
     const liabs = acc.filter(a => a.type === 'Liability');
     const equityAll = acc.filter(a => a.type === 'Equity');
@@ -3587,7 +3617,8 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     const retained = byCode(equityAll.filter(a => isRE(a)));
     // Assets.
     sectionHeader('Assets');
-    for (const sec of groupRows(assets, BS_ASSET_ORDER)) renderGroupedSection(sec, 'Total ' + sec.section);
+    const assetSecs = groupRows(assets, BS_ASSET_ORDER);
+    assetSecs.forEach((sec, i) => renderGroupedSection(sec, 'Total ' + sec.section, i === assetSecs.length - 1 ? GRAND_RESERVE : 0));
     subtotal('Total Assets', i => sumCol(assets, i), { double: true });
     // Liabilities and Members' Equity.
     sectionHeader('Liabilities and Members’ Equity');
@@ -3602,7 +3633,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
       subSubtotal('Total Retained Earnings', i => sumCol(retained, i));
     }
     ensure(rowH); dtext('Net Income (Loss)', nameLeft + 18, y, F.row, reg); figs(ni); y -= rowH;
-    subtotal('Total Members’ Equity', i => r2(sumCol(equityAll, i) + ni(i)));
+    subtotal('Total Members’ Equity', i => r2(sumCol(equityAll, i) + ni(i)), { reserveAfter: GRAND_RESERVE });
     subtotal('Total Liabilities and Members’ Equity', i => r2(sumCol(liabs, i) + sumCol(equityAll, i) + ni(i)), { double: true });
   };
   const renderIncome = () => {
