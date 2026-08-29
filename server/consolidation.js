@@ -784,9 +784,15 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
     //   accounts are eliminated, each for its OWN activity in that window —
     //   mortgage interest is removed only in the months the operating ledger
     //   actually carries it, and for exactly that amount. No plug.
-    let plugAsOf = null;
-    if (o && o.as_of) plugAsOf = o.as_of;
-    else if (o && o.from && o.to && o.from <= yearStart(o.to)) plugAsOf = o.to;   // year to date
+    // Plug only on a balance-sheet (as_of) window: a balance sheet has no P&L
+    // lines, so the mirror's net income has to land on a single Net Income line.
+    // Every income-statement window — monthly OR year to date — instead
+    // eliminates the mirrored P&L accounts line by line at that window's own
+    // activity. That sums to the same net-income effect as the plug (the plug is
+    // exactly the mirrored P&L, net), so the year-to-date statement still ties
+    // to the balance sheet, but it prints on the real expense lines with no
+    // synthetic plug line.
+    const plugAsOf = (o && o.as_of) ? o.as_of : null;
     let plugged = 0;
 
     if (plugAsOf) {
