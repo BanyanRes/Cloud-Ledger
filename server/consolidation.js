@@ -768,64 +768,57 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
     });
     // Two contexts, split by the window being built:
     //
-    //   Balance sheet / cumulative (as_of, or a year-to-date range). Eliminate
-    //   the mirrored BALANCE-SHEET accounts (asset/liability/equity) at their
-    //   ending balances. What is left over — assets minus liabilities minus
-    //   equity across the mirror — IS the net income embedded in the operating
-    //   book's copy of the development book, and it is posted as a single Net
-    //   Income (Loss) plug so the elimination column foots and the consolidated
-    //   balance sheet balances. The mirrored P&L accounts (e.g. mortgage
-    //   interest) are NOT eliminated line by line here: the plug already carries
-    //   their whole effect through net income, so removing them again would
-    //   double count.
+    //   Cumulative (as_of balance sheet, or a year-to-date income range).
+    //   Remove the ENTIRE mirror — asset, liability, equity AND P&L — for
+    //   whatever it carries this window. The operating book's copy of the
+    //   development book does not net exactly to zero (a small reconciling item
+    //   between the two books), so removing it in full leaves the elimination
+    //   column one-sided by that residual, which is plugged to a single Net
+    //   Income (Loss) line. Measured from ending balances so the balance sheet
+    //   and the year-to-date income statement carry the SAME plug and tie to
+    //   each other. Because the P&L is removed here too, the consolidated
+    //   statements never double-count the operating book's mortgage interest.
     //
-    //   Period statement of income (a single month). The balance-sheet mirror
-    //   accounts do not appear on an income statement, so only the mirrored P&L
-    //   accounts are eliminated, each for its OWN activity in that window —
-    //   mortgage interest is removed only in the months the operating ledger
-    //   actually carries it, and for exactly that amount. No plug.
-    // Plug only on a balance-sheet (as_of) window: a balance sheet has no P&L
-    // lines, so the mirror's net income has to land on a single Net Income line.
-    // Every income-statement window — monthly OR year to date — instead
-    // eliminates the mirrored P&L accounts line by line at that window's own
-    // activity. That sums to the same net-income effect as the plug (the plug is
-    // exactly the mirrored P&L, net), so the year-to-date statement still ties
-    // to the balance sheet, but it prints on the real expense lines with no
-    // synthetic plug line.
-    const plugAsOf = (o && o.as_of) ? o.as_of : null;
+    //   Single month income statement. Only the mirrored P&L accounts, each for
+    //   its OWN activity that month — mortgage interest is removed only in the
+    //   months the operating ledger actually carries it, and for exactly that
+    //   amount. No plug: the reconciling item is a cumulative (stock) figure,
+    //   not a one-month movement.
+    let plugAsOf = null;
+    if (o && o.as_of) plugAsOf = o.as_of;
+    else if (o && o.from && o.to && o.from <= yearStart(o.to)) plugAsOf = o.to;   // year to date
     let plugged = 0;
 
     if (plugAsOf) {
-      // Snapshot ending balances at the period end (the as_of window already is
-      // ending balances; a YTD range is not, so measure the plug off a snapshot
-      // either way — a stock reconciling item is always a point-in-time figure).
+      // Remove the whole mirror at this window's balances.
+      for (const l of legs) {
+        if (l.present && l.type) adjustments.push({ entity_id: l.entity_id, code: l.code, type: l.type, amount: l.amount });
+      }
+      // The plug is the residual of the mirror at ENDING balances (the same
+      // figure for the balance sheet and any year-to-date window).
       const snap = new Map();
       for (const eid of new Set(mirrorRows.map(m => m.entity_id))) {
         const mem = membersOf(db, group.id).find(x => x.entity_id === eid) || { entity_id: eid, source: 'tb' };
         snap.set(eid, memberBalances(db, mem, { as_of: plugAsOf, close_pl_before: yearStart(plugAsOf) }, computeBalances) || []);
       }
-      let bsDr = 0, bsCr = 0;
-      const plugEid = mirrorRows[0].entity_id;
+      let dr = 0, cr = 0;
       for (const l of legs) {
         const row = (snap.get(l.entity_id) || []).find(x => String(x.code) === String(l.code));
-        const type = row ? row.type : l.type;
-        const bal = row ? r2(row.balance) : 0;
-        l.type = type; l.balance = bal; l.present = !!row;
-        if (!type || !isBsType(type)) { l.amount = 0; continue; }   // P&L handled by the plug
-        l.amount = bal;
-        if (isDrType(type)) bsDr = r2(bsDr + bal); else bsCr = r2(bsCr + bal);
-        if (row) adjustments.push({ entity_id: l.entity_id, code: l.code, type, amount: bal });
+        if (!row || !row.type) continue;
+        if (isDrType(row.type)) dr = r2(dr + row.balance); else cr = r2(cr + row.balance);
       }
-      plugged = r2(bsDr - bsCr);   // net income embedded in the mirrored development book
+      plugged = r2(dr - cr);
+      const plugEid = mirrorRows[0].entity_id;
       if (Math.abs(plugged) > 0.004) {
-        // Post the plug on the synthetic Net Income line. Expense-typed with
-        // amount = -residual so that (revenue - expense) net income moves by
-        // +residual; buildColumns creates the line on demand.
+        // Synthetic Net Income line: Expense-typed with amount = -residual so
+        // (revenue - expense) net income moves by +residual. buildColumns
+        // creates the line on demand; income-statement renderers fold it into
+        // net income without printing it as an expense line.
         adjustments.push({ entity_id: plugEid, code: NI_PLUG_CODE, type: 'Expense', name: NI_PLUG_NAME, amount: r2(-plugged) });
         legs.push({ entity_id: plugEid, code: NI_PLUG_CODE, name: NI_PLUG_NAME, type: 'Net Income', balance: 0, amount: r2(-plugged), present: true, plug: true });
       }
     } else {
-      // Period income statement: only the mirrored P&L accounts, at this
+      // Single month income statement: only the mirrored P&L accounts, at this
       // window's own activity.
       for (const l of legs) {
         if (!isPlType(l.type)) { l.amount = 0; continue; }
