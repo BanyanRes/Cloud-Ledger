@@ -473,6 +473,112 @@ function figureFor(rows, code) {
   return r ? r2(r.balance) : 0;
 }
 
+// ── Forward funding derivation (Braker) ────────────────────────────────────
+// The funding elimination (rule 2) removes the operating ledger's contributed
+// capital against the development accounts that carry the transferred cash.
+// Instead of hand-maintaining which development accounts those are as new
+// transfers post, derive each new transfer straight from the development ledger
+// — exactly the way the accountant does it by hand:
+//
+//   1. The transfer amount is the increase in operating contributed capital
+//      (the gap between it and what the funding map already eliminates).
+//   2. Find the development journal entry that recorded the transfer — a credit
+//      to the development bank account for that amount (the cash that left).
+//   3. The account(s) DEBITED on that entry are what must be eliminated.
+//   4. If a debited account was a clearing/holding account later reclassed
+//      (e.g. 10119 "Cash - Operating I" → 13425 "Operating Shortfall"), follow
+//      the reclass to where it lands, so a live balance is eliminated rather
+//      than a zeroed clearing account.
+//
+// This runs ONLY when contributed capital has grown beyond the mapped funding
+// (a new transfer landed) and is purely additive — when everything already ties
+// (the recurring shortfall self-captures because 13425 is a `full` account) the
+// gap is zero and this does nothing, so prior periods reproduce unchanged. The
+// development bank account the transfers leave from, per scoped group:
+const FORWARD_FUNDING_CASH = { braker: '10166' };
+
+// Follow a reclass chain. `code` was DEBITED for `amount` on the transfer entry;
+// if a LATER entry (through as_of) CREDITED that same account for that amount,
+// the cash was reclassed out of it, so recurse into the reclass entry's debit
+// legs; otherwise `code` itself is where it landed. Returns [{ code, amount,
+// via }] — `via` records the account(s) it passed through, for transparency.
+// Depth-capped and it never revisits the account it just left, so it cannot loop.
+function followReclass(db, entityId, code, amount, asOf, depth) {
+  depth = depth || 0;
+  const here = [{ code: String(code), amount: r2(amount), via: null }];
+  if (depth > 6) return here;
+  const dateClause = asOf ? ' AND je.date <= ?' : '';
+  const params = asOf ? [entityId, code, asOf, amount] : [entityId, code, amount];
+  const rc = db.prepare(
+    `SELECT je.id AS entry_id FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
+      WHERE je.entity_id = ? AND jl.account_code = ? AND jl.credit > 0${dateClause}
+        AND ABS(jl.credit - ?) < 0.01
+      ORDER BY je.date ASC, je.id ASC`
+  ).all(...params);
+  if (!rc.length) return here;
+  const debits = db.prepare(
+    `SELECT jl.account_code AS code, jl.debit AS amount FROM journal_lines jl
+      WHERE jl.entry_id = ? AND jl.debit > 0 AND jl.account_code <> ?`
+  ).all(rc[0].entry_id, code);
+  if (!debits.length) return here;
+  const out = [];
+  for (const d of debits) {
+    for (const n of followReclass(db, entityId, d.code, r2(d.amount), asOf, depth + 1)) {
+      out.push({ code: n.code, amount: n.amount, via: n.via ? String(code) + '→' + n.via : String(code) });
+    }
+  }
+  return out;
+}
+
+// Derive funding legs for the outstanding `gap` (contributed capital not yet
+// eliminated by the map) from the development ledger `devEntityId`. Matches the
+// gap against credits to the development bank account (newest first, largest
+// that still fits the remaining gap), reads each matched entry's debit legs, and
+// follows any reclass to the landing account. Returns { legs, matched, residual,
+// transfers }: `legs` are extra funding legs to add; `residual` is any part of
+// the gap no transfer entry accounted for (reported, never plugged).
+function deriveForwardFunding(db, group, o, devEntityId, gap) {
+  const out = { legs: [], matched: 0, residual: r2(gap), transfers: [] };
+  const cashCode = FORWARD_FUNDING_CASH[group.scope_key];
+  if (!cashCode || gap <= 0.01) return out;
+  const asOf = o && o.as_of ? monthEnd(o.as_of) : null;
+  const dateClause = asOf ? ' AND je.date <= ?' : '';
+  const params = asOf ? [devEntityId, cashCode, asOf] : [devEntityId, cashCode];
+  const cands = db.prepare(
+    `SELECT je.id AS entry_id, je.date AS date, jl.credit AS amount
+       FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
+      WHERE je.entity_id = ? AND jl.account_code = ? AND jl.credit > 0${dateClause}
+      ORDER BY je.date DESC, je.id DESC`
+  ).all(...params);
+
+  // The clean case is one transfer per reporting period: a single credit to the
+  // development bank for exactly the gap. Match that, newest first. Requiring an
+  // EXACT single-entry match is deliberate — it can never mistake an ordinary
+  // vendor payment out of the same bank that merely happens to fit the gap for a
+  // funding transfer. If several transfers landed in one period, or the gap does
+  // not equal any single entry, nothing is derived and the whole gap is reported
+  // as unassigned (visible, never plugged) for the user to resolve.
+  const exact = cands.find(c => Math.abs(r2(c.amount) - gap) < 0.01);
+  if (exact) {
+    const amt = r2(exact.amount);
+    const debits = db.prepare(
+      `SELECT jl.account_code AS code, jl.debit AS amount FROM journal_lines jl
+        WHERE jl.entry_id = ? AND jl.debit > 0`
+    ).all(exact.entry_id);
+    const landed = [];
+    for (const d of debits) {
+      for (const t of followReclass(db, devEntityId, d.code, r2(d.amount), asOf, 0)) landed.push(t);
+    }
+    if (landed.length) {
+      for (const l of landed) out.legs.push({ code: l.code, amount: r2(l.amount) });
+      out.transfers.push({ entry_id: exact.entry_id, date: exact.date, amount: amt, accounts: landed });
+      out.matched = amt;
+      out.residual = r2(gap - amt);
+    }
+  }
+  return out;
+}
+
 // Build the elimination column for a window.
 //
 // Each rule computes its own two sides from the ledgers and eliminates the
@@ -547,8 +653,40 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
       l.capped = f.mode !== 'full' && Math.abs(r2(f.amount)) > Math.abs(l.balance);
       return l;
     });
-    const fundTotal = r2(fundLegs.reduce((s, l) => s + l.available, 0));
+    let fundTotal = r2(fundLegs.reduce((s, l) => s + l.available, 0));
     const capTotal = r2(capLegs.reduce((s, l) => s + l.available, 0));
+
+    // Forward funding derivation (Braker): when the operating ledger's
+    // contributed capital exceeds what the map already eliminates, a new
+    // transfer has landed that the map has not captured. Derive it from the
+    // development ledger (find the recording entry, take its debit legs, follow
+    // any reclass to the landing account) and add it as funding legs, so the
+    // schedule self-updates each period with no hand maintenance. Capped per
+    // account at that account's own balance minus what is already mapped, so a
+    // landing account that is also a mapped `full` account is never
+    // double-eliminated; anything the derivation cannot account for stays in the
+    // residual, reported and never plugged.
+    let derivedFunding = null;
+    if (group.scope_key === 'braker' && fundRows.length && r2(capTotal - fundTotal) > 0.01) {
+      const devEid = fundRows[0].entity_id;
+      derivedFunding = deriveForwardFunding(db, group, o, devEid, r2(capTotal - fundTotal));
+      const byCode = new Map();
+      for (const l of derivedFunding.legs) byCode.set(l.code, r2((byCode.get(l.code) || 0) + l.amount));
+      for (const [code, amount] of byCode) {
+        const row = (rowsFor(devEid) || []).find(x => String(x.code) === String(code));
+        const bal = row ? r2(row.balance) : 0;
+        const alreadyMapped = fundLegs
+          .filter(l => String(l.code) === String(code) && l.entity_id === devEid)
+          .reduce((s, l) => s + Math.abs(l.available), 0);
+        const room = Math.max(0, r2(Math.abs(bal) - alreadyMapped));
+        const avail = r2(Math.min(Math.abs(amount), room));
+        if (avail <= 0.01) continue;   // no live balance left to eliminate on this account
+        fundLegs.push({ entity_id: devEid, code, type: row ? row.type : null, name: row ? row.name : null,
+          balance: bal, available: avail, side: 'funding', mode: 'derived', derived: true });
+      }
+      fundTotal = r2(fundLegs.reduce((s, l) => s + l.available, 0));
+    }
+
     const matchedTotal = r2(Math.min(fundTotal, capTotal));
 
     // Allocate the matched amount down each side in listed order. Whatever is
@@ -574,6 +712,9 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
       capital_total: capTotal,
       residual: r2(capTotal - fundTotal),
       unassigned: r2(capTotal - fundTotal),
+      derived: derivedFunding
+        ? { matched: derivedFunding.matched, residual: derivedFunding.residual, transfers: derivedFunding.transfers }
+        : null,
     });
   }
 
@@ -775,5 +916,5 @@ module.exports = {
   tbAt,
   unmappedFor,
   mapFor,
-  _helpers: { monthEnd, prevMonthEnd, yearStart, monthStart, rollUp, r2 },
+  _helpers: { monthEnd, prevMonthEnd, yearStart, monthStart, rollUp, r2, deriveForwardFunding, followReclass },
 };
