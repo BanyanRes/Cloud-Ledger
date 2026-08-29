@@ -2697,7 +2697,15 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
         // The block's right edge is still cols[i] and its width is still the widest
         // line, so the widest line lands exactly where it always did and a
         // single-line heading does not move at all.
-        const blockLeft = cols[i] - maxW;
+        // colBox headers (Statement of Changes in Members' Equity, schedules of
+        // investments / partners' capital) CENTER each heading over its column
+        // — the block is centered on the underline box's center (cols[i]-boxW/2)
+        // rather than right-aligned to the column edge, so a short label like
+        // "Contributions" sits centered over its rule instead of hugging the
+        // right (CLA/Jimmy 8/29 — "these column headings should all be centered").
+        // Non-colBox headers (balance sheet / operations date columns) stay
+        // right-aligned over their right-aligned figures.
+        const blockLeft = (hopts.colBox && boxW) ? (cols[i] - boxW / 2 - maxW / 2) : (cols[i] - maxW);
         parts.forEach((pl, pi) => {
           const w = bold.widthOfTextAtSize(pl, FS.head);
           const lineY = baseY + (parts.length - 1 - pi) * LH;
