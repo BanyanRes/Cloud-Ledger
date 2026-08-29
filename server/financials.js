@@ -867,6 +867,94 @@ const BANYAN_SUB_ORDER_IN_GROUP = {
   'Depreciation and Amortization Expense': ['Depreciation', 'Amortization'],
 };
 
+// ── Banyan QOZB development consolidations (banyandev) statement of operations ─
+// Restructured to match the CLA package for HP and Braker EXACTLY. The two
+// property-management systems use different chart conventions — the same 411xx
+// fee code is Other Income on HP but Adjusted Residential Rent on Braker, and
+// 40100 Loss/Gain to Lease is Revenue - Services on HP but Adjusted Residential
+// Rent on Braker — so each entity carries its own account→group map. Section
+// order and the nested Other Income (Expense) shape follow the CLA reference.
+const BANYANDEV_REVENUE_GROUP_ORDER = ['Revenue - Services', 'Adjusted Residential Rent'];
+const BANYANDEV_OPEX_GROUP_ORDER = [
+  'Payroll Expenses', 'Facilities', 'Utilities', 'Legal and Accounting',
+  'Office Expense', 'Taxes and Insurance', 'Advertising and Promotion',
+  'Other Operating Expense',
+];
+const BANYANDEV_OTHER_INCOME_GROUP_ORDER = ['Other Income', 'Interest Income'];
+// Build a code→{bucket,group,sub} map from { bucket: { group: { sub: [codes] } } }.
+function bdBuildMap(spec) {
+  const m = {};
+  for (const bucket of Object.keys(spec))
+    for (const group of Object.keys(spec[bucket]))
+      for (const sub of Object.keys(spec[bucket][group]))
+        for (const code of spec[bucket][group][sub]) m[String(code)] = { bucket, group, sub };
+  return m;
+}
+const BANYANDEV_PL_MAP_HP = bdBuildMap({
+  revenue: {
+    'Revenue - Services': { 'Revenue - Services': ['40001','40002','40003','40004','40005','40006','40007','40008','40009','40010','40011','40014','40100'] },
+    'Adjusted Residential Rent': { 'Adjusted Residential Rent': ['40200','40202','40400','40401','40402','40450','40480'] },
+  },
+  opex: {
+    'Payroll Expenses': { 'Payroll Expenses': ['60002','60003','60004','60012','60006','60008','60009','60010','60050','60104','60105','60106'] },
+    'Facilities': { 'Facilities': ['61034','61041','61077','61078','61079','61080','61085','61087','61089','61092','61093','61094','61095','61096','61082','61108','61158'] },
+    'Utilities': { 'Utilities': ['61151','61152','61159','61164','61163'] },
+    'Legal and Accounting': { 'Legal and Accounting': ['63052'] },
+    'Office Expense': { 'Office Expense': ['60100','60101','60200','60451','60452','63026','67001','67152','67153','67154','67200','67210','67205','67251','67300','67402','67403','67404','68001','68110'] },
+    'Taxes and Insurance': { 'Taxes and Insurance': ['68050','68055'] },
+    'Advertising and Promotion': { 'Advertising and Promotion': ['67455','67457','67458','67461','67468'] },
+    'Other Operating Expense': { 'Other Operating Expense': ['68300','68301','68303','68304','68305','68306','68307','68310'] },
+  },
+  otherIncome: {
+    'Other Income': { 'Other Income': ['41110','41113','41114','41117','41122','41130'] },
+    'Interest Income': { 'Interest Income': ['70000'] },
+  },
+  otherExpense: {
+    'Other Expenses': { 'State and Local Taxes': ['68061'], 'Interest Expenses': ['75000'] },
+  },
+});
+const BANYANDEV_PL_MAP_BRAKER = bdBuildMap({
+  revenue: {
+    'Revenue - Services': { 'Revenue - Services': ['40001'] },
+    'Adjusted Residential Rent': { 'Adjusted Residential Rent': ['40100','40200','40201','40400','40480','41111','41113','41115','41117','41119','41120','41121','41122','41123','41124','41125','41126','41127','41128','41129'] },
+  },
+  opex: {
+    'Payroll Expenses': { 'Payroll Expenses': ['60000','60008','60010','60016','60104','60105'] },
+    'Facilities': { 'Facilities': ['61034','61056','61058','61064','61084','61085','61086','61087','61093','61169','61170','61171','61172'] },
+    'Utilities': { 'Utilities': ['61147','61148','61149','61152','61153','61163','61165','61166','61167','61168'] },
+    'Legal and Accounting': { 'Legal and Accounting': ['63000','63150'] },
+    'Office Expense': { 'Office Expense': ['60451','60452','63025','63026','63045','63046','63100','67001','67002','67003','67004','67005','67006','67007','67011','67012','67150','67152','67200','67250','67251','67300','67301','67400','67401','67403','67405','67467','68110'] },
+    'Taxes and Insurance': { 'Taxes and Insurance': ['65000','68055'] },
+    'Advertising and Promotion': { 'Advertising and Promotion': ['67455','67457'] },
+    'Other Operating Expense': { 'Other Operating Expense': ['68304','68306'] },
+  },
+  otherIncome: {
+    'Interest Income': { 'Interest Income': ['70000'] },
+  },
+  otherExpense: {
+    'Other Expense': { 'Other Expense': ['68061','75131','75132','75133','70350'] },
+  },
+});
+// CLA suppresses the group subtotal on HP's "Other Expenses" (it prints the two
+// subsection totals then goes straight to Total Other Income (Expense)); Braker's
+// flat "Other Expense" keeps its group total.
+const BANYANDEV_NO_GROUP_TOTAL = new Set(['Other Expenses']);
+function banyandevPlRoute(entityKey, row) {
+  const map = entityKey === 'braker' ? BANYANDEV_PL_MAP_BRAKER : BANYANDEV_PL_MAP_HP;
+  const hit = map[String(row.code)];
+  if (hit) return hit;
+  // Fallback so nothing is dropped and net income still ties.
+  const name = (row.name || '').toLowerCase();
+  const oeGroup = entityKey === 'braker' ? 'Other Expense' : 'Other Expenses';
+  if (row.type === 'Revenue') {
+    if (/interest income/.test(name)) return { bucket: 'otherIncome', group: 'Interest Income', sub: 'Interest Income' };
+    return { bucket: 'revenue', group: 'Adjusted Residential Rent', sub: 'Adjusted Residential Rent' };
+  }
+  if (/franchise tax|state.*tax|income tax/.test(name)) return { bucket: 'otherExpense', group: oeGroup, sub: entityKey === 'braker' ? 'Other Expense' : 'State and Local Taxes' };
+  if (/mortgage interest|interest expense/.test(name)) return { bucket: 'otherExpense', group: oeGroup, sub: entityKey === 'braker' ? 'Other Expense' : 'Interest Expenses' };
+  return { bucket: 'opex', group: 'Office Expense', sub: 'Office Expense' };
+}
+
 // ── numeric helpers ────────────────────────────────────────────────────────
 const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
 const isZero = n => Math.abs(Number(n) || 0) < 0.005;
@@ -1969,13 +2057,17 @@ async function buildStatements(getBalances, opts) {
   // Every P&L account is routed by banyanPlRoute so nothing is dropped; the
   // resulting net income equals the GL net income by construction.
   let banyanOps = null;
-  if (profile === 'banyan') {
+  if (profile === 'banyan' || profile === 'banyandev') {
+    const isBd = profile === 'banyandev';
+    const bdKey = isBd ? (/braker/i.test(String(opts.entityName || '')) ? 'braker' : 'hp') : null;
     const allPl = plLines(() => true);
     const byBucket = { revenue: [], opex: [], otherIncome: [], otherExpense: [], incomeTax: [] };
     const routeOf = {};
     for (const l of allPl) {
       const ref = mYtd.get(l.code) || mCur.get(l.code) || mPri.get(l.code);
-      const route = banyanPlRoute({ code: l.code, name: l.name, type: ref.type, subtype: ref.subtype });
+      const route = isBd
+        ? banyandevPlRoute(bdKey, { code: l.code, name: l.name, type: ref.type, subtype: ref.subtype })
+        : banyanPlRoute({ code: l.code, name: l.name, type: ref.type, subtype: ref.subtype });
       routeOf[l.code] = route;
       (byBucket[route.bucket] || byBucket.opex).push(l);
     }
@@ -2021,9 +2113,9 @@ async function buildStatements(getBalances, opts) {
       }
       return groups;
     };
-    const revenueTree = buildTree(byBucket.revenue);
-    const opexTree = buildTree(byBucket.opex, BANYAN_OPEX_GROUP_ORDER);
-    const otherIncomeTree = buildTree(byBucket.otherIncome);
+    const revenueTree = buildTree(byBucket.revenue, isBd ? BANYANDEV_REVENUE_GROUP_ORDER : undefined);
+    const opexTree = buildTree(byBucket.opex, isBd ? BANYANDEV_OPEX_GROUP_ORDER : BANYAN_OPEX_GROUP_ORDER);
+    const otherIncomeTree = buildTree(byBucket.otherIncome, isBd ? BANYANDEV_OTHER_INCOME_GROUP_ORDER : undefined);
     const otherExpenseTree = buildTree(byBucket.otherExpense);
     const incomeTaxTree = buildTree(byBucket.incomeTax);
     const sumBucket = arr => ({ cur: sumCol(arr, 'cur'), pri: sumCol(arr, 'pri'), ytd: sumCol(arr, 'ytd') });
@@ -2047,6 +2139,8 @@ async function buildStatements(getBalances, opts) {
     };
     banyanOps = {
       structured: true, banyanShape: true,
+      showGrossProfit: !isBd || bdKey === 'hp',
+      noGroupTotal: isBd ? BANYANDEV_NO_GROUP_TOTAL : null,
       revenueTree, opexTree, otherIncomeTree, otherExpenseTree, incomeTaxTree,
       totRev: tRev, grossProfit: gpB, totOpex: tOpexB,
       totOtherIncome: tOtherIncomeB, totOtherExpense: tOtherExpenseB,
@@ -2908,7 +3002,7 @@ async function renderStatementsPdf(s, outOffsets) {
             });
             if (su.lines.length > 1 && !echo) L.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true });
           }
-          if (showGroupTotal !== false) L.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true });
+          if (showGroupTotal !== false && !(bo.noGroupTotal && bo.noGroupTotal.has(g.title))) L.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true });
         }
       };
 
@@ -2920,8 +3014,8 @@ async function renderStatementsPdf(s, outOffsets) {
       // would be consumed by the first OPERATING EXPENSE line instead, putting
       // the "$" several sections down the statement.
       plFirstRow = false;
-      L.row('Total Revenue', cell4(bo.totRev), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true });
-      L.row('Gross Profit', cell4(bo.grossProfit), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
+      L.row('Total Revenue', cell4(bo.totRev), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: bo.showGrossProfit !== false ? 0 : 6 });
+      if (bo.showGrossProfit !== false) L.row('Gross Profit', cell4(bo.grossProfit), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
 
       L.sectionTitle('Operating Expenses');
       renderTree(bo.opexTree, { showGroupTotal: true, keepWhole: true });
