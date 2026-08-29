@@ -3803,10 +3803,16 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
       if (looksLikeXlsx(r.bytes, r.name)) {
         try {
           const wantSheet = r.sheet || 'Budget to Actual';
-          // No injected title: the requisition sheet carries its own header block
-          // ("Project Funding Requisition" / entity / period / report #), and the
-          // converter fits the whole sheet onto one landscape page as-is.
-          const conv = await xlsxSheetToPdf(r.bytes, wantSheet, {});
+          // Crop to the sheet's print area (drops the workbook's own left/right
+          // heading cells and anything below the reconciliation) and render a
+          // clean CENTERED heading — entity + report name from the sheet's own
+          // print header, with the PACKAGE period date substituted for the file's
+          // (often stale) date line. Applies to development AND rail-asset
+          // requisition reports alike, since both embed through this converter.
+          const conv = await xlsxSheetToPdf(r.bytes, wantSheet, {
+            headingDate: (statements.meta && statements.meta.longDate) || undefined,
+            headingEntity: (statements.meta && statements.meta.entityName) || undefined,
+          });
           reqPdfBytes = Buffer.from(conv.bytes);
           fromXlsx = true;
           rInfo.convertedFromXlsx = true;

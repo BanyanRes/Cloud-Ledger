@@ -23,6 +23,7 @@ const XLSX = require('xlsx');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const { readSheetFills } = require('./xlsxFills');
 const { readSheetBorders } = require('./xlsxBorders');
+const { readSheetHeaderCenter } = require('./xlsxHeader');
 
 // Landscape Letter.
 const LP = { w: 792, h: 612, mL: 30, mR: 30, mT: 40, mB: 34 };
@@ -273,15 +274,43 @@ async function worksheetToPdfBytes(ws, opts = {}) {
   const reg = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
+  // Centered heading (entity / report name / period date) drawn at the top of
+  // EVERY page. opts.heading is an array of { text, size, bold } lines, built by
+  // xlsxSheetToPdf from the sheet's own print header with the package period
+  // date substituted. When absent, no heading is drawn (legacy behavior).
+  const headingLines = (Array.isArray(opts.heading) ? opts.heading : [])
+    .filter(h => h && h.text)
+    .map(h => ({ text: String(h.text), size: h.size || 11, font: h.bold === false ? reg : bold }));
+  const HEADING_GAP = 12;            // gap between the heading block and the table
+  const HEADING_TOP_PAD = 2;         // small pad above the first heading line
+  const headingH = headingLines.length
+    ? headingLines.reduce((a, h) => a + h.size + 4, 0) + HEADING_GAP + HEADING_TOP_PAD
+    : 0;
+  const drawHeading = (page) => {
+    if (!headingH) return;
+    let hy = LP.h - LP.mT - HEADING_TOP_PAD;
+    for (const h of headingLines) {
+      hy -= h.size + 4;
+      const tw = strW(h.font, h.text, h.size);
+      page.drawText(h.text, { x: (LP.w - tw) / 2, y: hy, size: h.size, font: h.font, color: rgb(0.1, 0.1, 0.1) });
+    }
+  };
+  // Top of the table area on each page (below the heading block, if any).
+  const contentTop = LP.h - LP.mT - headingH;
+
   if (!rows.length || !nCols) {
     const page = pdf.addPage([LP.w, LP.h]);
-    page.drawText(opts.title || 'Requisition Report', { x: LP.mL, y: LP.h - LP.mT, size: 12, font: bold });
-    page.drawText('(worksheet contained no data)', { x: LP.mL, y: LP.h - LP.mT - 20, size: 9, font: reg, color: rgb(0.4, 0.4, 0.4) });
+    drawHeading(page);
+    if (!headingH) page.drawText(opts.title || 'Requisition Report', { x: LP.mL, y: LP.h - LP.mT, size: 12, font: bold });
+    page.drawText('(worksheet contained no data)', { x: LP.mL, y: contentTop - 14, size: 9, font: reg, color: rgb(0.4, 0.4, 0.4) });
     return await pdf.save({ useObjectStreams: false });
   }
 
   const printableW = LP.w - LP.mL - LP.mR;
-  const printableH = LP.h - LP.mT - LP.mB;
+  // Height available for the TABLE on each page = below the centered heading
+  // block down to the bottom margin. Reserving headingH here keeps the heading
+  // from overlapping the first rows and makes the fit-to-page scale correct.
+  const printableH = contentTop - LP.mB;
   const BASE_FONT = nCols > 12 ? BODY_FONT : BODY_FONT + 0.5;
   const MIN_FONT = 4.2;          // legibility floor; below this we accept overflow
   const titleGap = opts.title ? 16 : 0;
@@ -350,29 +379,45 @@ async function worksheetToPdfBytes(ws, opts = {}) {
     return { fontSize, lineH, rowPad, cellPad, widths, colX, mergedWidth, wrapped, rowHeights, totalH };
   };
 
-  // Fit-to-one-page scale. Start from the width constraint (never upscale past
-  // 1×), then, if the resulting height still overflows, tighten the scale by the
-  // height ratio and recompute once. One extra pass converges because shrinking
-  // the font only ever reduces the number of wrapped lines (never increases it),
-  // so the second layout's height is a safe upper bound for the final scale.
-  let scale = Math.min(1, printableW / natTotalW);
-  let L = layoutAt(scale);
-  if (L.totalH > printableH) {
-    // Try to fit the height by shrinking the font too — but only while it stays
-    // at or above the legibility floor. If fitting one page would require a
-    // sub-floor font, keep this (width-fit) scale and let the render loop
-    // paginate onto additional pages rather than cram illegibly or clip the
-    // lower rows (which was dropping the Budget-to-Actual reconciliation block
-    // off the bottom of the page).
-    const tightened = scale * (printableH / L.totalH);
-    if (BASE_FONT * tightened >= MIN_FONT) { scale = tightened; L = layoutAt(scale); }
+  // How many pages a given layout actually needs, mirroring the render loop's
+  // greedy row placement exactly (a row that would cross the bottom margin moves
+  // wholesale to the next page). Using the real page count — not a height ratio —
+  // is what lets us reliably avoid orphaning a couple of rows onto a nearly-empty
+  // trailing page, since greedy placement leaves whitespace a ratio can't see.
+  const pagesNeeded = (rowHeights) => {
+    let pages = 1, yy = contentTop;
+    for (const rowH of rowHeights) {
+      if (yy - rowH < LP.mB && yy < contentTop) { pages++; yy = contentTop; }
+      yy -= rowH;
+    }
+    return pages;
+  };
+
+  // Fit scale. Start from the width constraint (never upscale past 1×), then
+  // scan scales downward to the legibility floor and pick the one that yields
+  // the FEWEST pages (at the largest scale achieving that count). This packs the
+  // report tightly — cropping it to its print area removed columns, which raised
+  // the width-fit scale and had otherwise spilled the Budget-to-Actual
+  // reconciliation's last rows onto an almost-empty extra page.
+  const widthScale = Math.min(1, printableW / natTotalW);
+  const minScale = Math.min(widthScale, MIN_FONT / BASE_FONT);
+  let scale = widthScale;
+  let L = layoutAt(widthScale);
+  let bestPages = pagesNeeded(L.rowHeights);
+  for (let s = widthScale; s >= minScale - 1e-6; s -= 0.02) {
+    const cand = layoutAt(s);
+    const p = pagesNeeded(cand.rowHeights);
+    if (p < bestPages) { bestPages = p; scale = s; L = cand; }  // fewer pages → adopt (largest such scale)
   }
 
   const { fontSize, lineH, rowPad, cellPad, colX, mergedWidth, wrapped, rowHeights } = L;
 
-  let page = pdf.addPage([LP.w, LP.h]);
-  let y = LP.h - LP.mT;
-  if (opts.title) {
+  // Every page gets the centered heading drawn at its top; the table starts at
+  // contentTop (below the heading).
+  const newPage = () => { const pg = pdf.addPage([LP.w, LP.h]); drawHeading(pg); return pg; };
+  let page = newPage();
+  let y = contentTop;
+  if (opts.title && !headingLines.length) {
     page.drawText(String(opts.title), { x: LP.mL, y, size: Math.max(8, 11 * scale), font: bold });
     y -= titleGap;
   }
@@ -384,7 +429,7 @@ async function worksheetToPdfBytes(ws, opts = {}) {
     // page. (A single row taller than the whole page still prints, to avoid an
     // infinite loop.) This is what keeps the Budget-to-Actual reconciliation
     // block, which sits at the bottom of a tall sheet, from being cut off.
-    if (y - rowH < LP.mB && y < (LP.h - LP.mT)) { page = pdf.addPage([LP.w, LP.h]); y = LP.h - LP.mT; }
+    if (y - rowH < LP.mB && y < contentTop) { page = newPage(); y = contentTop; }
     const { cells } = wrapped[ri];
     // Pass 1: paint cell background fills BEFORE any text, so colored bands sit
     // behind their values. A merged region is painted once, across the merged
@@ -472,6 +517,16 @@ async function xlsxSheetToPdf(xlsxBuffer, sheetName, opts = {}) {
     name = found || wb.SheetNames[0];
   }
   const ws = wb.Sheets[name];
+  // Crop to the sheet's PRINT AREA when one is defined (opt-out via
+  // opts.printArea === false). This makes the embedded report show exactly the
+  // printable page(s): it drops the workbook's own left/right heading cells that
+  // sit ABOVE the print area, and anything BELOW it (e.g. the percentage-of-
+  // completion summary under the reconciliation). Falls back to the full used
+  // range when no print area is defined.
+  if (opts.printArea !== false) {
+    const pa = resolvePrintArea(wb, name);
+    if (pa) ws['!ref'] = pa;
+  }
   // Read solid cell fills straight from the OOXML (SheetJS community build does
   // not surface fills), so the rendered page reproduces the report's header
   // band, subtotal rows, and Date cell. Degrades to no fills on any parse error.
@@ -482,10 +537,57 @@ async function xlsxSheetToPdf(xlsxBuffer, sheetName, opts = {}) {
   // no borders on any parse error.
   let borders;
   try { borders = await readSheetBorders(xlsxBuffer, name); } catch { borders = undefined; }
-  // Pass through only an explicitly-provided title; the requisition sheet carries
-  // its own header block, so we don't inject the sheet name as a caption.
-  const bytes = await worksheetToPdfBytes(ws, { title: opts.title, fills, borders });
+  // Build the centered heading (entity / report name / period date) from the
+  // sheet's own print header, substituting the caller's package period date for
+  // the file's (often stale) date line. Degrades to no heading on any error.
+  let heading;
+  try { heading = await buildHeading(xlsxBuffer, name, opts); } catch { heading = null; }
+  // Pass through only an explicitly-provided title; the requisition sheet's own
+  // heading is now rendered from its print header (see `heading`).
+  const bytes = await worksheetToPdfBytes(ws, { title: opts.title, fills, borders, heading });
   return { bytes, sheetUsed: name, availableSheets: wb.SheetNames };
+}
+
+// Resolve a sheet's PRINT AREA (an A1 range string like "B6:K108") from the
+// workbook's _xlnm.Print_Area defined names, which SheetJS surfaces on
+// wb.Workbook.Names. Matches by sheet index (localSheetId) or by the sheet name
+// embedded in the ref. Multi-area print ranges take the first area. Returns null
+// when no usable print area is defined.
+function resolvePrintArea(wb, sheetName) {
+  try {
+    const names = (wb.Workbook && wb.Workbook.Names) || [];
+    const idx = wb.SheetNames.indexOf(sheetName);
+    for (const n of names) {
+      if (!n || n.Name !== '_xlnm.Print_Area') continue;
+      const ref = String(n.Ref || '');
+      const bang = ref.lastIndexOf('!');
+      if (bang < 0) continue;
+      const sheetPart = ref.slice(0, bang).replace(/^'(.*)'$/, '$1').replace(/''/g, "'");
+      if (!(n.Sheet === idx || sheetPart === sheetName)) continue;
+      const a1 = ref.slice(bang + 1).split(',')[0].replace(/\$/g, '').trim();
+      if (/^[A-Z]+\d+:[A-Z]+\d+$/.test(a1)) return a1;
+      if (/^[A-Z]+\d+$/.test(a1)) return a1 + ':' + a1;
+    }
+  } catch (e) { /* fall through */ }
+  return null;
+}
+
+// Build the centered heading lines for the report: the sheet's own print-header
+// center gives the entity name (line 1) and report name (line 2); the date line
+// is the caller's package period (opts.headingDate) when provided, else the
+// header's own third line. Fallbacks: entity → opts.headingEntity, report → the
+// sheet name. Returns an array of { text, size, bold } or null when there is
+// nothing to show.
+async function buildHeading(xlsxBuffer, name, opts) {
+  const lines = await readSheetHeaderCenter(xlsxBuffer, name); // [] on failure
+  const entity = (lines[0] || opts.headingEntity || '').trim();
+  const report = (lines[1] || name || '').trim();
+  const date = (opts.headingDate || lines[2] || '').trim();
+  const out = [];
+  if (entity) out.push({ text: entity, size: 12, bold: true });
+  if (report) out.push({ text: report, size: 11, bold: true });
+  if (date) out.push({ text: date, size: 11, bold: true });
+  return out.length ? out : null;
 }
 
 // Sniff whether a buffer is a ZIP-based OOXML (.xlsx) file (PK signature).
