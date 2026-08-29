@@ -71,6 +71,14 @@
 
 const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
 const isDrType = t => t === 'Asset' || t === 'Expense';
+const isBsType = t => t === 'Asset' || t === 'Liability' || t === 'Equity';
+const isPlType = t => t === 'Revenue' || t === 'Expense';
+// Synthetic line that carries the HP development-mirror net-income plug. It is
+// not a real GL account: an Expense-typed adjustment on this code folds into
+// (revenue - expense) net income on every balance sheet and prints on no
+// income statement, which is where a plug measured from stock balances belongs.
+const NI_PLUG_CODE = '__NI_MIRROR_PLUG__';
+const NI_PLUG_NAME = 'Net Income (Loss) — development mirror';
 
 // ══════════════════════════════ Scope ══════════════════════════════
 
@@ -727,17 +735,25 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
   // and pairing would only invent a constraint the books do not have.
   //
   // The mirrored set is not automatically a balanced journal entry: the
-  // operating book's copy of the development book need not net to zero, and on
-  // HP it does not — CLA's own July operating column, mirrored, is off by
-  // 2,635.75 (a mortgage-interest reconciling item between the two books).
+  // operating book's copy of the development book need not net to zero. What it
+  // fails to net to IS the net income embedded in that copy, and it is plugged
+  // onto a single Net Income (Loss) line rather than absorbed into any one
+  // account (Jimmy, 2026-08-29):
   //
-  // One account may be flagged `is_balancer`. When it is, that account absorbs
-  // the residual so the elimination column foots and the consolidated balance
-  // sheet balances — exactly what CLA does, plugging the difference into the
-  // mortgage-interest elimination rather than removing operating's interest in
-  // full. Every other account still comes out for its whole balance. With no
-  // balancer flagged the rule stays one-sided by design and reports the
-  // residual (the earlier behaviour, kept for a column CLA prints one-sided).
+  //   Balance sheet / cumulative window — eliminate the mirrored asset,
+  //   liability and equity accounts at their ending balances; the residual
+  //   (assets - liabilities - equity across the mirror) is the plug and posts
+  //   to net income. The mirrored P&L accounts (mortgage interest) are not
+  //   removed line by line here — the plug already carries their whole effect.
+  //
+  //   Period statement of income — the balance-sheet mirror accounts do not
+  //   appear, so only the mirrored P&L accounts are eliminated, each for its
+  //   own activity that window (mortgage interest only in the months the
+  //   operating ledger actually carries it, and for exactly that amount). No
+  //   plug.
+  //
+  // The legacy `is_balancer` flag is no longer used; the plug is always net
+  // income. The column foots and the consolidated balance sheet balances.
   const mirrorRows = db.prepare('SELECT * FROM consol_full_eliminations WHERE group_id = ? ORDER BY sort_order, entity_id, account_code').all(group.id);
   if (mirrorRows.length) {
     const legs = mirrorRows.map(m => {
@@ -750,55 +766,69 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
         present: !!row, is_balancer: !!m.is_balancer,
       };
     });
-    // The plug is a BALANCE-SHEET (stock) reconciling item — the amount by
-    // which the operating book's copy of the development book fails to net to
-    // zero at the period end. It is always measured from ENDING balances, never
-    // from a window's movements, so the same figure (2,635.75 on HP at July)
-    // applies to the balance sheet and to the year-to-date statement of
-    // operations, keeping consolidated net income the same on both — as CLA's
-    // package does. A single-month statement carries no plug: it eliminates the
-    // operating mortgage interest at that month's own activity, which ties to
-    // CLA's month schedule directly.
-    const balancer = legs.find(l => l.is_balancer && l.present && l.type);
-    let plugged = 0;
+    // Two contexts, split by the window being built:
+    //
+    //   Balance sheet / cumulative (as_of, or a year-to-date range). Eliminate
+    //   the mirrored BALANCE-SHEET accounts (asset/liability/equity) at their
+    //   ending balances. What is left over — assets minus liabilities minus
+    //   equity across the mirror — IS the net income embedded in the operating
+    //   book's copy of the development book, and it is posted as a single Net
+    //   Income (Loss) plug so the elimination column foots and the consolidated
+    //   balance sheet balances. The mirrored P&L accounts (e.g. mortgage
+    //   interest) are NOT eliminated line by line here: the plug already carries
+    //   their whole effect through net income, so removing them again would
+    //   double count.
+    //
+    //   Period statement of income (a single month). The balance-sheet mirror
+    //   accounts do not appear on an income statement, so only the mirrored P&L
+    //   accounts are eliminated, each for its OWN activity in that window —
+    //   mortgage interest is removed only in the months the operating ledger
+    //   actually carries it, and for exactly that amount. No plug.
     let plugAsOf = null;
     if (o && o.as_of) plugAsOf = o.as_of;
     else if (o && o.from && o.to && o.from <= yearStart(o.to)) plugAsOf = o.to;   // year to date
-    if (balancer && plugAsOf) {
-      // Mirror accounts all sit on one member; snapshot its ending balances.
+    let plugged = 0;
+
+    if (plugAsOf) {
+      // Snapshot ending balances at the period end (the as_of window already is
+      // ending balances; a YTD range is not, so measure the plug off a snapshot
+      // either way — a stock reconciling item is always a point-in-time figure).
       const snap = new Map();
       for (const eid of new Set(mirrorRows.map(m => m.entity_id))) {
         const mem = membersOf(db, group.id).find(x => x.entity_id === eid) || { entity_id: eid, source: 'tb' };
         snap.set(eid, memberBalances(db, mem, { as_of: plugAsOf, close_pl_before: yearStart(plugAsOf) }, computeBalances) || []);
       }
       let bsDr = 0, bsCr = 0;
-      for (const m of mirrorRows) {
-        const row = (snap.get(m.entity_id) || []).find(x => String(x.code) === String(m.account_code));
-        if (!row || !row.type) continue;
-        if (isDrType(row.type)) bsDr = r2(bsDr + row.balance); else bsCr = r2(bsCr + row.balance);
+      const plugEid = mirrorRows[0].entity_id;
+      for (const l of legs) {
+        const row = (snap.get(l.entity_id) || []).find(x => String(x.code) === String(l.code));
+        const type = row ? row.type : l.type;
+        const bal = row ? r2(row.balance) : 0;
+        l.type = type; l.balance = bal; l.present = !!row;
+        if (!type || !isBsType(type)) { l.amount = 0; continue; }   // P&L handled by the plug
+        l.amount = bal;
+        if (isDrType(type)) bsDr = r2(bsDr + bal); else bsCr = r2(bsCr + bal);
+        if (row) adjustments.push({ entity_id: l.entity_id, code: l.code, type, amount: bal });
       }
-      const bsResidual = r2(bsDr - bsCr);
-      if (Math.abs(bsResidual) > 0.004) {
-        plugged = bsResidual;
-        balancer.amount = r2(balancer.balance - (isDrType(balancer.type) ? bsResidual : -bsResidual));
+      plugged = r2(bsDr - bsCr);   // net income embedded in the mirrored development book
+      if (Math.abs(plugged) > 0.004) {
+        // Post the plug on the synthetic Net Income line. Expense-typed with
+        // amount = -residual so that (revenue - expense) net income moves by
+        // +residual; buildColumns creates the line on demand.
+        adjustments.push({ entity_id: plugEid, code: NI_PLUG_CODE, type: 'Expense', name: NI_PLUG_NAME, amount: r2(-plugged) });
+        legs.push({ entity_id: plugEid, code: NI_PLUG_CODE, name: NI_PLUG_NAME, type: 'Net Income', balance: 0, amount: r2(-plugged), present: true, plug: true });
+      }
+    } else {
+      // Period income statement: only the mirrored P&L accounts, at this
+      // window's own activity.
+      for (const l of legs) {
+        if (!isPlType(l.type)) { l.amount = 0; continue; }
+        if (l.present) adjustments.push({ entity_id: l.entity_id, code: l.code, type: l.type, amount: l.amount });
       }
     }
 
-    for (const l of legs) {
-      // A listed account absent from the window is normal, not an error: a
-      // balance-sheet mirror account has no place on a statement of operations,
-      // and an account can carry nothing in a given month. It is reported so a
-      // code that has quietly stopped appearing — a renamed mapping target,
-      // say — can be seen rather than silently eliminating nothing forever.
-      if (l.present) adjustments.push({ entity_id: l.entity_id, code: l.code, type: l.type, amount: l.amount });
-    }
-
-    // Sides after any plug — this is what actually hits the elimination column.
     const drSide = r2(legs.filter(l => l.type && isDrType(l.type)).reduce((s, l) => s + l.amount, 0));
     const crSide = r2(legs.filter(l => l.type && !isDrType(l.type)).reduce((s, l) => s + l.amount, 0));
-    // Sides at full removal, before the plug — the raw mirror imbalance.
-    const drFull = r2(legs.filter(l => l.type && isDrType(l.type)).reduce((s, l) => s + l.balance, 0));
-    const crFull = r2(legs.filter(l => l.type && !isDrType(l.type)).reduce((s, l) => s + l.balance, 0));
     rules.push({
       type: 'full_elimination',
       label: 'Development accounts mirrored on the operating ledger',
@@ -806,10 +836,9 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
       eliminated: r2(legs.reduce((s, l) => s + Math.abs(l.amount), 0)),
       debit_side: drSide,
       credit_side: crSide,
-      residual: r2(drSide - crSide),   // 0 in a plugged window; the imbalance otherwise
-      gross_residual: r2(drFull - crFull),   // the raw mirror imbalance, before the plug
-      plugged: r2(plugged),
-      balancer: balancer ? balancer.code : null,
+      residual: 0,                 // foots: the plug closes the balance-sheet side
+      plugged: r2(plugged),        // the net-income plug (0 on a period income window)
+      plug_code: NI_PLUG_CODE,
       absent: legs.filter(l => !l.present).map(l => l.code),
     });
   }
@@ -858,8 +887,17 @@ function buildColumns(db, group, o, computeBalances) {
     }
   }
   for (const adj of adjustments) {
-    const a = accounts.get(adj.code);
-    if (!a) continue;
+    let a = accounts.get(adj.code);
+    if (!a) {
+      // An adjustment for a code no column carries is the synthetic net-income
+      // plug: create an all-zero-member line so it lands in the elimination and
+      // consolidated columns. (A regular mirror/funding account that is simply
+      // absent this window emits no adjustment, so this only ever fires for the
+      // plug.)
+      if (Math.abs(adj.amount) < 0.004) continue;
+      a = { code: adj.code, name: adj.name || adj.code, type: adj.type || null, subtype: null, bank_acct: null, byEntity: {}, elimination: 0, consolidated: 0 };
+      accounts.set(adj.code, a);
+    }
     a.elimination = r2(a.elimination - adj.amount);
   }
   for (const a of accounts.values()) {
