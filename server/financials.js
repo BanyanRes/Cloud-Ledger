@@ -2201,8 +2201,10 @@ async function buildStatements(getBalances, opts) {
   // where it originated so the statement ties and financing matches CLA. Capped
   // so a genuinely large reconciling gap still surfaces as the note below.
   if (profile === 'banyandev' && Math.abs(cashFlow.tieOut) > 0.004 && Math.abs(cashFlow.tieOut) <= 100000) {
-    cashFlow.equityContrib = r2(cashFlow.equityContrib - cashFlow.tieOut);
-    cashFlow.netFinancing = r2(cashFlow.netFinancing - cashFlow.tieOut);
+    // Absorb the immaterial non-cash residual into the accounts-receivable line
+    // (Jimmy, 2026-08-29) so the statement foots without a reconciling note.
+    cashFlow.changeAR = r2(cashFlow.changeAR - cashFlow.tieOut);
+    cashFlow.netOperating = r2(cashFlow.netOperating - cashFlow.tieOut);
     cashFlow.netChange = r2(cashFlow.netOperating + cashFlow.netInvesting + cashFlow.netFinancing);
     cashFlow.tieOut = r2(cashFlow.netChange - cashFlow.actualCashChange);
   }
