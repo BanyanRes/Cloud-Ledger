@@ -3036,7 +3036,7 @@ async function renderStatementsPdf(s, outOffsets) {
         L.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
       }
 
-      L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+      L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: false, doubleBelow: true, dollarPrefix: true });
     } else if (s.operations.bsfrgp && s.operations.bsfrgp.structured) {
       // ── Banyan SFR GP Investors shape: Operating Expenses / Other Income
       //    (Expense) / Income Taxes / Net Income (Loss). ────────────────────
@@ -3080,7 +3080,7 @@ async function renderStatementsPdf(s, outOffsets) {
       renderTree(bo.incomeTaxTree, { showGroupTotal: true });
       L.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
 
-      L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+      L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: false, doubleBelow: true, dollarPrefix: true });
     } else {
     // $ on the first figure line of the statement (CLA 8/17, global). It is
     // armed once and spent by whichever section draws first, because a
@@ -3175,7 +3175,7 @@ async function renderStatementsPdf(s, outOffsets) {
       renderOie(itTree, { echoSub: true });
       L.row('Total Income Taxes', cell4oie(s.operations.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     }
-    L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: m.profile !== 'banyandev', doubleBelow: true, dollarPrefix: true });
+    L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: false, doubleBelow: true, dollarPrefix: true });
     }
   }
 
@@ -3510,7 +3510,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   // A double rule under the figures (final-total convention). Drawn just below
   // the current baseline, only under the number columns.
   const doubleUnder = () => { for (let i = 0; i < nCols; i++) { const x0 = colRight[i] - (numColW - 10); for (const dy of [-2.4, -4.1]) page.drawLine({ start: { x: x0, y: y + dy }, end: { x: colRight[i], y: y + dy }, thickness: 0.5, color: rgb(0.3, 0.3, 0.3) }); } };
-  const subtotal = (label, getVal, opts) => { const o = opts || {}; ensure(rowH); rule(); dtext(label, nameLeft + 10, y, F.row, bold); figs(getVal, bold); if (o.double) doubleUnder(); y -= rowH * 1.5; };
+  const subtotal = (label, getVal, opts) => { const o = opts || {}; ensure(rowH); if (!o.noTopRule) rule(); dtext(label, nameLeft + 10, y, F.row, bold); figs(getVal, bold); if (o.double) doubleUnder(); y -= rowH * 1.5; };
 
   // Mirror the FACE statement groupings (Jimmy, 2026-08-28): the consolidating
   // schedules use the same balance-sheet classification (bsClassifyFor) and the
@@ -3649,7 +3649,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
       it.forEach(a => acctRowAt(a, 10));
       subtotal('Total Income Taxes', i => sumCol(it, i));
     }
-    subtotal('Net Income (Loss)', i => r2(opInc(i) + (sumCol(oi, i) - sumCol(oe, i)) - sumCol(it, i)), { double: true });
+    subtotal('Net Income (Loss)', i => r2(opInc(i) + (sumCol(oi, i) - sumCol(oe, i)) - sumCol(it, i)), { double: true, noTopRule: true });
   };
 
   renderBalanceSheet();
