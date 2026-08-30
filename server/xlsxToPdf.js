@@ -527,6 +527,13 @@ async function xlsxSheetToPdf(xlsxBuffer, sheetName, opts = {}) {
     const pa = resolvePrintArea(wb, name);
     if (pa) ws['!ref'] = pa;
   }
+  // Never print the workbook's own heading block (PROJECT FUNDING REQUISITION,
+  // Project Address, Project Entity, Application Period, Requisition #) that
+  // sits above the column headings — it is redundant with the centered heading
+  // we render. Clamp the crop's TOP edge down to the column-heading row even
+  // when the print area or a page break reaches up into that block (Jimmy,
+  // 2026-08-30).
+  if (opts.dropAboveHeader !== false) clampTopToHeader(ws);
   // Read solid cell fills straight from the OOXML (SheetJS community build does
   // not surface fills), so the rendered page reproduces the report's header
   // band, subtotal rows, and Date cell. Degrades to no fills on any parse error.
@@ -572,6 +579,51 @@ function resolvePrintArea(wb, sheetName) {
   return null;
 }
 
+// Move the crop's TOP edge down to the report's column-heading row, dropping
+// everything above it — the workbook's own heading block (PROJECT FUNDING
+// REQUISITION / Project Address / Project Entity / Application Period /
+// Requisition #), which is redundant with the centered heading we draw. This
+// runs regardless of the print area or page break, so those rows never print
+// even when the print area reaches up into them.
+//
+// The column-heading row is found by its labels (Account Name / Yardi Code /
+// COA#). When the header is drawn on two rows (e.g. "High Point Original" above
+// "Approved Budget"), the row ABOVE the label row is kept too, so the top line
+// of every column header survives. If no header row is recognized, the crop is
+// left unchanged.
+function clampTopToHeader(ws) {
+  const ref = ws['!ref'];
+  if (!ref) return;
+  let range;
+  try { range = XLSX.utils.decode_range(ref); } catch { return; }
+  const ANCHORS = ['account name', 'yardi code', 'coa#', 'coa #'];
+  // Tokens that identify a column-header row (used to pull in a stacked header's
+  // upper line). Chosen to NOT appear in the heading block above — so
+  // "Application Period" and "PROJECT FUNDING REQUISITION" are never mistaken
+  // for header rows.
+  const HDR_TOKENS = ['contingency', 'reallocation', 'approved budget', 'lender', 'previous application',
+    'payment this', 'total complete', 'draw to date', 'inception to', 'incurred to', 'percent drawn', 'balance remaining'];
+  const rowText = (r) => {
+    let s = '';
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const cell = ws[XLSX.utils.encode_cell({ r, c })];
+      if (cell && (cell.w != null || cell.v != null)) s += ' ' + String(cell.w != null ? cell.w : cell.v);
+    }
+    return s.toLowerCase();
+  };
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    if (!ANCHORS.some(a => rowText(r).includes(a))) continue;
+    // Found the label row; walk up while rows still read as header rows (cap 3).
+    let top = r;
+    for (let up = r - 1, steps = 0; up >= range.s.r && steps < 3; up--, steps++) {
+      if (!HDR_TOKENS.some(t => rowText(up).includes(t))) break;
+      top = up;
+    }
+    if (top > range.s.r) { range.s.r = top; ws['!ref'] = XLSX.utils.encode_range(range); }
+    return;
+  }
+}
+
 // Build the centered heading lines for the report: the sheet's own print-header
 // center gives the entity name (line 1) and report name (line 2); the date line
 // is the caller's package period (opts.headingDate) when provided, else the
@@ -597,4 +649,4 @@ function looksLikeXlsx(buf, originalName) {
   return buf[0] === 0x50 && buf[1] === 0x4b && (buf[2] === 0x03 || buf[2] === 0x05 || buf[2] === 0x07);
 }
 
-module.exports = { xlsxSheetToPdf, worksheetToPdfBytes, sheetToGrid, looksLikeXlsx };
+module.exports = { xlsxSheetToPdf, worksheetToPdfBytes, sheetToGrid, looksLikeXlsx, clampTopToHeader };
