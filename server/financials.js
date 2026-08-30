@@ -2942,6 +2942,13 @@ async function renderStatementsPdf(s, outOffsets) {
     // (CLA/Jimmy 8/30 — "no orphaned totals").
     const BS_EQUITY_TAIL = 46;
     bsFirstRow = wantDollar;
+    // True when the LAST asset section total already carries a rule BELOW its
+    // figures (Total Current Assets / Total Fixed Assets, Net). In that case the
+    // grand "Total Assets" must NOT also draw a rule above its own figures — the
+    // two would stack 6pt apart and read as a stray double rule. Most visible on
+    // a one-section balance sheet (County Line Rail Operations), where Total
+    // Current Assets is immediately followed by Total Assets (Jimmy, 2026-08-30).
+    let lastAssetSectionRuledBelow = false;
     if (tkBs) renderTkBlocks(tkBs.assetBlocks);
     else {
       // Keep the grand "Total Assets" line from being orphaned alone at the top
@@ -2951,8 +2958,9 @@ async function renderStatementsPdf(s, outOffsets) {
       // subtotal with the total line to the subsequent page").
       const asecs = s.balanceSheet.assetSections;
       asecs.forEach((sec, i) => renderBsSection(sec, 'Total ' + sec.title, i === asecs.length - 1 ? BS_GRAND_RESERVE : 0));
+      if (asecs.length) lastAssetSectionRuledBelow = RULE_BELOW_SECTIONS.test('Total ' + asecs[asecs.length - 1].title);
     }
-    L.row('Total Assets', bsCells(s.balanceSheet.totalAssets.cur, s.balanceSheet.totalAssets.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, gapAfter: 8, dollarPrefix: wantDollar });
+    L.row('Total Assets', bsCells(s.balanceSheet.totalAssets.cur, s.balanceSheet.totalAssets.pri), { indent: 6, boldRow: true, ruleAbove: !lastAssetSectionRuledBelow, doubleBelow: true, gapAfter: 8, dollarPrefix: wantDollar });
 
     L.sectionTitle('LIABILITIES AND MEMBERS\u2019 EQUITY');
     bsFirstRow = wantDollar;

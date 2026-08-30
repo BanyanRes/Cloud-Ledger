@@ -172,7 +172,12 @@ function buildBalanceSheet(s) {
   sh.sectionTitle('ASSETS');
   bsFirst.armed = true;
   for (const sec of bs.assetSections) renderSection(sec, 'Total ' + sec.title, RULE_BELOW.test('Total ' + sec.title));
-  sh.row('Total Assets', cells(bs.totalAssets.cur, bs.totalAssets.pri), { indent: 6, bold: true, ruleAbove: true, double: true, gapAfter: 1, dollar: true });
+  // No rule above Total Assets when the last asset section total already carries
+  // one below its figures — the two would stack and read as a stray double rule
+  // (Jimmy, 2026-08-30; County Line Rail Operations, a one-section balance sheet).
+  const lastAsset = bs.assetSections[bs.assetSections.length - 1];
+  const assetsRuledBelow = !!lastAsset && RULE_BELOW.test('Total ' + lastAsset.title);
+  sh.row('Total Assets', cells(bs.totalAssets.cur, bs.totalAssets.pri), { indent: 6, bold: true, ruleAbove: !assetsRuledBelow, double: true, gapAfter: 1, dollar: true });
 
   sh.sectionTitle('LIABILITIES AND MEMBERS\u2019 EQUITY');
   bsFirst.armed = true;
