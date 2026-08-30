@@ -24,6 +24,7 @@ const { computeAllocation, buildAllocationWorkbook } = require('./insurance_allo
 const financials = require('./financials');
 const financialsXlsx = require('./financials_xlsx');
 const consolidation = require('./consolidation');
+const budget = require('./budget');
 const execSummaries = require('./execSummaries');
 const ExcelJS = require('exceljs');
 const xlsxStyledReport = require('./xlsxStyledReport.js');
@@ -9923,6 +9924,7 @@ require('./orgstructure').registerOrgStructureRoutes(app, {
 const finStmtUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
 const finStmtFields = finStmtUpload.fields([{ name: 'execSummary', maxCount: 1 }, { name: 'reqReport', maxCount: 2 }, { name: 'wip', maxCount: 1 }]);
 const wipUploadFields = finStmtUpload.fields([{ name: 'wip', maxCount: 1 }]);
+const budgetUploadFields = finStmtUpload.fields([{ name: 'budget', maxCount: 1 }]);
 
 // Preview endpoint: returns the numeric statements + tie-out checks as JSON,
 // so the UI can show balance-sheet / cash-flow tie-outs before generating.
@@ -10382,6 +10384,166 @@ app.get('/api/workpapers/financial-statements/:entity_id/wip', auth, requireEnti
              bytes: got ? got.bytes.length : 0, uploaded_at: got ? got.uploadedAt : null });
 });
 
+// ── Operating budget (rail assets) ─────────────────────────────────────────
+// Uploaded ANNUALLY, and again whenever the budget is revised. The workbook is
+// parsed once, here, into budget_lines; the monthly Budget-to-Actual schedule
+// then reads the database, never the file. The workbook itself is still filed
+// in the entity's Workpapers tree under "Budget" as the source document.
+//
+// Re-uploading the same fiscal year creates a NEW VERSION and deactivates the
+// prior one. Prior versions are retained so an earlier month regenerated later
+// still reflects the budget that was in force at the time.
+function budgetFilename(fy, versionNo, originalName) {
+  const ext = /\.xlsm$/i.test(String(originalName || '')) ? '.xlsm' : '.xlsx';
+  return 'budget_' + fy + '_v' + versionNo + ext;
+}
+
+function chartOf(eid) {
+  return db.prepare('SELECT code, name, type, subtype FROM accounts WHERE entity_id=? ORDER BY code').all(eid);
+}
+
+app.post('/api/workpapers/financial-statements/:entity_id/budget', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
+  budgetUploadFields(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    try {
+      const eid = Number(req.params.entity_id);
+      const f = req.files && req.files.budget && req.files.budget[0];
+      if (!f || !f.buffer || !f.buffer.length) return res.status(400).json({ error: 'No file uploaded (field name: budget)' });
+      if (!/\.(xlsx|xlsm)$/i.test(String(f.originalname || ''))) {
+        return res.status(400).json({ error: 'The budget must be an Excel workbook (.xlsx or .xlsm).' });
+      }
+      const who = req.user ? (req.user.name || req.user.email) : 'system';
+
+      let parsed;
+      try { parsed = budget.parseWorkbook(f.buffer, req.body.sheet ? { sheet: req.body.sheet } : {}); }
+      catch (e) { return res.status(400).json({ error: 'Could not read the budget workbook: ' + e.message }); }
+
+      // File the source workbook alongside the parsed data.
+      const prev = db.prepare('SELECT MAX(version_no) AS v FROM budget_versions WHERE entity_id=? AND fiscal_year=?')
+        .get(eid, parsed.fiscalYear);
+      const nextVersion = (prev && prev.v ? prev.v : 0) + 1;
+      const storedName = budgetFilename(parsed.fiscalYear, nextVersion, f.originalname);
+      let stored = null;
+      try {
+        ensureWpFolders(db, eid, budget.BUDGET_FOLDER, who);
+        stored = saveWpBuffer(db, WORKPAPERS_DIR, eid, budget.BUDGET_FOLDER, storedName,
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', f.buffer, who, { overwrite: true });
+      } catch (e) {
+        console.error('Budget workbook filing failed:', e.message);
+      }
+
+      const saved = budget.saveVersion(db, {
+        entityId: eid, parsed, originalName: f.originalname,
+        storedFilename: stored && stored.stored_filename ? stored.stored_filename : storedName,
+        who, note: req.body.note || null,
+      });
+
+      // Seed the label -> account map for any label not already mapped. Existing
+      // mappings are never overwritten: a human may have corrected one, and a
+      // re-upload must not silently undo that.
+      const labels = parsed.rows.filter(r => r.kind === 'line').map(r => r.label);
+      const seeded = budget.seedMap(db, eid, labels, chartOf(eid), who);
+
+      res.json({
+        ok: true,
+        fiscal_year: saved.fiscalYear,
+        version_no: saved.versionNo,
+        sheet: parsed.sheetName,
+        periods: parsed.periods,
+        line_count: labels.length,
+        original_name: f.originalname,
+        stored_as: storedName,
+        warnings: parsed.warnings || [],
+        mapping: { seeded: seeded.added.length, unmapped: seeded.unmapped },
+      });
+    } catch (e) {
+      res.status(500).json({ error: 'Budget upload failed: ' + e.message });
+    }
+  });
+});
+
+// Which budget is on file for the fiscal year covering as_of?
+app.get('/api/workpapers/financial-statements/:entity_id/budget', auth, requireEntityAccess('entity_id'), (req, res) => {
+  try {
+    const eid = Number(req.params.entity_id);
+    const asOf = req.query.as_of;
+    if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(String(asOf))) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
+    const fy = Number(String(asOf).slice(0, 4));
+    const v = budget.activeVersion(db, eid, fy);
+    if (!v) return res.json({ present: false, fiscal_year: fy, versions: budget.listVersions(db, eid) });
+    const lines = budget.versionLines(db, v.id).filter(r => r.kind === 'line');
+    const map = budget.getMap(db, eid);
+    const unmapped = lines.filter(r => !(map.get(budget.norm(r.label)) || []).length).map(r => r.label);
+    res.json({
+      present: true, fiscal_year: fy, version_no: v.version_no, version_id: v.id,
+      original_name: v.original_name, uploaded_at: v.uploaded_at, uploaded_by: v.uploaded_by,
+      line_count: lines.length, unmapped,
+      versions: budget.listVersions(db, eid),
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// The stored budget-line -> GL account mapping, with the entity's P&L chart so
+// the UI can offer choices.
+app.get('/api/workpapers/financial-statements/:entity_id/budget/mapping', auth, requireEntityAccess('entity_id'), (req, res) => {
+  try {
+    const eid = Number(req.params.entity_id);
+    const fy = Number(req.query.fiscal_year || String(req.query.as_of || '').slice(0, 4) || new Date().getFullYear());
+    const v = budget.activeVersion(db, eid, fy);
+    if (!v) return res.json({ present: false, fiscal_year: fy, rows: [], accounts: [] });
+    const map = budget.getMap(db, eid);
+    const rows = budget.versionLines(db, v.id).filter(r => r.kind === 'line').map(r => ({
+      label: r.label, section: r.section, group_name: r.group_name,
+      codes: map.get(budget.norm(r.label)) || [],
+    }));
+    const accounts = chartOf(eid).filter(a => a.type === 'Revenue' || a.type === 'Expense');
+    res.json({ present: true, fiscal_year: fy, version_no: v.version_no, rows, accounts });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.put('/api/workpapers/financial-statements/:entity_id/budget/mapping', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
+  try {
+    const eid = Number(req.params.entity_id);
+    const body = req.body || {};
+    const label = body.label;
+    const codes = body.codes;
+    if (!label || typeof label !== 'string') return res.status(400).json({ error: 'label is required' });
+    if (codes != null && !Array.isArray(codes)) return res.status(400).json({ error: 'codes must be an array of account codes' });
+    const valid = new Set(chartOf(eid).map(a => String(a.code)));
+    for (const c of (codes || [])) {
+      if (!valid.has(String(c).trim())) return res.status(400).json({ error: 'Account ' + c + ' is not in this entity chart of accounts.' });
+    }
+    const who = req.user ? (req.user.name || req.user.email) : 'system';
+    const out = budget.setMap(db, eid, label, codes || [], who);
+    res.json({ ok: true, label: out.label, codes: out.codes });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// The Budget-to-Actual schedule as JSON — drives the on-screen preview, and is
+// the same data the PDF renders.
+app.get('/api/workpapers/financial-statements/:entity_id/budget/preview', auth, requireEntityAccess('entity_id'), async (req, res) => {
+  try {
+    const eid = Number(req.params.entity_id);
+    const asOf = req.query.as_of;
+    if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(String(asOf))) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
+    const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
+    const b2a = await budget.buildBudgetToActual(db, {
+      entityId: eid, asOf, entityName: ent ? ent.name : null,
+      balancesAt: (d) => Promise.resolve(computeBalances(eid, { as_of: d })),
+    });
+    if (!b2a) return res.json({ present: false, fiscal_year: Number(String(asOf).slice(0, 4)) });
+    res.json(Object.assign({ present: true }, b2a));
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   finStmtFields(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message });
@@ -10455,7 +10617,21 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
         if (stored) { wipBytes = stored.bytes; wipName = wipFilename(asOf); }
       }
 
-      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName, consolSchedules });
+      // Budget to Actual: built from the budget stored for this entity's fiscal
+      // year (uploaded annually, and again on any revision). Returns null when
+      // no budget is on file, in which case the package is unchanged — so this
+      // is safe for every entity, not just the rail assets.
+      let b2a = null;
+      try {
+        b2a = await budget.buildBudgetToActual(db, {
+          entityId: Number(eid), asOf, entityName: fsEntityName,
+          balancesAt: (d) => Promise.resolve(computeBalances(eid, { as_of: d })),
+        });
+      } catch (e) {
+        console.error('Budget-to-Actual build failed:', e.message);
+      }
+
+      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName, consolSchedules, b2a });
 
       const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
       const safeName = fsEntityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
