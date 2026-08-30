@@ -3649,6 +3649,17 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     sectionHeader('Liabilities and Members’ Equity');
     for (const sec of groupRows(liabs, ['Current Liabilities', 'Long Term Liabilities'])) renderGroupedSection(sec, 'Total ' + sec.section);
     subtotal('Total Liabilities', i => sumCol(liabs, i));
+    // Keep the whole Members' Equity section on one page — never split it so
+    // that only its totals spill to a near-empty continuation page (matches the
+    // face balance sheet; CLA/Jimmy 8/30, "no orphaned totals"). Falls back to
+    // the Net Income reserve below when the section is taller than a page.
+    {
+      const usable = (PH - PAGE.mT) - (PAGE.mB + 8);
+      let eqH = rowH * 2 + contrib.length * rowH + rowH * 1.2;   // ME header + Net Income + contributed + its subtotal
+      if (retained.length) eqH += rowH + retained.length * rowH + rowH * 1.2;  // Retained Earnings header + rows + subtotal
+      eqH += rowH * 3;                                            // the two grand totals
+      if (eqH <= usable) ensure(eqH);
+    }
     subHeader('Members’ Equity');
     contrib.forEach(a => acctRowAt(a, 18));
     subSubtotal('Total Members’ Equity', i => sumCol(contrib, i));
