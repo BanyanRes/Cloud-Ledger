@@ -2959,6 +2959,15 @@ async function renderStatementsPdf(s, outOffsets) {
     if (tkBs) renderTkBlocks(tkBs.liabBlocks);
     else for (const sec of s.balanceSheet.liabSections) renderBsSection(sec, 'Total ' + sec.title);
     L.row('Total Liabilities', bsCells(s.balanceSheet.totalLiab.cur, s.balanceSheet.totalLiab.pri), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
+    // Keep the whole Members' Equity section on one page \u2014 never split it so
+    // that only its totals spill to a near-empty continuation page (CLA/Jimmy
+    // 8/30, "no orphaned totals"). If the section is taller than a page it can't
+    // be kept whole; the Net Income tail reserve below is the fallback then.
+    {
+      const _eqRows = (s.balanceSheet.equityRows || []).length + (s.balanceSheet.retainedRows || []).length;
+      const _fixed = (m.profile === 'banyandev') ? 7 : 4;   // headers + subtotals + NI + 2 grand totals
+      L.keepTogether((_eqRows + _fixed) * 13 + 20);
+    }
     L.row('Members\u2019 Equity', [], { indent: 6, boldRow: true });
     for (const r of s.balanceSheet.equityRows) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
     if (m.profile === 'banyandev') {
