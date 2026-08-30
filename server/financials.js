@@ -3504,6 +3504,9 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   // Space a section subtotal reserves so the following grand total shares its page.
   const GRAND_RESERVE = rowH * 1.5;
   let page, y, curTitle = null, curDateLine = null;
+  // Set true just before the first account row of a statement section; the next
+  // account row prints a "$" in every column and clears it (CLA dollar rule).
+  let dollarFirst = false;
 
   const dtext = (s, x, yy, size, font, color) => page.drawText(String(s), { x, y: yy, size, font, color: color || rgb(0.1, 0.1, 0.1) });
   const dright = (s, xr, yy, size, font, color) => dtext(s, xr - font.widthOfTextAtSize(String(s), size), yy, size, font, color);
@@ -3539,7 +3542,19 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     y -= 24; colHeaders();
   };
   const ensure = (space) => { if (y - space < PAGE.mB + 8) newPage(); };
-  const figs = (getVal, font) => { for (let i = 0; i < nCols; i++) dright(acct(getVal(i)), colRight[i], y, F.row, font || reg); };
+  // Draw the figure in every column, right-aligned on the column edge. When
+  // `dollar` is set, also print a "$" at the LEFT of each column's numeric band
+  // — a fixed position, so the number stays right-aligned and a clear gap opens
+  // between the "$" and the figure (CLA presentation; Jimmy, 2026-08-30). Used
+  // on the first account row of each statement and on the grand totals, every
+  // column, matching the face statements' dollar rule.
+  const DOLLAR_GAP = 5;   // "$" sits this far right of the column's left boundary
+  const figs = (getVal, font, dollar) => {
+    for (let i = 0; i < nCols; i++) {
+      if (dollar) dtext('$', colRight[i] - numColW + DOLLAR_GAP, y, F.row, font || reg);
+      dright(acct(getVal(i)), colRight[i], y, F.row, font || reg);
+    }
+  };
   const rule = () => { for (let i = 0; i < nCols; i++) page.drawLine({ start: { x: colRight[i] - (numColW - 10), y: y + 8 }, end: { x: colRight[i], y: y + 8 }, thickness: 0.5, color: rgb(0.3, 0.3, 0.3) }); };
   // Column value accessor for one account across member / elimination / consolidated columns.
   const val = (a, i) => i < cols.length ? (a.byEntity[cols[i].entity_id] || 0) : (i === cols.length ? (a.elimination || 0) : (a.consolidated || 0));
@@ -3549,7 +3564,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   const accountRow = (a) => {
     ensure(rowH);
     dtext(truncate((a.code ? a.code + ' ' : '') + (a.name || ''), reg, F.row, nameEnd - (nameLeft + 10)), nameLeft + 10, y, F.row, reg);
-    figs(i => val(a, i)); y -= rowH;
+    figs(i => val(a, i), reg, dollarFirst); if (dollarFirst) dollarFirst = false; y -= rowH;
   };
   const sectionHeader = (t) => { ensure(rowH * 2); dtext(t, nameLeft, y, F.row, bold); y -= rowH; };
   // A double rule under the figures (final-total convention). Drawn just below
@@ -3559,7 +3574,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   // follows it (a grand total) lands on the SAME page — keeps "Total Assets" /
   // "Total Liabilities and Members' Equity" from being orphaned alone at the
   // top of a continuation page (CLA/Jimmy 8/28).
-  const subtotal = (label, getVal, opts) => { const o = opts || {}; ensure(rowH + (o.reserveAfter || 0)); if (!o.noTopRule) rule(); dtext(label, nameLeft + 10, y, F.row, bold); figs(getVal, bold); if (o.double) doubleUnder(); y -= rowH * 1.5; };
+  const subtotal = (label, getVal, opts) => { const o = opts || {}; ensure(rowH + (o.reserveAfter || 0)); if (!o.noTopRule) rule(); dtext(label, nameLeft + 10, y, F.row, bold); figs(getVal, bold, o.dollar); if (o.double) doubleUnder(); y -= rowH * 1.5; };
 
   // Mirror the FACE statement groupings (Jimmy, 2026-08-28): the consolidating
   // schedules use the same balance-sheet classification (bsClassifyFor) and the
@@ -3577,7 +3592,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   const acctRowAt = (a, ind) => {
     ensure(rowH);
     dtext(truncate((a.code ? a.code + ' ' : '') + (a.name || ''), reg, F.row, nameEnd - (nameLeft + ind)), nameLeft + ind, y, F.row, reg);
-    figs(i => val(a, i)); y -= rowH;
+    figs(i => val(a, i), reg, dollarFirst); if (dollarFirst) dollarFirst = false; y -= rowH;
   };
   const subHeader = (t) => { ensure(rowH); dtext(t, nameLeft + 10, y, F.row, reg); y -= rowH; };
   const subSubtotal = (label, getVal) => { ensure(rowH); rule(); dtext(label, nameLeft + 18, y, F.row, reg); figs(getVal, reg); y -= rowH * 1.2; };
@@ -3642,11 +3657,13 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     const retained = byCode(equityAll.filter(a => isRE(a)));
     // Assets.
     sectionHeader('Assets');
+    dollarFirst = true;
     const assetSecs = groupRows(assets, BS_ASSET_ORDER);
     assetSecs.forEach((sec, i) => renderGroupedSection(sec, 'Total ' + sec.section, i === assetSecs.length - 1 ? GRAND_RESERVE : 0));
-    subtotal('Total Assets', i => sumCol(assets, i), { double: true });
+    subtotal('Total Assets', i => sumCol(assets, i), { double: true, dollar: true });
     // Liabilities and Members' Equity.
     sectionHeader('Liabilities and Members’ Equity');
+    dollarFirst = true;
     for (const sec of groupRows(liabs, ['Current Liabilities', 'Long Term Liabilities'])) renderGroupedSection(sec, 'Total ' + sec.section);
     subtotal('Total Liabilities', i => sumCol(liabs, i));
     // Keep the whole Members' Equity section on one page — never split it so
@@ -3674,7 +3691,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     // 8/30 — "no orphaned totals").
     ensure(rowH * 4); dtext('Net Income (Loss)', nameLeft + 18, y, F.row, reg); figs(ni); y -= rowH;
     subtotal('Total Members’ Equity', i => r2(sumCol(equityAll, i) + ni(i)));
-    subtotal('Total Liabilities and Members’ Equity', i => r2(sumCol(liabs, i) + sumCol(equityAll, i) + ni(i)), { double: true });
+    subtotal('Total Liabilities and Members’ Equity', i => r2(sumCol(liabs, i) + sumCol(equityAll, i) + ni(i)), { double: true, dollar: true });
   };
   const renderIncome = () => {
     curTitle = 'Consolidating Statement of Income'; curDateLine = 'For the Month Ended ' + meta.longDate;
@@ -3702,6 +3719,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     const oe = byCode(pl.filter(a => route(a) === 'oe'));
     const it = byCode(pl.filter(a => route(a) === 'it'));
     sectionHeader('Revenue');
+    dollarFirst = true;
     rev.forEach(a => acctRowAt(a, 10));
     subtotal('Total Revenue', i => sumCol(rev, i));
     sectionHeader('Operating Expenses');
@@ -3720,7 +3738,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
       it.forEach(a => acctRowAt(a, 10));
       subtotal('Total Income Taxes', i => sumCol(it, i));
     }
-    subtotal('Net Income (Loss)', i => r2(opInc(i) + (sumCol(oi, i) - sumCol(oe, i)) - sumCol(it, i)), { double: true, noTopRule: true });
+    subtotal('Net Income (Loss)', i => r2(opInc(i) + (sumCol(oi, i) - sumCol(oe, i)) - sumCol(it, i)), { double: true, noTopRule: true, dollar: true });
   };
 
   renderBalanceSheet();
