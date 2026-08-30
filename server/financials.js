@@ -2935,6 +2935,12 @@ async function renderStatementsPdf(s, outOffsets) {
     // grand total never lands alone atop a continuation page (>= gapAfter + a
     // grand-total row; see keepWithNext in makeLayout.row).
     const BS_GRAND_RESERVE = 22;
+    // Height of the equity CLOSING cluster (Net Income + the grand Total
+    // Members' Equity + Total Liabilities and Members' Equity). Reserved on the
+    // Net Income line so those totals never land alone at the top of a page —
+    // the whole cluster breaks together, led by the Net Income detail line
+    // (CLA/Jimmy 8/30 — "no orphaned totals").
+    const BS_EQUITY_TAIL = 46;
     bsFirstRow = wantDollar;
     if (tkBs) renderTkBlocks(tkBs.assetBlocks);
     else {
@@ -2966,12 +2972,14 @@ async function renderStatementsPdf(s, outOffsets) {
       L.row('Retained Earnings', [], { indent: 6, boldRow: true });
       for (const r of rr) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
       L.row('Total Retained Earnings', bsCells(retTot.cur, retTot.pri), { indent: 20, ruleAbove: true, gapAfter: 4 });
+      L.keepTogether(BS_EQUITY_TAIL);
       L.row('Net Income (Loss)', bsCells(s.balanceSheet.niLine.cur, s.balanceSheet.niLine.pri), { indent: 16 });
-      L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6, keepWithNext: BS_GRAND_RESERVE });
+      L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     } else {
       for (const r of (s.balanceSheet.retainedRows || [])) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
+      L.keepTogether(BS_EQUITY_TAIL);
       L.row('Net Income (Loss)', bsCells(s.balanceSheet.niLine.cur, s.balanceSheet.niLine.pri), { indent: 16 });
-      L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6, keepWithNext: BS_GRAND_RESERVE });
+      L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     }
     L.row('Total Liabilities and Members\u2019 Equity', bsCells(s.balanceSheet.totalLiabEquity.cur, s.balanceSheet.totalLiabEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: wantDollar });
   }
@@ -3640,8 +3648,12 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
       retained.forEach(a => acctRowAt(a, 18));
       subSubtotal('Total Retained Earnings', i => sumCol(retained, i));
     }
-    ensure(rowH); dtext('Net Income (Loss)', nameLeft + 18, y, F.row, reg); figs(ni); y -= rowH;
-    subtotal('Total Members’ Equity', i => r2(sumCol(equityAll, i) + ni(i)), { reserveAfter: GRAND_RESERVE });
+    // Reserve the whole equity CLOSING cluster (Net Income + the two grand
+    // totals) so those totals never land alone at the top of a page — the
+    // cluster breaks together, led by the Net Income detail line (CLA/Jimmy
+    // 8/30 — "no orphaned totals").
+    ensure(rowH * 4); dtext('Net Income (Loss)', nameLeft + 18, y, F.row, reg); figs(ni); y -= rowH;
+    subtotal('Total Members’ Equity', i => r2(sumCol(equityAll, i) + ni(i)));
     subtotal('Total Liabilities and Members’ Equity', i => r2(sumCol(liabs, i) + sumCol(equityAll, i) + ni(i)), { double: true });
   };
   const renderIncome = () => {
