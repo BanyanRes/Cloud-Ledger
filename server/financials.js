@@ -3875,7 +3875,10 @@ async function renderBudgetToActualPdf(b2a, meta, outOffsets) {
         L.row(r.label, cells(r), { indent: 6, boldRow: true, gapAfter: 6, dollarPrefix: true, keepWithNext: kw });
         break;
       case 'net':
-        L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+        // No rule above Net Income (Loss): the Total Other Income (Expense)
+        // subtotal above it already carries a rule, and the double underline
+        // below marks the final total (Jimmy, 2026-08-31).
+        L.row(r.label, cells(r), { indent: 6, boldRow: true, doubleBelow: true, dollarPrefix: true });
         break;
       default:
         break;
