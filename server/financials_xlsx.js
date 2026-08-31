@@ -188,7 +188,7 @@ function buildBalanceSheet(s) {
   const assetsRuledBelow = !!lastAsset && RULE_BELOW.test('Total ' + lastAsset.title);
   sh.row('Total Assets', cells(bs.totalAssets.cur, bs.totalAssets.pri), { indent: 6, bold: true, ruleAbove: !assetsRuledBelow, double: true, gapAfter: 1, dollar: true });
 
-  sh.sectionTitle('LIABILITIES AND MEMBERS\u2019 EQUITY');
+  sh.sectionTitle('LIABILITIES AND ' + meEquity.toUpperCase());
   bsFirst.armed = true;
   for (const sec of bs.liabSections) renderSection(sec, 'Total ' + sec.title, false);
   sh.row('Total Liabilities', cells(bs.totalLiab.cur, bs.totalLiab.pri), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });

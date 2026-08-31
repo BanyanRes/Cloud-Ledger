@@ -2989,7 +2989,7 @@ async function renderStatementsPdf(s, outOffsets) {
     }
     L.row('Total Assets', bsCells(s.balanceSheet.totalAssets.cur, s.balanceSheet.totalAssets.pri), { indent: 6, boldRow: true, ruleAbove: !lastAssetSectionRuledBelow, doubleBelow: true, gapAfter: 8, dollarPrefix: wantDollar });
 
-    L.sectionTitle('LIABILITIES AND MEMBERS\u2019 EQUITY');
+    L.sectionTitle('LIABILITIES AND ' + meEquity.toUpperCase());
     bsFirstRow = wantDollar;
     if (tkBs) renderTkBlocks(tkBs.liabBlocks);
     else for (const sec of s.balanceSheet.liabSections) renderBsSection(sec, 'Total ' + sec.title);
