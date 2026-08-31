@@ -3824,13 +3824,10 @@ async function renderBudgetToActualPdf(b2a, meta, outOffsets) {
   // Favourable-positive: revenue beats budget by exceeding it, expense by
   // coming in under it.
   const varOf = (r, a, b) => (r.sense === 'exp' ? b - a : a - b);
-  const cells = (r) => (r.memo
-    // A component of a compared total (e.g. interest expensed vs capitalised)
-    // has no budget of its own, so its budget and variance cells stay blank
-    // rather than showing the whole budget as a variance twice over.
-    ? [money(r.aM), '', '', money(r.aY), '', '']
-    : [money(r.aM), money(r.bM), money(varOf(r, r.aM, r.bM)),
-       money(r.aY), money(r.bY), money(varOf(r, r.aY, r.bY))]);
+  const cells = (r) => [
+    money(r.aM), money(r.bM), money(varOf(r, r.aM, r.bM)),
+    money(r.aY), money(r.bY), money(varOf(r, r.aY, r.bY)),
+  ];
 
   for (const r of b2a.rows) {
     switch (r.kind) {
@@ -3844,9 +3841,6 @@ async function renderBudgetToActualPdf(b2a, meta, outOffsets) {
       case 'line':
       case 'debtline':
         L.row(r.label, cells(r), { indent: 28 });
-        break;
-      case 'debttotal':
-        L.row(r.label, cells(r), { indent: 20, boldRow: true, ruleAbove: true, gapAfter: 4 });
         break;
       case 'cashflow':
         L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6, dollarPrefix: true });
@@ -3883,20 +3877,14 @@ async function renderBudgetToActualPdf(b2a, meta, outOffsets) {
       + (b2a.meta.uploadedAt ? ', uploaded ' + String(b2a.meta.uploadedAt).slice(0, 10) : '') + ').');
   }
   const ds = b2a.debtService;
-  if (ds && (ds.bM || ds.bY || ds.total.aY)) {
-    notes.push('Debt service compares interest incurred against the budget\u2019s Projected Debt Service. That budget '
-      + 'line is interest only \u2014 it is computed as the loan balance times the rate divided by twelve, and the '
-      + 'balance is level for the whole year with no scheduled principal \u2014 so the two sides are like for like. '
+  if (ds && (ds.bM || ds.bY)) {
+    notes.push('Debt service compares actual interest expense against the budget\u2019s Projected Debt Service. That '
+      + 'budget line is interest only \u2014 it is computed as the loan balance times the rate divided by twelve, and '
+      + 'the balance is level for the whole year with no scheduled principal \u2014 so the two sides are like for like. '
       + 'Loan fees and unused-line fees are not interest and remain in Other Income (Expense).');
-    if (ds.capitalised && ds.capitalised.codes.length) {
-      notes.push('Interest incurred is split between the part expensed and the part capitalised to construction in '
-        + 'progress (account ' + ds.capitalised.codes.join(', ') + '). Only the expensed part is deducted in Net Income '
-        + '(Loss); capitalised interest is added to the asset and is not a cost of the period. Comparing the budget to '
-        + 'expensed interest alone would show a favourable variance the entity has not actually earned.');
-    }
-    notes.push('Cash Flow After Debt Service is Net Operating Income less all interest incurred \u2014 the measure the '
-      + 'operating budget itself ends on, and a cash measure, so it deducts capitalised interest too. Net Income (Loss) '
-      + 'is built separately below and includes depreciation, which the budget does not carry.');
+    notes.push('Cash Flow After Debt Service is Net Operating Income less debt service, the measure the operating '
+      + 'budget itself ends on. Net Income (Loss) continues below it and includes depreciation, which the budget '
+      + 'does not carry.');
   }
   const um = (b2a.unmapped && b2a.unmapped.budgetLabels) || [];
   if (um.length) {

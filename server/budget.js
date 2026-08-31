@@ -495,11 +495,6 @@ function setMap(db, entityId, label, codes, who) {
 // sign convention per section.
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const OTHER_CODE = /^(69|70|71|75|82|83)/;   // below the operating line
-// Interest capitalised into construction in progress rather than expensed.
-// Matched on account NAME, because the code differs by entity (CLIP/Silsbee/
-// Buna use 12321, SRN 12325) and these are Asset accounts, so they can never
-// collide with a P&L line.
-const CAPITALISED_INTEREST = /construction\s+period\s+interest/i;
 
 function priorMonthEnd(asOf) {
   const [y, m] = String(asOf).split('-').map(Number);
@@ -692,60 +687,19 @@ async function buildBudgetToActual(db, { entityId, asOf, entityName, balancesAt 
   rows.push({ kind: 'noi', label: 'Net Operating Income', sense: 'rev', ...noi });
 
   // ── Debt service ─────────────────────────────────────────────────────────
-  // Projected debt service against actual interest INCURRED, which on a
-  // development-stage rail asset is mostly capitalised rather than expensed.
-  // Comparing it to interest expense alone reads as a huge favourable variance
-  // that is not real: at 6/30/2026 SRN had expensed nothing against 1,373,303 of
-  // projected debt service while capitalising 634,330 to construction in
-  // progress. So the two components are shown separately and their total is what
-  // carries the variance.
-  //
-  // Net Income (Loss) still deducts only the EXPENSED portion — capitalised
-  // interest is added to the asset, not to the period — which is why net income
-  // continues to tie to the general ledger.
+  // Actual interest expense against the budget's Projected Debt Service, then
+  // Cash Flow After Debt Service — the line the operating budget ends on.
+  // Projected Debt Service is interest only (every 2026 rail workbook computes
+  // it as -(ending balance x rate / 12), with the loan balance level all year
+  // and no scheduled principal), so it compares directly to interest expense.
   const debt = debtRow || { aM: 0, aY: 0, bM: 0, bY: 0 };
-  let capInt = { aM: 0, aY: 0, codes: [] };
-  for (const [code, a] of meta) {
-    if (a.type !== 'Asset' || !CAPITALISED_INTEREST.test(String(a.name || ''))) continue;
-    const act = actOf(code);
-    if (Math.abs(act.month) < 0.005 && Math.abs(act.ytd) < 0.005) continue;
-    capInt.aM = r2(capInt.aM + act.month);
-    capInt.aY = r2(capInt.aY + act.ytd);
-    capInt.codes.push(String(code));
-  }
-  const totalInterest = { aM: r2(debt.aM + capInt.aM), aY: r2(debt.aY + capInt.aY), bM: debt.bM, bY: debt.bY };
-  if (debtRow || capInt.codes.length) {
+  if (debtRow) {
     rows.push({ kind: 'section', label: 'Debt Service' });
-    if (capInt.codes.length) {
-      // Split presentation: components are memo rows (no budget of their own),
-      // and the total carries the comparison.
-      // Built explicitly rather than spreading debtRow: an entity could
-      // capitalise interest with no Projected Debt Service line in its budget,
-      // and spreading null would emit a row with no kind at all.
-      rows.push({
-        kind: 'debtline', role: 'expensed', label: 'Interest expensed', sense: 'exp', memo: true,
-        codes: debtRow ? debtRow.codes : [], mapped: debtRow ? debtRow.mapped : false,
-        budgetLabel: debtRow ? debtRow.budgetLabel : null,
-        aM: debt.aM, aY: debt.aY, bM: 0, bY: 0,
-      });
-      rows.push({
-        kind: 'debtline', role: 'capitalised',
-        label: 'Interest capitalised to construction in progress',
-        codes: capInt.codes, sense: 'exp', memo: true, mapped: true,
-        aM: capInt.aM, aY: capInt.aY, bM: 0, bY: 0,
-      });
-      rows.push({
-        kind: 'debttotal', role: 'total', label: 'Total interest incurred', sense: 'exp',
-        mapped: !debtRow || debtRow.mapped,
-        aM: totalInterest.aM, aY: totalInterest.aY, bM: totalInterest.bM, bY: totalInterest.bY,
-      });
-    } else if (debtRow) {
-      rows.push({ ...debtRow, role: 'expensed' });
-    }
+    rows.push({ ...debtRow, role: 'expensed' });
     rows.push({
       kind: 'cashflow', label: 'Cash Flow After Debt Service', sense: 'rev',
-      aM: r2(noi.aM - totalInterest.aM), aY: r2(noi.aY - totalInterest.aY),
-      bM: r2(noi.bM - totalInterest.bM), bY: r2(noi.bY - totalInterest.bY),
+      aM: r2(noi.aM - debt.aM), aY: r2(noi.aY - debt.aY),
+      bM: r2(noi.bM - debt.bM), bY: r2(noi.bY - debt.bY),
     });
   }
 
@@ -769,13 +723,9 @@ async function buildBudgetToActual(db, { entityId, asOf, entityName, balancesAt 
       sourceFile: version.original_name,
     },
     rows,
-    totals: { revenue: revT, opex: opexT, noi, debt, capInt, totalInterest, other: otherT, net },
-    debtService: (debtRow || capInt.codes.length) ? {
-      expensed: { aM: debt.aM, aY: debt.aY },
-      capitalised: { aM: capInt.aM, aY: capInt.aY, codes: capInt.codes },
-      total: { aM: totalInterest.aM, aY: totalInterest.aY },
-      bM: debt.bM, bY: debt.bY,
-      mapped: debtRow ? debtRow.mapped : false,
+    totals: { revenue: revT, opex: opexT, noi, debt, other: otherT, net },
+    debtService: debtRow ? {
+      aM: debt.aM, aY: debt.aY, bM: debt.bM, bY: debt.bY, mapped: debtRow.mapped,
     } : null,
     unmapped: { budgetLabels: unmappedBudget, unbudgetedAccounts: extraExp.concat(extraRev).map(r => r.codes[0]) },
     tieChecks,
