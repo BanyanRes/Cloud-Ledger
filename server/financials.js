@@ -3889,6 +3889,15 @@ async function renderBudgetToActualPdf(b2a, meta, outOffsets) {
   return await pdf.save();
 }
 
+// Read a phase number from a requisition report's filename, e.g.
+// "... Requisition Report Phase 2B 07.2026.xlsx" -> "2B". The CPA-prepared files
+// do not follow a rigid naming scheme, so just find a "Phase <n>[letter]" token
+// wherever it sits in the name. Returns the phase (upper-cased) or null.
+function reqPhaseFromName(name) {
+  const m = /\bphase\s+([0-9]+[A-Za-z]?)\b/i.exec(String(name || ''));
+  return m ? m[1].toUpperCase() : null;
+}
+
 async function generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName, consolSchedules, b2a }) {
   const merged = await PDFDocument.create();
   const info = { sections: [], warnings: [] };
@@ -4008,7 +4017,16 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
     for (let ri = 0; ri < reqList.length; ri++) {
       const r = reqList[ri];
       if (!r || !r.bytes) continue;
-      const label = multi ? ('Budget to Actual (' + (ri + 1) + ')') : 'Budget to Actual';
+      // Phase number for the heading and the TOC label — read from the report's
+      // own filename (e.g. "... Requisition Report Phase 2B 07.2026.xlsx"). The
+      // CPA-prepared files don't follow a rigid naming scheme, so we just look
+      // for a "Phase <n>[letter]" token wherever it appears in the name. Falls
+      // back to the auto-numbered "(1)/(2)" label when the name carries no phase
+      // (Jimmy, 2026-08-31).
+      const phase = reqPhaseFromName(r.name);
+      const label = phase
+        ? ('Budget to Actual — Phase ' + phase)
+        : (multi ? ('Budget to Actual (' + (ri + 1) + ')') : 'Budget to Actual');
       const rInfo = { label };
       let reqPdfBytes = r.bytes;
       let fromXlsx = false;
@@ -4024,6 +4042,7 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
           const conv = await xlsxSheetToPdf(r.bytes, wantSheet, {
             headingDate: (statements.meta && statements.meta.longDate) || undefined,
             headingEntity: (statements.meta && statements.meta.entityName) || undefined,
+            headingPhase: phase || undefined,
           });
           reqPdfBytes = Buffer.from(conv.bytes);
           fromXlsx = true;
@@ -4950,6 +4969,7 @@ module.exports = {
   generatePackage,
   renderStatementsPdf,
   renderBudgetToActualPdf,
+  reqPhaseFromName,
   B2A_TITLE,
   stripInvoiceLogPages,
   // exported for unit tests / reuse

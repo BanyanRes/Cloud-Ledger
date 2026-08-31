@@ -633,7 +633,14 @@ function clampTopToHeader(ws) {
 async function buildHeading(xlsxBuffer, name, opts) {
   const lines = await readSheetHeaderCenter(xlsxBuffer, name); // [] on failure
   const entity = (lines[0] || opts.headingEntity || '').trim();
-  const report = (lines[1] || name || '').trim();
+  let report = (lines[1] || name || '').trim();
+  // Show the phase number (read from the report's filename) in the heading.
+  // Only appended when the sheet's own report line does not already name a
+  // phase, so a header that already reads "... Phase 2B" is left untouched
+  // (Jimmy, 2026-08-31).
+  if (opts.headingPhase && !/\bphase\b/i.test(report)) {
+    report = report ? (report + ' — Phase ' + opts.headingPhase) : ('Phase ' + opts.headingPhase);
+  }
   const date = (opts.headingDate || lines[2] || '').trim();
   const out = [];
   if (entity) out.push({ text: entity, size: 12, bold: true });
