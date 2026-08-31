@@ -5213,6 +5213,14 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
   const[wipStatus,setWipStatus]=useState(null);
   const[wipBusy,setWipBusy]=useState(false);
   const[wipMsg,setWipMsg]=useState('');
+  // Operating budget. Uploaded once a year (and again on any revision); once on
+  // file CL adds the Budget-to-Actual schedule to every monthly package for that
+  // year with no further input.
+  const[budgetFile,setBudgetFile]=useState(null);
+  const[budgetStatus,setBudgetStatus]=useState(null);
+  const[budgetBusy,setBudgetBusy]=useState(false);
+  const[budgetMsg,setBudgetMsg]=useState('');
+  const[budgetWarn,setBudgetWarn]=useState([]);
   // Operating trial balance (consolidation parents only: Braker / HP). The
   // upload stores the operating column's TB; the consolidated schedules render
   // on Intercompany -> Consolidation. operGrp resolves the group whose parent
@@ -5247,6 +5255,29 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
       .catch(()=>{});
     return()=>{cancelled=true;};
   },[entityId,asOf,isTurnkey]);
+  // Is a budget on file for the fiscal year covering this statement date?
+  useEffect(()=>{let cancelled=false;setBudgetStatus(null);setBudgetFile(null);setBudgetMsg('');setBudgetWarn([]);
+    if(!entityId||!/^\d{4}-\d{2}-\d{2}$/.test(asOf))return;
+    api.financialStatementsBudgetStatus(entityId,asOf)
+      .then(st=>{if(!cancelled)setBudgetStatus(st);})
+      .catch(()=>{});
+    return()=>{cancelled=true;};
+  },[entityId,asOf]);
+  const uploadBudget=async(f)=>{
+    if(!f)return;
+    setBudgetMsg('');setBudgetWarn([]);setBudgetBusy(true);
+    try{
+      const out=await api.financialStatementsBudgetUpload(entityId,f);
+      if(!out)return;
+      setBudgetFile(null);
+      const un=(out.mapping&&out.mapping.unmapped)||[];
+      setBudgetMsg('Loaded '+out.line_count+' budget lines for '+out.fiscal_year+' (version '+out.version_no+') from '+(out.original_name||f.name)+'.'
+        +(un.length?' '+un.length+' line'+(un.length===1?'':'s')+' could not be matched to an account: '+un.join(', ')+'.':' All lines matched to accounts.'));
+      setBudgetWarn(out.warnings||[]);
+      const st=await api.financialStatementsBudgetStatus(entityId,asOf).catch(()=>null);
+      if(st)setBudgetStatus(st);
+    }catch(e){setBudgetMsg(e.message);}finally{setBudgetBusy(false);}
+  };
   const uploadWip=async(f)=>{
     if(!f)return;
     setWipMsg('');setWipBusy(true);
@@ -5359,6 +5390,32 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
           <label style={S.label}>Executive summary (merged as-is, after the cover)</label>
           <input type="file" accept=".pdf" disabled={!canEdit} onChange={e=>setExecFile(e.target.files[0]||null)} style={{fontSize:13}}/>
           {execFile&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{execFile.name}</span>}
+        </div>
+        <div>
+          <label style={S.label}>Operating budget <span style={{fontWeight:400,color:T.textMuted}}>(Excel &mdash; adds a Budget to Actual schedule as the last item in the package)</span></label>
+          <div style={{fontSize:12,color:T.textMuted,marginBottom:6,maxWidth:760}}>
+            Upload the annual operations budget workbook <b style={{color:T.textBright}}>once a year</b>, and again <b style={{color:T.textBright}}>whenever the budget is revised</b> &mdash; not every month.
+            CloudLedger reads the <b style={{color:T.textBright}}>Budget Detail</b> tab, matches each line to a GL account, and then produces the Budget to Actual schedule automatically in every monthly package for that year.
+            Re-uploading a year keeps the earlier version, so a prior month regenerated later still shows the budget that was in force then.
+          </div>
+          <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+            <input type="file" accept=".xlsx,.xlsm" disabled={!canEdit||budgetBusy} onChange={e=>{const f=e.target.files&&e.target.files[0]?e.target.files[0]:null;setBudgetFile(f);}} style={{fontSize:13}}/>
+            <button style={{...S.btnS,padding:'6px 12px',opacity:(!budgetFile||budgetBusy||!canEdit)?0.6:1}} disabled={!budgetFile||budgetBusy||!canEdit} onClick={()=>uploadBudget(budgetFile)}>{budgetBusy?'Uploading…':'Upload budget'}</button>
+          </div>
+          {budgetFile&&<div style={{marginTop:6,fontSize:12,color:T.textMuted}}>Selected: {budgetFile.name}</div>}
+          {budgetStatus&&budgetStatus.present&&<div style={{marginTop:6,fontSize:12,color:T.green}}>
+            &#10003; {budgetStatus.fiscal_year} budget on file &mdash; {budgetStatus.line_count} lines, version {budgetStatus.version_no}
+            {budgetStatus.original_name?(' ('+budgetStatus.original_name+')'):''}
+            {budgetStatus.uploaded_at?(', uploaded '+String(budgetStatus.uploaded_at).slice(0,10)):''}. The Budget to Actual schedule will be added to this package.
+          </div>}
+          {budgetStatus&&budgetStatus.present&&budgetStatus.unmapped&&budgetStatus.unmapped.length>0&&<div style={{marginTop:4,fontSize:12,color:T.orange}}>
+            {budgetStatus.unmapped.length} budget line{budgetStatus.unmapped.length===1?'':'s'} not matched to a GL account and shown with nil actual: {budgetStatus.unmapped.join(', ')}.
+          </div>}
+          {budgetStatus&&!budgetStatus.present&&!budgetFile&&<div style={{marginTop:6,fontSize:12,color:T.textMuted}}>
+            No {budgetStatus.fiscal_year} budget on file. Without one the package generates as it does today, with no Budget to Actual schedule.
+          </div>}
+          {budgetMsg&&<div style={{marginTop:6,fontSize:12,color:T.textBright}}>{budgetMsg}</div>}
+          {budgetWarn.map((w,i)=><div key={i} style={{marginTop:4,fontSize:12,color:T.orange}}>{w}</div>)}
         </div>
         {isDevEntity&&<div>
           <label style={S.label}>Requisition report (PDF or Excel &mdash; Invoice Log pages removed automatically)</label>

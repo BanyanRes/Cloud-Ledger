@@ -616,6 +616,33 @@ export const api = {
     if (!res.ok) throw new Error(data.error || 'WIP upload failed');
     return data;
   },
+  // Operating budget (annual). The workbook is parsed server-side into budget
+  // lines on upload; the monthly Budget-to-Actual schedule reads those, not the
+  // file. Re-uploading a year creates a new version.
+  financialStatementsBudgetUpload: async (eid, file, note) => {
+    const fd = new FormData();
+    fd.append('budget', file);
+    if (note) fd.append('note', note);
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/financial-statements/' + eid + '/budget', {
+      method: 'POST', headers: token ? { Authorization: 'Bearer ' + token } : {}, body: fd,
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Budget upload failed');
+    return data;
+  },
+  financialStatementsBudgetStatus: async (eid, asOf) => {
+    const token = getToken();
+    const qs = 'as_of=' + encodeURIComponent(asOf);
+    const res = await fetch(API_BASE + '/workpapers/financial-statements/' + eid + '/budget?' + qs, {
+      method: 'GET', headers: token ? { Authorization: 'Bearer ' + token } : {},
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Budget status failed');
+    return data;
+  },
   financialStatementsWipStatus: async (eid, asOf) => {
     const token = getToken();
     const qs = 'as_of=' + encodeURIComponent(asOf);

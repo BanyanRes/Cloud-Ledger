@@ -2545,7 +2545,11 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     y -= 20;
     // Repeat the column headers on continuation pages (not the very first page,
     // where the statement body calls colHeaders() itself in the right spot).
-    if (_hdrSpec && !_replaying) {
+    // Only replay when there are still columns to draw against. A statement
+    // that clears its columns mid-page (e.g. a prose notes block after the
+    // figures) would otherwise replay the header with cols[] empty, and every
+    // cols[i] would be undefined -> NaN x -> pdf-lib throws on drawText.
+    if (_hdrSpec && !_replaying && cols.length) {
       _replaying = true;
       layout.colHeaders(_hdrSpec.labels, _hdrSpec.hopts);
       _replaying = false;
@@ -3774,7 +3778,95 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
 // }
 // Returns { bytes, info: { pages, reqRemoved, reqKept, cashFlowTies, ... } }.
 // ═══════════════════════════════════════════════════════════════════════════
-async function generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName, consolSchedules }) {
+// ═══════════════════════════════════════════════════════════════════════════
+// renderBudgetToActualPdf — the Schedule of Operating Results, Budget to Actual.
+//
+// Jimmy, 2026-08-28: rail assets carry an annual operations budget; this
+// schedule is the LAST item in their statement package. The data comes from
+// budget.buildBudgetToActual(); this function only draws it, through the same
+// layout engine as the face statements so it reads as part of the package
+// rather than a bolted-on appendix.
+//
+// Landscape, six numeric columns: actual / budget / variance for the month and
+// again year to date. Variance is favourable-positive on BOTH sides of the P&L,
+// which is why it is computed from each row's `sense` rather than by
+// subtracting blindly.
+// ═══════════════════════════════════════════════════════════════════════════
+const B2A_TITLE = 'Profit and Loss - Actual vs Budget';
+
+async function renderBudgetToActualPdf(b2a, meta, outOffsets) {
+  const pdf = await PDFDocument.create();
+  const reg = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const fonts = { reg, bold };
+  const money = v => acct(v, { dash: true });
+
+  const m = Object.assign({}, meta, { asOf: b2a.meta.asOf });
+  const title = (m.isConsolidated ? 'Consolidated ' : '') + B2A_TITLE;
+  const L = makeLayout(pdf, fonts, m, title, {
+    landscape: true,
+    dateLine: monthsEndedLabel(b2a.meta.asOf),
+  });
+  if (outOffsets) outOffsets.push({ label: B2A_TITLE, page: pdf.getPageCount() });
+  L.start();
+
+  const RIGHT = PAGE.h - PAGE.mR;          // landscape: measured on the long edge
+  const PITCH = 85;
+  const cols = [];
+  for (let i = 5; i >= 0; i--) cols.push(RIGHT - i * PITCH);
+  L.setCols(cols);
+  L.colHeaders(
+    ['Month\nActual', 'Month\nBudget', 'Month\nVariance',
+      'Year to Date\nActual', 'Year to Date\nBudget', 'Year to Date\nVariance'],
+    { underline: true }
+  );
+
+  // Favourable-positive: revenue beats budget by exceeding it, expense by
+  // coming in under it.
+  const varOf = (r, a, b) => (r.sense === 'exp' ? b - a : a - b);
+  const cells = (r) => [
+    money(r.aM), money(r.bM), money(varOf(r, r.aM, r.bM)),
+    money(r.aY), money(r.bY), money(varOf(r, r.aY, r.bY)),
+  ];
+
+  for (const r of b2a.rows) {
+    switch (r.kind) {
+      case 'section':
+        L.space(4);
+        L.sectionTitle(r.label);
+        break;
+      case 'group':
+        L.row(r.label, [], { indent: 14, boldRow: true });
+        break;
+      case 'line':
+      case 'debtline':
+        L.row(r.label, cells(r), { indent: 28 });
+        break;
+      case 'cashflow':
+        L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6, dollarPrefix: true });
+        break;
+      case 'subtotal':
+        L.row(r.label, cells(r), { indent: 20, boldRow: true, ruleAbove: true, gapAfter: 4 });
+        break;
+      case 'total':
+        L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
+        break;
+      case 'noi':
+        L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6, dollarPrefix: true });
+        break;
+      case 'net':
+        L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+        break;
+      default:
+        break;
+    }
+  }
+
+
+  return await pdf.save();
+}
+
+async function generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName, consolSchedules, b2a }) {
   const merged = await PDFDocument.create();
   const info = { sections: [], warnings: [] };
 
@@ -3970,6 +4062,31 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
     } catch (e) {
       info.warnings.push('Consolidating schedules could not be rendered (' + e.message + '); package generated without them.');
       info.consolidatingSchedules = { included: false, error: e.message };
+    }
+  }
+
+  // ── Budget to Actual (rail assets with a budget on file) ───────────────────
+  // Jimmy, 2026-08-28: the LAST item in the package, after the consolidating
+  // schedules. Skipped silently when the entity has no budget for the year —
+  // most entities never will, and their packages must be unchanged.
+  if (b2a) {
+    try {
+      const b2aOffsets = [];
+      const b2aBytes = await renderBudgetToActualPdf(b2a, statements.meta, b2aOffsets);
+      const b2aBodyStart = body.getPageCount();
+      await appendToBody(b2aBytes, B2A_TITLE, false);
+      for (const off of b2aOffsets) {
+        tocEntries.push({ label: off.label, page: b2aBodyStart + off.page + COVER_TOC_PAGES + 1 });
+      }
+      info.budgetToActual = {
+        included: true,
+        fiscalYear: b2a.meta.fiscalYear,
+        versionNo: b2a.meta.versionNo,
+        unmappedBudgetLines: (b2a.unmapped && b2a.unmapped.budgetLabels) || [],
+      };
+    } catch (e) {
+      info.warnings.push('Budget-to-Actual schedule could not be rendered (' + e.message + '); package generated without it.');
+      info.budgetToActual = { included: false, error: e.message };
     }
   }
 
@@ -4809,6 +4926,8 @@ module.exports = {
   renderFundStatementsPdf,
   generatePackage,
   renderStatementsPdf,
+  renderBudgetToActualPdf,
+  B2A_TITLE,
   stripInvoiceLogPages,
   // exported for unit tests / reuse
   _helpers: { acct, r2, isZero, netIncomeOf, bsSection, priorMonthEnd, yearStart, monthStart, monthsEndedLabel, longDate, monthYearLabel, displayEntityName, withDesignation, resolvePeriod },
