@@ -2854,6 +2854,12 @@ async function renderStatementsPdf(s, outOffsets) {
   const fonts = { reg, bold };
   const m = s.meta;
   const money = v => acct(v, { dash: true });
+  // Single-member LLCs (SRN / SABINERI and Buna / CLRBUNAP) read "Member\u2019s
+  // Equity" (singular possessive) throughout. Pinned by code and raw name so no
+  // other srn-profile entity is affected.
+  const _singleMember = ['SABINERI', 'CLRBUNAP'].includes(String(m.entityCode || '').toUpperCase())
+    || /sabine|county\s*line\s*srn|\bbuna\b/i.test(m.rawEntityName || '');
+  const meEquity = _singleMember ? 'Member\u2019s Equity' : 'Members\u2019 Equity';
 
   // Numeric column right-edges. Balance Sheet now has 3 columns (current, prior,
   // and a Change column at the far right); Operations uses 3.
@@ -2997,14 +3003,14 @@ async function renderStatementsPdf(s, outOffsets) {
       const _fixed = (m.profile === 'banyandev') ? 7 : 4;   // headers + subtotals + NI + 2 grand totals
       L.keepTogether((_eqRows + _fixed) * 13 + 20);
     }
-    L.row('Members\u2019 Equity', [], { indent: 6, boldRow: true });
+    L.row(meEquity, [], { indent: 6, boldRow: true });
     for (const r of s.balanceSheet.equityRows) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
     if (m.profile === 'banyandev') {
       // CLA presentation: a contributed-capital subtotal, then a separate
       // Retained Earnings subsection with its own subtotal, then Net Income,
       // then the grand Total Members' Equity.
       const tce = s.balanceSheet.totalContribEquity;
-      L.row('Total Members\u2019 Equity', bsCells(tce.cur, tce.pri), { indent: 20, ruleAbove: true, gapAfter: 4 });
+      L.row('Total ' + meEquity, bsCells(tce.cur, tce.pri), { indent: 20, ruleAbove: true, gapAfter: 4 });
       const rr = s.balanceSheet.retainedRows || [];
       const retTot = { cur: r2(rr.reduce((a, r) => a + r.cur, 0)), pri: r2(rr.reduce((a, r) => a + r.pri, 0)) };
       L.row('Retained Earnings', [], { indent: 6, boldRow: true });
@@ -3012,14 +3018,14 @@ async function renderStatementsPdf(s, outOffsets) {
       L.row('Total Retained Earnings', bsCells(retTot.cur, retTot.pri), { indent: 20, ruleAbove: true, gapAfter: 4 });
       L.keepTogether(BS_EQUITY_TAIL);
       L.row('Net Income (Loss)', bsCells(s.balanceSheet.niLine.cur, s.balanceSheet.niLine.pri), { indent: 16 });
-      L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      L.row('Total ' + meEquity, bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     } else {
       for (const r of (s.balanceSheet.retainedRows || [])) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
       L.keepTogether(BS_EQUITY_TAIL);
       L.row('Net Income (Loss)', bsCells(s.balanceSheet.niLine.cur, s.balanceSheet.niLine.pri), { indent: 16 });
-      L.row('Total Members\u2019 Equity', bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+      L.row('Total ' + meEquity, bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
     }
-    L.row('Total Liabilities and Members\u2019 Equity', bsCells(s.balanceSheet.totalLiabEquity.cur, s.balanceSheet.totalLiabEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: wantDollar });
+    L.row('Total Liabilities and ' + meEquity, bsCells(s.balanceSheet.totalLiabEquity.cur, s.balanceSheet.totalLiabEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: wantDollar });
   }
 
   // ── 2. Statements of Operations ─────────────────────────────────────────────
@@ -3328,14 +3334,9 @@ async function renderStatementsPdf(s, outOffsets) {
     // column shown even when all zero, and a Net Income (Loss) column wide enough
     // to keep the value on one row. Only the first member row and the Total row
     // carry a "$" (CLA 8/17); the rows between them are bare figures.
-    // SRN (entity 37 / SABINERI / "County Line SRN") is a single-member LLC, so
-    // its statement reads "Member\u2019s Equity" (singular possessive). Pinned by
-    // code and raw name so no other srn-profile entity is affected.
-    const _isSRN = String(m.entityCode || '').toUpperCase() === 'SABINERI' || /sabine|county\s*line\s*srn/i.test(m.rawEntityName || '');
-    const _meWord = _isSRN ? 'Member\u2019s Equity' : 'Members\u2019 Equity';
     const eqTitle = (m.isConsolidated ? 'Consolidated ' : '') + (m.profile === 'banyan'
-      ? 'Statement of Changes in ' + _meWord + ' \u2013 Tax Basis'
-      : 'Statement of Changes in ' + _meWord + '');
+      ? 'Statement of Changes in ' + meEquity + ' \u2013 Tax Basis'
+      : 'Statement of Changes in ' + meEquity);
     const L = makeLayout(pdf, fonts, m, eqTitle,
       { landscape: true, dateLine: m.monthsEnded });
     const LRIGHT = PAGE.h - PAGE.mR; // landscape printable right edge (PAGE.h is the long side)

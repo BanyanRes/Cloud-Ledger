@@ -144,12 +144,21 @@ const num = (v) => (v == null || v === '' ? 0 : Number(v));
 const chg = (cur, pri) => num(cur) - num(pri);
 
 // ── Balance Sheet sheet ─────────────────────────────────────────────────────
+// Single-member LLCs (SRN / SABINERI and Buna / CLRBUNAP) read "Member\u2019s
+// Equity" (singular possessive). Pinned by code and raw name.
+function isSingleMember(m) {
+  return ['SABINERI', 'CLRBUNAP'].includes(String(m.entityCode || '').toUpperCase())
+    || /sabine|county\s*line\s*srn|\bbuna\b/i.test(m.rawEntityName || '');
+}
+function meEquityLabel(m) { return isSingleMember(m) ? 'Member\u2019s Equity' : 'Members\u2019 Equity'; }
+
 function buildBalanceSheet(s) {
   const m = s.meta;
+  const meEquity = meEquityLabel(m);
   const bs = s.balanceSheet;
   const sh = makeSheet('Balance Sheet');
   const title = m.profile === 'banyan'
-    ? 'Statements of Assets, Liabilities, and Members\u2019 Equity \u2013 Tax Basis'
+    ? 'Statements of Assets, Liabilities, and ' + meEquity + ' \u2013 Tax Basis'
     : 'Balance Sheets';
   sh.titleBlock([m.entityName, title, m.longDate + ' and ' + m.priorLongDate]);
   sh.colHeaders([m.longDate, m.priorLongDate, 'Change']);
@@ -183,12 +192,12 @@ function buildBalanceSheet(s) {
   bsFirst.armed = true;
   for (const sec of bs.liabSections) renderSection(sec, 'Total ' + sec.title, false);
   sh.row('Total Liabilities', cells(bs.totalLiab.cur, bs.totalLiab.pri), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
-  sh.row('Members\u2019 Equity', [], { indent: 6, bold: true });
+  sh.row(meEquity, [], { indent: 6, bold: true });
   for (const r of bs.equityRows) sh.row(r.name, cells(r.cur, r.pri), { indent: 16 });
   for (const r of (bs.retainedRows || [])) sh.row(r.name, cells(r.cur, r.pri), { indent: 16 });
   sh.row('Net Income (Loss)', cells(bs.niLine.cur, bs.niLine.pri), { indent: 16 });
-  sh.row('Total Members\u2019 Equity', cells(bs.totalEquity.cur, bs.totalEquity.pri), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1 });
-  sh.row('Total Liabilities and Members\u2019 Equity', cells(bs.totalLiabEquity.cur, bs.totalLiabEquity.pri), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true });
+  sh.row('Total ' + meEquity, cells(bs.totalEquity.cur, bs.totalEquity.pri), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1 });
+  sh.row('Total Liabilities and ' + meEquity, cells(bs.totalLiabEquity.cur, bs.totalLiabEquity.pri), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true });
   return sh._finish();
 }
 
@@ -386,12 +395,11 @@ function buildCashFlow(s) {
 function buildEquity(s) {
   const m = s.meta;
   const eq = s.equity;
-  const _isSRN = String(m.entityCode || '').toUpperCase() === 'SABINERI' || /sabine|county\s*line\s*srn/i.test(m.rawEntityName || '');
-  const _meWord = _isSRN ? 'Member\u2019s Equity' : 'Members\u2019 Equity';
-  const sh = makeSheet(_isSRN ? "Member's Equity" : 'Members Equity');
+  const meEquity = meEquityLabel(m);
+  const sh = makeSheet(isSingleMember(m) ? "Member's Equity" : 'Members Equity');
   const title = m.profile === 'banyan'
-    ? 'Statement of Changes in ' + _meWord + ' \u2013 Tax Basis'
-    : 'Statement of Changes in ' + _meWord + '';
+    ? 'Statement of Changes in ' + meEquity + ' \u2013 Tax Basis'
+    : 'Statement of Changes in ' + meEquity;
   sh.titleBlock([m.entityName, title, m.monthsEnded]);
   const shortMD = (long) => {
     const map = { January: 1, February: 2, March: 3, April: 4, May: 5, June: 6, July: 7, August: 8, September: 9, October: 10, November: 11, December: 12 };
