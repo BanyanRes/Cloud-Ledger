@@ -548,7 +548,7 @@ function buildCashFlow(s) {
   sh.sectionTitle('Cash Flows from Financing Activities');
   const finFeed = [];
   if (!isZero(cf.equityContrib)) finFeed.push(sh.row('Member contributions (distributions), net', one(cf.equityContrib), { indent: 28 }));
-  if (!isZero(cf.debtChange)) finFeed.push(sh.row('Proceeds from (repayment of) long-term debt', one(cf.debtChange), { indent: 28 }));
+  if (!isZero(cf.debtChange)) finFeed.push(sh.row('Net Proceeds from (Repayment of) Loan Payable', one(cf.debtChange), { indent: 28 }));
   const netFinRow = sh.row('Net Cash Provided (Used) by Financing Activities', one(cf.netFinancing), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: finFeed });
 
   const netChangeRow = sh.row('Net Increase (Decrease) in Cash', one(cf.netChange), { indent: 6, bold: true, ruleAbove: true, sumOf: [netOpRow, netInvRow, netFinRow] });

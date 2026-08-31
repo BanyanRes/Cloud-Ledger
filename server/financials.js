@@ -2237,20 +2237,16 @@ async function buildStatements(getBalances, opts) {
     } else if (ref.type === 'Liability') {
       const cashEffect = delta; // liability up → cash up
       const sec = bsSec(ref);
-      // NOTE: the name test runs BEFORE the section test, so a LONG-TERM account
-      // named "... payable" lands on the operating AP line instead of debt service.
-      // That is a real misclassification, and reversing the two tests fixes it \u2014
-      // but it moves the operating and financing subtotals for any entity that has
-      // one (measured: a 250k swing on an SRN-shaped entity with a drawn note
-      // payable; net change in cash is unaffected). Those statements are already
-      // issued, so this is deliberately left alone here and tracked as its own
-      // decision. See claude/changelog-2026-08-17-banyan-fs-cla-aug17-review.md.
-      // banyandev (CLA): long-term debt is FINANCING even though the UMB loan
-      // account is named "... payable" — test the section before the name so the
-      // loan proceeds land in Financing, not the operating AP line.
-      if (profile === 'banyandev' && sec === 'Long Term Liabilities') cfBuckets.debtChange += cashEffect;
-      else if (/payable/i.test(nm)) cfBuckets.ap += cashEffect;
+      // Loan payables are FINANCING for every entity: the change in any loan /
+      // note payable / bond account, or anything the section classifier put in
+      // Long Term Liabilities, is a debt draw/repayment and belongs in financing
+      // activities — not the operating AP line. These tests run BEFORE the
+      // generic "... payable" name test so a loan account named "loan payable"
+      // lands on debt service rather than operating AP. (Jimmy, 2026-08-31 —
+      // generalized from the earlier banyandev-only rule to all entities.)
+      if (/loan|note payable|bond/i.test(nm)) cfBuckets.debtChange += cashEffect;
       else if (sec === 'Long Term Liabilities') cfBuckets.debtChange += cashEffect;
+      else if (/payable/i.test(nm)) cfBuckets.ap += cashEffect;
       else cfBuckets.accrued += cashEffect; // accrued / other current liabilities
     } else if (ref.type === 'Equity') {
       // Equity delta includes contributions/distributions but NOT current-year
@@ -3315,7 +3311,7 @@ async function renderStatementsPdf(s, outOffsets) {
 
     L.sectionTitle('Cash Flows from Financing Activities');
     if (!isZero(cf.equityContrib)) L.row('Member contributions (distributions), net', [money(cf.equityContrib)], { indent: 28 });
-    if (!isZero(cf.debtChange)) L.row(m.profile === 'banyandev' ? 'Net Proceeds from Loan Payable' : 'Proceeds from (repayment of) long-term debt', [money(cf.debtChange)], { indent: 28 });
+    if (!isZero(cf.debtChange)) L.row('Net Proceeds from (Repayment of) Loan Payable', [money(cf.debtChange)], { indent: 28 });
     L.row('Net Cash Provided (Used) by Financing Activities', [money(cf.netFinancing)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
 
     L.row('Net Increase (Decrease) in Cash', [money(cf.netChange)], { indent: 6, boldRow: true, ruleAbove: true });
