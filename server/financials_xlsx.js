@@ -53,24 +53,31 @@ function makeSheet(sheetName) {
   const AMT0 = 2;          // first amount column index
   let amountColCount = 1;  // widened as rows are pushed
 
+  // push returns the 0-based row index it wrote, so a later total can name the
+  // exact rows it sums (o.sumOf = [rowIdx, ...]). That makes every SUM correct by
+  // construction — the builder knows its own tree — rather than guessed from row
+  // geometry in the render layer.
   function push(label, amounts, o = {}) {
     const a = Array.isArray(amounts) ? amounts : [];
     amountColCount = Math.max(amountColCount, a.length);
     const row = [label == null ? '' : label, o.dollar ? '$' : ''];
     for (let i = 0; i < a.length; i++) row[AMT0 + i] = a[i];
+    const idx = rows.length;
     rows.push(row);
-    // hasAmounts: this row carries at least one numeric amount cell. isTotal:
-    // a subtotal/total line (ruleAbove marks it in every builder). These two
-    // flags drive the SUM-formula pass in renderSheet.
-    const hasAmounts = a.some(v => typeof v === 'number');
     meta.push({
       indent: indentStep(o.indent || 0),
       bold: !!o.bold, ruleAbove: !!o.ruleAbove, ruleBelow: !!o.ruleBelow,
       double: !!o.double, dollar: !!o.dollar, title: !!o.title, sub: !!o.sub,
       header: !!o.header, gapAfter: o.gapAfter || 0,
-      hasAmounts, isTotal: !!o.ruleAbove && (!!o.bold || !!o.double),
+      // Rows this total sums (0-based indices), if the builder declared them.
+      sumOf: Array.isArray(o.sumOf) ? o.sumOf.slice() : null,
+      // Horizontal SUM within this row: { fromCol, toCol, atCol } as 0-based
+      // amount-column offsets (0 = first amount column). Used for the equity
+      // "ending = beginning + contributions + distributions + net income" column.
+      rowSum: o.rowSum || null,
     });
     if (o.gapAfter) { rows.push([]); meta.push({}); }
+    return idx;
   }
 
   return {
@@ -102,12 +109,12 @@ function colLetter(n) {
 // already computed so a formula can never display a figure that disagrees with
 // the PDF:
 //   • Change column  → =<cur> - <prior>  (exact by definition of chg()).
-//   • Subtotal/total → =SUM(<contiguous detail run above>), written ONLY when
-//     that sum equals the stored total to the cent. Grand totals that add other
-//     subtotals are summed from those subtotal rows (the detail rows in between
-//     each carry their own subtotal, so the nearest run above a grand total is
-//     the set of subtotals). Where the contiguous run does not reconcile, the
-//     static number is kept — correctness beats having a formula on every row.
+//   • Subtotal/total → =SUM(...) over the EXACT rows the builder declared feed
+//     that total (meta.sumOf, a list of 0-based row indices). Contiguous rows
+//     collapse to SUM(top:bottom); a gapped set becomes SUM(a,b,c). Because the
+//     builder walks its own tree, the summands are always right; the value is
+//     still re-checked to the cent as a guard, and on the rare miss the static
+//     number is kept.
 // Returns a Map keyed "r:c" (0-based, same basis as rows/meta) → { formula, result }.
 function buildFormulaMap(rows, meta, AMT0, amountColCount) {
   const map = new Map();
@@ -122,6 +129,23 @@ function buildFormulaMap(rows, meta, AMT0, amountColCount) {
     if (i >= 0) changeCol = AMT0 + i;
   }
 
+  // Render a list of 0-based row indices as an Excel range argument for column
+  // c: collapse maximal contiguous runs into A:B, join the rest with commas.
+  // e.g. rows [8,9,10,12] in col C -> "C9:C11,C13".
+  const rangeArg = (rowIdxs, c) => {
+    const L = colLetter(c + 1);
+    const rs = rowIdxs.slice().sort((a, b) => a - b);
+    const parts = [];
+    let i = 0;
+    while (i < rs.length) {
+      let j = i;
+      while (j + 1 < rs.length && rs[j + 1] === rs[j] + 1) j++;
+      parts.push(rs[i] === rs[j] ? (L + (rs[i] + 1)) : (L + (rs[i] + 1) + ':' + L + (rs[j] + 1)));
+      i = j + 1;
+    }
+    return parts.join(',');
+  };
+
   for (let r = 0; r < rows.length; r++) {
     const m = meta[r] || {};
     const row = rows[r] || [];
@@ -134,38 +158,31 @@ function buildFormulaMap(rows, meta, AMT0, amountColCount) {
       map.set(key(r, changeCol), { formula: curRef + '-' + priRef, result: num(row[changeCol]) });
     }
 
-    // Subtotal/total → SUM of the contiguous detail run directly above, per
-    // amount column (skip the Change column, which is handled above).
-    if (m.isTotal) {
-      // Find the contiguous run of amount-bearing rows immediately above r,
-      // stopping at a blank/header/section row or a prior total (the previous
-      // total closes its own group).
-      let top = -1, bottom = -1;
-      for (let k = r - 1; k >= 0; k--) {
-        const mk = meta[k] || {};
-        const rowk = rows[k] || [];
-        const hasAmt = rowk.some((v, c) => c >= AMT0 && typeof v === 'number');
-        if (!hasAmt) { if (bottom >= 0) break; else continue; }
-        if (mk.section || mk.header || mk.titleLine) break;
-        bottom = bottom < 0 ? k : bottom;
-        top = k;
-        if (mk.isTotal) break; // include this total then stop (grand-total case)
+    // Subtotal/total → SUM over the builder-declared summand rows, per amount
+    // column (the Change column stays a cur-prior formula, handled above).
+    if (Array.isArray(m.sumOf) && m.sumOf.length) {
+      for (let c = AMT0; c < AMT0 + amountColCount; c++) {
+        if (c === changeCol) continue;
+        if (typeof row[c] !== 'number') continue;
+        // Only include summand rows that actually carry a number in this column.
+        const feed = m.sumOf.filter(ri => typeof (rows[ri] || [])[c] === 'number');
+        if (!feed.length) continue;
+        const acc = feed.reduce((s, ri) => s + num(rows[ri][c]), 0);
+        if (!near(acc, row[c])) continue; // guard: never show a wrong figure
+        map.set(key(r, c), { formula: 'SUM(' + rangeArg(feed, c) + ')', result: num(row[c]) });
       }
-      if (top >= 0 && bottom >= top) {
-        for (const c of [AMT0, AMT0 + 1, AMT0 + 3, AMT0 + 4].concat(changeCol >= 0 ? [] : [AMT0 + 2])) {
-          if (c >= AMT0 + amountColCount) continue;
-          if (c === changeCol) continue;
-          if (typeof row[c] !== 'number') continue;
-          // Sum the run for this column; only formulaize if it reconciles.
-          let acc = 0, any = false;
-          for (let k = top; k <= bottom; k++) {
-            const v = (rows[k] || [])[c];
-            if (typeof v === 'number') { acc += v; any = true; }
-          }
-          if (any && near(acc, row[c])) {
-            const L = colLetter(c + 1);
-            map.set(key(r, c), { formula: 'SUM(' + L + (top + 1) + ':' + L + (bottom + 1) + ')', result: num(row[c]) });
-          }
+    }
+
+    // Horizontal SUM within the row (e.g. equity ending = beginning + contrib +
+    // distrib + net income). Columns are 0-based amount offsets.
+    if (m.rowSum) {
+      const from = AMT0 + m.rowSum.fromCol, to = AMT0 + m.rowSum.toCol, at = AMT0 + m.rowSum.atCol;
+      if (typeof row[at] === 'number') {
+        let acc = 0;
+        for (let c = from; c <= to; c++) acc += num(row[c]);
+        if (near(acc, row[at])) {
+          const L1 = colLetter(from + 1), L2 = colLetter(to + 1);
+          map.set(key(r, at), { formula: 'SUM(' + L1 + (r + 1) + ':' + L2 + (r + 1) + ')', result: num(row[at]) });
         }
       }
     }
@@ -256,40 +273,53 @@ function buildBalanceSheet(s) {
   sh.colHeaders([m.longDate, m.priorLongDate, 'Change']);
   const cells = (cur, pri) => [num(cur), num(pri), chg(cur, pri)];
 
+  // renderSection returns the row index of the section-total line so the grand
+  // total (Total Assets / Total Liabilities) can SUM the section totals.
   const renderSection = (sec, totalLabel, ruleBelowTotal) => {
     sh.row(sec.title, [], { indent: 6, bold: true });
     const showSub = sec.subs.length > 1 || sec.subs.some(su => su.contra) || m.profile === 'bsfrgp' || m.profile === 'banyan';
+    const feedTotal = []; // rows the section total sums: sub-totals, or bare detail rows
     for (const su of sec.subs) {
       if (showSub) sh.row(su.title, [], { indent: 16 });
       const rowIndent = showSub ? 26 : 16;
-      for (const r of su.rows) { sh.row(r.name, cells(r.cur, r.pri), { indent: rowIndent, dollar: bsFirst.armed }); bsFirst.armed = false; }
-      if (showSub && su.rows.length > 1) sh.row('Total ' + su.title, cells(su.subtotal.cur, su.subtotal.pri), { indent: 20, ruleAbove: true });
+      const detailRows = [];
+      for (const r of su.rows) { detailRows.push(sh.row(r.name, cells(r.cur, r.pri), { indent: rowIndent, dollar: bsFirst.armed })); bsFirst.armed = false; }
+      if (showSub && su.rows.length > 1) {
+        feedTotal.push(sh.row('Total ' + su.title, cells(su.subtotal.cur, su.subtotal.pri), { indent: 20, ruleAbove: true, sumOf: detailRows }));
+      } else {
+        // No printed sub-total line: the section total sums these detail rows directly.
+        feedTotal.push(...detailRows);
+      }
     }
-    sh.row(totalLabel, cells(sec.total.cur, sec.total.pri), { indent: 6, bold: true, ruleAbove: true, ruleBelow: ruleBelowTotal, gapAfter: 1 });
+    return sh.row(totalLabel, cells(sec.total.cur, sec.total.pri), { indent: 6, bold: true, ruleAbove: true, ruleBelow: ruleBelowTotal, gapAfter: 1, sumOf: feedTotal });
   };
   const bsFirst = { armed: false };
   const RULE_BELOW = /^Total (Current Assets|Fixed Assets, Net)$/;
 
   sh.sectionTitle('ASSETS');
   bsFirst.armed = true;
-  for (const sec of bs.assetSections) renderSection(sec, 'Total ' + sec.title, RULE_BELOW.test('Total ' + sec.title));
+  const assetTotalRows = [];
+  for (const sec of bs.assetSections) assetTotalRows.push(renderSection(sec, 'Total ' + sec.title, RULE_BELOW.test('Total ' + sec.title)));
   // No rule above Total Assets when the last asset section total already carries
   // one below its figures — the two would stack and read as a stray double rule
   // (Jimmy, 2026-08-30; County Line Rail Operations, a one-section balance sheet).
   const lastAsset = bs.assetSections[bs.assetSections.length - 1];
   const assetsRuledBelow = !!lastAsset && RULE_BELOW.test('Total ' + lastAsset.title);
-  sh.row('Total Assets', cells(bs.totalAssets.cur, bs.totalAssets.pri), { indent: 6, bold: true, ruleAbove: !assetsRuledBelow, double: true, gapAfter: 1, dollar: true });
+  sh.row('Total Assets', cells(bs.totalAssets.cur, bs.totalAssets.pri), { indent: 6, bold: true, ruleAbove: !assetsRuledBelow, double: true, gapAfter: 1, dollar: true, sumOf: assetTotalRows });
 
   sh.sectionTitle('LIABILITIES AND ' + meEquity.toUpperCase());
   bsFirst.armed = true;
-  for (const sec of bs.liabSections) renderSection(sec, 'Total ' + sec.title, false);
-  sh.row('Total Liabilities', cells(bs.totalLiab.cur, bs.totalLiab.pri), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+  const liabTotalRows = [];
+  for (const sec of bs.liabSections) liabTotalRows.push(renderSection(sec, 'Total ' + sec.title, false));
+  const totalLiabRow = sh.row('Total Liabilities', cells(bs.totalLiab.cur, bs.totalLiab.pri), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: liabTotalRows });
   sh.row(meEquity, [], { indent: 6, bold: true });
-  for (const r of bs.equityRows) sh.row(r.name, cells(r.cur, r.pri), { indent: 16 });
-  for (const r of (bs.retainedRows || [])) sh.row(r.name, cells(r.cur, r.pri), { indent: 16 });
-  sh.row('Net Income (Loss)', cells(bs.niLine.cur, bs.niLine.pri), { indent: 16 });
-  sh.row('Total ' + meEquity, cells(bs.totalEquity.cur, bs.totalEquity.pri), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1 });
-  sh.row('Total Liabilities and ' + meEquity, cells(bs.totalLiabEquity.cur, bs.totalLiabEquity.pri), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true });
+  const equityFeed = [];
+  for (const r of bs.equityRows) equityFeed.push(sh.row(r.name, cells(r.cur, r.pri), { indent: 16 }));
+  for (const r of (bs.retainedRows || [])) equityFeed.push(sh.row(r.name, cells(r.cur, r.pri), { indent: 16 }));
+  equityFeed.push(sh.row('Net Income (Loss)', cells(bs.niLine.cur, bs.niLine.pri), { indent: 16 }));
+  const totalEquityRow = sh.row('Total ' + meEquity, cells(bs.totalEquity.cur, bs.totalEquity.pri), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: equityFeed });
+  // Total Liabilities and Members' Equity = Total Liabilities + Total Members' Equity.
+  sh.row('Total Liabilities and ' + meEquity, cells(bs.totalLiabEquity.cur, bs.totalLiabEquity.pri), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: [totalLiabRow, totalEquityRow] });
   return sh._finish();
 }
 
@@ -310,69 +340,101 @@ function buildOperations(s) {
   if (op.banyan && op.banyan.structured) {
     const bo = op.banyan;
     const first = { armed: false };
+    // renderTree returns the row indices of the rows a section grand total sums:
+    // each group's total row (or, when a group prints no total, that group's
+    // feed rows). Sub-totals sum their own lines; group totals sum their subs.
     const renderTree = (groups, { showGroupTotal } = {}) => {
+      const sectionFeed = [];
       for (const g of groups) {
         sh.row(g.title, [], { indent: 12, bold: true });
+        const groupFeed = [];
         for (const su of g.subs) {
           const echo = su.title === g.title;
           if (!echo) sh.row(su.title, [], { indent: 20 });
           const li = echo ? 26 : 30;
-          su.lines.forEach(r => { sh.row(r.name, cell4(r), { indent: li, dollar: first.armed }); first.armed = false; });
-          if (su.lines.length > 1 && !echo) sh.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true });
+          const lineRows = [];
+          su.lines.forEach(r => { lineRows.push(sh.row(r.name, cell4(r), { indent: li, dollar: first.armed })); first.armed = false; });
+          if (su.lines.length > 1 && !echo) {
+            groupFeed.push(sh.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true, sumOf: lineRows }));
+          } else {
+            groupFeed.push(...lineRows);
+          }
         }
-        if (showGroupTotal !== false) sh.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true });
+        if (showGroupTotal !== false) {
+          sectionFeed.push(sh.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true, sumOf: groupFeed }));
+        } else {
+          sectionFeed.push(...groupFeed);
+        }
       }
+      return sectionFeed;
     };
     sh.sectionTitle('Revenue');
     first.armed = true;
-    renderTree(bo.revenueTree, { showGroupTotal: true });
+    const revFeed = renderTree(bo.revenueTree, { showGroupTotal: true });
     first.armed = false;
-    sh.row('Total Revenue', cell4(bo.totRev), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true });
-    sh.row('Gross Profit', cell4(bo.grossProfit), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+    const totRevRow = sh.row('Total Revenue', cell4(bo.totRev), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, sumOf: revFeed });
+    // Gross Profit = Total Revenue (no COGS section on this profile).
+    const grossRow = sh.row('Gross Profit', cell4(bo.grossProfit), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: [totRevRow] });
     sh.sectionTitle('Operating Expenses');
-    renderTree(bo.opexTree, { showGroupTotal: true });
-    sh.row('Total Operating Expenses', cell4(bo.totOpex), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+    const opexFeed = renderTree(bo.opexTree, { showGroupTotal: true });
+    const totOpexRow = sh.row('Total Operating Expenses', cell4(bo.totOpex), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: opexFeed });
+    const netFeed = [grossRow, totOpexRow]; // NI = Gross Profit - Opex + OtherIE + Taxes (signs already in the figures)
     if (bo.otherIncomeTree.length || bo.otherExpenseTree.length) {
       sh.sectionTitle('Other Income (Expense)');
-      renderTree(bo.otherIncomeTree, { showGroupTotal: true });
-      renderTree(bo.otherExpenseTree, { showGroupTotal: true });
-      sh.row('Total Other Income (Expense)', cell4(bo.totOtherIE), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+      const oiFeed = renderTree(bo.otherIncomeTree, { showGroupTotal: true });
+      const oeFeed = renderTree(bo.otherExpenseTree, { showGroupTotal: true });
+      const totOtherRow = sh.row('Total Other Income (Expense)', cell4(bo.totOtherIE), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: oiFeed.concat(oeFeed) });
+      netFeed.push(totOtherRow);
     }
     if (bo.incomeTaxTree.length) {
       sh.sectionTitle('Income Taxes');
-      renderTree(bo.incomeTaxTree, { showGroupTotal: true });
-      sh.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+      const itFeed = renderTree(bo.incomeTaxTree, { showGroupTotal: true });
+      const totTaxRow = sh.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: itFeed });
+      netFeed.push(totTaxRow);
     }
-    sh.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true });
+    // Net Income ties out as Gross Profit − Operating Expenses (+ Other, − Taxes),
+    // which is exactly the sum of those subtotal rows because expenses/taxes are
+    // carried as reductions in the figures. The value guard keeps it honest.
+    sh.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: netFeed });
   } else if (op.bsfrgp && op.bsfrgp.structured) {
     const bo = op.bsfrgp;
     const first = { armed: false };
     const renderTree = (groups, { showGroupTotal }) => {
+      const sectionFeed = [];
       for (const g of groups) {
         sh.row(g.title, [], { indent: 12, bold: true });
+        const groupFeed = [];
         for (const su of g.subs) {
           const echo = su.title === g.title;
           if (!echo) sh.row(su.title, [], { indent: 20 });
-          su.lines.forEach(r => { sh.row(r.name, cell4(r), { indent: echo ? 26 : 30, dollar: first.armed }); first.armed = false; });
-          if (su.lines.length > 1 && !echo) sh.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true });
+          const lineRows = [];
+          su.lines.forEach(r => { lineRows.push(sh.row(r.name, cell4(r), { indent: echo ? 26 : 30, dollar: first.armed })); first.armed = false; });
+          if (su.lines.length > 1 && !echo) {
+            groupFeed.push(sh.row('Total ' + su.title, cell4(su.subtotal), { indent: 24, ruleAbove: true, sumOf: lineRows }));
+          } else {
+            groupFeed.push(...lineRows);
+          }
         }
         if (showGroupTotal && (g.subs.length > 1 || g.subs.some(su => su.title === g.title))) {
-          sh.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true });
+          sectionFeed.push(sh.row('Total ' + g.title, cell4(g.subtotal), { indent: 16, ruleAbove: true, sumOf: groupFeed }));
+        } else {
+          sectionFeed.push(...groupFeed);
         }
       }
+      return sectionFeed;
     };
     sh.sectionTitle('Operating Expenses');
     first.armed = true;
-    renderTree(bo.opexTree, { showGroupTotal: true });
-    sh.row('Total Operating Expenses', cell4(bo.totOpex), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+    const opexFeed = renderTree(bo.opexTree, { showGroupTotal: true });
+    const totOpexRow = sh.row('Total Operating Expenses', cell4(bo.totOpex), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: opexFeed });
     sh.sectionTitle('Other Income (Expense)');
-    renderTree(bo.otherIncomeTree, { showGroupTotal: true });
-    renderTree(bo.otherExpenseTree, { showGroupTotal: true });
-    sh.row('Total Other Income (Expense)', cell4(bo.totOtherIE), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+    const oiFeed = renderTree(bo.otherIncomeTree, { showGroupTotal: true });
+    const oeFeed = renderTree(bo.otherExpenseTree, { showGroupTotal: true });
+    const totOtherRow = sh.row('Total Other Income (Expense)', cell4(bo.totOtherIE), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: oiFeed.concat(oeFeed) });
     sh.sectionTitle('Income Taxes');
-    renderTree(bo.incomeTaxTree, { showGroupTotal: true });
-    sh.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
-    sh.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true });
+    const itFeed = renderTree(bo.incomeTaxTree, { showGroupTotal: true });
+    const totTaxRow = sh.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: itFeed });
+    sh.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: [totOpexRow, totOtherRow, totTaxRow] });
   } else {
     // The $ is armed once and spent by whichever section draws first: a
     // development entity whose only revenue account was interest income now
@@ -380,29 +442,38 @@ function buildOperations(s) {
     // Income (Expense) (Jimmy, 2026-08-28).
     const firstFig = { armed: true };
     const spendDollar = () => { const d = firstFig.armed; firstFig.armed = false; return d; };
+    const netFeed = []; // subtotal rows Net Income sums
     if (op.revenue.length) {
       sh.sectionTitle('Revenue');
-      op.revenue.forEach(r => line(r, { dollar: spendDollar() }));
-      sh.row('Total Revenue', cell4(op.totRev), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+      const revRows = op.revenue.map(r => line(r, { dollar: spendDollar() }));
+      netFeed.push(sh.row('Total Revenue', cell4(op.totRev), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: revRows }));
     }
     if (op.cogs.length) {
       sh.sectionTitle('Cost of Revenue');
-      op.cogs.forEach(r => line(r));
-      sh.row('Total Cost of Revenue', cell4(op.totCogs), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1 });
-      sh.row('Gross Profit', cell4(op.grossProfit), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+      const cogsRows = op.cogs.map(r => line(r));
+      const totCogsRow = sh.row('Total Cost of Revenue', cell4(op.totCogs), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: cogsRows });
+      // Gross Profit = Total Revenue − Total COGS. Its summand rows are those two
+      // totals (the COGS figure is a reduction, so a straight SUM ties out only
+      // when totCogs is carried negative; the value guard drops the formula if not,
+      // leaving the correct static number).
+      const grossFeed = netFeed.length ? [netFeed[netFeed.length - 1], totCogsRow] : [totCogsRow];
+      netFeed.length = 0;
+      netFeed.push(sh.row('Gross Profit', cell4(op.grossProfit), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: grossFeed }));
     }
     sh.sectionTitle('Operating Expenses');
     const groups = op.opexGroups && op.opexGroups.length ? op.opexGroups : null;
+    const opexFeed = [];
     if (groups) {
       for (const g of groups) {
         sh.row(g.title, [], { indent: 12, bold: true });
-        g.lines.forEach(r => sh.row(r.name, cell4(r), { indent: 26, dollar: spendDollar() }));
-        if (g.lines.length > 1) sh.row('Total ' + g.title, cell4(g.subtotal), { indent: 20, ruleAbove: true });
+        const gLines = g.lines.map(r => sh.row(r.name, cell4(r), { indent: 26, dollar: spendDollar() }));
+        if (g.lines.length > 1) opexFeed.push(sh.row('Total ' + g.title, cell4(g.subtotal), { indent: 20, ruleAbove: true, sumOf: gLines }));
+        else opexFeed.push(...gLines);
       }
     } else {
-      op.opex.forEach(r => line(r, { dollar: spendDollar() }));
+      op.opex.forEach(r => opexFeed.push(line(r, { dollar: spendDollar() })));
     }
-    sh.row('Total Operating Expenses', cell4(op.totOpex), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+    netFeed.push(sh.row('Total Operating Expenses', cell4(op.totOpex), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: opexFeed }));
     // Other Income (Expense) / Income Taxes, from the shared classifier
     // (otherIeRoute in financials.js). Same nesting as the PDF; expense lines
     // print parenthesised as reductions of income.
@@ -410,32 +481,36 @@ function buildOperations(s) {
     const oeTree = op.otherExpenseTree || [];
     const itTree = op.incomeTaxTree || [];
     const negT = (t) => ({ cur: -num(t.cur), pri: -num(t.pri), ytd: -num(t.ytd) });
-    const renderOie = (groups, opts) => {
+    const renderOie = (grps, opts) => {
       const o = opts || {};
-      for (const g of groups) {
+      const sectionFeed = [];
+      for (const g of grps) {
         sh.row(g.title, [], { indent: 12, bold: true });
+        const groupFeed = [];
         for (const su of g.subs) {
           const echo = !!o.echoSub && su.title === g.title;
           if (!echo) sh.row(su.title, [], { indent: 20 });
           const li = echo ? 26 : 30;
-          su.lines.forEach(r => sh.row(r.name, cell4(o.negate ? negT(r) : r), { indent: li }));
-          if (!echo) sh.row('Total ' + su.title, cell4(o.negate ? negT(su.subtotal) : su.subtotal), { indent: 24, ruleAbove: true });
+          const lineRows = su.lines.map(r => sh.row(r.name, cell4(o.negate ? negT(r) : r), { indent: li }));
+          if (!echo) groupFeed.push(sh.row('Total ' + su.title, cell4(o.negate ? negT(su.subtotal) : su.subtotal), { indent: 24, ruleAbove: true, sumOf: lineRows }));
+          else groupFeed.push(...lineRows);
         }
-        sh.row('Total ' + g.title, cell4(o.negate ? negT(g.subtotal) : g.subtotal), { indent: 16, ruleAbove: true });
+        sectionFeed.push(sh.row('Total ' + g.title, cell4(o.negate ? negT(g.subtotal) : g.subtotal), { indent: 16, ruleAbove: true, sumOf: groupFeed }));
       }
+      return sectionFeed;
     };
     if (oiTree.length || oeTree.length) {
       sh.sectionTitle('Other Income (Expense)');
-      renderOie(oiTree, { echoSub: true });
-      renderOie(oeTree, { negate: true, echoSub: true });
-      sh.row('Total Other Income (Expense)', cell4(op.totOtherIE), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+      const oiFeed = renderOie(oiTree, { echoSub: true });
+      const oeFeed = renderOie(oeTree, { negate: true, echoSub: true });
+      netFeed.push(sh.row('Total Other Income (Expense)', cell4(op.totOtherIE), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: oiFeed.concat(oeFeed) }));
     }
     if (itTree.length) {
       sh.sectionTitle('Income Taxes');
-      renderOie(itTree, { echoSub: true });
-      sh.row('Total Income Taxes', cell4(op.totIncomeTax), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1 });
+      const itFeed = renderOie(itTree, { echoSub: true });
+      netFeed.push(sh.row('Total Income Taxes', cell4(op.totIncomeTax), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: itFeed }));
     }
-    sh.row('Net Income (Loss)', cell4(op.netIncome), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true });
+    sh.row('Net Income (Loss)', cell4(op.netIncome), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: netFeed });
   }
   return sh._finish();
 }
@@ -451,31 +526,34 @@ function buildCashFlow(s) {
   const one = (v) => [num(v)];
 
   sh.sectionTitle('Cash Flows from Operating Activities');
-  sh.row('Net Income (Loss)', one(cf.netIncome), { indent: 16, dollar: true });
+  const opFeed = [];
+  opFeed.push(sh.row('Net Income (Loss)', one(cf.netIncome), { indent: 16, dollar: true }));
   sh.row('Adjustments to reconcile net income to net cash:', [], { indent: 16 });
-  if (!isZero(cf.amortization)) sh.row('Amortization and depreciation', one(cf.amortization), { indent: 28 });
+  if (!isZero(cf.amortization)) opFeed.push(sh.row('Amortization and depreciation', one(cf.amortization), { indent: 28 }));
   sh.blank();
   sh.row('Changes in Operating Assets and Liabilities:', [], { indent: 16 });
-  if (!isZero(cf.changeAR)) sh.row('(Increase) decrease in accounts receivable', one(cf.changeAR), { indent: 28 });
-  if (!isZero(cf.changePrepaidOther)) sh.row('(Increase) decrease in prepaid and other current assets', one(cf.changePrepaidOther), { indent: 28 });
-  if (!isZero(cf.changeIntercompany)) sh.row('(Increase) decrease in intercompany balances', one(cf.changeIntercompany), { indent: 28 });
+  if (!isZero(cf.changeAR)) opFeed.push(sh.row('(Increase) decrease in accounts receivable', one(cf.changeAR), { indent: 28 }));
+  if (!isZero(cf.changePrepaidOther)) opFeed.push(sh.row('(Increase) decrease in prepaid and other current assets', one(cf.changePrepaidOther), { indent: 28 }));
+  if (!isZero(cf.changeIntercompany)) opFeed.push(sh.row('(Increase) decrease in intercompany balances', one(cf.changeIntercompany), { indent: 28 }));
   const changeApOther = num(cf.changeAP) + num(cf.changeAccrued);
-  if (!isZero(changeApOther)) sh.row('Increase (decrease) in accounts payable and other current liabilities', one(changeApOther), { indent: 28 });
-  sh.row('Net Cash Provided (Used) by Operating Activities', one(cf.netOperating), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1 });
+  if (!isZero(changeApOther)) opFeed.push(sh.row('Increase (decrease) in accounts payable and other current liabilities', one(changeApOther), { indent: 28 }));
+  const netOpRow = sh.row('Net Cash Provided (Used) by Operating Activities', one(cf.netOperating), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: opFeed });
 
   sh.sectionTitle('Cash Flows from Investing Activities');
-  if (!isZero(cf.capex)) sh.row('Acquisition of fixed assets', one(cf.capex), { indent: 28 });
-  if (!isZero(cf.ltInvest)) sh.row('(Increase) decrease in Other Assets', one(cf.ltInvest), { indent: 28 });
-  sh.row('Net Cash Provided (Used) by Investing Activities', one(cf.netInvesting), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1 });
+  const invFeed = [];
+  if (!isZero(cf.capex)) invFeed.push(sh.row('Acquisition of fixed assets', one(cf.capex), { indent: 28 }));
+  if (!isZero(cf.ltInvest)) invFeed.push(sh.row('(Increase) decrease in Other Assets', one(cf.ltInvest), { indent: 28 }));
+  const netInvRow = sh.row('Net Cash Provided (Used) by Investing Activities', one(cf.netInvesting), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: invFeed });
 
   sh.sectionTitle('Cash Flows from Financing Activities');
-  if (!isZero(cf.equityContrib)) sh.row('Member contributions (distributions), net', one(cf.equityContrib), { indent: 28 });
-  if (!isZero(cf.debtChange)) sh.row('Proceeds from (repayment of) long-term debt', one(cf.debtChange), { indent: 28 });
-  sh.row('Net Cash Provided (Used) by Financing Activities', one(cf.netFinancing), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1 });
+  const finFeed = [];
+  if (!isZero(cf.equityContrib)) finFeed.push(sh.row('Member contributions (distributions), net', one(cf.equityContrib), { indent: 28 }));
+  if (!isZero(cf.debtChange)) finFeed.push(sh.row('Proceeds from (repayment of) long-term debt', one(cf.debtChange), { indent: 28 }));
+  const netFinRow = sh.row('Net Cash Provided (Used) by Financing Activities', one(cf.netFinancing), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: finFeed });
 
-  sh.row('Net Increase (Decrease) in Cash', one(cf.netChange), { indent: 6, bold: true, ruleAbove: true });
-  sh.row('Cash, Beginning of Period', one(cf.cashBeg), { indent: 6 });
-  sh.row('Cash, End of Period', one(cf.cashEnd), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true });
+  const netChangeRow = sh.row('Net Increase (Decrease) in Cash', one(cf.netChange), { indent: 6, bold: true, ruleAbove: true, sumOf: [netOpRow, netInvRow, netFinRow] });
+  const cashBegRow = sh.row('Cash, Beginning of Period', one(cf.cashBeg), { indent: 6 });
+  sh.row('Cash, End of Period', one(cf.cashEnd), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: [netChangeRow, cashBegRow] });
   if (!isZero(cf.tieOut)) {
     sh.blank();
     sh.row('Note: reconciled change differs from cash movement (see notes).', [], { indent: 6 });
@@ -503,9 +581,13 @@ function buildEquity(s) {
   sh.colHeaders(['Equity Balances at ' + begDate, 'Contributions', 'Distributions', 'Net Income (Loss)', 'Equity Balances at ' + endDate]);
   const cells = (r) => [num(r.beginning), num(r.contributions), num(r.distributions), num(r.netIncome), num(r.ending)];
   sh.row('Member', [], { indent: 6, bold: true });
-  eq.rows.forEach((r, i) => sh.row(r.name, cells(r), { indent: 16, dollar: i === 0 }));
+  // Each member's ending balance = beginning + contributions + distributions +
+  // net income (contributions/distributions carry their own sign), so the ending
+  // column is a horizontal SUM of the four columns to its left (rowSum). The
+  // Total row is the vertical SUM of the member rows.
+  const memberRows = eq.rows.map((r, i) => sh.row(r.name, cells(r), { indent: 16, dollar: i === 0, rowSum: { fromCol: 0, toCol: 3, atCol: 4 } }));
   const t = eq.totals;
-  sh.row('Total', [num(t.beginning), num(t.contributions), num(t.distributions), num(t.netIncome), num(t.ending)], { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true });
+  sh.row('Total', [num(t.beginning), num(t.contributions), num(t.distributions), num(t.netIncome), num(t.ending)], { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: memberRows, rowSum: { fromCol: 0, toCol: 3, atCol: 4 } });
   return sh._finish();
 }
 
