@@ -5399,10 +5399,9 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
             Re-uploading a year keeps the earlier version, so a prior month regenerated later still shows the budget that was in force then.
           </div>
           <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
-            <input type="file" accept=".xlsx,.xlsm" disabled={!canEdit||budgetBusy} onChange={e=>{const f=e.target.files&&e.target.files[0]?e.target.files[0]:null;setBudgetFile(f);}} style={{fontSize:13}}/>
-            <button style={{...S.btnS,padding:'6px 12px',opacity:(!budgetFile||budgetBusy||!canEdit)?0.6:1}} disabled={!budgetFile||budgetBusy||!canEdit} onClick={()=>uploadBudget(budgetFile)}>{budgetBusy?'Uploading…':'Upload budget'}</button>
+            <input type="file" accept=".xlsx,.xlsm" disabled={!canEdit||budgetBusy} onChange={e=>{const f=e.target.files&&e.target.files[0]?e.target.files[0]:null;e.target.value='';if(f){setBudgetFile(f);uploadBudget(f);}}} style={{fontSize:13}}/>
           </div>
-          {budgetFile&&<div style={{marginTop:6,fontSize:12,color:T.textMuted}}>Selected: {budgetFile.name}</div>}
+          {budgetFile&&<div style={{marginTop:6,fontSize:12,color:budgetBusy?T.textBright:T.textMuted}}>{budgetBusy?('Uploading '+budgetFile.name+'…'):('Selected: '+budgetFile.name)}</div>}
           {budgetStatus&&budgetStatus.present&&<div style={{marginTop:6,fontSize:12,color:T.green}}>
             &#10003; {budgetStatus.fiscal_year} budget on file &mdash; {budgetStatus.line_count} lines, version {budgetStatus.version_no}
             {budgetStatus.original_name?(' ('+budgetStatus.original_name+')'):''}
