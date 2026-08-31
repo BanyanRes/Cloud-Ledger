@@ -758,7 +758,7 @@ async function buildBudgetToActual(db, { entityId, asOf, entityName, balancesAt 
   }
 
   if (extraOther.length) {
-    rows.push({ kind: 'group', label: 'Other Income (Expense) — not in the operating budget' });
+    rows.push({ kind: 'group', label: 'Other Income (Expense) — Non-Budgeted' });
     extraOther.forEach(x => rows.push(x));
     rows.push({ kind: 'subtotal', label: 'Total Other Income (Expense)', sense: 'other', ...otherT });
   }
