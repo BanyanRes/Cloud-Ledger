@@ -3328,9 +3328,14 @@ async function renderStatementsPdf(s, outOffsets) {
     // column shown even when all zero, and a Net Income (Loss) column wide enough
     // to keep the value on one row. Only the first member row and the Total row
     // carry a "$" (CLA 8/17); the rows between them are bare figures.
+    // SRN (entity 37 / SABINERI / "County Line SRN") is a single-member LLC, so
+    // its statement reads "Member\u2019s Equity" (singular possessive). Pinned by
+    // code and raw name so no other srn-profile entity is affected.
+    const _isSRN = String(m.entityCode || '').toUpperCase() === 'SABINERI' || /sabine|county\s*line\s*srn/i.test(m.rawEntityName || '');
+    const _meWord = _isSRN ? 'Member\u2019s Equity' : 'Members\u2019 Equity';
     const eqTitle = (m.isConsolidated ? 'Consolidated ' : '') + (m.profile === 'banyan'
-      ? 'Statement of Changes in Members\u2019 Equity \u2013 Tax Basis'
-      : 'Statement of Changes in Members\u2019 Equity');
+      ? 'Statement of Changes in ' + _meWord + ' \u2013 Tax Basis'
+      : 'Statement of Changes in ' + _meWord + '');
     const L = makeLayout(pdf, fonts, m, eqTitle,
       { landscape: true, dateLine: m.monthsEnded });
     const LRIGHT = PAGE.h - PAGE.mR; // landscape printable right edge (PAGE.h is the long side)

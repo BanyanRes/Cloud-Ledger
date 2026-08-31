@@ -386,10 +386,12 @@ function buildCashFlow(s) {
 function buildEquity(s) {
   const m = s.meta;
   const eq = s.equity;
-  const sh = makeSheet('Members Equity');
+  const _isSRN = String(m.entityCode || '').toUpperCase() === 'SABINERI' || /sabine|county\s*line\s*srn/i.test(m.rawEntityName || '');
+  const _meWord = _isSRN ? 'Member\u2019s Equity' : 'Members\u2019 Equity';
+  const sh = makeSheet(_isSRN ? "Member's Equity" : 'Members Equity');
   const title = m.profile === 'banyan'
-    ? 'Statement of Changes in Members\u2019 Equity \u2013 Tax Basis'
-    : 'Statement of Changes in Members\u2019 Equity';
+    ? 'Statement of Changes in ' + _meWord + ' \u2013 Tax Basis'
+    : 'Statement of Changes in ' + _meWord + '';
   sh.titleBlock([m.entityName, title, m.monthsEnded]);
   const shortMD = (long) => {
     const map = { January: 1, February: 2, March: 3, April: 4, May: 5, June: 6, July: 7, August: 8, September: 9, October: 10, November: 11, December: 12 };
