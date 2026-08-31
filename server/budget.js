@@ -174,6 +174,7 @@ function parseWorkbook(buffer, opts = {}) {
 
   const out = [];
   const warnings = [];
+  const droppedLines = [];   // uncaptioned rows left out — folded into the self-check
   let section = null;
   let group = null;
   let seq = 0;
@@ -187,17 +188,20 @@ function parseWorkbook(buffer, opts = {}) {
     const note = rawNote == null ? null : (String(rawNote).trim() || null);
 
     // A row with money on it but NO caption is a budget line whose label was
-    // deleted, not an empty row. Buna's 2026 workbook does exactly this: row 47
-    // carries $2,000 of December bonuses with an empty column D, and dropping it
-    // put the schedule $2,000 below the workbook's own payroll total. Keep it,
-    // name it from its note if it has one, and warn.
+    // deleted. Buna's 2026 workbook does this at row 47 ($2,000 of December
+    // bonuses, empty column D). Jimmy, 2026-08-31: leave it OUT of the schedule
+    // rather than show an "(unlabelled line)" row — but warn, so the missing
+    // caption is visible and the source can be fixed. (The self-check below then
+    // also flags that the affected subtotal is short by this amount.)
     if (raw == null || String(raw).trim() === '') {
       if (!hasAmounts) continue;
       const guess = note ? note.split(/[\r\n]/)[0].trim().slice(0, 40) : '';
-      const label = '(unlabelled line' + (guess ? ' — ' + guess : '') + ')';
       warnings.push('Row ' + (r + 1) + ' has budget amounts but no line name in column D'
-        + (guess ? ' (note: "' + guess + '")' : '') + '. Included as "' + label + '" — add a caption in the workbook and re-upload.');
-      out.push({ seq: seq++, kind: 'line', section, group_name: group, label, note, amounts, unlabelled: true });
+        + (guess ? ' (note: "' + guess + '")' : '') + '. It was left out of the schedule — add a caption in the workbook and re-upload to include it.');
+      // Remember where it sat so the self-check does not then flag its own
+      // group/section subtotal as short by this same amount — a dropped
+      // uncaptioned row is a known omission, not a parse error.
+      droppedLines.push({ section, groupNorm: group ? norm(group) : null, amounts });
       continue;
     }
     const label = String(raw).trim();
@@ -251,11 +255,24 @@ function parseWorkbook(buffer, opts = {}) {
   // upload time rather than discovering it in a variance three months later.
   {
     const near = (a, b) => Math.abs(a - b) < 0.5;
+    // Deliberately-dropped uncaptioned rows are folded back in per group and per
+    // section, so the check verifies the PARSE (did we read the visible lines
+    // right?) and does not re-flag the same known omission the warning above
+    // already covers.
+    const droppedByGroup = {}; const droppedByExp = Array(12).fill(0); const droppedByRev = Array(12).fill(0);
+    for (const d of droppedLines) {
+      const tgt = d.section === 'Revenue' ? droppedByRev : droppedByExp;
+      for (let i = 0; i < 12; i++) tgt[i] += d.amounts[i];
+      if (d.groupNorm) {
+        if (!droppedByGroup[d.groupNorm]) droppedByGroup[d.groupNorm] = Array(12).fill(0);
+        for (let i = 0; i < 12; i++) droppedByGroup[d.groupNorm][i] += d.amounts[i];
+      }
+    }
     const grp = {};
     let cur = null;
-    const revSum = Array(12).fill(0), expSum = Array(12).fill(0);
+    const revSum = droppedByRev.slice(), expSum = droppedByExp.slice();
     for (const r of out) {
-      if (r.kind === 'group') { cur = norm(r.label); grp[cur] = Array(12).fill(0); continue; }
+      if (r.kind === 'group') { cur = norm(r.label); grp[cur] = (droppedByGroup[cur] || Array(12).fill(0)).slice(); continue; }
       if (r.kind === 'line') {
         const target = r.section === 'Revenue' ? revSum : expSum;
         for (let i = 0; i < 12; i++) target[i] += r.amounts[i];
@@ -627,51 +644,33 @@ async function buildBudgetToActual(db, { entityId, asOf, entityName, balancesAt 
   // ── Actual accounts with activity and no budget line ─────────────────────
   // Split by code: operating accounts join the operating expense section under
   // an explicit heading; 69xxx/7xxxx/8xxxx sit below Net Operating Income in
-  // Other Income (Expense), where the budget has nothing to say at all.
-  const extraOpex = [], extraOther = [];
+  // Other Income (Expense). Every P&L account with no budget line lands here,
+  // regardless of code — Jimmy, 2026-08-31: "all the P&L accounts that are not
+  // in the operating budget get included in the other income (expense) section
+  // to agree to the actual book net income." This keeps the operating section a
+  // clean budget comparison (only lines the budget carries) and drops everything
+  // else below Net Operating Income, where it still rolls into net income so the
+  // schedule ties to the book. Expenses reduce income (negative); revenue and
+  // gains add to it (positive).
+  const extraOther = [];
   for (const [code, a] of meta) {
     if (a.type !== 'Revenue' && a.type !== 'Expense') continue;
     if (used.has(String(code))) continue;
     const act = actOf(code);
     if (Math.abs(act.month) < 0.005 && Math.abs(act.ytd) < 0.005) continue;
-    const isOther = OTHER_CODE.test(String(code)) || a.type === 'Revenue' && OTHER_CODE.test(String(code));
-    const row = {
+    const sign = a.type === 'Expense' ? -1 : 1;
+    extraOther.push({
       kind: 'line', label: a.name, codes: [String(code)], mapped: true, unbudgeted: true,
-      aM: act.month, aY: act.ytd, bM: 0, bY: 0,
-    };
-    if (OTHER_CODE.test(String(code))) {
-      // Presented as a contribution to income: expenses negative.
-      const sign = a.type === 'Expense' ? -1 : 1;
-      extraOther.push({ ...row, sense: 'other', aM: r2(sign * act.month), aY: r2(sign * act.ytd) });
-    } else if (a.type === 'Revenue') {
-      extraOpex.push({ ...row, sense: 'rev', _rev: true });
-    } else {
-      extraOpex.push({ ...row, sense: 'exp' });
-    }
+      sense: 'other', aM: r2(sign * act.month), aY: r2(sign * act.ytd), bM: 0, bY: 0,
+    });
   }
-  // Unbudgeted revenue belongs in the revenue section, not with the expenses.
-  const extraRev = extraOpex.filter(r => r._rev);
-  const extraExp = extraOpex.filter(r => !r._rev);
-  extraRev.forEach(r => { delete r._rev; add(revT, r); });
-  extraExp.forEach(r => add(opexT, r));
   extraOther.forEach(r => add(otherT, r));
-  extraRev.sort((a, b) => a.codes[0].localeCompare(b.codes[0]));
-  extraExp.sort((a, b) => a.codes[0].localeCompare(b.codes[0]));
   extraOther.sort((a, b) => a.codes[0].localeCompare(b.codes[0]));
 
-  // Splice the unbudgeted operating rows in ahead of their section totals and
-  // recompute the totals rows already emitted (they were built from the budget
-  // lines alone).
+  // The operating section now holds only budgeted lines, so the totals emitted
+  // during the pass are already final.
   const rows = [];
   for (const r of out) {
-    if (r.kind === 'total' && /revenue/i.test(r.label) && extraRev.length) {
-      rows.push({ kind: 'group', label: 'Other revenue (no budget line)' });
-      extraRev.forEach(x => rows.push(x));
-    }
-    if (r.kind === 'total' && !/revenue/i.test(r.label) && extraExp.length) {
-      rows.push({ kind: 'group', label: 'Other operating expenses (no budget line)' });
-      extraExp.forEach(x => rows.push(x));
-    }
     if (r.kind === 'total') {
       const t = /revenue/i.test(r.label) ? revT : opexT;
       rows.push({ ...r, ...t });
@@ -727,7 +726,7 @@ async function buildBudgetToActual(db, { entityId, asOf, entityName, balancesAt 
     debtService: debtRow ? {
       aM: debt.aM, aY: debt.aY, bM: debt.bM, bY: debt.bY, mapped: debtRow.mapped,
     } : null,
-    unmapped: { budgetLabels: unmappedBudget, unbudgetedAccounts: extraExp.concat(extraRev).map(r => r.codes[0]) },
+    unmapped: { budgetLabels: unmappedBudget, unbudgetedAccounts: extraOther.map(r => r.codes[0]) },
     tieChecks,
   };
 }
