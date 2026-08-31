@@ -2427,6 +2427,23 @@ async function buildStatements(getBalances, opts) {
     equityMembers.push({ code: o.code, name: o.name, beginning: beg, contributions: r2(end - beg), distributions: 0, netIncome: 0, ending: end });
   }
   equityMembers.sort((a, b) => String(a.code).localeCompare(String(b.code), undefined, { numeric: true }));
+  // A distribution account's current-year movement is a DISTRIBUTION, not a
+  // negative contribution. The generic member mapping above books every
+  // account's (cur - beg) delta into the contributions column; for a
+  // distribution account (33xxx "Distribution - ...") that puts a negative in
+  // Contributions when it belongs in the Distributions column. Reroute it so
+  // the columns read correctly. The row still foots to ending (beginning +
+  // contributions + distributions + net income) because the amount only moves
+  // between two columns, and total ending equity — hence the tie to the
+  // balance sheet — is untouched.
+  for (const mrow of equityMembers) {
+    const isDistribution = /^\s*distribution\b/i.test(String(mrow.name || ''))
+      || /^33/.test(String(mrow.code || ''));
+    if (isDistribution && !isZero(mrow.contributions)) {
+      mrow.distributions = r2(mrow.distributions + mrow.contributions);
+      mrow.contributions = 0;
+    }
+  }
   // HP (CLA): the Banyan HP Fund Undeployed Capital line is presented as a
   // current-period distribution, not an opening balance — move its beginning
   // balance into the Distributions column. The row still foots to ending
