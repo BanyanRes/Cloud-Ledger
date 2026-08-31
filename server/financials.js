@@ -3862,7 +3862,11 @@ async function renderBudgetToActualPdf(b2a, meta, outOffsets) {
         L.row(r.label, cells(r), { indent: 20, boldRow: true, ruleAbove: true, gapAfter: 4, keepWithNext: kw });
         break;
       case 'total':
-        L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6, keepWithNext: kw });
+        // Rule below only under Total Revenue (the divider before the expense
+        // section). Total Operating Expenses drops its underline — Net Operating
+        // Income sits directly beneath it, so a rule there read as a stray line
+        // (Jimmy, 2026-08-31).
+        L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: /revenue/i.test(r.label), gapAfter: 6, keepWithNext: kw });
         break;
       case 'noi':
         // No rule above Net Operating Income (Jimmy, 2026-08-31): the Total
