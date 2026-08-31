@@ -1202,7 +1202,7 @@ function PeriodLockingPage({entityId,entityName,user,canEdit=true}){
   useEffect(load,[entityId]);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(''),4000);};
   const run=async(fn,ok)=>{setBusy(true);setErr('');try{await fn();flash(ok);load();}catch(e){setErr((e.detail&&e.detail.error)||e.message);}finally{setBusy(false);}};
-  const softClose=()=>{if(!/^\d{4}-\d{2}$/.test(month))return setErr('Pick a month');const reason=window.prompt('Soft-close '+month+'? Optional note:','')||'';run(()=>api.softClosePeriod(entityId,month,reason),month+' soft-closed');};
+  const softClose=()=>{if(!/^\d{4}-\d{2}$/.test(month))return setErr('Pick a month');if(!window.confirm('Soft-close '+month+'? Posting into it will warn but is still allowed.'))return;run(()=>api.softClosePeriod(entityId,month,''),month+' soft-closed');};
   const hardClose=()=>{if(!/^\d{4}$/.test(year))return setErr('Enter a 4-digit year');if(!window.confirm('Hard-close the '+year+' fiscal year for '+entityName+'?\n\nThis BLOCKS all posting into '+year+' in-app. Only an authorized administrator can reopen it.'))return;const reason=window.prompt('Optional note for closing '+year+':','')||'';run(()=>api.hardCloseYear(entityId,year,reason),year+' hard-closed');};
   const reopenSoft=(m)=>{if(!window.confirm('Reopen '+m+'? Posting into it will no longer warn.'))return;run(()=>api.reopenSoftPeriod(entityId,m.slice(0,7)),m+' reopened');};
   const reopenYear=(y)=>{if(!window.confirm('Reopen the '+y+' fiscal year? Posting into '+y+' will be allowed again.'))return;run(()=>api.reopenYear(entityId,y.slice(0,4)),y+' reopened');};
