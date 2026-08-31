@@ -498,6 +498,47 @@ function setMap(db, entityId, label, codes, who) {
   return { label, codes: codes || [] };
 }
 
+// Auto-map budget lines to newly-added P&L accounts by exact name.
+//
+// seedMap runs once, at upload, against the chart as it stood then. When a P&L
+// account is added later whose name is a budget line — or a line was left
+// unmapped because no such account existed yet — nothing would connect the two.
+// This pass runs on every build and closes that gap: for any budget label with
+// no mapping yet, an account whose normalized NAME equals the label is mapped
+// and the mapping persisted (source 'auto-name'), so the actual flows into the
+// schedule instead of sitting in Other Income (Expense). Name identity is
+// unambiguous, so — unlike the DEFAULT_MAP guess table — this is safe to apply
+// automatically, and is allowed even for NO_DEFAULT labels: an account literally
+// named "Bonuses" is the bonuses account, not a guess. A mapping a human already
+// set is never touched. Returns what it added.
+function autoMapByName(db, entityId, labels, accounts, who) {
+  ensureSchema(db);
+  const byName = new Map();
+  for (const a of accounts || []) {
+    if (a.type !== 'Revenue' && a.type !== 'Expense') continue;
+    const k = norm(a.name);
+    if (k && !byName.has(k)) byName.set(k, a);
+  }
+  const existing = new Set(
+    db.prepare('SELECT label_norm FROM budget_account_map WHERE entity_id=?').all(entityId).map(r => r.label_norm)
+  );
+  const ins = db.prepare(
+    'INSERT OR IGNORE INTO budget_account_map (entity_id, label_norm, label, account_code, source, created_by) VALUES (?,?,?,?,?,?)'
+  );
+  const added = [];
+  const seen = new Set();
+  for (const label of labels || []) {
+    const n = norm(label);
+    if (!n || existing.has(n) || seen.has(n)) continue;
+    seen.add(n);
+    const a = byName.get(n);
+    if (!a) continue;
+    ins.run(entityId, n, label, String(a.code), 'auto-name', who || null);
+    added.push({ label, code: String(a.code) });
+  }
+  return added;
+}
+
 // ── Budget-to-Actual builder ───────────────────────────────────────────────
 // Pure given `balancesAt(dateStr) -> [{code,name,type,balance}]`.
 //
@@ -529,11 +570,21 @@ async function buildBudgetToActual(db, { entityId, asOf, entityName, balancesAt 
   if (!version) return null;                              // no budget on file — caller skips the schedule
 
   const lines = versionLines(db, version.id);
-  const map = getMap(db, entityId);
 
   const [cur, pm, py] = await Promise.all([
     balancesAt(asOf), balancesAt(priorMonthEnd(asOf)), balancesAt(priorYearEnd(asOf)),
   ]);
+
+  // Review the current chart and auto-map any budget line whose name now matches
+  // a P&L account added since the budget was uploaded, then read the (possibly
+  // enlarged) map. Jimmy, 2026-08-31: as new P&L GL accounts are added, CL should
+  // map them into the schedule automatically. Non-fatal — if the write fails
+  // (e.g. a read-only connection) the report still builds from the stored map.
+  try {
+    const labelList = lines.filter(r => r.kind === 'line' || r.kind === 'debt').map(r => r.label);
+    autoMapByName(db, entityId, labelList, cur || [], 'auto');
+  } catch (e) { /* keep going with the stored map */ }
+  const map = getMap(db, entityId);
   const idx = (arr) => {
     const m = new Map();
     for (const a of arr || []) m.set(String(a.code), a);

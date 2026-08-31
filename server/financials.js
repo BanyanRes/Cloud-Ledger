@@ -3792,7 +3792,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
 // which is why it is computed from each row's `sense` rather than by
 // subtracting blindly.
 // ═══════════════════════════════════════════════════════════════════════════
-const B2A_TITLE = 'Schedule of Operating Results – Budget to Actual';
+const B2A_TITLE = 'Profit and Loss - Actual vs Budget';
 
 async function renderBudgetToActualPdf(b2a, meta, outOffsets) {
   const pdf = await PDFDocument.create();
@@ -3862,59 +3862,6 @@ async function renderBudgetToActualPdf(b2a, meta, outOffsets) {
     }
   }
 
-  // ── Notes ────────────────────────────────────────────────────────────────
-  // Everything a reader needs to interpret the variances, and everything an
-  // accountant needs to know is UNRESOLVED. The unmapped and unbudgeted lists
-  // are printed rather than suppressed: a silent omission in a budget schedule
-  // is worse than a visible one.
-  const notes = [];
-  notes.push('Actual amounts are general ledger activity: the monthly column is the change in account balance '
-    + 'from the prior month end, and the year-to-date column the change from the prior year end.');
-  notes.push('Variances are presented favourable-positive. Revenue variance is actual less budget; '
-    + 'expense variance is budget less actual.');
-  if (b2a.meta.sourceFile) {
-    notes.push('Budget source: ' + b2a.meta.sourceFile + ' (version ' + b2a.meta.versionNo
-      + (b2a.meta.uploadedAt ? ', uploaded ' + String(b2a.meta.uploadedAt).slice(0, 10) : '') + ').');
-  }
-  const ds = b2a.debtService;
-  if (ds && (ds.bM || ds.bY)) {
-    notes.push('Debt service compares actual interest expense against the budget\u2019s Projected Debt Service. That '
-      + 'budget line is interest only \u2014 it is computed as the loan balance times the rate divided by twelve, and '
-      + 'the balance is level for the whole year with no scheduled principal \u2014 so the two sides are like for like. '
-      + 'Loan fees and unused-line fees are not interest and remain in Other Income (Expense).');
-    notes.push('Cash Flow After Debt Service is Net Operating Income less debt service, the measure the operating '
-      + 'budget itself ends on. Net Income (Loss) continues below it and includes depreciation, which the budget '
-      + 'does not carry.');
-  }
-  const um = (b2a.unmapped && b2a.unmapped.budgetLabels) || [];
-  if (um.length) {
-    notes.push('Budget lines with no general ledger account assigned, shown with nil actual: ' + um.join('; ') + '.');
-  }
-  if (b2a.rows.some(r => r.unbudgeted)) {
-    notes.push('Accounts carrying activity with no budget line are grouped under "no budget line" headings and shown with nil budget.');
-  }
-  for (const w of (b2a.warnings || [])) notes.push(w);
-
-  L.space(10);
-  L.keepTogether(30);
-  L.sectionTitle('Notes to the schedule');
-  const wrapW = PAGE.h - PAGE.mL - PAGE.mR - 20;
-  let n = 0;
-  for (const note of notes) {
-    n += 1;
-    const words = (n + '. ' + note).split(' ');
-    let line = '';
-    const lines = [];
-    for (const wd of words) {
-      const test = line ? line + ' ' + wd : wd;
-      if (reg.widthOfTextAtSize(test, FS.row) > wrapW) { lines.push(line); line = wd; }
-      else line = test;
-    }
-    if (line) lines.push(line);
-    L.keepTogether(lines.length * ROW_H + 4);
-    lines.forEach((ln, i) => L.row(ln, [], { indent: i === 0 ? 6 : 16 }));
-    L.space(2);
-  }
 
   return await pdf.save();
 }
