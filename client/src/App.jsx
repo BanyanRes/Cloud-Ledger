@@ -5396,7 +5396,7 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
           <div style={{fontSize:12,color:T.textMuted,marginBottom:6,maxWidth:760}}>
             Upload the annual operations budget workbook <b style={{color:T.textBright}}>once a year</b>, and again <b style={{color:T.textBright}}>whenever the budget is revised</b> &mdash; not every month.
             CloudLedger reads the <b style={{color:T.textBright}}>Budget Detail</b> tab, matches each line to a GL account, and then produces the Budget to Actual schedule automatically in every monthly package for that year.
-            Re-uploading a year keeps the earlier version, so a prior month regenerated later still shows the budget that was in force then.
+            Re-uploading a year replaces the budget for that whole year: any month regenerated afterward — including a prior month already closed — uses the most recently uploaded budget.
           </div>
           <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
             <input type="file" accept=".xlsx,.xlsm" disabled={!canEdit||budgetBusy} onChange={e=>{const f=e.target.files&&e.target.files[0]?e.target.files[0]:null;e.target.value='';if(f){setBudgetFile(f);uploadBudget(f);}}} style={{fontSize:13}}/>

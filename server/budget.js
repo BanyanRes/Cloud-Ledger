@@ -316,8 +316,12 @@ function saveVersion(db, { entityId, parsed, originalName, storedFilename, who, 
   const versionNo = (prev && prev.v ? prev.v : 0) + 1;
 
   const tx = db.transaction(() => {
-    // Only one active version per entity + year; older ones are retained so a
-    // prior month regenerated later still shows the budget then in force.
+    // Only one active version per entity + year. Re-uploading (a revision)
+    // deactivates the prior one and makes THIS the active version, and the
+    // report always builds from the active version (activeVersion below). So a
+    // prior month regenerated after a revision uses the LATEST budget, not the
+    // one that was in force when the month first closed (Jimmy, 2026-08-31).
+    // Older versions are retained only as an audit trail, never re-selected.
     db.prepare('UPDATE budget_versions SET is_active=0 WHERE entity_id=? AND fiscal_year=?')
       .run(entityId, parsed.fiscalYear);
     const ins = db.prepare(`
