@@ -4608,7 +4608,7 @@ function ApAgingReport({entityId,entityName,canEdit=true,pendingConfig,clearPend
       <tbody>{data.vendors.map(g=><Fragment key={g.vendor}>
         <tr><td colSpan={ncols} style={{...S.td,fontWeight:700,color:T.textBright,background:T.bgElevated}}>{g.vendor}</td></tr>
         {g.rows.map((r,i)=><tr key={i}>
-          <td style={S.td}>{r.date}</td><td style={S.td}>{r.type}</td><td style={S.td}>{r.num}</td><td style={S.td}>{r.vendor}</td><td style={S.td}>{r.due_date}</td><td style={S.tdR}>{r.past_due_days||''}</td>
+          <td style={S.td}>{r.date}</td><td style={S.td}>{r.type}</td><td style={r.entry_id?{...S.td,color:T.accent,cursor:'pointer',opacity:entryLoading?0.6:1}:S.td} onClick={()=>{if(r.entry_id)openEntry(r.entry_id);}}>{r.num}</td><td style={S.td}>{r.vendor}</td><td style={S.td}>{r.due_date}</td><td style={S.tdR}>{r.past_due_days||''}</td>
           {BK.map(b=><td key={b} style={S.tdR}>{r.bucket===b?fmt(r.amount):''}</td>)}<td style={S.tdR}></td><td style={{...S.tdR,fontWeight:600}}>{fmt(r.amount)}</td>
         </tr>)}
         <tr style={{background:T.bgElevated}}><td colSpan={COLS} style={{...S.td,fontWeight:600,fontStyle:'italic'}}>Total {g.vendor}</td>

@@ -7765,7 +7765,7 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
       const bk = bucketOf(dpd);
       if (!byVendor.has(vname)) byVendor.set(vname, { vendor: vname, rows: [], subtotal: emptyBuckets() });
       const grp = byVendor.get(vname);
-      grp.rows.push({ date: it.date, type: 'Bill', num: String(num), vendor: vname, due_date: dueDate, past_due_days: Math.max(0, dpd), amount: it.amount, bucket: bk });
+      grp.rows.push({ date: it.date, type: 'Bill', num: String(num), entry_id: it.entry_id, entry_num: it.entry_num, vendor: vname, due_date: dueDate, past_due_days: Math.max(0, dpd), amount: it.amount, bucket: bk });
       grp.subtotal[bk] += it.amount; grp.subtotal.total += it.amount;
       grand[bk] += it.amount; grand.total += it.amount;
     } else {
