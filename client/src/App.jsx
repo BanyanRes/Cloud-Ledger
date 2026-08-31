@@ -931,7 +931,7 @@ export default function App(){
         {page==='wp_gpfees'&&activeEntity&&isCLRF&&<GpFeesWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_valuation'&&activeEntity&&isCLRF&&<ValuationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} key={activeEntity+'-'+rk}/>}
+        {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='fundrep'&&activeEntity&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
       </>})()}</div></div>
@@ -2102,6 +2102,11 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
       onSaved();onClose();}catch(e){setErr(e.message);}finally{setSaving(false);}};
   const del=async()=>{if(!confirm('Delete JE-'+String(entry.entry_num).padStart(4,'0')+'? This permanently removes the entry and all its lines. This cannot be undone.'))return;
     setSaving(true);setErr('');try{await api.deleteEntry(entityId,entry.id);onSaved();onClose();}catch(e){setErr(e.message);setSaving(false);}};
+  const[xlBusy,setXlBusy]=useState(false);
+  const downloadXlsx=async()=>{setXlBusy(true);setErr('');
+    try{const out=await api.entryXlsx(entityId,entry.id);if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
+    }catch(e){setErr(e.message);}finally{setXlBusy(false);}};
   const uploadAtt=async e=>{const fl=e.target.files;if(!fl||fl.length===0)return;setErr('');setAttUploading(true);
     try{const r=await api.uploadAttachments(entityId,entry.id,fl);setAttachments(p=>[...p,...(r.attachments||r.files||r||[])]);}
     catch(ex){setErr(ex.message);}finally{setAttUploading(false);if(attInputRef.current)attInputRef.current.value='';}};
@@ -2155,6 +2160,7 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
       <button style={S.btnS} onClick={addLine}>+ Add line</button>
       <button style={{...S.btnS,color:T.teal,borderColor:T.teal+'40'}} onClick={()=>setShowAddAcct(true)}>+ New account</button>
       <button style={{...S.btnS,color:T.red,borderColor:T.red+'40'}} onClick={del} disabled={saving} title="Permanently delete this journal entry">Delete JE</button>
+      <button style={{...S.btnS,color:T.green,borderColor:T.green+'40'}} onClick={downloadXlsx} disabled={xlBusy} title="Download this journal entry as an Excel file with formulas">{xlBusy?'Preparing…':'Download Excel'}</button>
       <div style={{flex:1}}/>
       {!bal&&tDr>0&&<span style={{fontSize:12,color:T.orange,fontWeight:600}}>Off by ${fmt(tDr-tCr)}</span>}
       {bal&&<span style={{fontSize:12,color:T.green,fontWeight:600}}>Balanced</span>}
@@ -5270,7 +5276,7 @@ function TrailingTwelveMonths({entityId,entityName}){
 }
 
 // ═══ Workpapers › Financial Statements — GL-derived statement package (PDF) ═══
-function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false,isDev=false}){
+function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false,isDev=false,budgetEligible=false}){
   const[asOf,setAsOf]=useState(today());
   const[period,setPeriod]=useState('monthly');
   const[execFile,setExecFile]=useState(null);
@@ -5461,7 +5467,7 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
           <input type="file" accept=".pdf" disabled={!canEdit} onChange={e=>setExecFile(e.target.files[0]||null)} style={{fontSize:13}}/>
           {execFile&&<span style={{marginLeft:10,color:T.textMuted,fontSize:12}}>{execFile.name}</span>}
         </div>
-        <div>
+        {budgetEligible&&<div>
           <label style={S.label}>Operating budget <span style={{fontWeight:400,color:T.textMuted}}>(Excel &mdash; adds a Budget to Actual schedule as the last item in the package)</span></label>
           <div style={{fontSize:12,color:T.textMuted,marginBottom:6,maxWidth:760}}>
             Upload the annual operations budget workbook <b style={{color:T.textBright}}>once a year</b>, and again <b style={{color:T.textBright}}>whenever the budget is revised</b> &mdash; not every month.
@@ -5485,7 +5491,7 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
           </div>}
           {budgetMsg&&<div style={{marginTop:6,fontSize:12,color:T.textBright}}>{budgetMsg}</div>}
           {budgetWarn.map((w,i)=><div key={i} style={{marginTop:4,fontSize:12,color:T.orange}}>{w}</div>)}
-        </div>
+        </div>}
         {isDevEntity&&<div>
           <label style={S.label}>Requisition report (PDF or Excel &mdash; Invoice Log pages removed automatically)</label>
           <input type="file" accept=".pdf,.xlsx,.xls" disabled={!canEdit} onChange={e=>setReqFile(e.target.files[0]||null)} style={{fontSize:13}}/>

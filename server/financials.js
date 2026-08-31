@@ -3949,7 +3949,10 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
   // on them prints a duplicate. Recorded as { from, to } in 0-based BODY page
   // indices and converted to absolute page numbers at stamping time.
   const uploadedBodyRanges = [];
-  const appendToBody = async (bytes, label, addToc, uploaded) => {
+  // forceNumber: an uploaded section whose pages DO NOT carry the supplier's own
+  // footer, so our page number should be stamped on them (they are not added to
+  // the skip ranges). Used for the Banyan Residential executive summary.
+  const appendToBody = async (bytes, label, addToc, uploaded, forceNumber) => {
     if (!bytes) return 0;
     let srcDoc;
     try { srcDoc = await PDFDocument.load(bytes, { ignoreEncryption: true }); }
@@ -3959,10 +3962,17 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
     const pages = await body.copyPages(srcDoc, idx);
     pages.forEach(p => body.addPage(p));
     info.sections.push({ label, pages: pages.length, uploaded: !!uploaded });
-    if (uploaded && pages.length) uploadedBodyRanges.push({ from: startPage, to: startPage + pages.length - 1, label });
+    if (uploaded && !forceNumber && pages.length) uploadedBodyRanges.push({ from: startPage, to: startPage + pages.length - 1, label });
     if (addToc) tocEntries.push({ label, page: startPage + COVER_TOC_PAGES + 1 });
     return pages.length;
   };
+
+  // Banyan Residential's executive summary is authored in-house and carries no
+  // page footer of its own, so unlike CLA's uploaded summaries it should receive
+  // the package page number (Jimmy, 2026-08-31).
+  const _m = statements.meta || {};
+  const numberExecSummary = (String(_m.entityCode || '').toUpperCase() === 'BANYANRE1')
+    || /^banyan\s*residential$/i.test(String(_m.rawEntityName || '').trim());
 
   // Executive summary — resolution order:
   //   1) a per-call uploaded PDF (execSummaryBytes) — always wins, merged as-is.
@@ -3973,11 +3983,11 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
   //      date line is dynamic from the statement period.
   //   4) neither → warn as before.
   if (execSummaryBytes) {
-    await appendToBody(execSummaryBytes, 'Executive Summary', true, true);
+    await appendToBody(execSummaryBytes, 'Executive Summary', true, true, numberExecSummary);
     info.execSummarySource = 'uploaded';
   } else if (storedDefaultBytes) {
     // The stored default is itself a previously uploaded/split PDF.
-    await appendToBody(storedDefaultBytes, 'Executive Summary', true, true);
+    await appendToBody(storedDefaultBytes, 'Executive Summary', true, true, numberExecSummary);
     info.execSummarySource = 'stored_default';
   } else {
     let defBytes = null;

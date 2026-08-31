@@ -59,11 +59,16 @@ function makeSheet(sheetName) {
     const row = [label == null ? '' : label, o.dollar ? '$' : ''];
     for (let i = 0; i < a.length; i++) row[AMT0 + i] = a[i];
     rows.push(row);
+    // hasAmounts: this row carries at least one numeric amount cell. isTotal:
+    // a subtotal/total line (ruleAbove marks it in every builder). These two
+    // flags drive the SUM-formula pass in renderSheet.
+    const hasAmounts = a.some(v => typeof v === 'number');
     meta.push({
       indent: indentStep(o.indent || 0),
       bold: !!o.bold, ruleAbove: !!o.ruleAbove, ruleBelow: !!o.ruleBelow,
       double: !!o.double, dollar: !!o.dollar, title: !!o.title, sub: !!o.sub,
       header: !!o.header, gapAfter: o.gapAfter || 0,
+      hasAmounts, isTotal: !!o.ruleAbove && (!!o.bold || !!o.double),
     });
     if (o.gapAfter) { rows.push([]); meta.push({}); }
   }
@@ -76,7 +81,7 @@ function makeSheet(sheetName) {
       const row = ['', ''];
       labels.forEach((l, i) => { row[AMT0 + i] = l; });
       amountColCount = Math.max(amountColCount, labels.length);
-      rows.push(row); meta.push({ header: true });
+      rows.push(row); meta.push({ header: true, headerLabels: labels.slice() });
     },
     sectionTitle(t) { rows.push([t]); meta.push({ bold: true, section: true }); },
     row: push,
@@ -85,18 +90,105 @@ function makeSheet(sheetName) {
   };
 }
 
+// A1-style column letter for a 1-based column index.
+function colLetter(n) {
+  let s = '';
+  while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
+
+// Build live formulas for the amount cells so the workbook is analyzable, not a
+// dead grid of numbers. Two kinds, both VERIFIED against the value the builder
+// already computed so a formula can never display a figure that disagrees with
+// the PDF:
+//   • Change column  → =<cur> - <prior>  (exact by definition of chg()).
+//   • Subtotal/total → =SUM(<contiguous detail run above>), written ONLY when
+//     that sum equals the stored total to the cent. Grand totals that add other
+//     subtotals are summed from those subtotal rows (the detail rows in between
+//     each carry their own subtotal, so the nearest run above a grand total is
+//     the set of subtotals). Where the contiguous run does not reconcile, the
+//     static number is kept — correctness beats having a formula on every row.
+// Returns a Map keyed "r:c" (0-based, same basis as rows/meta) → { formula, result }.
+function buildFormulaMap(rows, meta, AMT0, amountColCount) {
+  const map = new Map();
+  const key = (r, c) => r + ':' + c;
+  const near = (a, b) => Math.abs(num(a) - num(b)) < 0.01;
+
+  // Locate the Change column (0-based amount index) from the header row, if any.
+  let changeCol = -1;
+  const hdr = meta.find(m => m && m.header && Array.isArray(m.headerLabels));
+  if (hdr) {
+    const i = hdr.headerLabels.findIndex(l => /^change$/i.test(String(l || '').trim()));
+    if (i >= 0) changeCol = AMT0 + i;
+  }
+
+  for (let r = 0; r < rows.length; r++) {
+    const m = meta[r] || {};
+    const row = rows[r] || [];
+
+    // Change = current - prior (first two amount columns).
+    if (changeCol >= 0 && typeof row[changeCol] === 'number'
+        && typeof row[AMT0] === 'number' && typeof row[AMT0 + 1] === 'number') {
+      const curRef = colLetter(AMT0 + 1) + (r + 1);
+      const priRef = colLetter(AMT0 + 2) + (r + 1);
+      map.set(key(r, changeCol), { formula: curRef + '-' + priRef, result: num(row[changeCol]) });
+    }
+
+    // Subtotal/total → SUM of the contiguous detail run directly above, per
+    // amount column (skip the Change column, which is handled above).
+    if (m.isTotal) {
+      // Find the contiguous run of amount-bearing rows immediately above r,
+      // stopping at a blank/header/section row or a prior total (the previous
+      // total closes its own group).
+      let top = -1, bottom = -1;
+      for (let k = r - 1; k >= 0; k--) {
+        const mk = meta[k] || {};
+        const rowk = rows[k] || [];
+        const hasAmt = rowk.some((v, c) => c >= AMT0 && typeof v === 'number');
+        if (!hasAmt) { if (bottom >= 0) break; else continue; }
+        if (mk.section || mk.header || mk.titleLine) break;
+        bottom = bottom < 0 ? k : bottom;
+        top = k;
+        if (mk.isTotal) break; // include this total then stop (grand-total case)
+      }
+      if (top >= 0 && bottom >= top) {
+        for (const c of [AMT0, AMT0 + 1, AMT0 + 3, AMT0 + 4].concat(changeCol >= 0 ? [] : [AMT0 + 2])) {
+          if (c >= AMT0 + amountColCount) continue;
+          if (c === changeCol) continue;
+          if (typeof row[c] !== 'number') continue;
+          // Sum the run for this column; only formulaize if it reconciles.
+          let acc = 0, any = false;
+          for (let k = top; k <= bottom; k++) {
+            const v = (rows[k] || [])[c];
+            if (typeof v === 'number') { acc += v; any = true; }
+          }
+          if (any && near(acc, row[c])) {
+            const L = colLetter(c + 1);
+            map.set(key(r, c), { formula: 'SUM(' + L + (top + 1) + ':' + L + (bottom + 1) + ')', result: num(row[c]) });
+          }
+        }
+      }
+    }
+  }
+  return map;
+}
+
 // Render an accumulated sheet description onto an ExcelJS worksheet.
 function renderSheet(ws, built) {
   const { rows, meta, AMT0, amountColCount } = built;
   const amountCols = [];
   for (let i = 0; i < amountColCount; i++) amountCols.push(AMT0 + i);
 
+  const formulaMap = buildFormulaMap(rows, meta, AMT0, amountColCount);
+
   rows.forEach((row, r) => {
     const m = meta[r] || {};
     (row || []).forEach((v, c) => {
       if (v === '' || v == null) return;
       const cell = ws.getCell(r + 1, c + 1);
-      cell.value = v;
+      const f = formulaMap.get(r + ':' + c);
+      if (f && typeof v === 'number') { cell.value = { formula: f.formula, result: f.result }; }
+      else { cell.value = v; }
       if (typeof v === 'number') cell.numFmt = MONEY_FMT;
     });
     // Label cell: font + indent.

@@ -23,6 +23,7 @@ const reqDraft = require('./requisition_draft');
 const { computeAllocation, buildAllocationWorkbook } = require('./insurance_allocation');
 const financials = require('./financials');
 const financialsXlsx = require('./financials_xlsx');
+const jeXlsx = require('./je_xlsx');
 const consolidation = require('./consolidation');
 const periods = require('./periods');
 const budget = require('./budget');
@@ -3283,6 +3284,36 @@ app.get('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), (req, res
     WHERE jl.entry_id = ?`).all(e.id);
   const attachments = db.prepare('SELECT id, original_name, mime_type, size FROM journal_attachments WHERE entry_id = ?').all(e.id);
   res.json({ ...e, lines, attachments });
+});
+
+// Download a single journal entry as a styled .xlsx with live SUM formulas on
+// the debit/credit totals and a debits-minus-credits difference check. Same
+// account/dimension detail the Edit JE modal shows.
+app.get('/api/entities/:eid/entries/:id/xlsx', auth, requireEntityAccess(), async (req, res) => {
+  try {
+    const e = db.prepare('SELECT * FROM journal_entries WHERE id = ? AND entity_id = ?').get(req.params.id, req.params.eid);
+    if (!e) return res.status(404).json({ error: 'Entry not found' });
+    const lines = db.prepare(`SELECT jl.*, a.name AS account_name,
+        dp.name AS project_name, dp.code AS project_code,
+        dc.name AS class_name, dl.name AS location_name
+      FROM journal_lines jl
+      LEFT JOIN accounts a ON a.entity_id = ? AND a.code = jl.account_code
+      LEFT JOIN dim_projects dp ON dp.id = jl.project_id
+      LEFT JOIN dim_classes dc ON dc.id = jl.class_id
+      LEFT JOIN dim_locations dl ON dl.id = jl.location_id
+      WHERE jl.entry_id = ?
+      ORDER BY jl.id`).all(req.params.eid, e.id);
+    const ent = db.prepare('SELECT name, code FROM entities WHERE id = ?').get(req.params.eid) || {};
+    const buf = await jeXlsx.buildEntryWorkbook({ ...e, entity: ent, lines });
+    const jeNo = 'JE-' + String(e.entry_num == null ? '' : e.entry_num).padStart(4, '0');
+    const safeName = String(ent.name || 'Entity').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    const fname = safeName + '_' + jeNo + '.xlsx';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
+    res.send(Buffer.from(buf));
+  } catch (err) {
+    res.status(500).json({ error: 'JE Excel export error: ' + err.message });
+  }
 });
 
 // GL detail (flat lines) for a printable/exportable general ledger, optionally
@@ -10523,6 +10554,18 @@ function budgetFilename(fy, versionNo, originalName) {
   return 'budget_' + fy + '_v' + versionNo + ext;
 }
 
+// The operating budget / Budget-to-Actual schedule is offered ONLY on rail-asset
+// entities and Turnkey Rail (which is an accounting-type entity by code). Every
+// other entity generates its package with no Budget-to-Actual schedule, so the
+// upload is rejected server-side even if the button is somehow reached.
+function budgetEligibleEntity(eid) {
+  const e = db.prepare('SELECT entity_type, code, name FROM entities WHERE id=?').get(eid);
+  if (!e) return false;
+  if (e.entity_type === 'rail_assets') return true;
+  if (e.code === 'TURNKEYR' || /turnkey\s*rail/i.test(String(e.name || ''))) return true;
+  return false;
+}
+
 function chartOf(eid) {
   return db.prepare('SELECT code, name, type, subtype FROM accounts WHERE entity_id=? ORDER BY code').all(eid);
 }
@@ -10532,6 +10575,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/budget', auth, require
     if (err) return res.status(400).json({ error: err.message });
     try {
       const eid = Number(req.params.entity_id);
+      if (!budgetEligibleEntity(eid)) return res.status(400).json({ error: 'An operating budget can only be uploaded for rail-asset entities and Turnkey Rail.' });
       const f = req.files && req.files.budget && req.files.budget[0];
       if (!f || !f.buffer || !f.buffer.length) return res.status(400).json({ error: 'No file uploaded (field name: budget)' });
       if (!/\.(xlsx|xlsm)$/i.test(String(f.originalname || ''))) {
