@@ -3811,7 +3811,12 @@ async function renderBudgetToActualPdf(b2a, meta, outOffsets) {
   L.start();
 
   const RIGHT = PAGE.h - PAGE.mR;          // landscape: measured on the long edge
-  const PITCH = 85;
+  // 78pt pitch (was 85): the per-column subtotal/total underlines are sized to
+  // the numeric-column pitch, so a wider pitch made the leftmost rule run back
+  // under the account names. At 78 the leftmost rule starts clear of the longest
+  // label ("Total General and Administrative Expenses") and the widest figure
+  // still fits with room to spare (Jimmy, 2026-08-31).
+  const PITCH = 78;
   const cols = [];
   for (let i = 5; i >= 0; i--) cols.push(RIGHT - i * PITCH);
   L.setCols(cols);
@@ -3829,30 +3834,41 @@ async function renderBudgetToActualPdf(b2a, meta, outOffsets) {
     money(r.aY), money(r.bY), money(varOf(r, r.aY, r.bY)),
   ];
 
-  for (const r of b2a.rows) {
+  // A subtotal/total/NOI/net/cash-flow row must never be orphaned at the top of a
+  // continuation page. The row just ABOVE such a row reserves its height
+  // (keepWithNext), so if the total would not fit at the bottom of the page the
+  // two break to the next page together and the total is never left alone.
+  const TOTALish = new Set(['subtotal', 'total', 'noi', 'net', 'cashflow']);
+  for (let i = 0; i < b2a.rows.length; i++) {
+    const r = b2a.rows[i];
+    const next = b2a.rows[i + 1];
+    const kw = (next && TOTALish.has(next.kind)) ? 24 : 0;
     switch (r.kind) {
       case 'section':
         L.space(4);
         L.sectionTitle(r.label);
         break;
       case 'group':
-        L.row(r.label, [], { indent: 14, boldRow: true });
+        L.row(r.label, [], { indent: 14, boldRow: true, keepWithNext: kw });
         break;
       case 'line':
       case 'debtline':
-        L.row(r.label, cells(r), { indent: 28 });
+        L.row(r.label, cells(r), { indent: 28, keepWithNext: kw });
         break;
       case 'cashflow':
-        L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6, dollarPrefix: true });
+        L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6, dollarPrefix: true, keepWithNext: kw });
         break;
       case 'subtotal':
-        L.row(r.label, cells(r), { indent: 20, boldRow: true, ruleAbove: true, gapAfter: 4 });
+        L.row(r.label, cells(r), { indent: 20, boldRow: true, ruleAbove: true, gapAfter: 4, keepWithNext: kw });
         break;
       case 'total':
-        L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
+        L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6, keepWithNext: kw });
         break;
       case 'noi':
-        L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6, dollarPrefix: true });
+        // No rule above Net Operating Income (Jimmy, 2026-08-31): the Total
+        // Operating Expenses row above it already carries a rule below its own
+        // figures, so a second line here read as a stray double underline.
+        L.row(r.label, cells(r), { indent: 6, boldRow: true, gapAfter: 6, dollarPrefix: true, keepWithNext: kw });
         break;
       case 'net':
         L.row(r.label, cells(r), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
