@@ -10441,7 +10441,9 @@ app.post('/api/workpapers/financial-statements/:entity_id/budget', auth, require
       // Seed the label -> account map for any label not already mapped. Existing
       // mappings are never overwritten: a human may have corrected one, and a
       // re-upload must not silently undo that.
-      const labels = parsed.rows.filter(r => r.kind === 'line').map(r => r.label);
+      // 'debt' is included: Projected Debt Service maps to interest expense and
+      // is a compared line on the schedule, not a memo.
+      const labels = parsed.rows.filter(r => r.kind === 'line' || r.kind === 'debt').map(r => r.label);
       const seeded = budget.seedMap(db, eid, labels, chartOf(eid), who);
 
       res.json({
