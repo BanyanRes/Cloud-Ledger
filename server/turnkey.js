@@ -4,6 +4,7 @@
 
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
+const periods = require('./periods');
 
 // POC standard chart of accounts (5-digit codes; names can be renamed freely)
 // POC chart of accounts — picks 5-digit codes that don't collide with the
@@ -192,6 +193,7 @@ function logSync(db, args) {
 //         journal_lines(entry_id, account_code, debit, credit)
 // memo is NOT NULL; entry_num auto-incremented per entity.
 function postJE(db, args) {
+  periods.assertPostable(db, args.cl_entity_id, args.date, { userEmail: args.created_by || 'turnkey-sync', source: 'turnkey' });
   const lines = args.lines;
   let totalDr = 0, totalCr = 0;
   for (var i = 0; i < lines.length; i++) {

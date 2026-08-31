@@ -405,11 +405,27 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
   const discard=()=>{setForm(BLANK_JE());setPendingFiles([]);};
   const onFilesSelected=e=>{const files=Array.from(e.target.files);if(files.length>0)setPendingFiles(p=>[...p,...files]);e.target.value='';};
   const post=async()=>{if(!form.date||!form.memo.trim()){setErr('Date and memo required');return;}if(form.lines.some(l=>!l.account_code)){setErr('All lines need an account');return;}if(!bal){setErr('Entry must balance');return;}
-    setPosting(true);setErr('');try{const r=await api.createEntry(entityId,{date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null}))});
+    setPosting(true);setErr('');
+    const _basePayload=override=>({date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null})),...(override||{})});
+    const _doPost=async override=>{
+      const r=await api.createEntry(entityId,_basePayload(override));
       let msg='JE-'+String(r.entry_num).padStart(4,'0')+' posted';
       if(pendingFiles.length>0){try{const u=await api.uploadAttachments(entityId,r.id,pendingFiles);msg+=' with '+u.length+' attachment(s)';}catch(ue){msg+=' (attachments failed: '+ue.message+')';}}
-      setForm(BLANK_JE());setPendingFiles([]);setPosted(msg+'!');setTimeout(()=>setPosted(''),5000);if(onPosted)onPosted();}
-    catch(e){setErr(e.message);}finally{setPosting(false);}};
+      setForm(BLANK_JE());setPendingFiles([]);setPosted(msg+'!');setTimeout(()=>setPosted(''),5000);if(onPosted)onPosted();
+    };
+    try{await _doPost();}
+    catch(e){
+      const d=e.detail||{};
+      if(d.code==='HARD_CLOSED'){setErr((d.error||'That fiscal year is closed.')+' Reopening it is a separate admin action.');}
+      else if(d.code==='SOFT_CLOSED'){
+        const mon=(d.period&&d.period.month)||'that month';
+        const reason=window.prompt(mon+' is soft-closed. To post into it anyway, enter a reason (this is logged):','');
+        if(reason===null){setErr('Post cancelled — '+mon+' is soft-closed.');}
+        else{try{await _doPost({override_period_lock:true,override_reason:reason});}catch(e2){setErr((e2.detail&&e2.detail.error)||e2.message);}}
+      }
+      else setErr(e.message);
+    }
+    finally{setPosting(false);}};
   const hasContent=form.memo||form.lines.some(l=>l.account_code||l.debit||l.credit)||pendingFiles.length>0;
 
   return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,width:'min(1200px, 96vw)',maxWidth:'96vw',height:'auto',maxHeight:'92vh',resize:'both',overflow:'auto',minWidth:'min(560px, 96vw)',minHeight:360}} onClick={e=>e.stopPropagation()}>
@@ -734,7 +750,7 @@ export default function App(){
   useEffect(()=>{if(user)Promise.all([api.getEntities(),api.getMyPrefs().catch(()=>({}))]).then(([e,p])=>{setEntities(e);if(p&&p.defaultEntityId!=null)setDefaultEntityId(p.defaultEntityId);if(e.length>0&&!activeEntity){const def=p&&p.defaultEntityId;setActiveEntity((def!=null&&e.find(x=>x.id===def))?def:e[0].id);}});},[user]);
   const setDefaultEntity=(id)=>{setDefaultEntityId(id);api.saveMyPrefs({defaultEntityId:id}).catch(err=>console.error('[prefs] save default entity failed:',err.message));};
   const refreshEntities=useCallback(async()=>{const e=await api.getEntities();setEntities(e);return e;},[]);
-  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers','intercompany','consolidation'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
+  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers','intercompany','consolidation','periods'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
   // Read-only users (Viewer) SEE the same sections as an Accountant but cannot edit.
   // canEdit gates every write control; it must never be derived from mere visibility.
   const canEdit = !!user && (user.role==='Admin' || (()=>{ const ae=activeEntity?entities.find(e=>e.id===activeEntity):null; return ae&&ae.access_level ? ae.access_level==='full' : user.role==='Accountant'; })());
@@ -827,6 +843,7 @@ export default function App(){
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
       {id:'users',label:'Users',icon:NI.users,section:'all'},
       {id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
+      {id:'periods',label:'Period Locking',icon:'🔒',section:'periods'},
     ]},
   ];
   // Access filter, then the user's saved order. Items with no saved position sort
@@ -907,6 +924,7 @@ export default function App(){
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='users'&&<UserManagement currentUser={user}/>}
         {page==='billcom'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
+        {page==='periods'&&activeEntity&&<PeriodLockingPage entityId={activeEntity} entityName={entityName} user={user} canEdit={canEdit} key={'per-'+activeEntity+'-'+rk}/>}
         {page==='billcom_sync'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity} initialTab='sync'/>}
         {page==='requisitions'&&activeEntity&&isReqEntity&&<Requisitions entityId={activeEntity} entityName={entityName} canEdit={canEdit} reqState={reqState} setReqState={setReqState}/>}
         {page==='wp_mgmtfee'&&activeEntity&&isCLRF&&<MgmtFeeWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
@@ -1172,6 +1190,51 @@ function SpreadsheetEditorModal({ file, onClose, onSaved }) {
   );
 }
 
+
+function PeriodLockingPage({entityId,entityName,user,canEdit=true}){
+  const[data,setData]=useState(null);
+  const[busy,setBusy]=useState(false);
+  const[msg,setMsg]=useState('');const[err,setErr]=useState('');
+  const now=new Date();
+  const[month,setMonth]=useState(now.toISOString().slice(0,7));
+  const[year,setYear]=useState(String(now.getFullYear()-1));
+  const load=()=>{setErr('');api.getPeriods(entityId).then(setData).catch(e=>setErr(e.message));};
+  useEffect(load,[entityId]);
+  const flash=m=>{setMsg(m);setTimeout(()=>setMsg(''),4000);};
+  const run=async(fn,ok)=>{setBusy(true);setErr('');try{await fn();flash(ok);load();}catch(e){setErr((e.detail&&e.detail.error)||e.message);}finally{setBusy(false);}};
+  const softClose=()=>{if(!/^\d{4}-\d{2}$/.test(month))return setErr('Pick a month');const reason=window.prompt('Soft-close '+month+'? Optional note:','')||'';run(()=>api.softClosePeriod(entityId,month,reason),month+' soft-closed');};
+  const hardClose=()=>{if(!/^\d{4}$/.test(year))return setErr('Enter a 4-digit year');if(!window.confirm('Hard-close the '+year+' fiscal year for '+entityName+'?\n\nThis BLOCKS all posting into '+year+' in-app. Only an authorized administrator can reopen it.'))return;const reason=window.prompt('Optional note for closing '+year+':','')||'';run(()=>api.hardCloseYear(entityId,year,reason),year+' hard-closed');};
+  const reopenSoft=(m)=>{if(!window.confirm('Reopen '+m+'? Posting into it will no longer warn.'))return;run(()=>api.reopenSoftPeriod(entityId,m.slice(0,7)),m+' reopened');};
+  const reopenYear=(y)=>{if(!window.confirm('Reopen the '+y+' fiscal year? Posting into '+y+' will be allowed again.'))return;run(()=>api.reopenYear(entityId,y.slice(0,4)),y+' reopened');};
+  if(!data)return(<div style={{padding:24}}>{err?<div style={{color:T.red}}>{err}</div>:'Loading…'}</div>);
+  const locks=data.locks||[];
+  const softs=locks.filter(l=>l.level==='soft');
+  const hards=locks.filter(l=>l.level==='hard');
+  const card={background:T.bgCard,border:'1px solid '+T.border,borderRadius:10,padding:20,marginBottom:16};
+  const h={fontSize:15,fontWeight:700,color:T.textBright,marginBottom:4};
+  const sub={fontSize:12,color:T.textDim,marginBottom:14};
+  const inp={...S.input,width:150};
+  const row={display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'};
+  return(<div style={{padding:24,maxWidth:900}}>
+    <div style={{fontSize:20,fontWeight:800,color:T.textBright,marginBottom:2}}>Period Locking</div>
+    <div style={{fontSize:12,color:T.textDim,marginBottom:20}}>{entityName}</div>
+    {err&&<div style={{color:T.red,marginBottom:12}}>{err}</div>}
+    {msg&&<div style={{color:T.green,marginBottom:12}}>{msg}</div>}
+    <div style={card}>
+      <div style={h}>Soft-close a month</div>
+      <div style={sub}>Posting into a soft-closed month — or any earlier open month before it — warns and asks for a reason, but is still allowed. Use this once a month is reviewed.</div>
+      {canEdit&&<div style={row}><input type='month' value={month} onChange={e=>setMonth(e.target.value)} style={inp}/><button disabled={busy} onClick={softClose} style={S.btnP}>Soft-close</button></div>}
+      {softs.length>0&&<div style={{marginTop:14}}>{softs.map(l=>(<div key={l.id} style={{...row,justifyContent:'space-between',borderTop:'1px solid '+T.border,padding:'8px 0'}}><div><span style={{color:T.textBright,fontWeight:600}}>{l.period_start.slice(0,7)}</span>{l.reason?<span style={{color:T.textDim,marginLeft:8,fontSize:12}}>— {l.reason}</span>:null}<div style={{fontSize:11,color:T.textDim}}>closed by {l.closed_by} · {String(l.closed_at||'').slice(0,10)}</div></div>{canEdit&&<button disabled={busy} onClick={()=>reopenSoft(l.period_start)} style={S.btnGhost}>Reopen</button>}</div>))}</div>}
+    </div>
+    <div style={card}>
+      <div style={h}>Hard-close a year</div>
+      <div style={sub}>A hard-closed fiscal year blocks all posting into that year in-app — no override. Reopening is restricted to authorized administrators.</div>
+      {canEdit&&<div style={row}><input type='number' value={year} onChange={e=>setYear(e.target.value)} style={inp} placeholder='YYYY'/><button disabled={busy} onClick={hardClose} style={{...S.btnP,background:T.red}}>Hard-close year</button></div>}
+      {hards.length>0&&<div style={{marginTop:14}}>{hards.map(l=>(<div key={l.id} style={{...row,justifyContent:'space-between',borderTop:'1px solid '+T.border,padding:'8px 0'}}><div><span style={{color:T.textBright,fontWeight:600}}>FY {l.period_start.slice(0,4)}</span>{l.reason?<span style={{color:T.textDim,marginLeft:8,fontSize:12}}>— {l.reason}</span>:null}<div style={{fontSize:11,color:T.textDim}}>closed by {l.closed_by} · {String(l.closed_at||'').slice(0,10)}</div></div>{data.can_reopen_year?<button disabled={busy} onClick={()=>reopenYear(l.period_start)} style={S.btnGhost}>Reopen year</button>:<span style={{fontSize:11,color:T.textDim}}>reopen restricted</span>}</div>))}</div>}
+      {!data.can_reopen_year&&<div style={{marginTop:10,fontSize:11,color:T.textDim}}>You can hard-close a year, but only authorized administrators can reopen one.</div>}
+    </div>
+  </div>);
+}
 
 function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
   const[selectedEntity,setSelectedEntity]=useState(activeEntity||(entities[0]?entities[0].id:null));

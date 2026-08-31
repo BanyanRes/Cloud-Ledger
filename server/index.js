@@ -24,6 +24,7 @@ const { computeAllocation, buildAllocationWorkbook } = require('./insurance_allo
 const financials = require('./financials');
 const financialsXlsx = require('./financials_xlsx');
 const consolidation = require('./consolidation');
+const periods = require('./periods');
 const budget = require('./budget');
 const execSummaries = require('./execSummaries');
 const ExcelJS = require('exceljs');
@@ -497,6 +498,8 @@ db.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS uq_reqdraft_open ON requisition_draft(entity_id, IFNULL(phase,'')) WHERE status='open';
   CREATE INDEX IF NOT EXISTS idx_reqdraft_entity ON requisition_draft(entity_id, status);
 `);
+
+periods.ensureSchema(db);
 
 const userCount = db.prepare('SELECT COUNT(*) as c FROM users').get();
 if (userCount.c === 0) {
@@ -1809,6 +1812,8 @@ app.post('/api/entities/:eid/import-tb', auth, requireEntityAccess(), requireRol
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   const eid = +req.params.eid;
   const asOfDate = req.body.as_of_date || '2024-12-31';
+  try { periods.assertPostable(db, eid, asOfDate, { userEmail: req.user.email, override: req.body.override_period_lock, reason: req.body.override_reason, source: 'tb-import' }); }
+  catch (e) { if (periods.sendPeriodError(res, e)) return; throw e; }
   try {
     const wb = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: true });
     const ws = wb.Sheets[wb.SheetNames[0]];
@@ -2316,6 +2321,8 @@ app.post('/api/entities/:eid/import-gl', auth, requireEntityAccess(), requireRol
   let mapping;
   try { mapping = JSON.parse(req.body.mapping || '{}'); } catch { return res.status(400).json({ error: 'Invalid mapping' }); }
   const asOfLabel = req.body.as_of_date || new Date().toISOString().slice(0, 10);
+  try { periods.assertPostable(db, eid, asOfLabel, { userEmail: req.user.email, override: req.body.override_period_lock, reason: req.body.override_reason, source: 'gl-import' }); }
+  catch (e) { if (periods.sendPeriodError(res, e)) return; throw e; }
   try {
     const { columns, rows } = glReadGrid(req.file.buffer);
     if (!rows.length) return res.status(400).json({ error: 'No data rows found in file' });
@@ -3369,6 +3376,8 @@ app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole(
   const { date, memo, lines, doc_number } = req.body; if (!date||!memo||!lines||lines.length<2) return res.status(400).json({ error: 'Invalid' });
   const tDr = lines.reduce((s,l) => s+(l.debit||0), 0); const tCr = lines.reduce((s,l) => s+(l.credit||0), 0);
   if (Math.abs(tDr-tCr) > 0.005) return res.status(400).json({ error: 'Must balance' });
+  try { periods.assertPostable(db, req.params.eid, date, { userEmail: req.user.email, override: req.body.override_period_lock, reason: req.body.override_reason, source: 'manual-je' }); }
+  catch (e) { if (periods.sendPeriodError(res, e)) return; throw e; }
   const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id=?').get(req.params.eid).m||0)+1;
   const result = db.transaction(() => {
     const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, doc_number, created_by) VALUES (?,?,?,?,?,?)').run(req.params.eid, num, date, memo, (doc_number || '').trim() || null, req.user.name);
@@ -3526,6 +3535,9 @@ app.post('/api/entities/:eid/entries/bulk', auth, requireEntityAccess(), require
   const eid = req.params.eid;
   const list = Array.isArray(req.body && req.body.entries) ? req.body.entries : [];
   if (!list.length) return res.status(400).json({ error: 'No entries to post' });
+  try {
+    for (const _e of list) periods.assertPostable(db, eid, _e.date, { userEmail: req.user.email, override: req.body.override_period_lock, reason: req.body.override_reason, source: 'bulk-entries' });
+  } catch (e) { if (periods.sendPeriodError(res, e)) return; throw e; }
 
   const accounts = new Set(db.prepare('SELECT code FROM accounts WHERE entity_id=?').all(eid).map(a => String(a.code)));
   // Re-validate server-side; never trust the client. Each entry is { date, memo,
@@ -3617,6 +3629,11 @@ app.put('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requireRo
   if (Math.abs(tDr - tCr) > 0.005) return res.status(400).json({ error: 'Must balance' });
   const entry = db.prepare('SELECT * FROM journal_entries WHERE id=? AND entity_id=?').get(req.params.id, req.params.eid);
   if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  try {
+    periods.assertPostable(db, req.params.eid, date, { userEmail: req.user.email, override: req.body.override_period_lock, reason: req.body.override_reason, source: 'je-update' });
+    if (entry.date && entry.date.slice(0,10) !== String(date).slice(0,10))
+      periods.assertPostable(db, req.params.eid, entry.date, { userEmail: req.user.email, override: req.body.override_period_lock, reason: req.body.override_reason, source: 'je-update-orig' });
+  } catch (e) { if (periods.sendPeriodError(res, e)) return; throw e; }
   db.transaction(() => {
     // doc_number is only touched when the caller sends the key, so an older client
     // that does not know about the field cannot blank an existing document number.
@@ -3631,6 +3648,44 @@ app.put('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requireRo
     for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?,?)').run(req.params.id, l.account_code, l.debit || 0, l.credit || 0, l.description || '', l.project_id || null, l.class_id || null, l.location_id || null);
   })();
   res.json({ success: true, entry_num: entry.entry_num });
+});
+
+// ═══ Period locking (soft-close month / hard-close year) ═══
+// Soft-close warns and lets an Admin/Accountant post anyway with a reason.
+// Hard-close blocks posting into that year in-app; only the reopen allowlist
+// (Jimmy, Irvin) can reopen a closed year, as a separate admin action.
+app.get('/api/entities/:eid/periods', auth, requireEntityAccess(), (req, res) => {
+  res.json({ locks: periods.listLocks(db, req.params.eid), can_reopen_year: periods.canReopenYear(req.user && req.user.email) });
+});
+
+app.post('/api/entities/:eid/periods/soft-close', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const month = String((req.body && req.body.month) || '').slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM' });
+  const r = periods.softClose(db, req.params.eid, month, req.user.name || req.user.email, (req.body && req.body.reason) || null);
+  res.json({ success: true, lock: r });
+});
+
+app.post('/api/entities/:eid/periods/reopen-soft', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const month = String((req.body && req.body.month) || '').slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM' });
+  res.json({ success: true, ...periods.reopenSoft(db, req.params.eid, month) });
+});
+
+app.post('/api/entities/:eid/periods/hard-close-year', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const year = String((req.body && req.body.year) || '').slice(0, 4);
+  if (!/^\d{4}$/.test(year)) return res.status(400).json({ error: 'year must be YYYY' });
+  const r = periods.hardCloseYear(db, req.params.eid, year, req.user.name || req.user.email, (req.body && req.body.reason) || null);
+  res.json({ success: true, lock: r });
+});
+
+// Reopening a hard-closed year is restricted to the named allowlist in periods.js.
+app.post('/api/entities/:eid/periods/reopen-year', auth, requireEntityAccess(), requireRole('Admin'), (req, res) => {
+  if (!periods.canReopenYear(req.user && req.user.email))
+    return res.status(403).json({ error: 'Only authorized administrators can reopen a closed year.' });
+  const year = String((req.body && req.body.year) || '').slice(0, 4);
+  if (!/^\d{4}$/.test(year)) return res.status(400).json({ error: 'year must be YYYY' });
+  try { res.json({ success: true, ...periods.reopenYear(db, req.params.eid, year, req.user.email) }); }
+  catch (e) { if (e.code === 'FORBIDDEN') return res.status(403).json({ error: e.message }); throw e; }
 });
 
 // ═══ Journal Attachments ═══
@@ -4677,6 +4732,9 @@ app.post('/api/entities/:eid/bank-transactions/post', auth, requireEntityAccess(
   const txns = db.prepare(`SELECT * FROM bank_transactions WHERE entity_id=? AND id IN (${transaction_ids.map(()=>'?').join(',')}) AND status='coded'`)
     .all(req.params.eid, ...transaction_ids);
   if (txns.length === 0) return res.status(400).json({ error: 'No coded transactions to post' });
+  try {
+    for (const _t of txns) periods.assertPostable(db, req.params.eid, _t.date, { userEmail: req.user.email, override: req.body.override_period_lock, reason: req.body.override_reason, source: 'bank-post' });
+  } catch (e) { if (periods.sendPeriodError(res, e)) return; throw e; }
 
   // Guard: never post unless EVERY selected transaction has a valid bank account.
   // A missing/blank/unknown bank_account_code would post the offset line but leave
@@ -6698,6 +6756,7 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
 
   const transferByDate = new Map(); // processDate -> NEW disbursed amount this run
   const insertJE = (date, memo, lines) => {
+    periods.assertPostable(db, entityId, date, { userEmail: (req.user && req.user.email) || 'billcom-unsync', source: 'billcom-unsync' });
     const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
     const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)')
       .run(entityId, num, date, memo, 'Bill.com sync');
@@ -7149,6 +7208,35 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       for (const st of settled) if (st.d) detailCache.set(st.id, st.d);
     }
     if (candidateIds.length) console.log('[billcom sync] entity ' + entityId + ': prefetched ' + detailCache.size + '/' + candidateIds.length + ' bill details in parallel');
+  }
+  // Period-lock pre-flight: block the whole sync if any eligible bill's posting
+  // date falls in a soft- or hard-closed period. All-or-nothing; no partial posts.
+  {
+    const _blocked = [];
+    for (const bill of bills) {
+      const _bid = String(pick(bill, 'id') || '');
+      if (!_bid || !isBillEligible(bill)) continue;
+      const _d = detailCache.get(_bid) || bill;
+      const _inv = pick(_d, 'invoiceDate', 'invoice_date') || pick(pick(_d, 'invoice') || {}, 'invoiceDate', 'invoice_date') || pick(bill, 'invoiceDate', 'invoice_date');
+      const _pd = glPostingFor(_d) || _inv;
+      if (!_pd) continue;
+      try {
+        periods.assertPostable(db, entityId, _pd, { userEmail: (req.user && req.user.email) || 'billcom-sync', source: 'billcom-sync' });
+      } catch (e) {
+        if (e && (e.code === 'HARD_CLOSED' || e.code === 'SOFT_CLOSED')) {
+          const _num = pick(_d, 'invoiceNumber', 'invoice_number') || pick(pick(_d, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || null;
+          _blocked.push({ id: _bid, invoice_number: _num, posting_date: String(_pd).slice(0, 10), period: e.period, level: e.period && e.period.level });
+        } else { throw e; }
+      }
+    }
+    if (_blocked.length) {
+      const _hard = _blocked.some(b => b.level === 'hard');
+      return res.status(_hard ? 423 : 409).json({
+        error: 'Bill.com sync blocked: ' + _blocked.length + ' bill(s) post into a closed period.',
+        code: _hard ? 'HARD_CLOSED' : 'SOFT_CLOSED',
+        blocked_bills: _blocked,
+      });
+    }
   }
   let billsProcessed = 0;
   result.bills.budget_reached = false;

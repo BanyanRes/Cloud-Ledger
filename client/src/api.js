@@ -105,6 +105,13 @@ export const api = {
   },
   bulkEntriesCommit: (eid, entries) => request('/entities/' + eid + '/entries/bulk', { method: 'POST', body: { entries } }),
 
+  // Period locking
+  getPeriods: (eid) => request('/entities/' + eid + '/periods'),
+  softClosePeriod: (eid, month, reason) => request('/entities/' + eid + '/periods/soft-close', { method: 'POST', body: { month, reason } }),
+  reopenSoftPeriod: (eid, month) => request('/entities/' + eid + '/periods/reopen-soft', { method: 'POST', body: { month } }),
+  hardCloseYear: (eid, year, reason) => request('/entities/' + eid + '/periods/hard-close-year', { method: 'POST', body: { year, reason } }),
+  reopenYear: (eid, year) => request('/entities/' + eid + '/periods/reopen-year', { method: 'POST', body: { year } }),
+
   // Attachments
   uploadAttachments: (eid, entryId, files) => {
     const fd = new FormData();

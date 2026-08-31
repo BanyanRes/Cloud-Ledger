@@ -27,6 +27,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const periods = require('./periods');
 const { PDFDocument } = require('pdf-lib');
 
 const MONEY = (n) => {
@@ -139,7 +140,11 @@ function nextInvoiceNum(db, eid, dateStr) {
 }
 
 // Post a balanced journal entry. Mirrors the /entries endpoint's insert shape.
-function postJE(db, eid, date, memo, lines, who) {
+function postJE(db, eid, date, memo, lines, who, opts) {
+  periods.assertPostable(db, eid, date, {
+    userEmail: opts && opts.userEmail, override: opts && opts.override,
+    reason: opts && opts.reason, source: (opts && opts.source) || 'ar-module',
+  });
   let dr = 0, cr = 0;
   for (const l of lines) { dr += Number(l.debit || 0); cr += Number(l.credit || 0); }
   if (Math.abs(dr - cr) > 0.005) throw new Error('Unbalanced JE: Dr ' + dr.toFixed(2) + ' vs Cr ' + cr.toFixed(2));
@@ -227,7 +232,8 @@ function createInvoice(db, eid, body, who) {
 
     const jeLines = [{ account_code: arCode, debit: total, credit: 0, description: 'Invoice ' + num + ' - ' + cust.name }];
     for (const l of lines) jeLines.push({ account_code: l.revenue_account_code, debit: 0, credit: l.amount, description: l.description, project_id: l.project_id, class_id: l.class_id, location_id: l.location_id });
-    const je = postJE(db, eid, invoice_date, 'AR Invoice ' + num + ' - ' + cust.name + (memo ? ' - ' + memo : ''), jeLines, who);
+    const je = postJE(db, eid, invoice_date, 'AR Invoice ' + num + ' - ' + cust.name + (memo ? ' - ' + memo : ''), jeLines, who,
+      { userEmail: body._userEmail, override: body.override_period_lock, reason: body.override_reason, source: 'ar-invoice' });
     db.prepare('UPDATE ar_invoices SET je_id = ? WHERE id = ?').run(je.id, invId);
     return invId;
   })();
@@ -722,7 +728,8 @@ function createCreditMemo(db, eid, body, whoName) {
     // JE mirrors an invoice: Cr A/R for the total, Dr each revenue/other account.
     const jeLines = [{ account_code: arCode, debit: 0, credit: gross, description: 'Credit memo ' + num + ' - ' + cust.name }];
     for (const l of lines) jeLines.push({ account_code: l.revenue_account_code, debit: l.amount, credit: 0, description: l.description, class_id: l.class_id, location_id: l.location_id });
-    const je = postJE(db, eid, memoDate, 'AR Credit Memo ' + num + ' - ' + cust.name + (note ? ' - ' + note : ''), jeLines, whoName);
+    const je = postJE(db, eid, memoDate, 'AR Credit Memo ' + num + ' - ' + cust.name + (note ? ' - ' + note : ''), jeLines, whoName,
+    { userEmail: body._userEmail, override: body.override_period_lock, reason: body.override_reason, source: 'ar-credit-memo' });
     db.prepare('UPDATE ar_invoices SET je_id = ? WHERE id = ?').run(je.id, cmId);
     return cmId;
   })();
@@ -775,7 +782,11 @@ function registerArRoutes(app, ctx) {
   const readers = [auth, requireEntityAccess()];
   const who = (req) => (req.user && (req.user.name || req.user.email)) || 'ar-module';
   const entName = (eid) => (db.prepare('SELECT name FROM entities WHERE id = ?').get(eid) || {}).name || 'Entity';
-  const fail = (res, e) => res.status(400).json({ error: e.message || String(e) });
+  const fail = (res, e) => {
+    if (e && e.code === 'HARD_CLOSED') return res.status(423).json({ error: e.message, code: 'HARD_CLOSED', period: e.period });
+    if (e && e.code === 'SOFT_CLOSED') return res.status(409).json({ error: e.message, code: 'SOFT_CLOSED', period: e.period, needs_override: true });
+    return res.status(400).json({ error: e.message || String(e) });
+  };
 
   ensureSchema(db);
 
@@ -908,7 +919,8 @@ function registerArRoutes(app, ctx) {
 
   app.post('/api/entities/:eid/ar/invoices', ...writers, (req, res) => {
     try {
-      const id = createInvoice(db, req.params.eid, req.body || {}, who(req));
+      const _b = req.body || {}; _b._userEmail = req.user && req.user.email;
+      const id = createInvoice(db, req.params.eid, _b, who(req));
       res.json(invoiceWithLines(db, req.params.eid, id));
     } catch (e) { fail(res, e); }
   });
@@ -917,7 +929,8 @@ function registerArRoutes(app, ctx) {
   // Create a credit memo (a negative document; JE Dr Revenue / Cr A/R).
   app.post('/api/entities/:eid/ar/credit-memos', ...writers, (req, res) => {
     try {
-      const id = createCreditMemo(db, req.params.eid, req.body || {}, who(req));
+      const _b = req.body || {}; _b._userEmail = req.user && req.user.email;
+      const id = createCreditMemo(db, req.params.eid, _b, who(req));
       res.json(invoiceWithLines(db, req.params.eid, id));
     } catch (e) { fail(res, e); }
   });
@@ -1046,7 +1059,8 @@ function registerArRoutes(app, ctx) {
         } else {
           const jeLines = [{ account_code: inv.ar_account_code, debit: 0, credit: r2(inv.total), description: 'Void invoice ' + inv.invoice_num }];
           for (const l of lines) jeLines.push({ account_code: l.revenue_account_code, debit: r2(l.amount), credit: 0, description: 'Void: ' + l.description, class_id: l.class_id, location_id: l.location_id });
-          const je = postJE(db, eid, voidDate, 'Void AR Invoice ' + inv.invoice_num + ' - ' + inv.customer_name, jeLines, who(req));
+          const je = postJE(db, eid, voidDate, 'Void AR Invoice ' + inv.invoice_num + ' - ' + inv.customer_name, jeLines, who(req),
+            { userEmail: req.user && req.user.email, override: req.body && req.body.override_period_lock, reason: req.body && req.body.override_reason, source: 'ar-void' });
           db.prepare("UPDATE ar_invoices SET status='void', void_je_id=?, voided_at=datetime('now') WHERE id=?").run(je.id, inv.id);
         }
       })();
