@@ -1198,14 +1198,17 @@ function PeriodLockingPage({entityId,entityName,user,canEdit=true}){
   const now=new Date();
   const[month,setMonth]=useState(now.toISOString().slice(0,7));
   const[year,setYear]=useState(String(now.getFullYear()-1));
+  const[allEnts,setAllEnts]=useState(false);
   const load=()=>{setErr('');api.getPeriods(entityId).then(setData).catch(e=>setErr(e.message));};
   useEffect(load,[entityId]);
   const flash=m=>{setMsg(m);setTimeout(()=>setMsg(''),4000);};
-  const run=async(fn,ok)=>{setBusy(true);setErr('');try{await fn();flash(ok);load();}catch(e){setErr((e.detail&&e.detail.error)||e.message);}finally{setBusy(false);}};
-  const softClose=()=>{if(!/^\d{4}-\d{2}$/.test(month))return setErr('Pick a month');if(!window.confirm('Soft-close '+month+'? Posting into it will warn but is still allowed.'))return;run(()=>api.softClosePeriod(entityId,month,''),month+' soft-closed');};
-  const hardClose=()=>{if(!/^\d{4}$/.test(year))return setErr('Enter a 4-digit year');if(!window.confirm('Hard-close the '+year+' fiscal year for '+entityName+'?\n\nThis BLOCKS all posting into '+year+' in-app. Only an authorized administrator can reopen it.'))return;run(()=>api.hardCloseYear(entityId,year,''),year+' hard-closed');};
+  const run=async(fn,ok)=>{setBusy(true);setErr('');try{await fn();if(ok)flash(ok);load();}catch(e){setErr((e.detail&&e.detail.error)||e.message);}finally{setBusy(false);}};
+  const softClose=()=>{if(!/^\d{4}-\d{2}$/.test(month))return setErr('Pick a month');const scope=allEnts?'ALL entities':entityName;if(!window.confirm('Soft-close '+month+' for '+scope+'? Posting into it will warn but is still allowed.'))return;if(allEnts)run(async()=>{const r=await api.softCloseAll(month);flash(month+' soft-closed for '+r.entities+' entities');},null);else run(()=>api.softClosePeriod(entityId,month,''),month+' soft-closed');};
+  const hardClose=()=>{if(!/^\d{4}$/.test(year))return setErr('Enter a 4-digit year');const scope=allEnts?'ALL entities':entityName;if(!window.confirm('Hard-close the '+year+' fiscal year for '+scope+'?\n\nThis BLOCKS all posting into '+year+' in-app. Only an authorized administrator can reopen it.'))return;if(allEnts)run(async()=>{const r=await api.hardCloseYearAll(year);flash(year+' hard-closed for '+r.entities+' entities');},null);else run(()=>api.hardCloseYear(entityId,year,''),year+' hard-closed');};
   const reopenSoft=(m)=>{if(!window.confirm('Reopen '+m+'? Posting into it will no longer warn.'))return;run(()=>api.reopenSoftPeriod(entityId,m.slice(0,7)),m+' reopened');};
   const reopenYear=(y)=>{if(!window.confirm('Reopen the '+y+' fiscal year? Posting into '+y+' will be allowed again.'))return;run(()=>api.reopenYear(entityId,y.slice(0,4)),y+' reopened');};
+  const reopenSoftAll=()=>{if(!/^\d{4}-\d{2}$/.test(month))return setErr('Pick a month');if(!window.confirm('Reopen '+month+' for ALL entities?'))return;run(async()=>{const r=await api.reopenSoftAll(month);flash(month+' reopened on '+r.reopened+' entities');},null);};
+  const reopenYearAll=()=>{if(!/^\d{4}$/.test(year))return setErr('Enter a 4-digit year');if(!window.confirm('Reopen the '+year+' fiscal year for ALL entities?'))return;run(async()=>{const r=await api.reopenYearAll(year);flash(year+' reopened on '+r.reopened+' entities');},null);};
   if(!data)return(<div style={{padding:24}}>{err?<div style={{color:T.red}}>{err}</div>:'Loading…'}</div>);
   const locks=data.locks||[];
   const softs=locks.filter(l=>l.level==='soft');
@@ -1220,16 +1223,20 @@ function PeriodLockingPage({entityId,entityName,user,canEdit=true}){
     <div style={{fontSize:12,color:T.textDim,marginBottom:20}}>{entityName}</div>
     {err&&<div style={{color:T.red,marginBottom:12}}>{err}</div>}
     {msg&&<div style={{color:T.green,marginBottom:12}}>{msg}</div>}
+    {canEdit&&<label style={{display:'flex',alignItems:'center',gap:10,padding:'12px 16px',marginBottom:16,borderRadius:10,cursor:'pointer',background:allEnts?T.orange+'14':T.bgElevated,border:'1px solid '+(allEnts?T.orange:T.border)}}>
+      <input type='checkbox' checked={allEnts} onChange={e=>setAllEnts(e.target.checked)} style={{width:16,height:16,cursor:'pointer'}}/>
+      <div><div style={{fontWeight:700,color:allEnts?T.orange:T.textBright,fontSize:13}}>Apply to ALL entities</div><div style={{fontSize:11,color:T.textDim}}>When on, close and reopen actions below run across every entity in the system, not just {entityName}.</div></div>
+    </label>}
     <div style={card}>
       <div style={h}>Soft-close a month</div>
       <div style={sub}>Posting into a soft-closed month — or any earlier open month before it — warns and asks for a reason, but is still allowed. Use this once a month is reviewed.</div>
-      {canEdit&&<div style={row}><input type='month' value={month} onChange={e=>setMonth(e.target.value)} style={inp}/><button disabled={busy} onClick={softClose} style={S.btnP}>Soft-close</button></div>}
+      {canEdit&&<div style={row}><input type='month' value={month} onChange={e=>setMonth(e.target.value)} style={inp}/><button disabled={busy} onClick={softClose} style={S.btnP}>{allEnts?'Soft-close (all)':'Soft-close'}</button>{allEnts&&<button disabled={busy} onClick={reopenSoftAll} style={{...S.btnGhost,border:'1px solid '+T.border,borderRadius:6,padding:'8px 12px'}}>Reopen (all)</button>}</div>}
       {softs.length>0&&<div style={{marginTop:14}}>{softs.map(l=>(<div key={l.id} style={{...row,justifyContent:'space-between',borderTop:'1px solid '+T.border,padding:'8px 0'}}><div><span style={{color:T.textBright,fontWeight:600}}>{l.period_start.slice(0,7)}</span>{l.reason?<span style={{color:T.textDim,marginLeft:8,fontSize:12}}>— {l.reason}</span>:null}<div style={{fontSize:11,color:T.textDim}}>closed by {l.closed_by} · {String(l.closed_at||'').slice(0,10)}</div></div>{canEdit&&<button disabled={busy} onClick={()=>reopenSoft(l.period_start)} style={S.btnGhost}>Reopen</button>}</div>))}</div>}
     </div>
     <div style={card}>
       <div style={h}>Hard-close a year</div>
       <div style={sub}>A hard-closed fiscal year blocks all posting into that year in-app — no override. Reopening is restricted to authorized administrators.</div>
-      {canEdit&&<div style={row}><input type='number' value={year} onChange={e=>setYear(e.target.value)} style={inp} placeholder='YYYY'/><button disabled={busy} onClick={hardClose} style={{...S.btnP,background:T.red}}>Hard-close year</button></div>}
+      {canEdit&&<div style={row}><input type='number' value={year} onChange={e=>setYear(e.target.value)} style={inp} placeholder='YYYY'/><button disabled={busy} onClick={hardClose} style={{...S.btnP,background:T.red}}>{allEnts?'Hard-close year (all)':'Hard-close year'}</button>{allEnts&&data.can_reopen_year&&<button disabled={busy} onClick={reopenYearAll} style={{...S.btnGhost,border:'1px solid '+T.border,borderRadius:6,padding:'8px 12px'}}>Reopen year (all)</button>}</div>}
       {hards.length>0&&<div style={{marginTop:14}}>{hards.map(l=>(<div key={l.id} style={{...row,justifyContent:'space-between',borderTop:'1px solid '+T.border,padding:'8px 0'}}><div><span style={{color:T.textBright,fontWeight:600}}>FY {l.period_start.slice(0,4)}</span>{l.reason?<span style={{color:T.textDim,marginLeft:8,fontSize:12}}>— {l.reason}</span>:null}<div style={{fontSize:11,color:T.textDim}}>closed by {l.closed_by} · {String(l.closed_at||'').slice(0,10)}</div></div>{data.can_reopen_year?<button disabled={busy} onClick={()=>reopenYear(l.period_start)} style={S.btnGhost}>Reopen year</button>:<span style={{fontSize:11,color:T.textDim}}>reopen restricted</span>}</div>))}</div>}
       {!data.can_reopen_year&&<div style={{marginTop:10,fontSize:11,color:T.textDim}}>You can hard-close a year, but only authorized administrators can reopen one.</div>}
     </div>

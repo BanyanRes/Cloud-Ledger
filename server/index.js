@@ -3688,6 +3688,43 @@ app.post('/api/entities/:eid/periods/reopen-year', auth, requireEntityAccess(), 
   catch (e) { if (e.code === 'FORBIDDEN') return res.status(403).json({ error: e.message }); throw e; }
 });
 
+// ═══ Portfolio-wide period locking (every entity in one action) ═══
+// Not entity-scoped: applies the same month/year to ALL entities. Same role
+// gates as the per-entity routes; year reopen still restricted to the allowlist.
+const allEntityIds = () => db.prepare('SELECT id FROM entities ORDER BY code').all().map(e => e.id);
+
+app.post('/api/periods/all/soft-close', auth, requireRole('Admin','Accountant'), (req, res) => {
+  const month = String((req.body && req.body.month) || '').slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM' });
+  const who = req.user.name || req.user.email;
+  const n = db.transaction(() => { const ids = allEntityIds(); for (const id of ids) periods.softClose(db, id, month, who, null); return ids.length; })();
+  res.json({ success: true, entities: n, month });
+});
+
+app.post('/api/periods/all/reopen-soft', auth, requireRole('Admin','Accountant'), (req, res) => {
+  const month = String((req.body && req.body.month) || '').slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM' });
+  const n = db.transaction(() => { const ids = allEntityIds(); let c = 0; for (const id of ids) c += periods.reopenSoft(db, id, month).removed; return c; })();
+  res.json({ success: true, reopened: n, month });
+});
+
+app.post('/api/periods/all/hard-close-year', auth, requireRole('Admin','Accountant'), (req, res) => {
+  const year = String((req.body && req.body.year) || '').slice(0, 4);
+  if (!/^\d{4}$/.test(year)) return res.status(400).json({ error: 'year must be YYYY' });
+  const who = req.user.name || req.user.email;
+  const n = db.transaction(() => { const ids = allEntityIds(); for (const id of ids) periods.hardCloseYear(db, id, year, who, null); return ids.length; })();
+  res.json({ success: true, entities: n, year });
+});
+
+app.post('/api/periods/all/reopen-year', auth, requireRole('Admin'), (req, res) => {
+  if (!periods.canReopenYear(req.user && req.user.email))
+    return res.status(403).json({ error: 'Only authorized administrators can reopen a closed year.' });
+  const year = String((req.body && req.body.year) || '').slice(0, 4);
+  if (!/^\d{4}$/.test(year)) return res.status(400).json({ error: 'year must be YYYY' });
+  const n = db.transaction(() => { const ids = allEntityIds(); let c = 0; for (const id of ids) c += periods.reopenYear(db, id, year, req.user.email).removed; return c; })();
+  res.json({ success: true, reopened: n, year });
+});
+
 // ═══ Journal Attachments ═══
 app.post('/api/entities/:eid/entries/:id/attachments', auth, requireEntityAccess(), requireRole('Admin','Accountant'), upload.array('files', 10), (req, res) => {
   if (!req.files || req.files.length === 0) return res.status(400).json({ error: 'No files' });

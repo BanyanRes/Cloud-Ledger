@@ -111,6 +111,11 @@ export const api = {
   reopenSoftPeriod: (eid, month) => request('/entities/' + eid + '/periods/reopen-soft', { method: 'POST', body: { month } }),
   hardCloseYear: (eid, year, reason) => request('/entities/' + eid + '/periods/hard-close-year', { method: 'POST', body: { year, reason } }),
   reopenYear: (eid, year) => request('/entities/' + eid + '/periods/reopen-year', { method: 'POST', body: { year } }),
+  // Portfolio-wide (all entities)
+  softCloseAll: (month) => request('/periods/all/soft-close', { method: 'POST', body: { month } }),
+  reopenSoftAll: (month) => request('/periods/all/reopen-soft', { method: 'POST', body: { month } }),
+  hardCloseYearAll: (year) => request('/periods/all/hard-close-year', { method: 'POST', body: { year } }),
+  reopenYearAll: (year) => request('/periods/all/reopen-year', { method: 'POST', body: { year } }),
 
   // Attachments
   uploadAttachments: (eid, entryId, files) => {
