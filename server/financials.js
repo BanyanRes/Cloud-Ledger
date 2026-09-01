@@ -246,6 +246,7 @@ const TURNKEY_CF = {
   contractAssets: ['11010', '14500'],
   prepaidExpenses: ['13000'],
   contractLiabilities: ['24000'],
+  retainagePayable: ['21510'],             // liability; increase provides cash
   fixedAssets: ['15000', '15005'],         // gross additions (investing)
   memberCapital: ['30000', '32000'],
 };
@@ -275,6 +276,7 @@ const TURNKEY_BS_ASSETS = [
 const TURNKEY_EQUITY_NAMES = { '30000': "Members' Capital" };
 const TURNKEY_BS_LIABS = [
   { kind: 'row', code: '20000', name: 'Accounts Payable' },
+  { kind: 'row', code: '21510', name: 'Retainage Payable' },
   { kind: 'group', title: 'Contract Liabilities', rows: [
       { code: '24000', name: 'Billings in Excess of Costs and Estimated Earnings' },
   ] },
@@ -2321,6 +2323,7 @@ async function buildStatements(getBalances, opts) {
     const dPre = mv(TURNKEY_CF.prepaidExpenses);
     const dAP = mv(TURNKEY_CF.accountsPayable);
     const dCL = mv(TURNKEY_CF.contractLiabilities);
+    const dRP = mv(TURNKEY_CF.retainagePayable);
     // 15100 is a contra asset: its balance goes more negative as depreciation
     // accrues, so the add-back is the negated movement.
     const dep = r2(-mv(TURNKEY_CF.depreciation));
@@ -2329,7 +2332,7 @@ async function buildStatements(getBalances, opts) {
     const contributions = equityMv > 0 ? equityMv : 0;
     const distributions = equityMv < 0 ? equityMv : 0;
 
-    const netOperating = r2(cashFlow.netIncome + dep - dAR + dAP - dCA - dPre + dCL);
+    const netOperating = r2(cashFlow.netIncome + dep - dAR + dAP - dCA - dPre + dCL + dRP);
     const netInvesting = r2(capex);
     const netFinancing = r2(contributions + distributions);
     const netChange = r2(netOperating + netInvesting + netFinancing);
@@ -2341,6 +2344,7 @@ async function buildStatements(getBalances, opts) {
       { label: 'Depreciation', value: dep, indent: true },
       { label: word(dAR) + ' in Accounts Receivable', value: r2(-dAR), indent: true },
       { label: word(dAP) + ' in Accounts Payable', value: dAP, indent: true },
+      { label: word(dRP) + ' in Retainage Payable', value: dRP, indent: true },
       { label: word(dCA) + ' in Contract Assets', value: r2(-dCA), indent: true },
       { label: word(dPre) + ' in Prepaid Expenses', value: r2(-dPre), indent: true },
       { label: word(dCL) + ' in Contract Liabilities', value: dCL, indent: true },
