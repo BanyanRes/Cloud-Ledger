@@ -3465,14 +3465,14 @@ function renderClroEquity(pdf, fonts, m, meEquity, equity, track) {
   const distrib = primary ? primary.distributions : (t.distributions || 0);
   const ni = primary ? primary.netIncome : (t.netIncome || 0);
   const end = primary ? primary.ending : (t.ending || 0);
-  const memberName = 'County Line Railroad Interests, LLC';
+  const memberName = 'County Line Railroad\nInterests, LLC';
 
   // Two numeric columns anchored near the right of the portrait page: the member
   // column and the Total column. Right-edges marched left from the printable
   // right edge by a fixed pitch, leaving each column room for a "$" cell and a
   // large right-aligned value.
   const PRIGHT = PAGE.w - PAGE.mR;
-  const PITCH = 150;
+  const PITCH = 118;
   const cTotal = PRIGHT;
   const cMember = cTotal - PITCH;
   L.setCols([cMember, cTotal]);
