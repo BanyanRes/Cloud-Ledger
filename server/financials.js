@@ -2877,11 +2877,12 @@ async function renderStatementsPdf(s, outOffsets) {
   const fonts = { reg, bold };
   const m = s.meta;
   const money = v => acct(v, { dash: true });
-  // Single-member LLCs (SRN / SABINERI and Buna / CLRBUNAP) read "Member\u2019s
-  // Equity" (singular possessive) throughout. Pinned by code and raw name so no
-  // other srn-profile entity is affected.
-  const _singleMember = ['SABINERI', 'CLRBUNAP'].includes(String(m.entityCode || '').toUpperCase())
-    || /sabine|county\s*line\s*srn|\bbuna\b/i.test(m.rawEntityName || '');
+  // Single-member LLCs (SRN / SABINERI, Buna / CLRBUNAP, and County Line Rail
+  // Operations / COUNTYLI3) read "Member\u2019s Equity" (singular possessive)
+  // throughout. Pinned by code and raw name so no other srn-profile entity is
+  // affected.
+  const _singleMember = ['SABINERI', 'CLRBUNAP', 'COUNTYLI3'].includes(String(m.entityCode || '').toUpperCase())
+    || /sabine|county\s*line\s*srn|\bbuna\b|county\s*line\s*rail\s*operations/i.test(m.rawEntityName || '');
   const meEquity = _singleMember ? 'Member\u2019s Equity' : 'Members\u2019 Equity';
 
   // Numeric column right-edges. Balance Sheet now has 3 columns (current, prior,

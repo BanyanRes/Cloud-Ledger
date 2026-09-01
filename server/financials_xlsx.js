@@ -267,8 +267,8 @@ const chg = (cur, pri) => num(cur) - num(pri);
 // Single-member LLCs (SRN / SABINERI and Buna / CLRBUNAP) read "Member\u2019s
 // Equity" (singular possessive). Pinned by code and raw name.
 function isSingleMember(m) {
-  return ['SABINERI', 'CLRBUNAP'].includes(String(m.entityCode || '').toUpperCase())
-    || /sabine|county\s*line\s*srn|\bbuna\b/i.test(m.rawEntityName || '');
+  return ['SABINERI', 'CLRBUNAP', 'COUNTYLI3'].includes(String(m.entityCode || '').toUpperCase())
+    || /sabine|county\s*line\s*srn|\bbuna\b|county\s*line\s*rail\s*operations/i.test(m.rawEntityName || '');
 }
 function meEquityLabel(m) { return isSingleMember(m) ? 'Member\u2019s Equity' : 'Members\u2019 Equity'; }
 
