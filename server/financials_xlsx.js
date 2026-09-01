@@ -554,13 +554,13 @@ function buildCashFlow(s) {
   const invFeed = [];
   if (!isZero(cf.capex)) invFeed.push(sh.row('Acquisition of fixed assets', one(cf.capex), { indent: 28 }));
   if (!isZero(cf.ltInvest)) invFeed.push(sh.row('(Increase) decrease in Other Assets', one(cf.ltInvest), { indent: 28 }));
-  const netInvRow = sh.row('Net Cash Provided (Used) by Investing Activities', one(cf.netInvesting), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: invFeed });
+  const netInvRow = sh.row('Net Cash Provided (Used) by Investing Activities', one(cf.netInvesting), { indent: 6, bold: true, ruleAbove: invFeed.length > 0, gapAfter: 1, sumOf: invFeed });
 
   sh.sectionTitle('Cash Flows from Financing Activities');
   const finFeed = [];
   if (!isZero(cf.equityContrib)) finFeed.push(sh.row('Member contributions (distributions), net', one(cf.equityContrib), { indent: 28 }));
   if (!isZero(cf.debtChange)) finFeed.push(sh.row('Net Proceeds from (Repayment of) Loan Payable', one(cf.debtChange), { indent: 28 }));
-  const netFinRow = sh.row('Net Cash Provided (Used) by Financing Activities', one(cf.netFinancing), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: finFeed });
+  const netFinRow = sh.row('Net Cash Provided (Used) by Financing Activities', one(cf.netFinancing), { indent: 6, bold: true, ruleAbove: finFeed.length > 0, gapAfter: 1, sumOf: finFeed });
 
   const netChangeRow = sh.row('Net Increase (Decrease) in Cash', one(cf.netChange), { indent: 6, bold: true, ruleAbove: true, sumOf: [netOpRow, netInvRow, netFinRow] });
   const cashBegRow = sh.row('Cash, Beginning of Period', one(cf.cashBeg), { indent: 6 });

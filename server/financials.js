@@ -3325,14 +3325,18 @@ async function renderStatementsPdf(s, outOffsets) {
     L.row('Net Cash Provided (Used) by Operating Activities', [money(cf.netOperating)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
 
     L.sectionTitle('Cash Flows from Investing Activities');
-    if (!isZero(cf.capex)) L.row('Acquisition of fixed assets', [money(cf.capex)], { indent: 28 });
-    if (!isZero(cf.ltInvest)) L.row(m.profile === 'banyandev' ? 'Purchase of Long Term Investments and Other Assets' : '(Increase) decrease in Other Assets', [money(cf.ltInvest)], { indent: 28 });
-    L.row('Net Cash Provided (Used) by Investing Activities', [money(cf.netInvesting)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
+    let _invLines = 0;
+    if (!isZero(cf.capex)) { L.row('Acquisition of fixed assets', [money(cf.capex)], { indent: 28 }); _invLines++; }
+    if (!isZero(cf.ltInvest)) { L.row(m.profile === 'banyandev' ? 'Purchase of Long Term Investments and Other Assets' : '(Increase) decrease in Other Assets', [money(cf.ltInvest)], { indent: 28 }); _invLines++; }
+    // No rule above the section total when the section printed no line items —
+    // there is nothing above it to underline (Jimmy, 2026-09-01).
+    L.row('Net Cash Provided (Used) by Investing Activities', [money(cf.netInvesting)], { indent: 6, boldRow: true, ruleAbove: _invLines > 0, gapAfter: 8 });
 
     L.sectionTitle('Cash Flows from Financing Activities');
-    if (!isZero(cf.equityContrib)) L.row('Member contributions (distributions), net', [money(cf.equityContrib)], { indent: 28 });
-    if (!isZero(cf.debtChange)) L.row('Net Proceeds from (Repayment of) Loan Payable', [money(cf.debtChange)], { indent: 28 });
-    L.row('Net Cash Provided (Used) by Financing Activities', [money(cf.netFinancing)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
+    let _finLines = 0;
+    if (!isZero(cf.equityContrib)) { L.row('Member contributions (distributions), net', [money(cf.equityContrib)], { indent: 28 }); _finLines++; }
+    if (!isZero(cf.debtChange)) { L.row('Net Proceeds from (Repayment of) Loan Payable', [money(cf.debtChange)], { indent: 28 }); _finLines++; }
+    L.row('Net Cash Provided (Used) by Financing Activities', [money(cf.netFinancing)], { indent: 6, boldRow: true, ruleAbove: _finLines > 0, gapAfter: 8 });
 
     L.row('Net Increase (Decrease) in Cash', [money(cf.netChange)], { indent: 6, boldRow: true, ruleAbove: true });
     L.row('Cash, Beginning of Period', [money(cf.cashBeg)], { indent: 6 });
