@@ -245,6 +245,15 @@ db.exec(`
     created_at TEXT DEFAULT (datetime('now')),
     UNIQUE(entity_id, folder_path)
   );
+  CREATE TABLE IF NOT EXISTS entity_exec_summary (
+    entity_id INTEGER PRIMARY KEY REFERENCES entities(id) ON DELETE CASCADE,
+    title TEXT,
+    date_mode TEXT,
+    blocks_json TEXT NOT NULL,
+    source_name TEXT,
+    updated_by TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
   CREATE INDEX IF NOT EXISTS idx_accounts_entity ON accounts(entity_id);
   CREATE INDEX IF NOT EXISTS idx_accounts_entity_code ON accounts(entity_id, code);
   CREATE INDEX IF NOT EXISTS idx_je_entity ON journal_entries(entity_id);
@@ -5375,6 +5384,65 @@ app.delete('/api/entity-files/:id', auth, requireRole('Admin','Accountant'), (re
   res.json({ success: true });
 });
 
+// ── Exec-summary text (dynamic-date override) API ───────────────────────
+// The stored TEXT (blocks) is what makes the exec-summary date dynamic: the
+// package renderer redraws it every month with the period's date. These routes
+// let you view / set / clear it, and backfill it from a PDF already stored for
+// the entity (so the five entities that carry a legacy stored PDF can be
+// converted without a re-upload).
+app.get('/api/entities/:eid/exec-summary-text', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const eid = Number(req.params.eid);
+  const row = db.prepare('SELECT title, date_mode, blocks_json, source_name, updated_by, updated_at FROM entity_exec_summary WHERE entity_id=?').get(eid);
+  if (!row) return res.json({ exists: false });
+  let blocks = [];
+  try { blocks = JSON.parse(row.blocks_json); } catch (_) {}
+  res.json({ exists: true, title: row.title, dateMode: row.date_mode, blocks, source_name: row.source_name, updated_by: row.updated_by, updated_at: row.updated_at });
+});
+// Set/replace the stored text directly. Body: { title?, dateMode?, blocks:[{p}|{bullets}] }.
+app.put('/api/entities/:eid/exec-summary-text', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const eid = Number(req.params.eid);
+  const b = req.body || {};
+  if (!Array.isArray(b.blocks) || !b.blocks.length) return res.status(400).json({ error: 'blocks (non-empty array) required' });
+  // Shallow-validate block shapes.
+  for (const blk of b.blocks) {
+    const okP = typeof blk.p === 'string' && blk.p.trim();
+    const okB = Array.isArray(blk.bullets) && blk.bullets.length && blk.bullets.every(x => typeof x === 'string');
+    if (!okP && !okB) return res.status(400).json({ error: 'each block must be {p:string} or {bullets:string[]}' });
+  }
+  const who = req.user ? (req.user.name || req.user.email) : 'system';
+  writeExecSummaryText(eid, { title: b.title || null, dateMode: b.dateMode || null, blocks: b.blocks }, who, b.source_name || null);
+  res.json({ success: true, blockCount: b.blocks.length });
+});
+app.delete('/api/entities/:eid/exec-summary-text', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  clearExecSummaryText(Number(req.params.eid));
+  res.json({ success: true });
+});
+// Backfill: extract text from a PDF already stored for this entity (the legacy
+// stored default, or any entity_files PDF by ?file_id=) and store it as text.
+app.post('/api/entities/:eid/exec-summary-text/from-stored', auth, requireEntityAccess(), requireRole('Admin','Accountant'), async (req, res) => {
+  const eid = Number(req.params.eid);
+  const who = req.user ? (req.user.name || req.user.email) : 'system';
+  let buf = null, srcName = null;
+  const fileId = req.query.file_id ? Number(req.query.file_id) : null;
+  try {
+    if (fileId) {
+      const f = db.prepare('SELECT * FROM entity_files WHERE id=? AND entity_id=?').get(fileId, eid);
+      if (!f) return res.status(404).json({ error: 'file not found for entity' });
+      buf = fs.readFileSync(path.resolve(WORKPAPERS_DIR, String(eid), f.stored_filename));
+      srcName = f.original_name;
+    } else {
+      buf = readStoredExecSummary(eid);
+      srcName = execSummaries.DEFAULT_FILENAME;
+    }
+  } catch (e) { return res.status(500).json({ error: 'could not read stored PDF: ' + e.message }); }
+  if (!buf) return res.status(404).json({ error: 'no stored exec-summary PDF for this entity' });
+  try {
+    const r = await parseAndStoreExecSummaryText(eid, buf, who, srcName);
+    if (!r.ok) return res.status(422).json({ error: 'extraction produced no text', reason: r.reason });
+    res.json({ success: true, blockCount: r.blockCount });
+  } catch (e) { res.status(500).json({ error: 'extraction failed: ' + e.message }); }
+});
+
 // Replace (version) a workpaper file — swaps file on disk, keeps same DB row id and folder location
 app.put('/api/entity-files/:id', auth, requireRole('Admin','Accountant'), (req, res, next) => {
   const f = db.prepare('SELECT * FROM entity_files WHERE id=?').get(req.params.id);
@@ -10483,6 +10551,45 @@ function writeStoredExecSummary(eid, buffer, who) {
     execSummaries.DEFAULT_FILENAME, 'application/pdf', buffer, who, { overwrite: true });
 }
 
+// ── Per-entity exec-summary TEXT (dynamic-date override) ───────────────────
+// CLA authors the exec summary and uploads a flattened PDF whose printed date
+// never updates. On upload we extract the body into renderer blocks and store
+// them here; the package renderer then redraws the summary every month with a
+// DYNAMIC date line, so only the date changes month to month. Stored text always
+// wins over a stored PDF for an entity (Jimmy, 2026-09-01).
+function readExecSummaryText(eid) {
+  const row = db.prepare('SELECT title, date_mode, blocks_json FROM entity_exec_summary WHERE entity_id=?').get(eid);
+  if (!row) return null;
+  let blocks;
+  try { blocks = JSON.parse(row.blocks_json); } catch (_) { return null; }
+  if (!Array.isArray(blocks) || !blocks.length) return null;
+  return { title: row.title || null, dateMode: row.date_mode || null, blocks };
+}
+function writeExecSummaryText(eid, override, who, sourceName) {
+  db.prepare(
+    `INSERT INTO entity_exec_summary (entity_id, title, date_mode, blocks_json, source_name, updated_by, updated_at)
+     VALUES (?,?,?,?,?,?,datetime('now'))
+     ON CONFLICT(entity_id) DO UPDATE SET
+       title=excluded.title, date_mode=excluded.date_mode, blocks_json=excluded.blocks_json,
+       source_name=excluded.source_name, updated_by=excluded.updated_by, updated_at=datetime('now')`
+  ).run(eid, override.title || null, override.dateMode || null,
+        JSON.stringify(override.blocks), sourceName || null, who);
+}
+function clearExecSummaryText(eid) {
+  db.prepare('DELETE FROM entity_exec_summary WHERE entity_id=?').run(eid);
+}
+// Parse an uploaded exec-summary PDF into blocks and store them for this entity.
+// Best-effort: a parse failure leaves any prior stored text untouched and is
+// surfaced to the caller, never thrown into the upload path.
+async function parseAndStoreExecSummaryText(eid, pdfBuffer, who, sourceName) {
+  const override = await execSummaries.parseExecSummaryBlocks(pdfBuffer);
+  if (!override || !override.blocks || !override.blocks.length) {
+    return { ok: false, reason: 'no extractable text' };
+  }
+  writeExecSummaryText(eid, override, who, sourceName);
+  return { ok: true, blockCount: override.blocks.length };
+}
+
 // ── WIP schedule (Schedule of Contracts) ───────────────────────────────────
 // Users upload the WIP schedule as a PDF; it is merged into the statement
 // package as its final statement section. Stored PER PERIOD (Jimmy,
@@ -10762,17 +10869,27 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       const reqReportName = reqReports[0] ? reqReports[0].name : null;
       const reqSheetName = reqReports[0] ? reqReports[0].sheet : undefined;
 
-      // When the user uploads an exec summary with this generate call, it both
-      // goes into THIS package and becomes the entity's new stored default.
-      // Otherwise fall back to the stored default (if any) for the merge.
+      // Exec summary resolution. CLA authors it and uploads a flattened PDF
+      // whose printed date never updates. On upload we EXTRACT the body to
+      // stored text (blocks) so the renderer can redraw it every month with a
+      // DYNAMIC date line; the raw PDF is still persisted as a legacy stored
+      // default. For the merge, stored TEXT wins over the stored PDF, so the
+      // date is dynamic (Jimmy, 2026-09-01).
       const who = req.user ? (req.user.name || req.user.email) : 'system';
       let storedDefaultBytes = null;
       if (execSummaryBytes) {
+        const upName = files.execSummary[0].originalname || null;
+        try {
+          const r = await parseAndStoreExecSummaryText(eid, execSummaryBytes, who, upName);
+          if (!r.ok) console.error('exec-summary text extract skipped:', r.reason);
+        } catch (e) { console.error('exec-summary text extract failed:', e.message); }
         try { writeStoredExecSummary(eid, execSummaryBytes, who); }
         catch (e) { console.error('exec-summary persist failed:', e.message); }
       } else {
         storedDefaultBytes = readStoredExecSummary(eid);
       }
+      // Stored text override (dynamic date). Always loaded; wins over the PDF.
+      const execSummaryText = readExecSummaryText(eid);
 
       // WIP schedule: an upload on this request both goes into THIS package
       // and becomes the stored copy for this period; otherwise use whatever
@@ -10802,7 +10919,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
         console.error('Budget-to-Actual build failed:', e.message);
       }
 
-      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName, consolSchedules, b2a });
+      const { bytes, info } = await financials.generatePackage({ statements, execSummaryBytes, execSummaryText, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName, consolSchedules, b2a });
 
       const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
       const safeName = fsEntityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');

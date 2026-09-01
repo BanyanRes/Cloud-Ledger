@@ -4026,7 +4026,7 @@ function reqPhaseFromName(name) {
   return m ? m[1].toUpperCase() : null;
 }
 
-async function generatePackage({ statements, execSummaryBytes, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName, consolSchedules, b2a }) {
+async function generatePackage({ statements, execSummaryBytes, execSummaryText, storedDefaultBytes, reqReports, reqReportBytes, reqReportName, reqSheetName, wipBytes, wipName, consolSchedules, b2a }) {
   const merged = await PDFDocument.create();
   const info = { sections: [], warnings: [] };
 
@@ -4079,15 +4079,25 @@ async function generatePackage({ statements, execSummaryBytes, storedDefaultByte
   const numberExecSummary = (String(_m.entityCode || '').toUpperCase() === 'BANYANRE1')
     || /^banyan\s*residential$/i.test(String(_m.rawEntityName || '').trim());
 
-  // Executive summary — resolution order:
-  //   1) a per-call uploaded PDF (execSummaryBytes) — always wins, merged as-is.
-  //      The route also persists it as this entity's new stored default.
-  //   2) the entity's stored default file (storedDefaultBytes), if one has been
-  //      uploaded/split previously.
-  //   3) the built-in rendered default (execSummaries.js), whose title-block
-  //      date line is dynamic from the statement period.
-  //   4) neither → warn as before.
-  if (execSummaryBytes) {
+  // Executive summary — resolution order (Jimmy, 2026-09-01):
+  //   1) STORED TEXT (execSummaryText): blocks extracted from CLA's uploaded
+  //      PDF, rendered here with a DYNAMIC date line. Always wins when present,
+  //      including on the same call that uploaded the PDF, so only the date
+  //      changes month to month.
+  //   2) a per-call uploaded PDF (execSummaryBytes), merged as-is — used only
+  //      when text extraction produced nothing (safety net; static date).
+  //   3) the entity's stored default PDF (storedDefaultBytes) — legacy static.
+  //   4) the built-in rendered default (execSummaries.js) — dynamic date.
+  //   5) none → warn.
+  let esText = null;
+  if (execSummaryText && Array.isArray(execSummaryText.blocks) && execSummaryText.blocks.length) {
+    try { esText = await execSummaries.renderExecSummaryPdf(statements.meta, execSummaryText); }
+    catch (e) { info.warnings.push('Stored exec-summary text render failed: ' + e.message); esText = null; }
+  }
+  if (esText) {
+    await appendToBody(esText, 'Executive Summary', true);
+    info.execSummarySource = 'stored_text';
+  } else if (execSummaryBytes) {
     await appendToBody(execSummaryBytes, 'Executive Summary', true, true, numberExecSummary);
     info.execSummarySource = 'uploaded';
   } else if (storedDefaultBytes) {
