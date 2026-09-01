@@ -1662,7 +1662,10 @@ async function buildStatements(getBalances, opts) {
   const inception = inceptionFor(profile);
   // Declared here because the balance-sheet block below needs it.
   const isTkProfile = profile === 'turnkey';
-  if (inception && inception < priorBsDate) period.pri = { from: inception, to: priorBsDate };
+  // Turnkey compares current month to prior MONTH, not inception-to-prior;
+  // leave its prior window as resolvePeriod set it. Other inception entities
+  // keep the cumulative inception-to-prior comparative.
+  if (inception && inception < priorBsDate && !isTkProfile) period.pri = { from: inception, to: priorBsDate };
 
   // Snapshots:
   //  bsCur / bsPri — balance sheet as of period-end and the prior COMPARABLE
@@ -2478,18 +2481,18 @@ async function buildStatements(getBalances, opts) {
               ? ('For the Period ' + inceptionRange(inception, asOf))
               : monthsEndedLabel(asOf),
             period: (opts.period || 'monthly').toLowerCase(), periodLabel: period.periodLabel, colLabel: period.colLabel,
-            opsDateLine: inception
+            opsDateLine: (inception && !isTkProfile)
               ? ('For the One Month Ended ' + longDate(asOf) + ', the Period ' + inceptionRange(inception, priorBsDate) + ', and the Period ' + inceptionRange(inception, asOf))
               : opsHeadingLine(period.colLabel, longDate(asOf), longDate(priorBsDate)),
             // Header for the operations statement's prior column, and the
             // opening column of the equity statement.
             // Pre-wrapped so it cannot collide with the current-column heading:
             // 'April 16 -' on the first row, 'May 31, 2026' on the row below.
-            opsPriorColLabel: inception
+            opsPriorColLabel: (inception && !isTkProfile)
               ? (monthDay(inception) + ' -\n' + longDate(priorBsDate))
               : longDate(priorBsDate),
             // Unwrapped form, for callers that want it as one string.
-            opsPriorColLabelFlat: inception ? inceptionRange(inception, priorBsDate) : longDate(priorBsDate),
+            opsPriorColLabelFlat: (inception && !isTkProfile) ? inceptionRange(inception, priorBsDate) : longDate(priorBsDate),
             equityBegDate: inception ? slashDate(inception) : null,
             inception: inception || null, profile },
     balanceSheet: Object.assign({ assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
