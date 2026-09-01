@@ -2645,6 +2645,10 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     //                 a gutter) instead of only the text width, so the rules read
     //                 as one-per-column with a narrow gap between them.
     colHeaders(labels, hopts = {}) {
+      // A new column-header block starts a fresh statement, so clear the
+      // stacked-total adjacency latch: a rule-below at the bottom of the prior
+      // statement must not suppress the first subtotal's rule-above here.
+      layout._prevRuledBelow = false;
       // Remember the spec so newPage() can repeat this header on continuation
       // pages. Only record on the FIRST (body-driven) call, not during replay.
       if (!_replaying) _hdrSpec = { labels, hopts };
@@ -2745,6 +2749,9 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       y = uy - HDR_TRAIL_GAP;
     },
     sectionTitle(str) {
+      // A section title is a non-total boundary: it re-arms the top rule for
+      // the next subtotal (clears the stacked-total adjacency latch).
+      layout._prevRuledBelow = false;
       ensure(16);
       page.drawText(str, { x: PAGE.mL, y, size: FS.row, font: bold });
       y -= 13;
@@ -2808,7 +2815,15 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
           page.drawLine({ start: { x: ruleLeft, y: yy }, end: { x: ruleRight, y: yy }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
         }
       };
-      if (ruleAbove) drawRule(y + 9);
+      // Adjacency rule (uniform across all statements, CLA/Jimmy): the single
+      // rule that separates two stacked totals belongs to the UPPER total (its
+      // rule-below), never the lower one. So if the previous row already drew a
+      // rule beneath its figures (ruleBelow or doubleBelow), suppress this row's
+      // ruleAbove — otherwise the two lines stack ~12pt apart and read as a
+      // stray double underline (Total Current Assets → Total Assets; Total
+      // Operating Expenses → Net Income; Total Liabilities → Total L&E; etc.).
+      const _drawAbove = ruleAbove && !layout._prevRuledBelow;
+      if (_drawAbove) drawRule(y + 9);
       page.drawText(String(label), { x: PAGE.mL + indent, y, size: FS.row, font });
       cells.forEach((c, i) => {
         if (c == null || c === '') return;
@@ -2832,6 +2847,11 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       });
       if (ruleBelow) drawRule(y - 3);
       if (doubleBelow) { drawRule(y - 3); drawRule(y - 5); }
+      // Latch whether THIS row ruled below, so the next row can suppress a
+      // redundant ruleAbove (see adjacency rule above). Reset on any row that
+      // did not rule below, so a normal detail line correctly re-arms the top
+      // rule for a following subtotal.
+      layout._prevRuledBelow = !!(ruleBelow || doubleBelow);
       y -= 12 + gapAfter;
     },
   };

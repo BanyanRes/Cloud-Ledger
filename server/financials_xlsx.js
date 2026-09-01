@@ -223,7 +223,18 @@ function renderSheet(ws, built) {
       cell.alignment = { ...(cell.alignment || {}), horizontal: 'right' };
       if (m.bold || m.header) cell.font = { ...(cell.font || {}), bold: true };
       const b = { ...(cell.border || {}) };
-      if (m.ruleAbove) b.top = { style: 'thin' };
+      // Adjacency rule (uniform, matches the PDF): the single rule separating
+      // two stacked totals belongs to the UPPER total (its rule-below), never
+      // the lower one. If the previous CONTENT row already ruled below (thin or
+      // double) — skipping any blank gap rows a `gapAfter` inserted between —
+      // suppress this row's rule-above so the two don't read as a stray double
+      // underline (Total Current Assets → Total Assets; Total Operating
+      // Expenses → Net Income; Total Liabilities → Total L&E; etc.).
+      let _pv = r - 1;
+      while (_pv >= 0 && (meta[_pv] == null || Object.keys(meta[_pv]).length === 0)) _pv--;
+      const _prev = _pv >= 0 ? (meta[_pv] || {}) : {};
+      const _prevRuledBelow = !!(_prev.ruleBelow || _prev.double);
+      if (m.ruleAbove && !_prevRuledBelow) b.top = { style: 'thin' };
       if (m.header) b.bottom = { style: 'thin' };
       if (m.double) b.bottom = { style: 'double' };
       else if (m.ruleBelow) b.bottom = { style: 'thin' };
