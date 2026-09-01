@@ -582,6 +582,38 @@ function buildEquity(s) {
     ? 'Statement of Changes in ' + meEquity + ' \u2013 Tax Basis'
     : 'Statement of Changes in ' + meEquity;
   sh.titleBlock([m.entityName, title, m.monthsEnded]);
+
+  // County Line Rail Operations (COUNTYLI3 / entity 46): TRANSPOSED layout to
+  // match the PDF and CPA reference — activity down the rows, each member a
+  // column plus a Total column. CLRO is single-member, so both columns match.
+  // Only nonzero activity rows print (Jimmy, 2026-09-01).
+  const isClro = (String(m.entityCode || '').toUpperCase() === 'COUNTYLI3')
+    || /county\s*line\s*rail\s*operations|^clro\b/i.test(String(m.rawEntityName || ''));
+  if (isClro) {
+    const begLong = 'January 1, ' + String(m.asOf).slice(0, 4);
+    const endLong = m.longDate;
+    const primary = (eq.rows && eq.rows.length) ? eq.rows[0] : null;
+    const t0 = eq.totals || {};
+    const beg = primary ? primary.beginning : (t0.beginning || 0);
+    const contrib = primary ? primary.contributions : (t0.contributions || 0);
+    const distrib = primary ? primary.distributions : (t0.distributions || 0);
+    const ni = primary ? primary.netIncome : (t0.netIncome || 0);
+    const end = primary ? primary.ending : (t0.ending || 0);
+    const memberName = (primary && primary.name)
+      ? primary.name.replace(/^Contributed Capital\s*[-\u2013]\s*/i, '').trim()
+      : 'Member';
+    const isZ = (v) => Math.abs(num(v)) < 0.005;
+    const two = (v) => [num(v), num(v)];
+    sh.colHeaders([memberName, 'Total']);
+    const openRow = sh.row('Equity Balance at ' + begLong, two(beg), { indent: 6, dollar: true });
+    const actRows = [];
+    if (!isZ(contrib)) actRows.push(sh.row('Contributions', two(contrib), { indent: 6 }));
+    if (!isZ(distrib)) actRows.push(sh.row('Distributions', two(distrib), { indent: 6 }));
+    if (!isZ(ni)) actRows.push(sh.row('Net income', two(ni), { indent: 6 }));
+    sh.row('Equity Balance at ' + endLong, two(end), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, dollar: true, sumOf: [openRow, ...actRows] });
+    return sh._finish();
+  }
+
   const shortMD = (long) => {
     const map = { January: 1, February: 2, March: 3, April: 4, May: 5, June: 6, July: 7, August: 8, September: 9, October: 10, November: 11, December: 12 };
     const mm = String(long).match(/^(\w+)\s+(\d+),\s+(\d+)$/);

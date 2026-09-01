@@ -3346,6 +3346,17 @@ async function renderStatementsPdf(s, outOffsets) {
 
   // ── 4. Statement of Changes in Members' Equity ──────────────────────────────
   {
+    // County Line Rail Operations (COUNTYLI3 / entity 46) uses a TRANSPOSED
+    // presentation per the CPA reference: activity runs down the rows (opening
+    // balance, activity, ending balance) and each MEMBER is a column, plus a
+    // Total column — the opposite of the standard member-per-row layout below.
+    // CLRO is single-member, so the member column and Total column show the
+    // same figures. Only nonzero activity rows print (Jimmy, 2026-09-01).
+    const _isClroEquity = (String(m.entityCode || '').toUpperCase() === 'COUNTYLI3')
+      || /county\s*line\s*rail\s*operations|^clro\b/i.test(String(m.rawEntityName || ''));
+    if (_isClroEquity) {
+      renderClroEquity(pdf, fonts, m, meEquity, s.equity, track);
+    } else {
     // Landscape page mirroring the CPA reference: five columns, a Distributions
     // column shown even when all zero, and a Net Income (Loss) column wide enough
     // to keep the value on one row. Only the first member row and the Total row
@@ -3409,9 +3420,82 @@ async function renderStatementsPdf(s, outOffsets) {
     const t = s.equity.totals;
     dollarRow('Total', [t.beginning, t.contributions, t.distributions, t.netIncome, t.ending],
       { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, colRules: true, dollarPrefix: eqDollar });
+    }
   }
 
   return await pdf.save();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// renderClroEquity — TRANSPOSED Statement of Changes in Member's Equity for
+// County Line Rail Operations, LLC (COUNTYLI3 / entity 46), matching the CPA
+// reference: activity runs DOWN the rows (opening balance → nonzero activity →
+// ending balance) and each MEMBER is a COLUMN, plus a Total column. CLRO is
+// single-member, so the member column and the Total column carry the same
+// figures. Only activity rows with a nonzero movement print. Portrait page.
+//   Rows:   Equity Balance at <beg>     $  <b>   $  <b>
+//           Net income                     <ni>     <ni>      (only if nonzero)
+//           Contributions                  <c>      <c>       (only if nonzero)
+//           Distributions                  <d>      <d>       (only if nonzero)
+//           Equity Balance at <end>     $  <e>   $  <e>
+// ═══════════════════════════════════════════════════════════════════════════
+function renderClroEquity(pdf, fonts, m, meEquity, equity, track) {
+  const eqTitle = 'Statement of Changes in ' + meEquity;
+  const L = makeLayout(pdf, fonts, m, eqTitle, { dateLine: m.monthsEnded });
+  track(eqTitle);
+  L.start();
+
+  const shortMD = (long) => {
+    const map = { January:1,February:2,March:3,April:4,May:5,June:6,July:7,August:8,September:9,October:10,November:11,December:12 };
+    const mm = String(long).match(/^(\w+)\s+(\d+),\s+(\d+)$/);
+    return mm ? (map[mm[1]] + '/' + mm[2] + '/' + mm[3]) : long;
+  };
+  // Long-form dates on the row labels, per the reference ("January 1, 2026").
+  const begLong = m.equityBegLongDate || ('January 1, ' + String(m.asOf).slice(0, 4));
+  const endLong = m.longDate;
+
+  // Single-member: take the member row (the non-Retained, non-empty equity row);
+  // fall back to the totals if the member list is degenerate. The member column
+  // and the Total column show the same numbers.
+  const memberRows = (equity.rows || []);
+  const primary = memberRows.length ? memberRows[0] : null;
+  const t = equity.totals || {};
+  const beg = primary ? primary.beginning : (t.beginning || 0);
+  const contrib = primary ? primary.contributions : (t.contributions || 0);
+  const distrib = primary ? primary.distributions : (t.distributions || 0);
+  const ni = primary ? primary.netIncome : (t.netIncome || 0);
+  const end = primary ? primary.ending : (t.ending || 0);
+  const memberName = (primary && primary.name)
+    ? primary.name.replace(/^Contributed Capital\s*[-\u2013]\s*/i, '').trim()
+    : 'Member';
+
+  // Two numeric columns anchored near the right of the portrait page: the member
+  // column and the Total column. Right-edges marched left from the printable
+  // right edge by a fixed pitch, leaving each column room for a "$" cell and a
+  // large right-aligned value.
+  const PRIGHT = PAGE.w - PAGE.mR;
+  const PITCH = 150;
+  const cTotal = PRIGHT;
+  const cMember = cTotal - PITCH;
+  L.setCols([cMember, cTotal]);
+
+  // Header: member name (may wrap to two lines) over the member column, "Total"
+  // over the Total column; both underlined, date-style bottom-aligned block so
+  // the labels sit just above the rule (matches the reference header).
+  L.colHeaders([memberName, 'Total'], { bottomAlign: true, underline: true, colBox: true });
+
+  const isZero = (v) => Math.abs(Number(v) || 0) < 0.005;
+  const twoCol = (v) => [acct(v), acct(v)]; // member col == total col (single member)
+
+  // Opening balance — "$" on both columns.
+  L.row('Equity Balance at ' + begLong, twoCol(beg), { indent: 6, valueInset: 4, dollarPrefix: true });
+  // Activity — only nonzero rows, in the reference order.
+  if (!isZero(contrib)) L.row('Contributions', twoCol(contrib), { indent: 6, valueInset: 4 });
+  if (!isZero(distrib)) L.row('Distributions', twoCol(distrib), { indent: 6, valueInset: 4 });
+  if (!isZero(ni)) L.row('Net income', twoCol(ni), { indent: 6, valueInset: 4 });
+  // Ending balance — rule above, "$" on both columns, and a rule below the
+  // figures to close the statement (single rule, matching the reference).
+  L.row('Equity Balance at ' + endLong, twoCol(end), { indent: 6, valueInset: 4, ruleAbove: true, ruleBelow: true, dollarPrefix: true });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
