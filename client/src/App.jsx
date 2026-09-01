@@ -5181,6 +5181,18 @@ function TrailingTwelveMonths({entityId,entityName}){
   const[busy,setBusy]=useState(false);
   const[err,setErr]=useState('');
   const[exporting,setExporting]=useState(false);
+  // GL drill-down: clicking a detail-line amount opens the journal lines behind
+  // that account for the clicked month (or the full 12-month window for Total).
+  const[detail,setDetail]=useState(null);
+  const openDetail=async(code,name,from,to,colLabel)=>{
+    setDetail({code,name,from,to,colLabel,loading:true,err:'',rows:null});
+    try{
+      const d=await api.getGLDetail(entityId,{account_code:code,from,to});
+      const lines=(d&&d.lines)?d.lines:((d&&d.rows)?d.rows:(Array.isArray(d)?d:[]));
+      setDetail(x=>x&&x.code===code&&x.from===from&&x.to===to?{...x,loading:false,rows:lines}:x);
+    }catch(e){setDetail(x=>x&&x.code===code&&x.from===from&&x.to===to?{...x,loading:false,err:e.message}:x);}
+  };
+  const isZero0=v=>Math.abs(Number(v)||0)<0.005;
   const fmt=n=>{const v=Number(n)||0;const t=Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});return v<0?'('+t+')':(v===0?'-':t);};
   useEffect(()=>{let cancelled=false;setData(null);setErr('');
     if(!entityId||!/^\d{4}-\d{2}-\d{2}$/.test(asOf))return;
@@ -5201,13 +5213,13 @@ function TrailingTwelveMonths({entityId,entityName}){
     // Revenue (suppressed when the entity has no operating revenue).
     if(data.revenue.length){
       line('Revenue',null,null,{header:true});
-      data.revenue.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+      data.revenue.forEach(l=>line(l.name,l.vals,l.total,{indent:1,code:l.code}));
       line('Total Revenue',data.totRev.vals,data.totRev.total,{bold:true,rule:true});
     }
     // Cost of Revenue (only if present)
     if(data.hasCogs){
       line('Cost of Revenue',null,null,{header:true});
-      data.cogs.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+      data.cogs.forEach(l=>line(l.name,l.vals,l.total,{indent:1,code:l.code}));
       line('Total Cost of Revenue',data.totCogs.vals,data.totCogs.total,{bold:true,rule:true});
       line('Gross Profit',data.grossProfit.vals,data.grossProfit.total,{bold:true,rule:true});
     }
@@ -5216,24 +5228,24 @@ function TrailingTwelveMonths({entityId,entityName}){
     data.opexGroups.forEach(g=>{
       if(data.opexGroups.length>1){
         line(g.title,null,null,{indent:1,sub:true});
-        g.lines.forEach(l=>line(l.name,l.vals,l.total,{indent:2}));
+        g.lines.forEach(l=>line(l.name,l.vals,l.total,{indent:2,code:l.code}));
         line('Total '+g.title,g.subtotal.vals,g.subtotal.total,{indent:1,rule:true});
       }else{
-        g.lines.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+        g.lines.forEach(l=>line(l.name,l.vals,l.total,{indent:1,code:l.code}));
       }
     });
     line('Total Operating Expenses',data.totOpex.vals,data.totOpex.total,{bold:true,rule:true});
     // Other Income (Expense) — expense lines already negated by the server.
     if((data.otherIncome&&data.otherIncome.length)||(data.otherExpense&&data.otherExpense.length)){
       line('Other Income (Expense)',null,null,{header:true});
-      (data.otherIncome||[]).forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
-      (data.otherExpense||[]).forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+      (data.otherIncome||[]).forEach(l=>line(l.name,l.vals,l.total,{indent:1,code:l.code}));
+      (data.otherExpense||[]).forEach(l=>line(l.name,l.vals,l.total,{indent:1,code:l.code}));
       line('Total Other Income (Expense)',data.totOtherIE.vals,data.totOtherIE.total,{bold:true,rule:true});
     }
     // Income Taxes
     if(data.incomeTax&&data.incomeTax.length){
       line('Income Taxes',null,null,{header:true});
-      data.incomeTax.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+      data.incomeTax.forEach(l=>line(l.name,l.vals,l.total,{indent:1,code:l.code}));
       line('Total Income Taxes',data.totIncomeTax.vals,data.totIncomeTax.total,{bold:true,rule:true});
     }
     // Net Income
@@ -5276,13 +5288,47 @@ function TrailingTwelveMonths({entityId,entityName}){
             <tr key={ri} style={{background:r.header?(T.hover||'transparent'):'transparent'}}>
               <td style={{position:'sticky',left:0,background:T.cardBg||T.bg,padding:'4px 12px',paddingLeft:(12+(r.indent||0)*16)+'px',fontWeight:(r.bold||r.header||r.sub)?600:400,color:r.header?T.textBright:T.text,borderTop:r.rule?'1px solid '+T.border:'none'}}>{r.label}</td>
               {(r.vals||new Array(nCols).fill(null)).map((v,ci)=>(
-                <td key={ci} style={{textAlign:'right',padding:'4px 10px',fontWeight:r.bold?600:400,color:T.text,borderTop:r.rule?'1px solid '+T.border:'none',borderBottom:r.dbl?'3px double '+T.border:'none'}}>{r.vals?fmt(v):''}</td>
+                <td key={ci} style={{textAlign:'right',padding:'4px 10px',fontWeight:r.bold?600:400,color:T.text,borderTop:r.rule?'1px solid '+T.border:'none',borderBottom:r.dbl?'3px double '+T.border:'none'}}>{!r.vals?'':(r.code&&!isZero0(v)?<button type='button' onClick={()=>openDetail(r.code,r.label,months[ci].from,months[ci].to,months[ci].label)} style={{background:'none',border:'none',padding:0,margin:0,color:T.link||'#2563eb',cursor:'pointer',font:'inherit',textAlign:'right'}} title='View transactions'>{fmt(v)}</button>:fmt(v))}</td>
               ))}
-              <td style={{textAlign:'right',padding:'4px 12px',fontWeight:(r.bold||r.header)?700:600,color:T.textBright,borderLeft:'2px solid '+T.border,borderTop:r.rule?'1px solid '+T.border:'none',borderBottom:r.dbl?'3px double '+T.border:'none'}}>{r.total==null?'':fmt(r.total)}</td>
+              <td style={{textAlign:'right',padding:'4px 12px',fontWeight:(r.bold||r.header)?700:600,color:T.textBright,borderLeft:'2px solid '+T.border,borderTop:r.rule?'1px solid '+T.border:'none',borderBottom:r.dbl?'3px double '+T.border:'none'}}>{r.total==null?'':(r.code&&months.length&&!isZero0(r.total)?<button type='button' onClick={()=>openDetail(r.code,r.label,months[0].from,months[months.length-1].to,data.meta.totalLabel||'Total')} style={{background:'none',border:'none',padding:0,margin:0,color:T.link||'#2563eb',cursor:'pointer',font:'inherit',textAlign:'right',fontWeight:'inherit'}} title='View transactions'>{fmt(r.total)}</button>:fmt(r.total))}</td>
             </tr>
           ))}
         </tbody>
       </table>
+    </div>}
+    {detail&&<div style={{position:'fixed',inset:0,background:'rgba(15,23,42,0.55)',display:'flex',justifyContent:'center',alignItems:'flex-start',zIndex:60,overflowY:'auto',padding:'40px 16px'}} onClick={e=>{if(e.target===e.currentTarget)setDetail(null);}}>
+      <div style={{...S.card,maxWidth:900,width:'100%',padding:0}} onClick={e=>e.stopPropagation()}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 16px',borderBottom:'1px solid '+T.border}}>
+          <div><div style={{fontWeight:700,color:T.textBright,fontSize:14}}>{detail.code} &middot; {detail.name}</div><div style={{fontSize:12,color:T.textMuted}}>{detail.colLabel} &middot; {detail.from} to {detail.to}</div></div>
+          <button onClick={()=>setDetail(null)} style={{background:'none',border:'none',color:T.textMuted,cursor:'pointer',fontSize:20,lineHeight:1}}>&times;</button>
+        </div>
+        <div style={{padding:'8px 16px 16px',overflowX:'auto'}}>
+          {detail.loading&&<div style={{color:T.textMuted,fontSize:12,padding:12}}>Loading transactions…</div>}
+          {detail.err&&<div style={S.err}>{detail.err}</div>}
+          {detail.rows&&detail.rows.length===0&&<div style={{color:T.textMuted,fontSize:12,padding:12}}>No transactions in this period.</div>}
+          {detail.rows&&detail.rows.length>0&&(()=>{const dr=detail.rows.reduce((s,x)=>s+(Number(x.debit)||0),0);const cr=detail.rows.reduce((s,x)=>s+(Number(x.credit)||0),0);return(
+          <table style={{borderCollapse:'collapse',width:'100%',fontSize:12,whiteSpace:'nowrap'}}>
+            <thead><tr>
+              {['Date','Entry','Doc / Vendor','Memo','Debit','Credit'].map((h,i)=><th key={i} style={{textAlign:i>3?'right':'left',padding:'6px 8px',borderBottom:'2px solid '+T.border,color:T.textDim,fontSize:11}}>{h}</th>)}
+            </tr></thead>
+            <tbody>
+              {detail.rows.map((x,i)=>(<tr key={i}>
+                <td style={{padding:'4px 8px',borderBottom:'1px solid '+T.border}}>{x.date}</td>
+                <td style={{padding:'4px 8px',borderBottom:'1px solid '+T.border}}>{x.entry_num||x.entry_id}</td>
+                <td style={{padding:'4px 8px',borderBottom:'1px solid '+T.border}}>{[x.doc_number,x.vendor].filter(Boolean).join(' · ')}</td>
+                <td style={{padding:'4px 8px',borderBottom:'1px solid '+T.border,maxWidth:280,overflow:'hidden',textOverflow:'ellipsis'}}>{x.description||x.memo||''}</td>
+                <td style={{padding:'4px 8px',borderBottom:'1px solid '+T.border,textAlign:'right'}}>{Number(x.debit)?fmt(x.debit):''}</td>
+                <td style={{padding:'4px 8px',borderBottom:'1px solid '+T.border,textAlign:'right'}}>{Number(x.credit)?fmt(x.credit):''}</td>
+              </tr>))}
+            </tbody>
+            <tfoot><tr>
+              <td colSpan={4} style={{padding:'6px 8px',borderTop:'2px solid '+T.border,fontWeight:700,color:T.textBright}}>{detail.rows.length} line{detail.rows.length===1?'':'s'}</td>
+              <td style={{padding:'6px 8px',borderTop:'2px solid '+T.border,textAlign:'right',fontWeight:700,color:T.textBright}}>{fmt(dr)}</td>
+              <td style={{padding:'6px 8px',borderTop:'2px solid '+T.border,textAlign:'right',fontWeight:700,color:T.textBright}}>{fmt(cr)}</td>
+            </tr></tfoot>
+          </table>);})()}
+        </div>
+      </div>
     </div>}
   </div>);
 }
