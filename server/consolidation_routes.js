@@ -487,6 +487,181 @@ function seedHp(db) {
   return { seeded: true, group_id: g.id, parent: parent.id, devco: devco.id, operating: operId, mirrors };
 }
 
+// ────────────────────────────── Midco I ──────────────────────────────
+//
+// CLRFI Midco I is a NATIVE-LEDGER consolidation: all five columns are real
+// CloudLedger entities that keep their own books here, so there is no operating
+// trial-balance upload, no mapping, and no mirror rule. Every figure is pulled
+// live via computeBalances. What Midco adds that Braker and HP do not have is
+// noncontrolling interest at two partially-owned subsidiaries (CLIP and
+// Silsbee), handled by the consol_nci overlay in the engine.
+//
+// Columns, in the order CLA's package prints them:
+//   Sabine River & Northern Railroad (37)  — "County Line SRN, LLC"
+//   CLR Silsbee Property Owner        (39)  — "County Line Rail Silsbee LLC"
+//   CLIP Property Owner               (54)  — "County Line Industrial Park, LLC"
+//   CLR Buna Property Owner           (38)  — "CLR Buna Property Owner LLC"
+//   CLRFI Midco I                     (70)  — "CLFRI Midco I LLC" (parent)
+//
+// Eliminations (all balance-sheet; the statement of operations has none):
+//
+//   1. Investment ↔ contributed capital.  Two pairs, each SELF-CONTAINED on one
+//      sub column (the investment and the capital it offsets sit on the same
+//      ledger, unlike Braker/HP where holder is the parent). Silsbee 17001 vs
+//      34063 (11,760,052) and CLIP 19041 vs 34164 (1,837,843). The engine
+//      matches min(|holder|,|issuer|) and removes both, so holder==issuer is
+//      fine.
+//   2. Contributed capital removed in full.  The eight OUTSIDE-investor capital
+//      accounts on CLIP/Silsbee come out 100% via consol_full_eliminations
+//      against the sub ledgers (the same "remove this account's whole balance"
+//      rule HP uses for its mirror, pointed at ledger columns here). The two
+//      investment-facing capital accounts (34063, 34164) are NOT listed here —
+//      rule 1 already removes them, and listing them would double-eliminate.
+//   3. Intercompany receivable/payable.  Every intragroup due-from and due-to
+//      account removed in full (they net in the elimination column); receivables
+//      facing counterparties outside the group are left in place.
+//   4. Noncontrolling interest.  consol_nci: the single NCI equity line plus the
+//      NCI-share reclass of retained earnings and net income. Percentages and
+//      capital dollars are fixed from the Schedule A cap tables (hardcoded per
+//      Jimmy, 2026-09-01); opening RE and YTD net income are pulled live.
+//
+// Entity ids are resolved by name/code at seed time, never hardcoded, so a
+// restored or renumbered database still finds them.
+
+// [ label, holder_code, issuer_code, sub_key ] — holder and issuer are the same
+// sub here, so one entity resolves both sides.
+const MIDCO_INVESTMENT_PAIRS = [
+  ['Investment in CLR Silsbee Property Owner / Contributed Capital', '17001', '34063', 'silsbee'],
+  ['Investment in CLIP Property Owner / Contributed Capital', '19041', '34164', 'clip'],
+];
+
+// Outside-investor contributed capital removed 100%. [ sub_key, code, name ].
+// The two investment-facing accounts (34063 Silsbee, 34164 CLIP) are excluded
+// on purpose — the investment pairs above remove those.
+const MIDCO_FULL_CAPITAL = [
+  ['silsbee', '34144', 'Contributed Capital - Grand Haven Investment'],
+  ['clip',    '34144', 'Contributed Capital - Grand Haven Investment'],
+  ['silsbee', '34151', 'Contributed Capital - Rail Mail, LLC'],
+  ['clip',    '34158', 'Contributed Capital - Streeter Trust'],
+  ['clip',    '34160', 'Contributed Capital - Tilton Cook LLC'],
+  ['silsbee', '34161', 'Contributed Capital - John Bendheim'],
+  ['silsbee', '34171', 'Contributed Capital - John H. Grayson Jr.'],
+  ['clip',    '34202', 'Contributed Capital - Deschutes I, LP'],
+  ['silsbee', '34261', 'Contributed Capital - USC'],
+  ['clip',    '34261', 'Contributed Capital - USC'],
+];
+
+// NCI config. [ sub_key, label, nci_capital, ownership_pct ]. re_account is the
+// shared 39000 by default. nci_capital and ownership_pct are the fixed
+// Schedule A figures — the capital-contribution split for the dollar piece
+// (CLIP's differs from ownership because USC came in later) and the ownership
+// fraction for the RE / net-income share.
+const MIDCO_NCI = [
+  ['clip',    'CLIP Property Owner',       14300000, 0.234858],
+  ['silsbee', 'CLR Silsbee Property Owner', 5325000, 0.454655],
+];
+
+// Intercompany receivable/payable accounts removed in full on consolidation.
+// Rather than pair-match (the balances form a web, not clean 1:1 pairs, and the
+// counterparties are not all in the group), every INTRAGROUP due-from and
+// due-to account comes out 100% and nets in the elimination column — the same
+// full-removal rule the outside-investor capital uses. Receivables whose
+// counterparty is OUTSIDE the five-entity group (County Line Rail Operations,
+// County Line Rail Fund I LP) are deliberately NOT listed: they are real
+// third-party balances that must survive consolidation. Any net difference
+// between the intragroup due-froms and due-tos (the two sides do not always tie
+// live) surfaces as the schedule's cross-foot residual rather than being
+// plugged. [ sub_key, code, name ].
+const MIDCO_IC_ACCOUNTS = [
+  ['clip',    '18307', 'Due from CLR Silsbee Property Owner'],
+  ['silsbee', '18378', 'Due from CLIP Property Owner'],
+  ['buna',    '18309', 'Due from SRN'],
+  ['buna',    '18378', 'Due from CLIP Property Owner'],
+  ['silsbee', '23375', 'Due to CLIP Property Owner'],
+  ['buna',    '23395', 'Due to Silsbee'],
+];
+
+function seedMidco(db) {
+  const find = (rx, codes) => findEntity(db, rx, codes);
+  const ents = {
+    srn:     find(/sabine\s*river\s*&?\s*northern/i, ['SABINERI']),
+    silsbee: find(/clr\s*silsbee\s*property\s*owner/i, ['CLRSILSB2']),
+    clip:    find(/clip\s*property\s*owner/i, ['CLIPPROP']),
+    buna:    find(/clr\s*buna\s*property\s*owner/i, ['CLRBUNAP']),
+    parent:  find(/clr?fi?\s*midco\s*i/i, ['CLRFIMID']),
+  };
+  const missing = Object.entries(ents).filter(([, e]) => !e).map(([k]) => k);
+  if (missing.length) return { seeded: false, reason: 'Midco entities not all present: ' + missing.join(', ') };
+
+  const now = new Date().toISOString();
+  let g = C.groupForParent(db, ents.parent.id);
+  if (!g) {
+    db.prepare('INSERT INTO consol_groups (parent_entity_id, scope_key, name, created_at, created_by) VALUES (?,?,?,?,?)')
+      .run(ents.parent.id, 'midco', 'CLRFI Midco I, LLC', now, 'seed');
+    g = C.groupForParent(db, ents.parent.id);
+  }
+  const addMember = (eid, label, order) => {
+    try {
+      db.prepare('INSERT INTO consol_members (group_id, entity_id, label, source, sort_order) VALUES (?,?,?,?,?)')
+        .run(g.id, eid, label, 'ledger', order);
+    } catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
+  };
+  addMember(ents.parent.id, 'CLFRI Midco I LLC', 0);
+  addMember(ents.srn.id, 'County Line SRN, LLC', 1);
+  addMember(ents.silsbee.id, 'County Line Rail Silsbee LLC', 2);
+  addMember(ents.clip.id, 'County Line Industrial Park, LLC', 3);
+  addMember(ents.buna.id, 'CLR Buna Property Owner LLC', 4);
+
+  // 1. Investment ↔ contributed capital (self-contained on the sub).
+  const insPair = db.prepare(`INSERT INTO consol_investment_pairs
+    (group_id, label, holder_entity_id, holder_account_code, issuer_entity_id, issuer_account_code, sort_order, created_at, created_by)
+    VALUES (?,?,?,?,?,?,?,?,?)`);
+  let pairs = 0;
+  MIDCO_INVESTMENT_PAIRS.forEach(([label, hc, ic, key], i) => {
+    const eid = ents[key].id;
+    try { insPair.run(g.id, label, eid, hc, eid, ic, i, now, 'seed'); pairs++; }
+    catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
+  });
+
+  // 2. Outside-investor contributed capital removed 100%.
+  const insFull = db.prepare(`INSERT INTO consol_full_eliminations
+    (group_id, entity_id, account_code, account_name, notes, is_balancer, sort_order, created_at, created_by, updated_at, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+  let caps = 0;
+  MIDCO_FULL_CAPITAL.forEach(([key, code, name], i) => {
+    try {
+      insFull.run(g.id, ents[key].id, code, name,
+        'Outside-investor contributed capital removed in full on consolidation', 0, 200 + i, now, 'seed', now, 'seed');
+      caps++;
+    } catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
+  });
+
+  // 3. Intercompany receivable/payable accounts removed in full (each nets in
+  // the elimination column). Uses the same consol_full_eliminations rule as the
+  // capital removals, so the receivables and payables come out 100% and the net
+  // shows as the schedule's cross-foot residual if the two sides do not tie.
+  let ics = 0;
+  MIDCO_IC_ACCOUNTS.forEach(([key, code, name], i) => {
+    try {
+      insFull.run(g.id, ents[key].id, code, name,
+        'Intragroup receivable/payable removed in full on consolidation', 0, 300 + i, now, 'seed', now, 'seed');
+      ics++;
+    } catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
+  });
+
+  // 4. Noncontrolling interest.
+  const insNci = db.prepare(`INSERT INTO consol_nci
+    (group_id, sub_entity_id, label, nci_capital, ownership_pct, re_account, nci_account, nci_name, sort_order, created_at, created_by, updated_at, updated_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  let ncis = 0;
+  MIDCO_NCI.forEach(([key, label, cap, own], i) => {
+    try { insNci.run(g.id, ents[key].id, label, cap, own, '39000', 'NCI', 'Noncontrolling Interest', i, now, 'seed', now, 'seed'); ncis++; }
+    catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
+  });
+
+  return { seeded: true, group_id: g.id, parent: ents.parent.id, pairs, caps, ics, ncis };
+}
+
 // ══════════════════════════════ Routes ══════════════════════════════
 
 function registerConsolidationRoutes(app, deps) {
@@ -502,6 +677,11 @@ function registerConsolidationRoutes(app, deps) {
     if (s.seeded) console.log('[consol] HP group ready (group ' + s.group_id + ', operating column ' + s.operating + ', +' + s.mirrors + ' mirrored accounts)');
     else console.log('[consol] HP seed skipped: ' + s.reason);
   } catch (e) { console.error('[consol] HP seed failed:', e.message); }
+  try {
+    const s = seedMidco(db);
+    if (s.seeded) console.log('[consol] Midco I group ready (group ' + s.group_id + ', +' + s.pairs + ' investment pairs, +' + s.caps + ' capital removals, +' + s.ics + ' IC pairs, +' + s.ncis + ' NCI subs)');
+    else console.log('[consol] Midco I seed skipped: ' + s.reason);
+  } catch (e) { console.error('[consol] Midco I seed failed:', e.message); }
 
   const gate = [auth, requireRole('Admin', 'Accountant')];
   const who = req => (req.user && (req.user.name || req.user.email)) || null;
@@ -533,7 +713,7 @@ function registerConsolidationRoutes(app, deps) {
     const ent = db.prepare('SELECT id, name, code FROM entities WHERE id = ?').get(eid);
     if (!ent) throw Object.assign(new Error('Entity not found'), { status: 404 });
     if (!C.scopeKeyFor(ent)) {
-      throw Object.assign(new Error('Consolidation from an uploaded operating trial balance is set up for Braker and HP only.'), { status: 400 });
+      throw Object.assign(new Error('Consolidation is configured for the Braker, HP and Midco I groups only.'), { status: 400 });
     }
     const group = C.groupForParent(db, eid);
     if (!group) throw Object.assign(new Error('No consolidation group is configured for ' + ent.name), { status: 404 });
@@ -982,4 +1162,5 @@ module.exports = {
   registerConsolidationRoutes, parseOperatingTb,
   seedBraker, BRAKER_MAP, BRAKER_FUNDING,
   seedHp, HP_FULL_ELIMINATIONS, hpOperatingId,
+  seedMidco, MIDCO_INVESTMENT_PAIRS, MIDCO_FULL_CAPITAL, MIDCO_NCI, MIDCO_IC_ACCOUNTS,
 };

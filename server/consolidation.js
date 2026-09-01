@@ -80,6 +80,7 @@ const isDrType = t => t === 'Asset' || t === 'Expense';
 const SCOPED_PARENTS = [
   { key: 'braker', name: /braker\s*qoz\s*business/i, codes: ['BRAKERQO1'] },
   { key: 'hp', name: /bridge\s*banyan\s*hp|hp\s*qozb/i, codes: ['BRIDGEBA'] },
+  { key: 'midco', name: /clr?fi?\s*midco\s*i/i, codes: ['CLRFIMID'] },
 ];
 
 function scopeKeyFor(ent) {
@@ -240,6 +241,40 @@ function ensureSchema(db) {
   // Older databases created the table before is_balancer existed.
   try { db.exec('ALTER TABLE consol_full_eliminations ADD COLUMN is_balancer INTEGER NOT NULL DEFAULT 0'); }
   catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  db.exec(`
+    -- Noncontrolling interest, per partially-owned subsidiary (Midco). NCI is
+    -- a reporting overlay like every other elimination here: nothing posts to
+    -- a ledger. Each row carries the two percentages the CPA's NCI schedule
+    -- uses and the fixed NCI capital dollars, because the two differ and only
+    -- the capital-contribution split reproduces the capital piece:
+    --   nci_capital        the NCI share of contributed capital, in DOLLARS.
+    --                      Fixed from the Schedule A cap table (CLIP's USC
+    --                      mark-up means this is NOT ownership_pct x capital).
+    --   ownership_pct      the NCI ownership fraction, applied to the LIVE
+    --                      opening retained earnings and live YTD net income.
+    -- NCI at period end = nci_capital + ownership_pct*(opening RE) +
+    --                     ownership_pct*(YTD net income). The controlling side
+    -- keeps the remainder; the sub's own contributed capital comes out in full
+    -- through consol_investment_pairs / the contributed-capital removals.
+    --
+    -- re_account is the sub's retained-earnings account code, so the reclass
+    -- lands on the right statement line. nci_account/nci_name name the single
+    -- consolidated Noncontrolling Interest equity line the schedule prints.
+    CREATE TABLE IF NOT EXISTS consol_nci (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL,
+      sub_entity_id INTEGER NOT NULL,
+      label TEXT,
+      nci_capital REAL NOT NULL DEFAULT 0,
+      ownership_pct REAL NOT NULL DEFAULT 0,
+      re_account TEXT NOT NULL DEFAULT '39000',
+      nci_account TEXT NOT NULL DEFAULT 'NCI',
+      nci_name TEXT NOT NULL DEFAULT 'Noncontrolling Interest',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT, created_by TEXT, updated_at TEXT, updated_by TEXT,
+      UNIQUE (group_id, sub_entity_id)
+    );
+  `);
 }
 
 // ══════════════════════════ Date helpers ══════════════════════════
@@ -585,6 +620,53 @@ function deriveForwardFunding(db, group, o, devEntityId, gap) {
 // MATCHED amount, reporting any difference as a residual. A residual is never
 // absorbed into the elimination column — if the two sides disagree the schedule
 // still cross-foots and the disagreement is visible.
+// Net income in a rowset: revenue balances less expense balances, in the sign
+// convention computeBalances returns (revenue and expense both stored positive,
+// so a gain is revenue > expense). Used for the NCI share of a window result.
+function netIncomeOfRows(rows) {
+  let ni = 0;
+  for (const r of rows || []) {
+    if (r.type === 'Revenue') ni = r2(ni + (Number(r.balance) || 0));
+    else if (r.type === 'Expense') ni = r2(ni - (Number(r.balance) || 0));
+  }
+  return r2(ni);
+}
+
+// -- Noncontrolling interest (Midco) ----------------------------------------
+// A reporting overlay, same as every other rule here. For each partially-owned
+// subsidiary the NCI carrying amount is
+//   nci_capital (fixed, from the cap table) + ownership_pct * opening RE
+//                                            + ownership_pct * YTD net income
+// The opening RE is the sub retained-earnings account with the current year P&L
+// held out (close_pl_before = year start), and the YTD net income is that same
+// rowset revenue less expense -- so on a balance-sheet window both come straight
+// off the rows already built, with no extra query.
+function computeNci(db, group, o, rowsFor) {
+  const cfg = db.prepare('SELECT * FROM consol_nci WHERE group_id = ? ORDER BY sort_order, id').all(group.id);
+  if (!cfg.length) return null;
+  const isBs = !!(o && o.as_of);
+  const subs = [];
+  let nciTotal = 0, reReclass = 0, niReclass = 0;
+  const nciLabel = cfg[0].nci_name || 'Noncontrolling Interest';
+  const nciCode = cfg[0].nci_account || 'NCI';
+  for (const c of cfg) {
+    const rows = rowsFor(c.sub_entity_id) || [];
+    const reOpen = figureFor(rows, c.re_account);
+    const niYtd = netIncomeOfRows(rows);
+    const shareRe = r2(c.ownership_pct * reOpen);
+    const shareNi = r2(c.ownership_pct * niYtd);
+    const nci = r2(c.nci_capital + shareRe + shareNi);
+    subs.push({ sub_entity_id: c.sub_entity_id, label: c.label, ownership_pct: c.ownership_pct,
+      nci_capital: r2(c.nci_capital), opening_re: reOpen, ni_ytd: niYtd,
+      nci_share_re: shareRe, nci_share_ni: shareNi, nci: nci, re_account: c.re_account });
+    nciTotal = r2(nciTotal + nci);
+    reReclass = r2(reReclass + shareRe);
+    niReclass = r2(niReclass + shareNi);
+  }
+  return { isBs, subs, nciTotal, reReclass, niReclass, nciCode, nciLabel,
+    reAccount: cfg[0].re_account };
+}
+
 function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
   const rowsFor = (eid) => {
     if (rowsByEntity && rowsByEntity.has(eid)) return rowsByEntity.get(eid);
@@ -814,6 +896,56 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
     });
   }
 
+  // -- 4. Noncontrolling interest (Midco) --
+  // NCI is a pure reporting overlay. On a balance-sheet window it (a) reclasses
+  // the NCI share of each sub retained earnings and net income out of
+  // controlling equity and (b) books the single consolidated Noncontrolling
+  // Interest equity line. On a statement-of-operations window it computes the
+  // NCI share of THAT window net income for the 'Less: NCI' presentation line;
+  // it makes no GL-account adjustment there.
+  //
+  // nciRows are synthetic accounts the schedule prints that exist in no column.
+  // buildColumns seeds them before applying adjustments so the reclass and the
+  // NCI line have a row to land on.
+  const nciRows = [];
+  const nci = computeNci(db, group, o, rowsFor);
+  if (nci) {
+    if (nci.isBs) {
+      const anySub = nci.subs[0];
+      // Reclass NCI share of retained earnings AND net income out of controlling
+      // equity onto the shared RE line. Positive amount -> negative elimination
+      // entry (the adjustment is the amount to SUBTRACT via the elimination).
+      const reMove = r2(nci.reReclass + nci.niReclass);
+      if (Math.abs(reMove) > 0.004) {
+        adjustments.push({ entity_id: anySub.sub_entity_id, code: nci.reAccount, type: 'Equity', amount: reMove });
+      }
+      // The NCI equity line exists only in elimination/consolidated. Push a
+      // synthetic row so it prints, and an adjustment that ADDS it to the
+      // consolidated column (a negative amount raises the elimination).
+      nciRows.push({ code: nci.nciCode, name: nci.nciLabel, type: 'Equity', subtype: 'Noncontrolling Interest', balance: 0 });
+      adjustments.push({ entity_id: group.parent_entity_id, code: nci.nciCode, type: 'Equity', amount: r2(-nci.nciTotal) });
+    }
+    let winShare = nci.niReclass;
+    if (!nci.isBs) {
+      winShare = 0;
+      for (const c of db.prepare('SELECT * FROM consol_nci WHERE group_id = ?').all(group.id)) {
+        const rows = rowsFor(c.sub_entity_id) || [];
+        winShare = r2(winShare + c.ownership_pct * netIncomeOfRows(rows));
+      }
+    }
+    rules.push({
+      type: 'nci',
+      label: 'Noncontrolling interest',
+      is_balance_sheet: nci.isBs,
+      subs: nci.subs,
+      nci_total: nci.nciTotal,
+      re_reclass: nci.reReclass,
+      ni_reclass: nci.niReclass,
+      window_ni_share: winShare,
+      nci_code: nci.nciCode,
+      nci_label: nci.nciLabel,
+    });
+  }
   // Collapse to one figure per (entity, account). The account's type travels
   // with it so a caller can render the entry as a debit or a credit — removing
   // a positive asset is a credit, removing positive equity is a debit.
@@ -824,7 +956,7 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
     if (cur) cur.amount = r2(cur.amount + a.amount);
     else byKey.set(k, { entity_id: a.entity_id, code: a.code, type: a.type || null, amount: r2(a.amount) });
   }
-  return { rules, adjustments: [...byKey.values()] };
+  return { rules, adjustments: [...byKey.values()], nciRows };
 }
 
 // ═══════════════════ Consolidated and consolidating ═══════════════════
@@ -840,7 +972,7 @@ function buildColumns(db, group, o, computeBalances) {
     if (rows === null) { unavailable.push(c.entity_id); rowsByEntity.set(c.entity_id, []); }
     else rowsByEntity.set(c.entity_id, rows);
   }
-  const { rules, adjustments } = computeEliminations(db, group, o, computeBalances, rowsByEntity);
+  const { rules, adjustments, nciRows } = computeEliminations(db, group, o, computeBalances, rowsByEntity);
 
   // Union of every account any column touches, so a line prints once with a
   // figure in each column that has one.
@@ -855,6 +987,14 @@ function buildColumns(db, group, o, computeBalances) {
     for (const row of rowsByEntity.get(c.entity_id)) {
       const a = note(row);
       a.byEntity[c.entity_id] = r2((a.byEntity[c.entity_id] || 0) + row.balance);
+    }
+  }
+  // Synthetic rows that exist only in the elimination/consolidated columns
+  // (the Noncontrolling Interest line). Seed them so an adjustment has a row to
+  // land on; they carry nothing in any member column.
+  for (const nr of (nciRows || [])) {
+    if (!accounts.has(nr.code)) {
+      accounts.set(nr.code, { code: nr.code, name: nr.name, type: nr.type, subtype: nr.subtype, bank_acct: null, byEntity: {}, elimination: 0, consolidated: 0 });
     }
   }
   for (const adj of adjustments) {
