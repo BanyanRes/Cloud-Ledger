@@ -930,7 +930,7 @@ export default function App(){
         {page==='wp_gpfees'&&activeEntity&&isCLRF&&<GpFeesWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_valuation'&&activeEntity&&isCLRF&&<ValuationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
+        {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='fundrep'&&activeEntity&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
       </>})()}</div></div>
@@ -5288,7 +5288,7 @@ function TrailingTwelveMonths({entityId,entityName}){
 }
 
 // ═══ Workpapers › Financial Statements — GL-derived statement package (PDF) ═══
-function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false,isDev=false,budgetEligible=false}){
+function FinancialStatements({entityId,entityName,entityCode='',canEdit=true,isDevEntity=false,isDev=false,budgetEligible=false}){
   const[asOf,setAsOf]=useState(today());
   const[period,setPeriod]=useState('monthly');
   const[execFile,setExecFile]=useState(null);
@@ -5296,7 +5296,7 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
   const[reqFile2,setReqFile2]=useState(null);
   // WIP schedule (Turnkey Rail only). Gated on the entity name so the button
   // appears exactly where the server's 'turnkey' statement profile applies.
-  const isTurnkey=/^turnkey\s*rail$/i.test(String(entityName||'').trim());
+  const isTurnkey=String(entityCode||'').toUpperCase()==='TURNKEYR'||/turnkey\s*rail/i.test(String(entityName||''));
   const[wipFile,setWipFile]=useState(null);
   const[wipStatus,setWipStatus]=useState(null);
   const[wipBusy,setWipBusy]=useState(false);
@@ -5527,8 +5527,8 @@ function FinancialStatements({entityId,entityName,canEdit=true,isDevEntity=false
         {isTurnkey&&<div>
           <label style={S.label}>WIP schedule <span style={{fontWeight:400,color:T.textMuted}}>(PDF &mdash; merged as &ldquo;Schedule of Contracts&rdquo; at the end of the statements)</span></label>
           <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
-            <input type="file" accept=".pdf" disabled={!canEdit||wipBusy} onChange={e=>setWipFile(e.target.files[0]||null)} style={{fontSize:13}}/>
-            <button style={{...S.btnS,padding:'6px 12px',opacity:(!wipFile||wipBusy||!canEdit)?0.6:1}} disabled={!wipFile||wipBusy||!canEdit} onClick={()=>uploadWip(wipFile)}>{wipBusy?'Uploading…':'Upload WIP schedule'}</button>
+            <input type="file" accept=".pdf" disabled={!canEdit||wipBusy} onChange={e=>{const f=e.target.files[0]||null;e.target.value='';if(f)uploadWip(f);}} style={{fontSize:13}}/>
+            {wipBusy&&<span style={{fontSize:12,color:T.textMuted}}>Uploading…</span>}
           </div>
           {wipFile&&<div style={{marginTop:6,fontSize:12,color:T.textMuted}}>Selected: {wipFile.name}</div>}
           {wipStatus&&wipStatus.present&&<div style={{marginTop:6,fontSize:12,color:T.green}}>&#10003; On file for {wipStatus.period}{wipStatus.uploaded_at?(' (uploaded '+String(wipStatus.uploaded_at).slice(0,10)+')'):''} &mdash; it will be merged into the package.</div>}
