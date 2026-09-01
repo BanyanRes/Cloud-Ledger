@@ -10165,7 +10165,11 @@ app.post('/api/workpapers/financial-statements/:entity_id/preview', auth, requir
     const getBalances = isConsolidated
       ? (o) => Promise.resolve(consolidation.consolidatedBalances(db, consolGroup, o, (id, oo) => computeBalances(id, oo)))
       : (o) => Promise.resolve(computeBalances(eid, o));
-    const s = await financials.buildStatements(getBalances, { asOf, period, entityName: isConsolidated ? consolParent.name : (ent ? ent.name : ('Entity ' + eid)), entityCode: isConsolidated ? (consolParent.code || '') : (ent ? ent.code : ''), isConsolidated });
+    // Noncontrolling-interest figures for a group that has NCI configured
+    // (Midco). Null for Braker / HP. Drives the consolidated equity split and
+    // the 'Less: NCI' statement-of-operations line.
+    const nci = isConsolidated ? consolidation.nciFigures(db, consolGroup, asOf, period, (id, oo) => computeBalances(id, oo)) : null;
+    const s = await financials.buildStatements(getBalances, { asOf, period, entityName: isConsolidated ? consolParent.name : (ent ? ent.name : ('Entity ' + eid)), entityCode: isConsolidated ? (consolParent.code || '') : (ent ? ent.code : ''), isConsolidated, nci });
     res.json({
       meta: s.meta,
       checks: s.checks,
@@ -10848,7 +10852,8 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       const getBalances = isConsolidated
         ? (o) => Promise.resolve(consolidation.consolidatedBalances(db, consolGroup, o, (id, oo) => computeBalances(id, oo)))
         : (o) => Promise.resolve(computeBalances(eid, o));
-      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: fsEntityCode, isConsolidated });
+      const nci = isConsolidated ? consolidation.nciFigures(db, consolGroup, asOf, period, (id, oo) => computeBalances(id, oo)) : null;
+      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: fsEntityCode, isConsolidated, nci });
       const consolSchedules = isConsolidated ? consolidation.buildScheduleSet(db, consolGroup, asOf, (id, oo) => computeBalances(id, oo)) : null;
 
       const files = req.files || {};

@@ -151,6 +151,16 @@ function entityProfile(opts) {
   // Financing, and no single rule above Net Income. Pinned by parent name/code
   // (these are the fsEntityName/fsEntityCode the consolidated package uses) so
   // no other entity is affected. (Jimmy, 2026-08-28.)
+  // CLRFI Midco I consolidated package (entity 70, the consolidation parent).
+  // Its CPA package (CLA) presents the consolidated equity with a single
+  // Members' Equity - County Line Rail Fund, LLC line, a Retained Earnings line,
+  // a Net Income (Loss) Attributable to CLRFI Midco I, LLC and Subsidiaries line
+  // (the controlling share), and a Noncontrolling Interest line; and the
+  // statement of operations carries a Less: Net Income Attributable to
+  // Noncontrolling Interest line below Net Income. Only reached on the
+  // consolidated package (isConsolidated), so the standalone Midco entity is
+  // unaffected. Pinned by parent name/code. (Jimmy, 2026-09-01.)
+  if ((opts && opts.isConsolidated) && (/clr?fi?\s*midco\s*i/i.test(name) || code === 'CLRFIMID')) return 'midco';
   if (/bridge\s*banyan\s*hp\s*qozb/i.test(name) || /braker\s*qoz\s*business/i.test(name) || code === 'BRIDGEBA' || code === 'BRAKERQO1') return 'banyandev';
   return 'srn';
 }
@@ -1809,6 +1819,43 @@ async function buildStatements(getBalances, opts) {
   const totalEquity = { cur: r2(totalContribEquity.cur + totalRetained.cur + niLine.cur), pri: r2(totalContribEquity.pri + totalRetained.pri + niLine.pri) };
   const totalLiabEquity = { cur: r2(totalLiab.cur + totalEquity.cur), pri: r2(totalLiab.pri + totalEquity.pri) };
 
+  // Midco consolidated NCI presentation. A pure presentation transform over the
+  // already-tied consolidated equity: the engine folded the NCI share of
+  // retained earnings AND net income onto the consolidated retained-earnings
+  // account and booked the whole NCI carrying amount on the Noncontrolling
+  // Interest line, so Total Members' Equity is already correct. To match CLA's
+  // face presentation we (a) lift the NCI line out of the contributed-capital
+  // rows into its own line, (b) collapse the surviving controlling capital into
+  // one Members' Equity line, (c) show retained earnings NET of only the NCI
+  // RE-share (undo the NI-share that the engine parked on RE), and (d) split net
+  // income into a controlling piece and a Less: NCI piece. Total equity is
+  // unchanged by construction. opts.nci carries { nci_total, re_reclass,
+  // ni_reclass, window_ni_share } from the consolidation engine.
+  let nciPresentation = null;
+  if (profile === 'midco' && opts && opts.nci) {
+    const nciTotal = r2(opts.nci.nci_total || 0);
+    const niShareYtd = r2(opts.nci.ni_reclass || 0);          // NCI share of YTD net income
+    const niSharePri = r2(opts.nci.ni_reclass_prior || 0);    // prior-period NI share, if provided
+    const niShareWindow = r2(opts.nci.window_ni_share || niShareYtd);
+    // The NCI equity line the engine booked (synthetic 'NCI' account).
+    const nciRow = equityRows.find(r => String(r.code) === 'NCI');
+    const membersRows = equityRows.filter(r => String(r.code) !== 'NCI');
+    const membersTotal = { cur: r2(membersRows.reduce((a, r) => a + r.cur, 0)),
+                           pri: r2(membersRows.reduce((a, r) => a + r.pri, 0)) };
+    // Retained earnings shown net of only the RE-share: add the NI-share back,
+    // since the engine had parked it on RE and it belongs on the NI split.
+    const reControlling = { cur: r2(totalRetained.cur + niShareYtd), pri: r2(totalRetained.pri + niSharePri) };
+    // Controlling net income = full consolidated NI minus the NCI share.
+    const niControlling = { cur: r2(niLine.cur - niShareYtd), pri: r2(niLine.pri - niSharePri) };
+    const nciLineVal = { cur: nciTotal, pri: r2((nciRow ? nciRow.pri : 0)) };
+    nciPresentation = {
+      membersRows, membersTotal, reControlling,
+      niControlling, niAttribNci: { cur: niShareYtd, pri: niSharePri },
+      nciLine: nciLineVal, windowNiShare: niShareWindow,
+      controllingMemberName: 'Members\u2019 Equity - County Line Rail Fund, LLC',
+    };
+  }
+
   // Turnkey block-shaped balance sheet (CLA presentation). Built from the same
   // two snapshots the generic sections use, so it cannot disagree with them,
   // and tied against totalAssets / totalLiab - which is what would catch a spec
@@ -2499,7 +2546,7 @@ async function buildStatements(getBalances, opts) {
             opsPriorColLabelFlat: (inception && !isTkProfile) ? inceptionRange(inception, priorBsDate) : longDate(priorBsDate),
             equityBegDate: inception ? slashDate(inception) : null,
             inception: inception || null, profile },
-    balanceSheet: Object.assign({ assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity },
+    balanceSheet: Object.assign({ assetSections, liabSections, equityRows, retainedRows, totalAssets, totalLiab, totalContribEquity, niLine, totalEquity, totalLiabEquity, nciPresentation },
       turnkeyBs ? { turnkey: turnkeyBs } : {}),
     operations: Object.assign({ revenue: revenueRows, cogs: cogsRows, opex: opexRows, opexGroups, totRev, totCogs, grossProfit, totOpex, netIncome,
       otherIncomeLines, otherExpenseLines, incomeTaxLines, totOtherInc, totOtherExp, totOtherIE, totIncomeTax,
@@ -3027,6 +3074,23 @@ async function renderStatementsPdf(s, outOffsets) {
       const _fixed = (m.profile === 'banyandev') ? 7 : 4;   // headers + subtotals + NI + 2 grand totals
       L.keepTogether((_eqRows + _fixed) * 13 + 20);
     }
+    const _nciP = s.balanceSheet.nciPresentation;
+    if (m.profile === 'midco' && _nciP) {
+      // CLA consolidated presentation: one collapsed Members' Equity line, a
+      // Retained Earnings line net of only the NCI RE-share, the controlling
+      // Net Income (Loss) Attributable to CLRFI Midco I, LLC and Subsidiaries,
+      // then the Noncontrolling Interest line, inside Total Members' Equity.
+      L.row(meEquity, [], { indent: 6, boldRow: true });
+      L.row(_nciP.controllingMemberName, bsCells(_nciP.membersTotal.cur, _nciP.membersTotal.pri), { indent: 16 });
+      L.row('Total ' + meEquity, bsCells(_nciP.membersTotal.cur, _nciP.membersTotal.pri), { indent: 20, ruleAbove: true, gapAfter: 4 });
+      L.row('Retained Earnings', [], { indent: 6, boldRow: true });
+      L.row('Retained Earnings', bsCells(_nciP.reControlling.cur, _nciP.reControlling.pri), { indent: 16 });
+      L.row('Total Retained Earnings', bsCells(_nciP.reControlling.cur, _nciP.reControlling.pri), { indent: 20, ruleAbove: true, gapAfter: 4 });
+      L.keepTogether(BS_EQUITY_TAIL + 26);
+      L.row('Net Income (Loss) Attributable to CLRFI Midco I, LLC and Subsidiaries', bsCells(_nciP.niControlling.cur, _nciP.niControlling.pri), { indent: 16 });
+      L.row('Noncontrolling Interest', bsCells(_nciP.nciLine.cur, _nciP.nciLine.pri), { indent: 16 });
+      L.row('Total ' + meEquity, bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    } else {
     L.row(meEquity, [], { indent: 6, boldRow: true });
     for (const r of s.balanceSheet.equityRows) L.row(r.name, bsCells(r.cur, r.pri), { indent: 16 });
     if (m.profile === 'banyandev') {
@@ -3048,6 +3112,7 @@ async function renderStatementsPdf(s, outOffsets) {
       L.keepTogether(BS_EQUITY_TAIL);
       L.row('Net Income (Loss)', bsCells(s.balanceSheet.niLine.cur, s.balanceSheet.niLine.pri), { indent: 16 });
       L.row('Total ' + meEquity, bsCells(s.balanceSheet.totalEquity.cur, s.balanceSheet.totalEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 6 });
+    }
     }
     L.row('Total Liabilities and ' + meEquity, bsCells(s.balanceSheet.totalLiabEquity.cur, s.balanceSheet.totalLiabEquity.pri), { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: wantDollar });
   }
@@ -3278,6 +3343,18 @@ async function renderStatementsPdf(s, outOffsets) {
       L.row('Total Income Taxes', cell4oie(s.operations.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     }
     L.row('Net Income (Loss)', [money(s.operations.netIncome.cur), money(s.operations.netIncome.pri), chg(s.operations.netIncome.cur, s.operations.netIncome.pri), money(s.operations.netIncome.ytd)], { indent: 6, boldRow: true, ruleAbove: false, doubleBelow: true, dollarPrefix: true });
+    // Midco consolidated: split net income between the noncontrolling interest
+    // and the controlling parent, matching CLA's face statement of operations.
+    // The NCI share is computed on the window being shown (month/quarter and
+    // YTD); the prior column carries the prior-period share.
+    const _nciP2 = s.balanceSheet.nciPresentation;
+    if (m.profile === 'midco' && _nciP2) {
+      const niCur = s.operations.netIncome.cur, niPri = s.operations.netIncome.pri, niYtd2 = s.operations.netIncome.ytd;
+      const shCur = _nciP2.windowNiShare, shYtd = _nciP2.niAttribNci.cur, shPri = _nciP2.niAttribNci.pri;
+      L.row('Less: Net Income (Loss) Attributable to Noncontrolling Interest', [money(shCur), money(shPri), chg(shCur, shPri), money(shYtd)], { indent: 6, gapBefore: 6 });
+      const ctrlCur = r2(niCur - shCur), ctrlPri = r2(niPri - shPri), ctrlYtd = r2(niYtd2 - shYtd);
+      L.row('Net Income (Loss) Attributable to CLRFI Midco I, LLC and Subsidiaries', [money(ctrlCur), money(ctrlPri), chg(ctrlCur, ctrlPri), money(ctrlYtd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+    }
     }
   }
 

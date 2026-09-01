@@ -1040,6 +1040,55 @@ function buildScheduleSet(db, group, asOf, computeBalances) {
   return { parentName: parent ? parent.name : '', asOf, columns, balanceSheet, incomeMonth };
 }
 
+// NCI presentation figures for the consolidated face package. Runs the NCI
+// rule on the balance-sheet window (for the carrying amount and the RE / net-
+// income reclass) and on the requested statement-of-operations window (for the
+// 'Less: NCI' line), plus the prior comparative period. Returns null for a
+// group with no NCI configured. Shape matches what financials.buildStatements
+// expects in opts.nci.
+function nciFigures(db, group, asOf, period, computeBalances) {
+  const cfg = db.prepare('SELECT COUNT(*) AS n FROM consol_nci WHERE group_id = ?').get(group.id);
+  if (!cfg || !cfg.n) return null;
+  const bs = buildColumns(db, group, { as_of: asOf, close_pl_before: yearStart(asOf) }, computeBalances);
+  const bsNci = (bs.rules || []).find(r => r.type === 'nci');
+  if (!bsNci) return null;
+  // The window for the 'current' operations column follows the period toggle:
+  // monthly -> the month, quarterly -> the quarter (three months back to the
+  // 1st), annually / default -> year to date. The engine's window NI share is
+  // computed from whatever window it is handed, so pass the right one.
+  const monthStartOf = (d) => String(d).slice(0, 7) + '-01';
+  let curFrom = monthStartOf(asOf);
+  if (period === 'quarterly') {
+    const [y, m] = String(asOf).split('-').map(Number);
+    const qStartMonth = m - ((m - 1) % 3);
+    curFrom = String(y) + '-' + String(qStartMonth).padStart(2, '0') + '-01';
+  } else if (period === 'annually') {
+    curFrom = yearStart(asOf);
+  }
+  const winRule = (o) => {
+    const built = buildColumns(db, group, o, computeBalances);
+    const r = (built.rules || []).find(x => x.type === 'nci');
+    return r ? r2(r.window_ni_share || 0) : 0;
+  };
+  const windowNiShare = winRule({ from: curFrom, to: asOf });
+  // Prior comparative column: the same period one step back. For a quarter that
+  // is the prior quarter; the CPA package's prior column is the immediately
+  // preceding period, so mirror it.
+  const priTo = prevMonthEnd(curFrom);
+  const priFrom = (period === 'quarterly')
+    ? (function () { const [y, m] = String(priTo).split('-').map(Number); const qs = m - ((m - 1) % 3); return String(y) + '-' + String(qs).padStart(2, '0') + '-01'; })()
+    : (period === 'annually' ? yearStart(priTo) : monthStartOf(priTo));
+  let niReclassPrior = 0;
+  try { niReclassPrior = winRule({ from: priFrom, to: priTo }); } catch (e) { niReclassPrior = 0; }
+  return {
+    nci_total: r2(bsNci.nci_total || 0),
+    re_reclass: r2(bsNci.re_reclass || 0),
+    ni_reclass: r2(bsNci.ni_reclass || 0),
+    ni_reclass_prior: r2(niReclassPrior),
+    window_ni_share: r2(windowNiShare),
+    subs: bsNci.subs || [],
+  };
+}
 module.exports = {
   ensureSchema,
   buildScheduleSet,
@@ -1052,6 +1101,7 @@ module.exports = {
   computeEliminations,
   buildColumns,
   consolidatedBalances,
+  nciFigures,
   tbMonths,
   tbAt,
   unmappedFor,
