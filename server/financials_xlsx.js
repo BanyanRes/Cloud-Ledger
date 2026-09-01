@@ -599,9 +599,7 @@ function buildEquity(s) {
     const distrib = primary ? primary.distributions : (t0.distributions || 0);
     const ni = primary ? primary.netIncome : (t0.netIncome || 0);
     const end = primary ? primary.ending : (t0.ending || 0);
-    const memberName = (primary && primary.name)
-      ? primary.name.replace(/^Contributed Capital\s*[-\u2013]\s*/i, '').trim()
-      : 'Member';
+    const memberName = 'County Line Railroad Interests, LLC';
     const isZ = (v) => Math.abs(num(v)) < 0.005;
     const two = (v) => [num(v), num(v)];
     sh.colHeaders([memberName, 'Total']);

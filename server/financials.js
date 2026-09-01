@@ -3465,9 +3465,7 @@ function renderClroEquity(pdf, fonts, m, meEquity, equity, track) {
   const distrib = primary ? primary.distributions : (t.distributions || 0);
   const ni = primary ? primary.netIncome : (t.netIncome || 0);
   const end = primary ? primary.ending : (t.ending || 0);
-  const memberName = (primary && primary.name)
-    ? primary.name.replace(/^Contributed Capital\s*[-\u2013]\s*/i, '').trim()
-    : 'Member';
+  const memberName = 'County Line Railroad Interests, LLC';
 
   // Two numeric columns anchored near the right of the portrait page: the member
   // column and the Total column. Right-edges marched left from the printable
