@@ -3495,9 +3495,9 @@ function renderClroEquity(pdf, fonts, m, meEquity, equity, track) {
   if (!isZero(contrib)) L.row('Contributions', twoCol(contrib), { indent: 6, valueInset: 4 });
   if (!isZero(distrib)) L.row('Distributions', twoCol(distrib), { indent: 6, valueInset: 4 });
   if (!isZero(ni)) L.row('Net income', twoCol(ni), { indent: 6, valueInset: 4 });
-  // Ending balance — rule above, "$" on both columns, and a rule below the
-  // figures to close the statement (single rule, matching the reference).
-  L.row('Equity Balance at ' + endLong, twoCol(end), { indent: 6, valueInset: 4, ruleAbove: true, ruleBelow: true, dollarPrefix: true });
+  // Ending balance — rule above, "$" on both columns, and a double underline
+  // below the figures to close the statement (final figure).
+  L.row('Equity Balance at ' + endLong, twoCol(end), { indent: 6, valueInset: 4, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

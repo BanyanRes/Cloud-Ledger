@@ -608,7 +608,7 @@ function buildEquity(s) {
     if (!isZ(contrib)) actRows.push(sh.row('Contributions', two(contrib), { indent: 6 }));
     if (!isZ(distrib)) actRows.push(sh.row('Distributions', two(distrib), { indent: 6 }));
     if (!isZ(ni)) actRows.push(sh.row('Net income', two(ni), { indent: 6 }));
-    sh.row('Equity Balance at ' + endLong, two(end), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, dollar: true, sumOf: [openRow, ...actRows] });
+    sh.row('Equity Balance at ' + endLong, two(end), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: [openRow, ...actRows] });
     return sh._finish();
   }
 
