@@ -2098,8 +2098,22 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
   };
   const tDr=form.lines.reduce((s,l)=>s+parseAmt(l.debit),0);const tCr=form.lines.reduce((s,l)=>s+parseAmt(l.credit),0);const bal=Math.abs(tDr-tCr)<0.005&&tDr>0;
   const save=async()=>{if(!form.date||!form.memo.trim()){setErr('Date and memo required');return;}if(form.lines.some(l=>!l.account_code)){setErr('All lines need an account');return;}if(!bal){setErr('Must balance');return;}
-    setSaving(true);setErr('');try{await api.updateEntry(entityId,entry.id,{date:form.date,memo:form.memo.trim(),doc_number:(form.doc_number||'').trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null}))});
-      onSaved();onClose();}catch(e){setErr(e.message);}finally{setSaving(false);}};
+    setSaving(true);setErr('');
+    const _basePayload=override=>({date:form.date,memo:form.memo.trim(),doc_number:(form.doc_number||'').trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null})),...(override||{})});
+    const _doSave=async override=>{await api.updateEntry(entityId,entry.id,_basePayload(override));onSaved();onClose();};
+    try{await _doSave();}
+    catch(e){
+      const d=e.detail||{};
+      if(d.code==='HARD_CLOSED'){setErr((d.error||'That fiscal year is closed.')+' Reopening it is a separate admin action.');}
+      else if(d.code==='SOFT_CLOSED'){
+        const mon=(d.period&&d.period.month)||'that month';
+        const reason=window.prompt(mon+' is soft-closed. To save this change into it anyway, enter a reason (this is logged):','');
+        if(reason===null){setErr('Save cancelled — '+mon+' is soft-closed.');}
+        else{try{await _doSave({override_period_lock:true,override_reason:reason});}catch(e2){setErr((e2.detail&&e2.detail.error)||e2.message);}}
+      }
+      else setErr(e.message);
+    }
+    finally{setSaving(false);}};
   const del=async()=>{if(!confirm('Delete JE-'+String(entry.entry_num).padStart(4,'0')+'? This permanently removes the entry and all its lines. This cannot be undone.'))return;
     setSaving(true);setErr('');try{await api.deleteEntry(entityId,entry.id);onSaved();onClose();}catch(e){setErr(e.message);setSaving(false);}};
   const[xlBusy,setXlBusy]=useState(false);
