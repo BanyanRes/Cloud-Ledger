@@ -419,9 +419,8 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
       if(d.code==='HARD_CLOSED'){setErr((d.error||'That fiscal year is closed.')+' Reopening it is a separate admin action.');}
       else if(d.code==='SOFT_CLOSED'){
         const mon=(d.period&&d.period.month)||'that month';
-        const reason=window.prompt(mon+' is soft-closed. To post into it anyway, enter a reason (this is logged):','');
-        if(reason===null){setErr('Post cancelled — '+mon+' is soft-closed.');}
-        else{try{await _doPost({override_period_lock:true,override_reason:reason});}catch(e2){setErr((e2.detail&&e2.detail.error)||e2.message);}}
+        if(window.confirm(mon+' is soft-closed. Post this entry into it anyway?')){try{await _doPost({override_period_lock:true});}catch(e2){setErr((e2.detail&&e2.detail.error)||e2.message);}}
+        else{setErr('Post cancelled — '+mon+' is soft-closed.');}
       }
       else setErr(e.message);
     }
@@ -2107,9 +2106,8 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
       if(d.code==='HARD_CLOSED'){setErr((d.error||'That fiscal year is closed.')+' Reopening it is a separate admin action.');}
       else if(d.code==='SOFT_CLOSED'){
         const mon=(d.period&&d.period.month)||'that month';
-        const reason=window.prompt(mon+' is soft-closed. To save this change into it anyway, enter a reason (this is logged):','');
-        if(reason===null){setErr('Save cancelled — '+mon+' is soft-closed.');}
-        else{try{await _doSave({override_period_lock:true,override_reason:reason});}catch(e2){setErr((e2.detail&&e2.detail.error)||e2.message);}}
+        if(window.confirm(mon+' is soft-closed. Post this entry into it anyway?')){try{await _doSave({override_period_lock:true});}catch(e2){setErr((e2.detail&&e2.detail.error)||e2.message);}}
+        else{setErr('Save cancelled — '+mon+' is soft-closed.');}
       }
       else setErr(e.message);
     }
