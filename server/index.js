@@ -7352,10 +7352,21 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     for (const bill of bills) {
       const _bid = String(pick(bill, 'id') || '');
       if (!_bid || !isBillEligible(bill)) continue;
+      // Only bills this run could actually POST may block it. A bill the posting
+      // loop skips unconditionally — already synced, remembered pre-cutoff, or
+      // dated on/before the sync cutoff (already in the GL through that date) —
+      // writes nothing, so a closed period is irrelevant to it. Without these
+      // three skips the pre-flight blocked on history: on an entity whose cutoff
+      // sits at or after its latest soft-closed month (e.g. Banyan Residential,
+      // cutoff 2026-06-30 and June 2026 soft-closed), EVERY pre-cutoff bill is by
+      // definition in a closed period, so the sync could never run again.
+      if (alreadySynced.get(entityId, 'bill', _bid)) continue;
+      if (alreadyPreCutoff.get(entityId, _bid)) continue;
       const _d = detailCache.get(_bid) || bill;
       const _inv = pick(_d, 'invoiceDate', 'invoice_date') || pick(pick(_d, 'invoice') || {}, 'invoiceDate', 'invoice_date') || pick(bill, 'invoiceDate', 'invoice_date');
       const _pd = glPostingFor(_d) || _inv;
       if (!_pd) continue;
+      if (String(_pd).slice(0, 10) <= cutoffDate) continue;
       try {
         periods.assertPostable(db, entityId, _pd, { userEmail: (req.user && req.user.email) || 'billcom-sync', source: 'billcom-sync' });
       } catch (e) {
@@ -7498,6 +7509,24 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
         basis: postingBasis, remembered: decidedOnGl,
       });
       continue;
+    }
+
+    // Period lock, per bill, on the authoritative detail posting date. The
+    // pre-flight above is the all-or-nothing gate, but it judges a bill on the
+    // list object when its detail prefetch missed, so this is the guard that
+    // actually stands between a bill and a closed month. Reported as an error on
+    // that bill; the rest of the run continues.
+    try {
+      periods.assertPostable(db, entityId, postDay, { userEmail: (req.user && req.user.email) || 'billcom-sync', source: 'billcom-sync' });
+    } catch (e) {
+      if (e && (e.code === 'HARD_CLOSED' || e.code === 'SOFT_CLOSED')) {
+        const _why = 'posting date ' + postDay + ' falls in a closed period';
+        result.bills.errors++;
+        try { logSync.run(entityId, 'bill', billId, null, 'error', _why, now, billNumber); } catch (e2) {}
+        result.bills.details.push({ id: billId, invoice_number: billNumber, status: 'error', reason: _why });
+        continue;
+      }
+      throw e;
     }
 
     const debitLines = [];
