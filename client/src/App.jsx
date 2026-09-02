@@ -264,19 +264,56 @@ const S = {
 const NI = { dashboard:'\u25a3', journal:'\u270e', coa:'\u2630', ledger:'\u2261', banktxn:'\u21c5', bankrec:'\u2611', trial:'\u2696', bs:'\u25a6', is:'\u25a4', wip:'▧', entities:'\u2302', users:'\u263a' };
 
 // ─── Autocomplete ───
-function AccountAutocomplete({accounts,value,onChange,placeholder,exclude}){
-  const[q,setQ]=useState('');const[open,setOpen]=useState(false);const[placement,setPlacement]=useState('down');const ref=useRef(null);const inputRef=useRef(null);
+// Type-to-search account picker. Matches on code OR name, space-separated words in any
+// order ("chase 120" finds "10191 - CHASE Entity 120 Odyssey"). Arrow keys move the
+// highlight, Enter/Tab take it, Escape reverts.
+function AccountAutocomplete({accounts,value,onChange,placeholder,exclude,style,autoFocus,clearable}){
+  const[q,setQ]=useState('');const[open,setOpen]=useState(false);const[hi,setHi]=useState(0);const[placement,setPlacement]=useState('down');
+  const ref=useRef(null);const inputRef=useRef(null);const listRef=useRef(null);
   const sel=accounts.find(a=>a.code===value);
-  const filtered=useMemo(()=>{const s=q.toLowerCase();return accounts.filter(a=>(!exclude||a.code!==exclude)&&(a.code.toLowerCase().includes(s)||a.name.toLowerCase().includes(s))).sort((a,b)=>a.code.localeCompare(b.code));},[accounts,q,exclude]);
-  useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false);};document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h);},[]);
+  const filtered=useMemo(()=>{
+    const pool=accounts.filter(a=>!exclude||a.code!==exclude);
+    const s=q.trim().toLowerCase();
+    if(!s)return pool.slice().sort((a,b)=>String(a.code).localeCompare(String(b.code)));
+    const toks=s.split(/\s+/);const out=[];
+    pool.forEach(a=>{
+      const code=String(a.code||'').toLowerCase(),name=String(a.name||'').toLowerCase(),hay=code+' '+name;
+      if(!toks.every(t=>hay.includes(t)))return;
+      // Rank: code prefix, then name prefix, then a word start in the name, then anything else.
+      const rank=code.startsWith(s)?0:name.startsWith(s)?1:(' '+name).includes(' '+s)?2:3;
+      out.push({a,rank});
+    });
+    return out.sort((x,y)=>x.rank-y.rank||String(x.a.code).localeCompare(String(y.a.code))).map(x=>x.a);
+  },[accounts,q,exclude]);
+  useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target)){setOpen(false);setQ('');}};document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h);},[]);
+  useEffect(()=>{setHi(0);},[q,open]);
+  useEffect(()=>{if(!open||!listRef.current)return;const el=listRef.current.children[hi];if(el&&el.scrollIntoView)el.scrollIntoView({block:'nearest'});},[hi,open]);
   // Decide whether to open the dropdown upward or downward based on available space
   const computePlacement=()=>{if(!inputRef.current)return;const r=inputRef.current.getBoundingClientRect();const below=window.innerHeight-r.bottom;const above=r.top;const desired=340;setPlacement(below<desired&&above>below?'up':'down');};
-  return(<div ref={ref} style={{position:'relative'}}><input ref={inputRef} style={S.inputSm} placeholder={placeholder||'Search account...'} value={open?q:(sel?acctLabel(sel.code,sel.name):'')}
-    onFocus={()=>{computePlacement();setOpen(true);setQ('');}} onChange={e=>{setQ(e.target.value);setOpen(true);}} onKeyDown={e=>{if(e.key==='Escape')setOpen(false);if(e.key==='Enter'&&filtered.length>0){onChange(filtered[0].code);setOpen(false);}}}/>
-    {open&&filtered.length>0&&<div style={{position:'absolute',...(placement==='up'?{bottom:'100%',marginBottom:4}:{top:'100%',marginTop:4}),left:0,right:0,background:'#fff',border:'1px solid '+T.border,borderRadius:T.radiusSm,maxHeight:340,overflowY:'auto',zIndex:50,boxShadow:T.shadowLg}}>
-      {filtered.map(a=><div key={a.code} style={{padding:'8px 12px',cursor:'pointer',fontSize:12,display:'flex',justifyContent:'space-between',background:a.code===value?T.accentDim:'transparent'}}
-        onClick={()=>{onChange(a.code);setOpen(false);}} onMouseEnter={e=>e.currentTarget.style.background=T.bgHover} onMouseLeave={e=>e.currentTarget.style.background=a.code===value?T.accentDim:'transparent'}>
-        <span><b style={{color:T.textBright}}>{a.code}</b> <span style={{color:T.textMuted}}>{a.name}</span></span><span style={S.tag(a.type)}>{a.type}</span></div>)}</div>}</div>);}
+  const pick=(a,blur)=>{onChange(a.code);setOpen(false);setQ('');if(blur&&inputRef.current)inputRef.current.blur();};
+  const onKey=e=>{
+    if(e.key==='ArrowDown'){e.preventDefault();if(!open){computePlacement();setOpen(true);}else setHi(h=>Math.min(h+1,filtered.length-1));return;}
+    if(e.key==='ArrowUp'){e.preventDefault();setHi(h=>Math.max(h-1,0));return;}
+    if(e.key==='Enter'){if(open&&filtered[hi]){e.preventDefault();pick(filtered[hi],true);}return;}
+    if(e.key==='Tab'){if(open&&q.trim()&&filtered[hi])pick(filtered[hi],false);else{setOpen(false);setQ('');}return;}
+    if(e.key==='Escape'){e.preventDefault();setOpen(false);setQ('');return;}
+  };
+  const label=sel?acctLabel(sel.code,sel.name):'';
+  return(<div ref={ref} style={{position:'relative',width:'100%'}}>
+    <input ref={inputRef} autoFocus={autoFocus} style={{...S.inputSm,width:'100%',...(style||{})}} title={label}
+      placeholder={sel?label:(placeholder||'Type code or name…')} value={open?q:label}
+      onFocus={()=>{computePlacement();setOpen(true);setQ('');}}
+      onBlur={()=>{setTimeout(()=>{setOpen(false);setQ('');},120);}}
+      onChange={e=>{setQ(e.target.value);if(!open)computePlacement();setOpen(true);}}
+      onKeyDown={onKey}/>
+    {clearable&&value&&!open&&<button type="button" title="Clear" onClick={()=>onChange('')}
+      style={{position:'absolute',right:4,top:'50%',transform:'translateY(-50%)',border:'none',background:'transparent',color:T.textMuted,cursor:'pointer',fontSize:14,lineHeight:1,padding:'0 4px'}}>&times;</button>}
+    {open&&<div ref={listRef} style={{position:'absolute',...(placement==='up'?{bottom:'100%',marginBottom:4}:{top:'100%',marginTop:4}),left:0,minWidth:'100%',width:'max-content',maxWidth:520,background:'#fff',border:'1px solid '+T.border,borderRadius:T.radiusSm,maxHeight:340,overflowY:'auto',zIndex:50,boxShadow:T.shadowLg}}>
+      {filtered.length===0
+        ?<div style={{padding:'8px 12px',fontSize:12,color:T.textMuted}}>No account matches “{q}”</div>
+        :filtered.map((a,idx)=><div key={a.code} style={{padding:'8px 12px',cursor:'pointer',fontSize:12,display:'flex',justifyContent:'space-between',gap:12,whiteSpace:'nowrap',background:idx===hi?T.bgHover:(a.code===value?T.accentDim:'transparent')}}
+          onMouseDown={e=>e.preventDefault()} onClick={()=>pick(a,true)} onMouseEnter={()=>setHi(idx)}>
+          <span><b style={{color:T.textBright}}>{a.code}</b> <span style={{color:T.textMuted}}>{a.name}</span></span><span style={S.tag(a.type)}>{a.type}</span></div>)}</div>}</div>);}
 
 // ─── Auth ───
 function AuthScreen({onLogin}){const[mode,setMode]=useState('login');const[email,setEmail]=useState('');const[pw,setPw]=useState('');const[name,setName]=useState('');const[confirmPw,setConfirmPw]=useState('');const[role,setRole]=useState('Accountant');
@@ -440,8 +477,7 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo / Description</label><input style={S.input} placeholder="What is this entry for?" value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
     <div style={{...S.cardFlush,marginBottom:16,maxHeight:'52vh',overflowY:'auto'}}><table className="cl-colresize" style={S.table}><thead style={{position:'sticky',top:0,zIndex:2,background:T.bgElevated}}><tr><th style={{...S.th,minWidth:300}}>Account</th>{showDims&&<th style={{...S.th,width:140}}>Dimension</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
-        <select style={S.select} title={l.account_code?acctLabel(l.account_code,(accounts.find(a=>a.code===l.account_code)||{}).name||''):''} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select account...</option>
-          {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code} title={acctLabel(a.code,a.name)}>{acctLabel(a.code,a.name)}</option>)}</select></td>
+        <AccountAutocomplete accounts={accounts} value={l.account_code} onChange={c=>updateLine(i,'account_code',c)} placeholder="Select account…" style={S.select} clearable/></td>
         {showDims&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={lineDimValue(l)} onChange={e=>setLineDim(i,e.target.value)}><option value="">— none —</option>{showProject&&<optgroup label="Project">{projOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</optgroup>}{showLocation&&<optgroup label="Location">{locOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}{showClass&&<optgroup label={classTerm()}>{clsOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} placeholder="(optional)" value={l.description||''} onChange={e=>updateLine(i,'description',e.target.value)}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'debit',f);}} onBlur={e=>updateLine(i,'debit',blurAmt(e.target.value))}/></td>
@@ -2143,8 +2179,7 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo</label><input style={S.input} value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
     <div style={{...S.cardFlush,marginBottom:16,maxHeight:'52vh',overflowY:'auto'}}><table className="cl-colresize" style={S.table}><thead style={{position:'sticky',top:0,zIndex:2,background:T.bgElevated}}><tr><th style={{...S.th,minWidth:300}}>Account</th>{showDims&&<th style={{...S.th,width:140}}>Dimension</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
-        <select style={S.select} title={l.account_code?acctLabel(l.account_code,(accounts.find(a=>a.code===l.account_code)||{}).name||''):''} value={l.account_code} onChange={e=>updateLine(i,'account_code',e.target.value)}><option value="">Select...</option>
-          {accounts.sort((a,b)=>a.code.localeCompare(b.code)).map(a=><option key={a.code} value={a.code} title={acctLabel(a.code,a.name)}>{acctLabel(a.code,a.name)}</option>)}</select></td>
+        <AccountAutocomplete accounts={accounts} value={l.account_code} onChange={c=>updateLine(i,'account_code',c)} placeholder="Select account…" style={S.select} clearable/></td>
         {showDims&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={lineDimValue(l)} onChange={e=>setLineDim(i,e.target.value)}><option value="">— none —</option>{showProject&&<optgroup label="Project">{projOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}{useDimProjects&&<option value="__new__">+ New project…</option>}</optgroup>}{showLocation&&<optgroup label="Location">{locOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}{showClass&&<optgroup label={classTerm()}>{clsOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}</select></td>}
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} value={l.description||''} placeholder="(optional)" onChange={e=>updateLine(i,'description',e.target.value)}/></td>
         <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)updateLine(i,'debit',f);}} onBlur={e=>updateLine(i,'debit',blurAmt(e.target.value))}/></td>
@@ -3228,7 +3263,7 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
       <div style={S.row}>
         <div style={{...S.col,flex:2}}><label style={S.label}>Code to GL Account</label>
           <div style={{display:'flex',gap:6}}>
-            <select style={{...S.select,flex:1}} value={form.account_code} onChange={e=>set('account_code',e.target.value)}><option value="">Select account...</option>{accounts.map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select>
+            <div style={{flex:1}}><AccountAutocomplete accounts={accounts} value={form.account_code} onChange={c=>set('account_code',c)} placeholder="Select account…" style={S.select} clearable/></div>
             <button style={{...S.btnS,color:T.teal,borderColor:T.teal+'40',whiteSpace:'nowrap'}} onClick={()=>setShowAddAcct(true)} title="Create a new GL account">+ New</button>
           </div>
         </div>
