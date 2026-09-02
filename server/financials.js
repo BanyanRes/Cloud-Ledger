@@ -521,6 +521,35 @@ function bsClassifyFor(profile, row) {
     }
     return { section: 'Other', sub: 'Other' };
   }
+  if (profile === 'midco') {
+    const explicit = BS_ACCOUNT_MAP_MIDCO[String(row.code)];
+    if (explicit) return { section: explicit[0], sub: explicit[1] };
+    // Defensive fallback: every consolidated-face account is pinned above, but
+    // never drop a row. Mirror CLA's groupings for anything unmapped.
+    const name = (row.name || '').toLowerCase();
+    if (row.type === 'Asset') {
+      if (isCashAccount(row)) return { section: 'Current Assets', sub: 'Cash and Cash Equivalents' };
+      if (/due from|intercompany/.test(name)) return { section: 'Current Assets', sub: 'Intercompany Receivable' };
+      if (/receivable|allowance/.test(name)) return { section: 'Current Assets', sub: 'Accounts Receivable, Net' };
+      if (/prepaid|reserve|earnest|deposit/.test(name)) return { section: 'Current Assets', sub: 'Other Current Assets' };
+      if (/accum|depreciation|amortization/.test(name)) return { section: 'Fixed Assets, Net', sub: 'Accumulated Depreciation' };
+      if (/favorable loan|customer contract|trade name|goodwill/.test(name)) return { section: 'Intangible Assets, Net', sub: 'Intangible Assets' };
+      if (/land|construction|acquisition|railroad asset|personal property|echo/.test(name)) return { section: 'Investments', sub: 'Long Term Investments' };
+      return { section: 'Other Assets', sub: 'Other Assets' };
+    }
+    if (row.type === 'Liability') {
+      if (/due to|intercompany/.test(name)) return { section: 'Current Liabilities', sub: 'Intercompany Payable' };
+      if (/loan|note payable|bot|bond/.test(name)) return { section: 'Long Term Liabilities', sub: 'Loans' };
+      if (/payable/.test(name)) return { section: 'Current Liabilities', sub: 'Accounts Payable' };
+      return { section: 'Current Liabilities', sub: 'Other Current Liabilities' };
+    }
+    if (row.type === 'Equity') {
+      if (String(row.code) === 'NCI') return { section: 'Members Equity', sub: 'Noncontrolling Interest' };
+      if (/retained earning/.test(name)) return { section: 'Members Equity', sub: 'Retained Earnings' };
+      return { section: 'Members Equity', sub: 'Members Equity' };
+    }
+    return { section: 'Other', sub: 'Other' };
+  }
   return bsClassify(row, { intercompany: usesIntercompanySections(profile) });
 }
 
@@ -872,6 +901,113 @@ const BANYAN_OPEX_GROUP_ORDER = [
 // order, which puts Debt Service (60253) ahead of Legal and Accounting (63000)
 // and Amortization (69000) ahead of Depreciation (69100) — both backwards from
 // the CPA reference. Groups not listed keep account-code order.
+// -- CLRFI Midco I consolidated statement-of-operations map -------------------
+// Pins every operating P&L account to the exact group/subsection CLA's package
+// uses so the consolidated statement of operations reads identically to the CPA
+// deliverable (Jimmy, 2026-09-01). Revenue, cost of revenue and operating
+// expenses are pinned here; the non-operating lines (interest income/expense,
+// misc, gains) are left to the shared otherIeRoute. Note CLA keeps the state /
+// franchise taxes inside Office Supplies (there is no separate Income Taxes
+// section on the consolidated statement), so those are pinned here and the map
+// is consulted BEFORE otherIeRoute to keep them out of an income-tax section.
+const MIDCO_PL_MAP = {
+  '40110': ['revenue', 'Revenue - Services', 'Revenue - Services'],
+  '40120': ['revenue', 'Revenue - Services', 'Revenue - Services'],
+  '40125': ['revenue', 'Revenue - Services', 'Revenue - Services'],
+  '40130': ['revenue', 'Revenue - Services', 'Revenue - Services'],
+  '40140': ['revenue', 'Revenue - Services', 'Revenue - Services'],
+  '40160': ['revenue', 'Revenue - Services', 'Revenue - Services'],
+  '41135': ['revenue', 'Revenue - Services', 'Revenue - Services'],
+  '41136': ['revenue', 'Revenue - Services', 'Revenue - Services'],
+  '51000': ['cogs', 'Cost of Goods Sold', 'Cost of Goods Sold'],
+  '63000': ['opex', 'General and Administrative Expenses', 'Legal and Accounting'],
+  '63025': ['opex', 'General and Administrative Expenses', 'Legal and Accounting'],
+  '63050': ['opex', 'General and Administrative Expenses', 'Legal and Accounting'],
+  '60210': ['opex', 'General and Administrative Expenses', 'Travel Expenses'],
+  '61164': ['opex', 'General and Administrative Expenses', 'Travel Expenses'],
+  '60500': ['opex', 'General and Administrative Expenses', 'Meals and Entertainment'],
+  '67100': ['opex', 'General and Administrative Expenses', 'Office Supplies'],
+  '67150': ['opex', 'General and Administrative Expenses', 'Office Supplies'],
+  '67200': ['opex', 'General and Administrative Expenses', 'Office Supplies'],
+  '67300': ['opex', 'General and Administrative Expenses', 'Office Supplies'],
+  '67400': ['opex', 'General and Administrative Expenses', 'Office Supplies'],
+  '68000': ['opex', 'General and Administrative Expenses', 'Office Supplies'],
+  '68050': ['opex', 'General and Administrative Expenses', 'Office Supplies'],
+  '68055': ['opex', 'General and Administrative Expenses', 'Office Supplies'],
+  '68060': ['opex', 'General and Administrative Expenses', 'Office Supplies'],
+  '68061': ['opex', 'General and Administrative Expenses', 'Office Supplies'],
+  '68110': ['opex', 'General and Administrative Expenses', 'Office Supplies'],
+  '69100': ['opex', 'Depreciation and Amortization Expense', 'Depreciation'],
+  '82000': ['opex', 'Depreciation and Amortization Expense', 'Amortization'],
+  '60000': ['opex', 'Payroll and Related Expenses', 'Payroll Expenses'],
+  '60002': ['opex', 'Payroll and Related Expenses', 'Payroll Expenses'],
+  '60005': ['opex', 'Payroll and Related Expenses', 'Payroll Expenses'],
+  '60012': ['opex', 'Payroll and Related Expenses', 'Payroll Expenses'],
+  '60200': ['opex', 'Payroll and Related Expenses', 'Payroll Expenses'],
+  '61005': ['opex', 'Utilities and Facilities', 'Facilities'],
+  '61050': ['opex', 'Utilities and Facilities', 'Facilities'],
+  '61052': ['opex', 'Utilities and Facilities', 'Facilities'],
+  '61053': ['opex', 'Utilities and Facilities', 'Facilities'],
+  '61054': ['opex', 'Utilities and Facilities', 'Facilities'],
+  '61056': ['opex', 'Utilities and Facilities', 'Facilities'],
+  '61064': ['opex', 'Utilities and Facilities', 'Facilities'],
+  '61000': ['opex', 'Utilities and Facilities', 'Rent'],
+  '61010': ['opex', 'Utilities and Facilities', 'Rent'],
+  '61150': ['opex', 'Utilities and Facilities', 'Utilities'],
+  '64000': ['opex', 'Operating and Maintenance Expenses', 'Other Operating Expense'],
+  '63027': ['opex', 'Management Fees', 'Management Fees'],
+  '63030': ['opex', 'Management Fees', 'Management Fees'],
+  '63034': ['opex', 'Management Fees', 'Management Fees'],
+  '63038': ['opex', 'Management Fees', 'Management Fees'],
+  '63041': ['opex', 'Management Fees', 'Management Fees'],
+  '63042': ['opex', 'Management Fees', 'Management Fees'],
+  '63047': ['opex', 'Management Fees', 'Management Fees'],
+};
+
+// Route a Midco consolidated P&L account. The MAP is consulted first (so the
+// state / franchise taxes stay in Office Supplies, matching CLA), then the
+// shared otherIeRoute for the non-operating lines, then name heuristics so a
+// new account is never dropped.
+function midcoPlRoute(row) {
+  const m = MIDCO_PL_MAP[String(row.code)];
+  if (m) return { bucket: m[0], group: m[1], sub: m[2] };
+  const oie = otherIeRoute(row);
+  if (oie) return oie;
+  const name = (row.name || '').toLowerCase();
+  if (row.type === 'Revenue') return { bucket: 'revenue', group: 'Revenue - Services', sub: 'Revenue - Services' };
+  if (/salary|salaries|wage|payroll|health insurance|rrb tax/.test(name)) return { bucket: 'opex', group: 'Payroll and Related Expenses', sub: 'Payroll Expenses' };
+  if (/reimbursable|management fee|offsite staff|fra compliance|switchmen|transload/.test(name)) return { bucket: 'opex', group: 'Management Fees', sub: 'Management Fees' };
+  if (/travel|fuel/.test(name)) return { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Travel Expenses' };
+  if (/meals|entertainment/.test(name)) return { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Meals and Entertainment' };
+  if (/accounting|legal|professional fee/.test(name)) return { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Legal and Accounting' };
+  if (/rent/.test(name)) return { bucket: 'opex', group: 'Utilities and Facilities', sub: 'Rent' };
+  if (/utilit/.test(name)) return { bucket: 'opex', group: 'Utilities and Facilities', sub: 'Utilities' };
+  if (/maintenance|repair|yard|crossing|landscape|pest|vehicle|equipment suppl/.test(name)) return { bucket: 'opex', group: 'Utilities and Facilities', sub: 'Facilities' };
+  if (/depreciation/.test(name)) return { bucket: 'opex', group: 'Depreciation and Amortization Expense', sub: 'Depreciation' };
+  if (/amortization/.test(name)) return { bucket: 'opex', group: 'Depreciation and Amortization Expense', sub: 'Amortization' };
+  if (/security/.test(name)) return { bucket: 'opex', group: 'Operating and Maintenance Expenses', sub: 'Other Operating Expense' };
+  return { bucket: 'opex', group: 'General and Administrative Expenses', sub: 'Office Supplies' };
+}
+
+// Operating-expense group order for the Midco consolidated statement, matching
+// CLA: G&A, Depreciation and Amortization, Payroll, Utilities and Facilities,
+// Operating and Maintenance, Management Fees.
+const MIDCO_OPEX_GROUP_ORDER = [
+  'General and Administrative Expenses',
+  'Depreciation and Amortization Expense',
+  'Payroll and Related Expenses',
+  'Utilities and Facilities',
+  'Operating and Maintenance Expenses',
+  'Management Fees',
+];
+
+// Subsection order within Midco groups, matching CLA.
+const MIDCO_SUB_ORDER_IN_GROUP = {
+  'General and Administrative Expenses': ['Legal and Accounting', 'Travel Expenses', 'Meals and Entertainment', 'Office Supplies'],
+  'Depreciation and Amortization Expense': ['Depreciation', 'Amortization'],
+  'Utilities and Facilities': ['Facilities', 'Rent', 'Utilities'],
+};
+
 const BANYAN_SUB_ORDER_IN_GROUP = {
   'Travel, Meals and Entertainment': ['Travel Expenses', 'Meals and Entertainment'],
   'General and Administrative Expenses': ['Legal and Accounting', 'Debt Service'],
@@ -1375,6 +1511,116 @@ const BS_ACCOUNT_MAP_SILSBEE = {
 // Accumulated-depreciation contras for the Silsbee profile.
 const BS_CONTRA_CODES_SILSBEE = new Set(['16160', '16500']);
 
+// -- CLRFI Midco I consolidated balance-sheet map -----------------------------
+// Pins every account on the CONSOLIDATED face balance sheet to the exact
+// section/subsection CLA's package uses, so CloudLedger's consolidated BS reads
+// identically to the CPA deliverable. Built from the CLA consolidated package
+// (00_A1) account-by-account (Jimmy, 2026-09-01). Fixed assets (11670 + the
+// 15xxx PP&E gross accounts) sit in Fixed Assets, Net; land / construction /
+// acquisition costs in Investments > Long Term Investments; the favorable-loan /
+// intangible block in Intangible Assets, Net; every remaining capitalized soft
+// cost (including 15160 Railroad & Building Improvements and 11020 Scrap Metal)
+// in Other Assets. 16160/16500 (accumulated depreciation) and 16600
+// (amortization) are contras within their sections; 12002 (allowance) nets
+// inside Accounts Receivable, Net. The surviving controlling contributed-capital
+// accounts (34006/34014/34262) sit in Members Equity; 39000 in Retained
+// Earnings; the synthetic NCI line in its own Noncontrolling Interest subsection
+// (the midco face renderer lifts it onto the CLA-style NCI line).
+const BS_ACCOUNT_MAP_MIDCO = {
+  '10010': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10040': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10050': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10070': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10107': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10111': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10163': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10175': ['Current Assets', 'Cash and Cash Equivalents'],
+  '10882': ['Current Assets', 'Cash and Cash Equivalents'],
+  '12000': ['Current Assets', 'Accounts Receivable, Net'],
+  '12002': ['Current Assets', 'Accounts Receivable, Net'],
+  '18310': ['Current Assets', 'Intercompany Receivable'],
+  '18311': ['Current Assets', 'Intercompany Receivable'],
+  '13001': ['Current Assets', 'Other Current Assets'],
+  '13100': ['Current Assets', 'Other Current Assets'],
+  '18002': ['Current Assets', 'Other Current Assets'],
+  '11670': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15100': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15150': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15165': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15170': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15175': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15200': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15210': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15220': ['Fixed Assets, Net', 'Fixed Assets'],
+  '15505': ['Fixed Assets, Net', 'Fixed Assets'],
+  '16160': ['Fixed Assets, Net', 'Accumulated Depreciation'],
+  '16500': ['Fixed Assets, Net', 'Accumulated Depreciation'],
+  '11009': ['Intangible Assets, Net', 'Intangible Assets'],
+  '11013': ['Intangible Assets, Net', 'Intangible Assets'],
+  '11014': ['Intangible Assets, Net', 'Intangible Assets'],
+  '11016': ['Intangible Assets, Net', 'Intangible Assets'],
+  '16600': ['Intangible Assets, Net', 'Amortization'],
+  '11010': ['Investments', 'Long Term Investments'],
+  '11011': ['Investments', 'Long Term Investments'],
+  '11012': ['Investments', 'Long Term Investments'],
+  '11015': ['Investments', 'Long Term Investments'],
+  '11040': ['Investments', 'Long Term Investments'],
+  '11050': ['Investments', 'Long Term Investments'],
+  '11211': ['Investments', 'Long Term Investments'],
+  '11215': ['Investments', 'Long Term Investments'],
+  '11230': ['Investments', 'Long Term Investments'],
+  '12021': ['Investments', 'Long Term Investments'],
+  '11020': ['Other Assets', 'Other Assets'],
+  '11030': ['Other Assets', 'Other Assets'],
+  '11713': ['Other Assets', 'Other Assets'],
+  '11760': ['Other Assets', 'Other Assets'],
+  '11915': ['Other Assets', 'Other Assets'],
+  '11920': ['Other Assets', 'Other Assets'],
+  '11970': ['Other Assets', 'Other Assets'],
+  '12013': ['Other Assets', 'Other Assets'],
+  '12115': ['Other Assets', 'Other Assets'],
+  '12116': ['Other Assets', 'Other Assets'],
+  '12127': ['Other Assets', 'Other Assets'],
+  '12230': ['Other Assets', 'Other Assets'],
+  '12310': ['Other Assets', 'Other Assets'],
+  '12315': ['Other Assets', 'Other Assets'],
+  '12321': ['Other Assets', 'Other Assets'],
+  '12323': ['Other Assets', 'Other Assets'],
+  '12325': ['Other Assets', 'Other Assets'],
+  '12343': ['Other Assets', 'Other Assets'],
+  '12364': ['Other Assets', 'Other Assets'],
+  '12381': ['Other Assets', 'Other Assets'],
+  '12420': ['Other Assets', 'Other Assets'],
+  '12421': ['Other Assets', 'Other Assets'],
+  '12423': ['Other Assets', 'Other Assets'],
+  '12594': ['Other Assets', 'Other Assets'],
+  '12596': ['Other Assets', 'Other Assets'],
+  '12600': ['Other Assets', 'Other Assets'],
+  '12720': ['Other Assets', 'Other Assets'],
+  '12913': ['Other Assets', 'Other Assets'],
+  '13420': ['Other Assets', 'Other Assets'],
+  '15160': ['Other Assets', 'Other Assets'],
+  '20000': ['Current Liabilities', 'Accounts Payable'],
+  '21006': ['Current Liabilities', 'Other Current Liabilities'],
+  '21011': ['Current Liabilities', 'Other Current Liabilities'],
+  '21200': ['Current Liabilities', 'Other Current Liabilities'],
+  '24000': ['Current Liabilities', 'Other Current Liabilities'],
+  '22100': ['Long Term Liabilities', 'Loans'],
+  '25063': ['Long Term Liabilities', 'Loans'],
+  '34006': ['Members Equity', 'Members Equity'],
+  '34014': ['Members Equity', 'Members Equity'],
+  '34262': ['Members Equity', 'Members Equity'],
+  '39000': ['Members Equity', 'Retained Earnings'],
+  'NCI': ['Members Equity', 'Noncontrolling Interest'],
+};
+
+// Contras within the Midco consolidated balance sheet: accumulated depreciation
+// and amortization subtract within their sections. The allowance (12002) carries
+// a natural credit balance and nets inside Accounts Receivable, Net without an
+// explicit contra flag, matching CLA.
+const BS_CONTRA_CODES_MIDCO = new Set(['16160', '16500', '16600']);
+
+
 // Codes eliminated on Silsbee before classification: the pushed-down parent
 // investment (17001, asset) and matching contributed capital (34063, equity).
 const SILSBEE_ELIMINATE_CODES = new Set(['17001', '34063']);
@@ -1647,6 +1893,7 @@ async function buildStatements(getBalances, opts) {
   const contraSet = (profile === 'banyan') ? BS_CONTRA_CODES_BANYAN
     : (profile === 'clip') ? BS_CONTRA_CODES_CLIP
     : (profile === 'silsbee') ? BS_CONTRA_CODES_SILSBEE
+    : (profile === 'midco') ? BS_CONTRA_CODES_MIDCO
     : BS_CONTRA_CODES;
   const bsCls = (row) => bsClassifyFor(profile, row);
   const bsSec = (row) => bsClassifyFor(profile, row).section;
@@ -2109,15 +2356,18 @@ async function buildStatements(getBalances, opts) {
   // Every P&L account is routed by banyanPlRoute so nothing is dropped; the
   // resulting net income equals the GL net income by construction.
   let banyanOps = null;
-  if (profile === 'banyan' || profile === 'banyandev') {
+  if (profile === 'banyan' || profile === 'banyandev' || profile === 'midco') {
     const isBd = profile === 'banyandev';
+    const isMidco = profile === 'midco';
     const bdKey = isBd ? (/braker/i.test(String(opts.entityName || '')) ? 'braker' : 'hp') : null;
     const allPl = plLines(() => true);
-    const byBucket = { revenue: [], opex: [], otherIncome: [], otherExpense: [], incomeTax: [] };
+    const byBucket = { revenue: [], cogs: [], opex: [], otherIncome: [], otherExpense: [], incomeTax: [] };
     const routeOf = {};
     for (const l of allPl) {
       const ref = mYtd.get(l.code) || mCur.get(l.code) || mPri.get(l.code);
-      const route = isBd
+      const route = isMidco
+        ? midcoPlRoute({ code: l.code, name: l.name, type: ref.type, subtype: ref.subtype })
+        : isBd
         ? banyandevPlRoute(bdKey, { code: l.code, name: l.name, type: ref.type, subtype: ref.subtype })
         : banyanPlRoute({ code: l.code, name: l.name, type: ref.type, subtype: ref.subtype });
       routeOf[l.code] = route;
@@ -2143,7 +2393,7 @@ async function buildStatements(getBalances, opts) {
       }
       for (const g of groups) {
         // Order subsections per the reference where specified.
-        const so = BANYAN_SUB_ORDER_IN_GROUP[g.title];
+        const so = (isMidco ? MIDCO_SUB_ORDER_IN_GROUP : BANYAN_SUB_ORDER_IN_GROUP)[g.title];
         if (so && so.length) {
           const srank = t => { const i = so.indexOf(t); return i === -1 ? so.length : i; };
           g.subs.sort((a, b) => srank(a.title) - srank(b.title));
@@ -2166,7 +2416,8 @@ async function buildStatements(getBalances, opts) {
       return groups;
     };
     const revenueTree = buildTree(byBucket.revenue, isBd ? BANYANDEV_REVENUE_GROUP_ORDER : undefined);
-    const opexTree = buildTree(byBucket.opex, isBd ? BANYANDEV_OPEX_GROUP_ORDER : BANYAN_OPEX_GROUP_ORDER);
+    const cogsTree = buildTree(byBucket.cogs);
+    const opexTree = buildTree(byBucket.opex, isMidco ? MIDCO_OPEX_GROUP_ORDER : isBd ? BANYANDEV_OPEX_GROUP_ORDER : BANYAN_OPEX_GROUP_ORDER);
     const otherIncomeTree = buildTree(byBucket.otherIncome, isBd ? BANYANDEV_OTHER_INCOME_GROUP_ORDER : undefined);
     const otherExpenseTree = buildTree(byBucket.otherExpense);
     const incomeTaxTree = buildTree(byBucket.incomeTax);
@@ -2182,16 +2433,20 @@ async function buildStatements(getBalances, opts) {
       pri: r2(tOtherIncomeB.pri + tOtherExpenseB.pri),
       ytd: r2(tOtherIncomeB.ytd + tOtherExpenseB.ytd),
     };
-    // No cost-of-revenue on Banyan, so Gross Profit = Total Revenue.
-    const gpB = { cur: tRev.cur, pri: tRev.pri, ytd: tRev.ytd };
+    // Banyan has no cost-of-revenue; Midco does (Car Hire), so Gross Profit =
+    // Total Revenue less Total Cost of Revenue for midco, and net income
+    // subtracts COGS as well.
+    const tCogsB = sumBucket(byBucket.cogs);
+    const gpB = { cur: r2(tRev.cur - tCogsB.cur), pri: r2(tRev.pri - tCogsB.pri), ytd: r2(tRev.ytd - tCogsB.ytd) };
     const niBanyan = {
-      cur: r2(tRev.cur - tOpexB.cur + tOtherIEB.cur - tIncomeTaxB.cur),
-      pri: r2(tRev.pri - tOpexB.pri + tOtherIEB.pri - tIncomeTaxB.pri),
-      ytd: r2(tRev.ytd - tOpexB.ytd + tOtherIEB.ytd - tIncomeTaxB.ytd),
+      cur: r2(tRev.cur - tCogsB.cur - tOpexB.cur + tOtherIEB.cur - tIncomeTaxB.cur),
+      pri: r2(tRev.pri - tCogsB.pri - tOpexB.pri + tOtherIEB.pri - tIncomeTaxB.pri),
+      ytd: r2(tRev.ytd - tCogsB.ytd - tOpexB.ytd + tOtherIEB.ytd - tIncomeTaxB.ytd),
     };
     banyanOps = {
       structured: true, banyanShape: true,
-      showGrossProfit: !isBd || bdKey === 'hp',
+      showGrossProfit: isMidco ? true : (!isBd || bdKey === 'hp'),
+      cogsTree, totCogs: tCogsB,
       noGroupTotal: isBd ? BANYANDEV_NO_GROUP_TOTAL : null,
       revenueTree, opexTree, otherIncomeTree, otherExpenseTree, incomeTaxTree,
       totRev: tRev, grossProfit: gpB, totOpex: tOpexB,
@@ -3182,6 +3437,13 @@ async function renderStatementsPdf(s, outOffsets) {
       // the "$" several sections down the statement.
       plFirstRow = false;
       L.row('Total Revenue', cell4(bo.totRev), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: bo.showGrossProfit !== false ? 0 : 6 });
+      // Cost of Revenue (Midco: Car Hire). Rendered between Total Revenue and
+      // Gross Profit, matching CLA. Only prints when there are COGS lines.
+      if (bo.cogsTree && bo.cogsTree.length) {
+        L.sectionTitle('Cost of Revenue');
+        renderTree(bo.cogsTree, { showGroupTotal: false });
+        L.row('Total Cost of Revenue', cell4(bo.totCogs), { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 4 });
+      }
       if (bo.showGrossProfit !== false) L.row('Gross Profit', cell4(bo.grossProfit), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
 
       L.sectionTitle('Operating Expenses');
@@ -3204,6 +3466,16 @@ async function renderStatementsPdf(s, outOffsets) {
       }
 
       L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: false, doubleBelow: true, dollarPrefix: true });
+      // Midco consolidated: split net income between the noncontrolling
+      // interest and the controlling parent, matching CLA. cur = the window
+      // being shown, ytd = year to date, pri = the prior comparative period.
+      const _nciP3 = s.balanceSheet.nciPresentation;
+      if (m.profile === 'midco' && _nciP3) {
+        const shCur = _nciP3.windowNiShare, shYtd = _nciP3.niAttribNci.cur, shPri = _nciP3.niAttribNci.pri;
+        L.row('Less: Net Income (Loss) Attributable to Noncontrolling Interest', [money(shCur), money(shPri), chg(shCur, shPri), money(shYtd)], { indent: 6, gapBefore: 6 });
+        const ctrlCur = r2(bo.netIncome.cur - shCur), ctrlPri = r2(bo.netIncome.pri - shPri), ctrlYtd = r2(bo.netIncome.ytd - shYtd);
+        L.row('Net Income (Loss) Attributable to CLRFI Midco I, LLC and Subsidiaries', [money(ctrlCur), money(ctrlPri), chg(ctrlCur, ctrlPri), money(ctrlYtd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+      }
     } else if (s.operations.bsfrgp && s.operations.bsfrgp.structured) {
       // ── Banyan SFR GP Investors shape: Operating Expenses / Other Income
       //    (Expense) / Income Taxes / Net Income (Loss). ────────────────────
