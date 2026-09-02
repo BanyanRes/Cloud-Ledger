@@ -3073,12 +3073,13 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     //                line across all columns. Defaults ON so every statement's
     //                subtotal/total underlines sit under each number separately,
     //                never as one long line running across the whole row.
-    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapAfter = 0, dollarPrefix = false, valueInset = 0, colRules = true, keepWithNext = 0, labelLines = null } = {}) {
+    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapBefore = 0, gapAfter = 0, dollarPrefix = false, valueInset = 0, colRules = true, keepWithNext = 0, labelLines = null } = {}) {
       // keepWithNext reserves extra space so this row and the row(s) that follow
       // land on the SAME page — used to keep a section grand-total from being
       // orphaned alone at the top of a continuation page: the closest subtotal
       // above it reserves the total's height and the two break together.
-      ensure((labelLines ? 25 : 13) + keepWithNext);
+      ensure((labelLines ? 25 : 13) + keepWithNext + (gapBefore || 0));
+      if (gapBefore) y -= gapBefore;
       const font = boldRow ? bold : reg;
       // Per-column rule width. For the per-column rules we want a uniform box
       // sized to the numeric columns (the inter-column pitch), NOT the wide
@@ -3131,14 +3132,18 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       // ruleAbove — otherwise the two lines stack ~12pt apart and read as a
       // stray double underline (Total Current Assets → Total Assets; Total
       // Operating Expenses → Net Income; Total Liabilities → Total L&E; etc.).
+      // For a wrapped label the numbers and any underline belong on the LOWER
+      // of the two lines, so they never collide with the row above. yNum is that
+      // lower baseline; for a normal row it is just y.
+      const yNum = (labelLines && labelLines.length >= 2) ? y - 12 : y;
       const _drawAbove = ruleAbove && !layout._prevRuledBelow;
       if (_drawAbove) drawRule(y + 9);
       if (labelLines && labelLines.length >= 2) {
         // Long label wrapped onto two lines so it does not overrun the number
-        // columns: first line sits a row-height above, the numbers align with
-        // the second (lower) line. Any rule/underline stays on the lower line.
-        page.drawText(String(labelLines[0]), { x: PAGE.mL + indent, y: y + 12, size: FS.row, font });
-        page.drawText(String(labelLines[1]), { x: PAGE.mL + indent, y, size: FS.row, font });
+        // columns: first line on this baseline, second line one row below, and
+        // the numbers align with that lower line.
+        page.drawText(String(labelLines[0]), { x: PAGE.mL + indent, y, size: FS.row, font });
+        page.drawText(String(labelLines[1]), { x: PAGE.mL + indent, y: yNum, size: FS.row, font });
       } else {
         page.drawText(String(label), { x: PAGE.mL + indent, y, size: FS.row, font });
       }
@@ -3146,7 +3151,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
         if (c == null || c === '') return;
         const s = String(c);
         const w = font.widthOfTextAtSize(s, FS.row);
-        page.drawText(s, { x: cols[i] - w - valueInset, y, size: FS.row, font });
+        page.drawText(s, { x: cols[i] - w - valueInset, y: yNum, size: FS.row, font });
         if (dollarPrefix) {
           // "$" anchored a fixed gap to the LEFT of this column's own number,
           // NOT at the column-box left edge. The old formula (cols[i] -
@@ -3159,11 +3164,11 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
           const DOLLAR_PREV_GAP = 12;
           const dollarInset = (Number.isFinite(pitch) ? pitch : 78) - DOLLAR_PREV_GAP;
           const dx = cols[i] - dollarInset - valueInset;
-          page.drawText('$', { x: dx, y, size: FS.row, font });
+          page.drawText('$', { x: dx, y: yNum, size: FS.row, font });
         }
       });
-      if (ruleBelow) drawRule(y - 3);
-      if (doubleBelow) { drawRule(y - 3); drawRule(y - 5); }
+      if (ruleBelow) drawRule(yNum - 3);
+      if (doubleBelow) { drawRule(yNum - 3); drawRule(yNum - 5); }
       // Latch whether THIS row ruled below, so the next row can suppress a
       // redundant ruleAbove (see adjacency rule above). Reset on any row that
       // did not rule below, so a normal detail line correctly re-arms the top
@@ -3474,24 +3479,24 @@ async function renderStatementsPdf(s, outOffsets) {
       }
 
       const _isMidcoNi = (m.profile === 'midco' && s.balanceSheet.nciPresentation);
-      // For midco, the Net Income (Loss) row has an attributable split below it,
-      // so it takes a single underline, not the double (the double belongs to
-      // the final 'Attributable to Midco' total). Every other profile keeps the
-      // double underline here.
+      // For midco, the Net Income (Loss) row is followed by the attributable
+      // split, so it takes a single rule (no double); the LAST row of the
+      // statement -- Net Income Attributable to CLRFI Midco I -- carries the
+      // double underline. Every other profile keeps the double here.
       L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: false, doubleBelow: !_isMidcoNi, dollarPrefix: true });
       // Midco consolidated: split net income between the noncontrolling
-      // interest and the controlling parent, matching CLA. cur = the window
-      // being shown, ytd = year to date, pri = the prior comparative period.
-      // The two labels are long, so they wrap onto two lines to avoid running
-      // over the number columns; the final total drops the double underline per
-      // Jimmy (2026-09-01).
+      // interest and the controlling parent, matching CLA. The two labels are
+      // long, so each wraps onto two lines to avoid running over the number
+      // columns. cur = the window shown, ytd = year to date, pri = the prior
+      // comparative period. The final row is double-underlined as the closing
+      // total of the statement (Jimmy, 2026-09-01).
       const _nciP3 = s.balanceSheet.nciPresentation;
       if (m.profile === 'midco' && _nciP3) {
         const shCur = _nciP3.windowNiShare, shYtd = _nciP3.niAttribNci.cur, shPri = _nciP3.niAttribNci.pri;
-        L.row('', [money(shCur), money(shPri), chg(shCur, shPri), money(shYtd)], { indent: 6, gapBefore: 6,
+        L.row('', [money(shCur), money(shPri), chg(shCur, shPri), money(shYtd)], { indent: 6, gapBefore: 4,
           labelLines: ['Less: Net Income (Loss) Attributable to', 'Noncontrolling Interest'] });
         const ctrlCur = r2(bo.netIncome.cur - shCur), ctrlPri = r2(bo.netIncome.pri - shPri), ctrlYtd = r2(bo.netIncome.ytd - shYtd);
-        L.row('', [money(ctrlCur), money(ctrlPri), chg(ctrlCur, ctrlPri), money(ctrlYtd)], { indent: 6, boldRow: true, ruleAbove: true, dollarPrefix: true,
+        L.row('', [money(ctrlCur), money(ctrlPri), chg(ctrlCur, ctrlPri), money(ctrlYtd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true,
           labelLines: ['Net Income (Loss) Attributable to', 'CLRFI Midco I, LLC and Subsidiaries'] });
       }
     } else if (s.operations.bsfrgp && s.operations.bsfrgp.structured) {
