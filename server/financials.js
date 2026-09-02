@@ -3073,12 +3073,12 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     //                line across all columns. Defaults ON so every statement's
     //                subtotal/total underlines sit under each number separately,
     //                never as one long line running across the whole row.
-    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapAfter = 0, dollarPrefix = false, valueInset = 0, colRules = true, keepWithNext = 0 } = {}) {
+    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapAfter = 0, dollarPrefix = false, valueInset = 0, colRules = true, keepWithNext = 0, labelLines = null } = {}) {
       // keepWithNext reserves extra space so this row and the row(s) that follow
       // land on the SAME page — used to keep a section grand-total from being
       // orphaned alone at the top of a continuation page: the closest subtotal
       // above it reserves the total's height and the two break together.
-      ensure(13 + keepWithNext);
+      ensure((labelLines ? 25 : 13) + keepWithNext);
       const font = boldRow ? bold : reg;
       // Per-column rule width. For the per-column rules we want a uniform box
       // sized to the numeric columns (the inter-column pitch), NOT the wide
@@ -3133,7 +3133,15 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       // Operating Expenses → Net Income; Total Liabilities → Total L&E; etc.).
       const _drawAbove = ruleAbove && !layout._prevRuledBelow;
       if (_drawAbove) drawRule(y + 9);
-      page.drawText(String(label), { x: PAGE.mL + indent, y, size: FS.row, font });
+      if (labelLines && labelLines.length >= 2) {
+        // Long label wrapped onto two lines so it does not overrun the number
+        // columns: first line sits a row-height above, the numbers align with
+        // the second (lower) line. Any rule/underline stays on the lower line.
+        page.drawText(String(labelLines[0]), { x: PAGE.mL + indent, y: y + 12, size: FS.row, font });
+        page.drawText(String(labelLines[1]), { x: PAGE.mL + indent, y, size: FS.row, font });
+      } else {
+        page.drawText(String(label), { x: PAGE.mL + indent, y, size: FS.row, font });
+      }
       cells.forEach((c, i) => {
         if (c == null || c === '') return;
         const s = String(c);
@@ -3161,7 +3169,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       // did not rule below, so a normal detail line correctly re-arms the top
       // rule for a following subtotal.
       layout._prevRuledBelow = !!(ruleBelow || doubleBelow);
-      y -= 12 + gapAfter;
+      y -= 12 + gapAfter + (labelLines ? 12 : 0);
     },
   };
   return layout;
@@ -3465,16 +3473,26 @@ async function renderStatementsPdf(s, outOffsets) {
         L.row('Total Income Taxes', cell4(bo.totIncomeTax), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
       }
 
-      L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: false, doubleBelow: true, dollarPrefix: true });
+      const _isMidcoNi = (m.profile === 'midco' && s.balanceSheet.nciPresentation);
+      // For midco, the Net Income (Loss) row has an attributable split below it,
+      // so it takes a single underline, not the double (the double belongs to
+      // the final 'Attributable to Midco' total). Every other profile keeps the
+      // double underline here.
+      L.row('Net Income (Loss)', cell4(bo.netIncome), { indent: 6, boldRow: true, ruleAbove: false, doubleBelow: !_isMidcoNi, dollarPrefix: true });
       // Midco consolidated: split net income between the noncontrolling
       // interest and the controlling parent, matching CLA. cur = the window
       // being shown, ytd = year to date, pri = the prior comparative period.
+      // The two labels are long, so they wrap onto two lines to avoid running
+      // over the number columns; the final total drops the double underline per
+      // Jimmy (2026-09-01).
       const _nciP3 = s.balanceSheet.nciPresentation;
       if (m.profile === 'midco' && _nciP3) {
         const shCur = _nciP3.windowNiShare, shYtd = _nciP3.niAttribNci.cur, shPri = _nciP3.niAttribNci.pri;
-        L.row('Less: Net Income (Loss) Attributable to Noncontrolling Interest', [money(shCur), money(shPri), chg(shCur, shPri), money(shYtd)], { indent: 6, gapBefore: 6 });
+        L.row('', [money(shCur), money(shPri), chg(shCur, shPri), money(shYtd)], { indent: 6, gapBefore: 6,
+          labelLines: ['Less: Net Income (Loss) Attributable to', 'Noncontrolling Interest'] });
         const ctrlCur = r2(bo.netIncome.cur - shCur), ctrlPri = r2(bo.netIncome.pri - shPri), ctrlYtd = r2(bo.netIncome.ytd - shYtd);
-        L.row('Net Income (Loss) Attributable to CLRFI Midco I, LLC and Subsidiaries', [money(ctrlCur), money(ctrlPri), chg(ctrlCur, ctrlPri), money(ctrlYtd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+        L.row('', [money(ctrlCur), money(ctrlPri), chg(ctrlCur, ctrlPri), money(ctrlYtd)], { indent: 6, boldRow: true, ruleAbove: true, dollarPrefix: true,
+          labelLines: ['Net Income (Loss) Attributable to', 'CLRFI Midco I, LLC and Subsidiaries'] });
       }
     } else if (s.operations.bsfrgp && s.operations.bsfrgp.structured) {
       // ── Banyan SFR GP Investors shape: Operating Expenses / Other Income
