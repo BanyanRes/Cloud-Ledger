@@ -544,7 +544,7 @@ function bsClassifyFor(profile, row) {
       return { section: 'Current Liabilities', sub: 'Other Current Liabilities' };
     }
     if (row.type === 'Equity') {
-      if (String(row.code) === 'NCI') return { section: 'Members Equity', sub: 'Noncontrolling Interest' };
+      if (String(row.code) === 'NCI') return { section: 'Members Equity', sub: 'Members Equity' };
       if (/retained earning/.test(name)) return { section: 'Members Equity', sub: 'Retained Earnings' };
       return { section: 'Members Equity', sub: 'Members Equity' };
     }
@@ -1611,7 +1611,7 @@ const BS_ACCOUNT_MAP_MIDCO = {
   '34014': ['Members Equity', 'Members Equity'],
   '34262': ['Members Equity', 'Members Equity'],
   '39000': ['Members Equity', 'Retained Earnings'],
-  'NCI': ['Members Equity', 'Noncontrolling Interest'],
+  'NCI': ['Members Equity', 'Members Equity'],
 };
 
 // Contras within the Midco consolidated balance sheet: accumulated depreciation
