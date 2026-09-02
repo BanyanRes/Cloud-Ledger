@@ -1,0 +1,114 @@
+5177 // ═══ Trailing 12 Months — P&L with 12 monthly columns + a Total column ═══
+5178 function TrailingTwelveMonths({entityId,entityName}){
+5179   const[asOf,setAsOf]=useState(today());
+5180   const[data,setData]=useState(null);
+5181   const[busy,setBusy]=useState(false);
+5182   const[err,setErr]=useState('');
+5183   const[exporting,setExporting]=useState(false);
+5184   const fmt=n=>{const v=Number(n)||0;const t=Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});return v<0?'('+t+')':(v===0?'-':t);};
+5185   useEffect(()=>{let cancelled=false;setData(null);setErr('');
+5186     if(!entityId||!/^\d{4}-\d{2}-\d{2}$/.test(asOf))return;
+5187     setBusy(true);
+5188     api.getTtmPL(entityId,asOf)
+5189       .then(d=>{if(!cancelled)setData(d);})
+5190       .catch(e=>{if(!cancelled)setErr(e.message);})
+5191       .finally(()=>{if(!cancelled)setBusy(false);});
+5192     return()=>{cancelled=true;};
+5193   },[entityId,asOf]);
+5194   const months=data?data.meta.months:[];
+5195   const nCols=months.length; // 12
+5196   // Build the ordered display rows for both the on-screen table and the export.
+5197   const buildRows=()=>{
+5198     if(!data)return[];
+5199     const rows=[];
+5200     const line=(label,vals,total,opt={})=>rows.push({label,vals,total,...opt});
+5201     // Revenue (suppressed when the entity has no operating revenue).
+5202     if(data.revenue.length){
+5203       line('Revenue',null,null,{header:true});
+5204       data.revenue.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+5205       line('Total Revenue',data.totRev.vals,data.totRev.total,{bold:true,rule:true});
+5206     }
+5207     // Cost of Revenue (only if present)
+5208     if(data.hasCogs){
+5209       line('Cost of Revenue',null,null,{header:true});
+5210       data.cogs.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+5211       line('Total Cost of Revenue',data.totCogs.vals,data.totCogs.total,{bold:true,rule:true});
+5212       line('Gross Profit',data.grossProfit.vals,data.grossProfit.total,{bold:true,rule:true});
+5213     }
+5214     // Operating Expenses, grouped
+5215     line('Operating Expenses',null,null,{header:true});
+5216     data.opexGroups.forEach(g=>{
+5217       if(data.opexGroups.length>1){
+5218         line(g.title,null,null,{indent:1,sub:true});
+5219         g.lines.forEach(l=>line(l.name,l.vals,l.total,{indent:2}));
+5220         line('Total '+g.title,g.subtotal.vals,g.subtotal.total,{indent:1,rule:true});
+5221       }else{
+5222         g.lines.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+5223       }
+5224     });
+5225     line('Total Operating Expenses',data.totOpex.vals,data.totOpex.total,{bold:true,rule:true});
+5226     // Other Income (Expense) — expense lines already negated by the server.
+5227     if((data.otherIncome&&data.otherIncome.length)||(data.otherExpense&&data.otherExpense.length)){
+5228       line('Other Income (Expense)',null,null,{header:true});
+5229       (data.otherIncome||[]).forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+5230       (data.otherExpense||[]).forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+5231       line('Total Other Income (Expense)',data.totOtherIE.vals,data.totOtherIE.total,{bold:true,rule:true});
+5232     }
+5233     // Income Taxes
+5234     if(data.incomeTax&&data.incomeTax.length){
+5235       line('Income Taxes',null,null,{header:true});
+5236       data.incomeTax.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));
+5237       line('Total Income Taxes',data.totIncomeTax.vals,data.totIncomeTax.total,{bold:true,rule:true});
+5238     }
+5239     // Net Income
+5240     line('Net Income (Loss)',data.netIncome.vals,data.netIncome.total,{bold:true,rule:true,dbl:true});
+5241     return rows;
+5242   };
+5243   const rows=buildRows();
+5244   // Download the styled workbook from the server (ExcelJS): comma-formatted
+5245   // amounts, underlined month header, and underlined subtotal/grand-total rows.
+5246   const doExport=async()=>{
+5247     if(!data)return;
+5248     setErr('');setExporting(true);
+5249     try{
+5250       const out=await api.getTtmPLXlsx(entityId,asOf);
+5251       if(!out)return;
+5252       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
+5253     }catch(e){setErr(e.message);}finally{setExporting(false);}
+5254   };
+5255   return(<div>
+5256     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+5257       <div><div style={S.h1}>Trailing 12 Months</div><div style={S.sub}>P&amp;L activity by month for the trailing twelve months &middot; {entityName||'this entity'}</div></div>
+5258       <div style={{display:'flex',gap:8,alignItems:'flex-end'}}>
+5259         <div><label style={S.label}>As of date</label><input type='date' value={asOf} onChange={e=>setAsOf(e.target.value)} style={{...S.input,width:160}}/></div>
+5260         {data&&<button style={{...S.btnExport,opacity:exporting?0.6:1}} disabled={exporting} onClick={doExport}>{exporting?'Exporting\u2026':'Export Excel'}</button>}
+5261       </div>
+5262     </div>
+5263     {err&&<div style={S.err}>{err}</div>}
+5264     {busy&&!data&&<div style={{color:T.textMuted,fontSize:12,padding:12}}>Computing trailing 12 months…</div>}
+5265     {data&&<div style={{...S.card,padding:0,overflowX:'auto'}}>
+5266       <table style={{borderCollapse:'collapse',width:'100%',fontSize:12,whiteSpace:'nowrap'}}>
+5267         <thead>
+5268           <tr>
+5269             <th style={{position:'sticky',left:0,background:T.cardBg||T.bg,textAlign:'left',padding:'8px 12px',borderBottom:'2px solid '+T.border,color:T.textDim,fontSize:11}}>{data.meta.periodLabel}</th>
+5270             {months.map((m,i)=><th key={i} style={{textAlign:'right',padding:'8px 10px',borderBottom:'2px solid '+T.border,color:T.textDim,fontSize:11}}>{m.label}</th>)}
+5271             <th style={{textAlign:'right',padding:'8px 12px',borderBottom:'2px solid '+T.border,color:T.textBright,fontSize:11,fontWeight:700,borderLeft:'2px solid '+T.border}}>{data.meta.totalLabel||'Total'}</th>
+5272           </tr>
+5273         </thead>
+5274         <tbody>
+5275           {rows.map((r,ri)=>(
+5276             <tr key={ri} style={{background:r.header?(T.hover||'transparent'):'transparent'}}>
+5277               <td style={{position:'sticky',left:0,background:T.cardBg||T.bg,padding:'4px 12px',paddingLeft:(12+(r.indent||0)*16)+'px',fontWeight:(r.bold||r.header||r.sub)?600:400,color:r.header?T.textBright:T.text,borderTop:r.rule?'1px solid '+T.border:'none'}}>{r.label}</td>
+5278               {(r.vals||new Array(nCols).fill(null)).map((v,ci)=>(
+5279                 <td key={ci} style={{textAlign:'right',padding:'4px 10px',fontWeight:r.bold?600:400,color:T.text,borderTop:r.rule?'1px solid '+T.border:'none',borderBottom:r.dbl?'3px double '+T.border:'none'}}>{r.vals?fmt(v):''}</td>
+5280               ))}
+5281               <td style={{textAlign:'right',padding:'4px 12px',fontWeight:(r.bold||r.header)?700:600,color:T.textBright,borderLeft:'2px solid '+T.border,borderTop:r.rule?'1px solid '+T.border:'none',borderBottom:r.dbl?'3px double '+T.border:'none'}}>{r.total==null?'':fmt(r.total)}</td>
+5282             </tr>
+5283           ))}
+5284         </tbody>
+5285       </table>
+5286     </div>}
+5287   </div>);
+5288 }
+5289 
+5290 // ═══ Workpapers › Financial Statements — GL-derived statement package (PDF) ═══

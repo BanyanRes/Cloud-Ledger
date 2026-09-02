@@ -3153,6 +3153,10 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
   // onChange, leaving form.match_date empty at submit. On save we read the live
   // input value as the source of truth so a visible date is never rejected.
   const dateRef=useRef(null);const amountRef=useRef(null);
+  // The edit form sits above the saved-notes table. Clicking Edit on a row far
+  // down the list used to look like nothing happened, so we scroll the form
+  // back into view and flash it.
+  const formRef=useRef(null);const[flash,setFlash]=useState(false);
   // Files staged in the form. For a new note they're uploaded right after the
   // note is created; when editing an existing note they upload immediately.
   const[stagedFiles,setStagedFiles]=useState([]);const[uploadingFiles,setUploadingFiles]=useState(false);
@@ -3167,7 +3171,16 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
   const dimOpts=[...projOpts,...locOpts,...clsOpts];const showDims=dimsEnabled&&dimOpts.length>0;
   const dimFromNote=n=>n.project_id?'project:'+n.project_id:n.location_id?'location:'+n.location_id:n.class_id?'class:'+n.class_id:'';
   const dimLabel=n=>{const v=dimFromNote(n);const o=dimOpts.find(x=>x.v===v);return o?o.label:'';};
-  const startEdit=n=>{setEditId(n.id);setStagedFiles([]);setForm({bank_account_code:n.bank_account_code||'',note:n.note||'',match_amount:String(n.match_amount),amount_tolerance:String(n.amount_tolerance||0),match_date:n.date_from||n.date_to||'',desc_keyword:n.desc_keyword||'',account_code:n.account_code||'',memo:n.memo||'',dim:dimFromNote(n),one_shot:!!n.one_shot});};
+  const startEdit=n=>{setEditId(n.id);setStagedFiles([]);setErr('');setMsg('');setForm({bank_account_code:n.bank_account_code||'',note:n.note||'',match_amount:String(n.match_amount),amount_tolerance:String(n.amount_tolerance||0),match_date:n.date_from||n.date_to||'',desc_keyword:n.desc_keyword||'',account_code:n.account_code||'',memo:n.memo||'',dim:dimFromNote(n),one_shot:!!n.one_shot});
+    // Bring the form back into view — it lives above the saved-notes table.
+    setFlash(true);
+    setTimeout(()=>{const el=formRef.current;if(!el)return;
+      const box=el.closest('.cl-modal-box');
+      if(box&&box.scrollHeight>box.clientHeight){box.scrollTo({top:0,behavior:'smooth'});}
+      else{el.scrollIntoView({behavior:'smooth',block:'center'});}
+      const d=dateRef.current;if(d&&d.focus)try{d.focus({preventScroll:true});}catch(_){d.focus();}
+    },0);
+    setTimeout(()=>setFlash(false),1600);};
   // Attach picked files. When the note is already saved (editId), upload now;
   // otherwise stage them to upload right after the note is created on save.
   const onPickFiles=async e=>{const files=Array.from(e.target.files||[]);e.target.value='';if(!files.length)return;
@@ -3201,8 +3214,8 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
     <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Wire Coding Notes</div>
     <div style={{fontSize:12,color:T.textMuted,marginBottom:18}}>Leave a note for a wire processed this month. When you upload the bank statement, the row matching the amount and date is auto-coded (status Coded) for your review before posting.</div>
     {err&&<div style={S.err}>{err}</div>}{msg&&<div style={S.success}>{msg}</div>}
-    {canEdit&&<div style={{border:'1px solid '+T.border,borderRadius:T.radiusXs,padding:16,marginBottom:20,background:T.bgSoft||'#fafafa'}}>
-      <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:12}}>{editId?'Edit note':'New note'}</div>
+    {canEdit&&<div ref={formRef} style={{border:'1px solid '+(flash||editId?T.orange:T.border),boxShadow:flash?'0 0 0 3px '+T.orange+'33':'none',transition:'border-color .2s, box-shadow .3s',borderRadius:T.radiusXs,padding:16,marginBottom:20,background:T.bgSoft||'#fafafa'}}>
+      <div style={{fontSize:13,fontWeight:600,color:editId?T.orange:T.text,marginBottom:12}}>{editId?'Edit note':'New note'}</div>
       <div style={S.row}>
         <div style={S.col}><label style={S.label}>Bank Account</label><select style={S.select} value={form.bank_account_code} onChange={e=>set('bank_account_code',e.target.value)}><option value="">Any account</option>{(bankAccts||[]).map(a=><option key={a.code} value={a.code}>{acctLabel(a.code,a.name)}</option>)}</select></div>
         <div style={S.col}><label style={S.label}>Transaction Date</label><input ref={dateRef} style={S.input} type="date" value={form.match_date} onChange={e=>set('match_date',e.target.value)}/></div>

@@ -1,0 +1,9 @@
+=== const[exporting,setExporting]=useState(f ===
+"const[exporting,setExporting]=useState(false);\n  const fmt=n=>{const v=Number(n)||0;const t=Math.abs(v).toLocaleString('"
+
+=== data.revenue.forEach(l=>line(l.name,l.va ===
+"data.revenue.forEach(l=>line(l.name,l.vals,l.total,{indent:1}));\n      line('Total Revenue"
+
+=== const rows=buildRows(); ===
+'const rows=buildRows();\n  // Download th'
+
