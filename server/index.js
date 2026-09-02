@@ -7348,8 +7348,12 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     }
     if (candidateIds.length) console.log('[billcom sync] entity ' + entityId + ': prefetched ' + detailCache.size + '/' + candidateIds.length + ' bill details in parallel');
   }
-  // Period-lock pre-flight: block the whole sync if any eligible bill's posting
-  // date falls in a soft- or hard-closed period. All-or-nothing; no partial posts.
+  // Period-lock pre-flight: block the whole sync ONLY if a bill this run would
+  // post lands in a HARD-closed year (a fiscal year that is not reopenable in a
+  // posting flow). A soft-closed month is a warning everywhere else in the app,
+  // overridable with "Post anyway" — the sync mirrors that: it posts the bill
+  // into the soft-closed month and logs the override (handled per bill at the
+  // insert site below), so soft-close never blocks the run.
   {
     const _blocked = [];
     for (const bill of bills) {
@@ -7373,17 +7377,19 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       try {
         periods.assertPostable(db, entityId, _pd, { userEmail: (req.user && req.user.email) || 'billcom-sync', source: 'billcom-sync' });
       } catch (e) {
-        if (e && (e.code === 'HARD_CLOSED' || e.code === 'SOFT_CLOSED')) {
+        // Only a HARD-closed year blocks the run. Soft-close is overridable, so
+        // it is handled per bill at the insert site (post anyway + log) and does
+        // NOT land here.
+        if (e && e.code === 'HARD_CLOSED') {
           const _num = pick(_d, 'invoiceNumber', 'invoice_number') || pick(pick(_d, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || null;
           _blocked.push({ id: _bid, invoice_number: _num, posting_date: String(_pd).slice(0, 10), period: e.period, level: e.period && e.period.level });
-        } else { throw e; }
+        } else if (!e || e.code !== 'SOFT_CLOSED') { throw e; }
       }
     }
     if (_blocked.length) {
-      const _hard = _blocked.some(b => b.level === 'hard');
-      return res.status(_hard ? 423 : 409).json({
-        error: 'Bill.com sync blocked: ' + _blocked.length + ' bill(s) post into a closed period.',
-        code: _hard ? 'HARD_CLOSED' : 'SOFT_CLOSED',
+      return res.status(423).json({
+        error: 'Bill.com sync blocked: ' + _blocked.length + ' bill(s) post into a hard-closed year.',
+        code: 'HARD_CLOSED',
         blocked_bills: _blocked,
       });
     }
@@ -7515,21 +7521,27 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     }
 
     // Period lock, per bill, on the authoritative detail posting date. The
-    // pre-flight above is the all-or-nothing gate, but it judges a bill on the
-    // list object when its detail prefetch missed, so this is the guard that
-    // actually stands between a bill and a closed month. Reported as an error on
-    // that bill; the rest of the run continues.
+    // pre-flight above is the all-or-nothing hard-close gate, but it judges a
+    // bill on the list object when its detail prefetch missed, so this is the
+    // guard that actually stands between a bill and a closed period.
+    //
+    // A hard-closed year is never overridable: reject the bill here, before any
+    // mapping work, and continue the run. A soft-closed month is NOT rejected —
+    // it is overridable and is posted anyway below, with the override logged at
+    // the insert (so period_override_log records only bills that actually post,
+    // not ones that then fail on mappings or a zero total). No override is
+    // written here.
     try {
       periods.assertPostable(db, entityId, postDay, { userEmail: (req.user && req.user.email) || 'billcom-sync', source: 'billcom-sync' });
     } catch (e) {
-      if (e && (e.code === 'HARD_CLOSED' || e.code === 'SOFT_CLOSED')) {
-        const _why = 'posting date ' + postDay + ' falls in a closed period';
+      if (e && e.code === 'HARD_CLOSED') {
+        const _why = 'posting date ' + postDay + ' falls in a hard-closed year';
         result.bills.errors++;
         try { logSync.run(entityId, 'bill', billId, null, 'error', _why, now, billNumber); } catch (e2) {}
         result.bills.details.push({ id: billId, invoice_number: billNumber, status: 'error', reason: _why });
         continue;
       }
-      throw e;
+      if (!e || e.code !== 'SOFT_CLOSED') throw e; // soft-close: fall through and post with override
     }
 
     const debitLines = [];
@@ -7637,6 +7649,12 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
 
     try {
       const insertedId = db.transaction(() => {
+        // Record the soft-close override here, inside the same transaction as the
+        // post, so period_override_log gets exactly one row per bill that truly
+        // posts into a soft-closed month. A no-op (returns ok, writes nothing)
+        // for a bill in an open month; a hard-closed year was already rejected
+        // above so this can never throw here.
+        periods.assertPostable(db, entityId, postDay, { userEmail: (req.user && req.user.email) || 'billcom-sync', override: true, reason: 'Bill.com sync (' + billNumber + ')', source: 'billcom-sync' });
         const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
         const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, vendor, doc_number, created_by) VALUES (?,?,?,?,?,?,?)')
           .run(entityId, num, postingDate, memo, billVendor, String(billNumber || '') || null, 'Bill.com sync');
