@@ -6892,7 +6892,10 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
 
   const transferByDate = new Map(); // processDate -> NEW disbursed amount this run
   const insertJE = (date, memo, lines) => {
-    periods.assertPostable(db, entityId, date, { userEmail: (req.user && req.user.email) || 'billcom-unsync', source: 'billcom-unsync' });
+    // `actor` is the caller-supplied user label; there is no `req` in this
+    // module-level function (referencing one threw ReferenceError on every
+    // payment JE, which the per-payment catch turned into "req is not defined").
+    periods.assertPostable(db, entityId, date, { userEmail: actor || 'billcom-payment-reconcile', source: 'billcom-payment-reconcile' });
     const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
     const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)')
       .run(entityId, num, date, memo, 'Bill.com sync');
