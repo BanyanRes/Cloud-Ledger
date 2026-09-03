@@ -6855,8 +6855,14 @@ async function billcomFetchBillDoc({ sessionId, devKey, baseUrl, billId }) {
   const dr = await billcomFetch(full, { method: 'GET', headers: { sessionId, devKey } }, 25000);
   if (!dr.ok) throw new Error('download HTTP ' + dr.status);
   const buf = Buffer.from(await dr.arrayBuffer());
-  if (buf.slice(0, 5).toString('latin1') !== '%PDF-') throw new Error('downloaded content is not a PDF');
-  return { buffer: buf, name: String(doc.name || ('Invoice_' + billId + '.pdf')).replace(/[\\/:*?"<>|]/g, '_') };
+  const h = buf.slice(0, 4);
+  let kind = 'other';
+  if (buf.slice(0, 5).toString('latin1') === '%PDF-') kind = 'pdf';
+  else if (h[0] === 0x89 && h[1] === 0x50) kind = 'image';                    // PNG
+  else if (h[0] === 0xFF && h[1] === 0xD8) kind = 'image';                    // JPEG
+  else if ((h[0] === 0x49 && h[1] === 0x49) || (h[0] === 0x4D && h[1] === 0x4D)) kind = 'image'; // TIFF
+  if (kind === 'other') throw new Error('unsupported document type (not a PDF or image)');
+  return { buffer: buf, kind, name: String(doc.name || ('Invoice_' + billId + '.pdf')).replace(/[\\/:*?"<>|]/g, '_') };
 }
 
 // Return a SEARCHABLE PDF. If the PDF already has a real text layer (a digital
@@ -6893,6 +6899,19 @@ function makeSearchablePdf(buffer) {
   finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {} }
 }
 
+// An image invoice (PNG/JPEG/TIFF from Bill.com) -> a searchable PDF via
+// tesseract (image + OCR text layer). tesseract/leptonica sniffs the format.
+function imageToSearchablePdf(buffer) {
+  const cp = require('child_process'); const osMod = require('os');
+  const dir = fs.mkdtempSync(path.join(osMod.tmpdir(), 'climg-'));
+  try {
+    const img = path.join(dir, 'img'); fs.writeFileSync(img, buffer);
+    const outBase = path.join(dir, 'out');
+    cp.execFileSync('tesseract', [img, outBase, 'pdf'], { stdio: 'ignore', timeout: 90000, maxBuffer: 64 * 1024 * 1024 });
+    return fs.readFileSync(outBase + '.pdf');
+  } finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {} }
+}
+
 // Bytes free on the attachments volume, so a backfill never fills the disk out
 // from under the live SQLite DB (a full volume is what causes SQLITE_FULL).
 function uploadDirFreeBytes() {
@@ -6924,7 +6943,11 @@ app.post('/api/billcom/attach-invoices/:entity_id', auth, requireEntityAccess('e
   // Already handled: attached ('success') OR checked and found no document in
   // Bill.com ('skip'). Both are excluded so a repeated (offset 0) backfill loop
   // terminates instead of re-checking no-document bills forever.
-  const done = new Set(db.prepare("SELECT billcom_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'invoice_doc' AND status IN ('success','skip')").all(eid).map(r => String(r.billcom_id)));
+  // Excludes attached ('success'), no-document ('skip'), and failed ('error')
+  // bills. Errors are excluded so a persistently-failing bill (bad download,
+  // unsupported file) doesn't block the whole queue behind it; they're reported
+  // and can be retried later by clearing their invoice_doc log rows.
+  const done = new Set(db.prepare("SELECT billcom_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'invoice_doc' AND status IN ('success','skip','error')").all(eid).map(r => String(r.billcom_id)));
   const allSynced = db.prepare(
     "SELECT bl.billcom_id, bl.cl_entry_id, bl.invoice_number, je.date, je.entry_num " +
     "FROM billcom_sync_log bl JOIN journal_entries je ON je.id = bl.cl_entry_id " +
@@ -6976,16 +6999,20 @@ app.post('/api/billcom/attach-invoices/:entity_id', auth, requireEntityAccess('e
         continue;
       }
       if (uploadDirFreeBytes() != null && uploadDirFreeBytes() < MIN_FREE_BYTES_FOR_ATTACH) { result.errors.push({ billcom_id: row.billcom_id, error: 'disk low, stopped' }); result.next_offset = offset + result.details.length; result.remaining = Math.max(0, total - (offset + result.details.length)); break; }
-      const pdf = makeSearchablePdf(doc.buffer);
+      const pdf = doc.kind === 'image' ? imageToSearchablePdf(doc.buffer) : makeSearchablePdf(doc.buffer);
+      const attName = /\.pdf$/i.test(doc.name) ? doc.name : (doc.name.replace(/\.[^.]+$/, '') + '.pdf');
       const stored = 'billinv_' + String(row.billcom_id).replace(/[^A-Za-z0-9]/g, '') + '_' + Date.now() + '.pdf';
       fs.writeFileSync(path.join(UPLOAD_DIR, stored), pdf);
       db.transaction(() => {
-        insAtt.run(row.cl_entry_id, stored, doc.name, 'application/pdf', pdf.length, now);
+        insAtt.run(row.cl_entry_id, stored, attName, 'application/pdf', pdf.length, now);
         logDoc.run(eid, 'invoice_doc', String(row.billcom_id), row.cl_entry_id, 'success', 'attached ' + doc.name + ' (' + Math.round(pdf.length / 1024) + ' KB)', now, row.invoice_number || null);
       })();
       result.attached++;
       if (result.details.length < 100) result.details.push({ entry_num: row.entry_num, invoice_number: row.invoice_number, status: 'attached', filename: doc.name, kb: Math.round(pdf.length / 1024) });
     } catch (e) {
+      // Log the failure so this bill is not retried forever at the front of the
+      // queue (it would block every bill behind it). Reported for a later retry.
+      try { logDoc.run(eid, 'invoice_doc', String(row.billcom_id), row.cl_entry_id, 'error', String(e.message).slice(0, 200), now, row.invoice_number || null); } catch (e2) {}
       result.errors.push({ billcom_id: row.billcom_id, invoice_number: row.invoice_number, error: e.message });
     }
   }
