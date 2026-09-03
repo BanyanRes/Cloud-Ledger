@@ -6890,8 +6890,6 @@ app.get('/api/billcom/_probe-doc/:entity_id/:bill_id', auth, requireEntityAccess
     v2.login_status = lj.response_status;
     const v2sid = lj.response_data && lj.response_data.sessionId;
     v2.have_session = !!v2sid;
-    v2.login_rd_keys = lj.response_data && typeof lj.response_data === 'object' ? Object.keys(lj.response_data) : null;
-    v2.apiEndPoint = lj.response_data && lj.response_data.apiEndPoint;
     if (lj.response_status !== 0) v2.login_error = JSON.stringify(lj.response_data).slice(0, 200);
     if (v2sid) {
       for (const opt of [{ id: billId }, { id: billId, pageRetrievalOptions: { pageNumbers: [1] } }]) {
@@ -6908,30 +6906,6 @@ app.get('/api/billcom/_probe-doc/:entity_id/:bill_id', auth, requireEntityAccess
           } catch { snip = buf.toString('utf8').slice(0, 200); }
         } else { snip = { content_type: ct, bytes: buf.length, head_hex: buf.slice(0, 8).toString('hex') }; }
         (v2.getDocumentPages = v2.getDocumentPages || []).push({ opt, status: gr.status, content_type: ct, snippet: snip });
-      }
-      // Now try to actually download the document bytes from the fileUrl.
-      let fileUrl = null;
-      try {
-        const gb = new URLSearchParams({ devKey, sessionId: v2sid, data: JSON.stringify({ id: billId }) });
-        const gr = await billcomFetch(v2.base + '/GetDocumentPages.json', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: gb.toString() }, 15000);
-        const j = JSON.parse(await gr.text());
-        fileUrl = j.response_data && j.response_data.documentPages && j.response_data.documentPages.fileUrl;
-      } catch (e) {}
-      v2.fileUrl = fileUrl;
-      if (fileUrl) {
-        const hosts = [];
-        if (v2.apiEndPoint) hosts.push(String(v2.apiEndPoint).replace(/\/api\/v2.*$/, '').replace(/\/$/, ''));
-        hosts.push('https://api.bill.com');
-        v2.image_attempts = [];
-        for (const host of hosts) {
-          const full = host + fileUrl + (fileUrl.includes('?') ? '&' : '?') + 'sessionId=' + encodeURIComponent(v2sid) + '&devKey=' + encodeURIComponent(devKey);
-          try {
-            const ir = await billcomFetch(full, { method: 'GET', headers: { sessionId: v2sid, devKey } }, 20000);
-            const ct = ir.headers.get('content-type') || '';
-            const buf = Buffer.from(await ir.arrayBuffer());
-            v2.image_attempts.push({ host, status: ir.status, content_type: ct, bytes: buf.length, head: buf.slice(0, 8).toString('latin1'), head_hex: buf.slice(0, 8).toString('hex') });
-          } catch (e) { v2.image_attempts.push({ host, error: e.message }); }
-        }
       }
     }
   } catch (e) { v2.error = e.message; }
