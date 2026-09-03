@@ -6834,40 +6834,155 @@ app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id
   res.json({ logs: rows });
 });
 
-// TEMP diagnostic: confirm the supported v3 document endpoints for a bill.
-// GET /v3/documents/bills/{billId} -> list w/ downloadLink; then GET downloadLink.
-// Admin-only, read-only, returns metadata only (no file bytes). Remove after.
-app.get('/api/billcom/_probe-doc2/:entity_id/:bill_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
+// ── Bill.com invoice document -> CloudLedger journal attachment ──
+// Fetch a bill's invoice PDF via the supported v3 documents API (added by Bill.com
+// June 2024): GET /documents/bills/{billId} lists the docs, each with a
+// downloadLink; GET that link (sessionId header) returns the PDF bytes. Uses the
+// SAME v3 credentials the sync uses — no browser, no stored password.
+async function billcomFetchBillDoc({ sessionId, devKey, baseUrl, billId }) {
+  const base = baseUrl || BILLCOM_BASE_URLS.production;
+  const lr = await billcomFetch(base + '/documents/bills/' + encodeURIComponent(billId), {
+    method: 'GET', headers: { sessionId, devKey, Accept: 'application/json' }
+  }, 15000);
+  if (!lr.ok) throw new Error('list documents HTTP ' + lr.status);
+  const lj = JSON.parse(await lr.text());
+  const docs = Array.isArray(lj) ? lj : (lj.results || []);
+  if (!docs.length) return null; // no document attached in Bill.com
+  // Prefer a virus-scanned-clean doc; fall back to the first with a link.
+  const doc = docs.find(d => d.downloadLink && (d.scanStatus === 'CLEAN' || !d.scanStatus)) || docs.find(d => d.downloadLink);
+  if (!doc || !doc.downloadLink) return null;
+  const full = /^https?:/i.test(doc.downloadLink) ? doc.downloadLink : (base.replace(/\/connect\/v3.*$/, '') + doc.downloadLink);
+  const dr = await billcomFetch(full, { method: 'GET', headers: { sessionId, devKey } }, 25000);
+  if (!dr.ok) throw new Error('download HTTP ' + dr.status);
+  const buf = Buffer.from(await dr.arrayBuffer());
+  if (buf.slice(0, 5).toString('latin1') !== '%PDF-') throw new Error('downloaded content is not a PDF');
+  return { buffer: buf, name: String(doc.name || ('Invoice_' + billId + '.pdf')).replace(/[\\/:*?"<>|]/g, '_') };
+}
+
+// Return a SEARCHABLE PDF. If the PDF already has a real text layer (a digital
+// invoice), keep it exactly as-is so it stays crisp. Otherwise (a scan/image)
+// rasterize and OCR each page with tesseract into an image+text PDF and merge.
+// Best-effort: any failure or partial result returns the ORIGINAL bytes, so we
+// always attach the real invoice even when OCR can't run.
+function makeSearchablePdf(buffer) {
+  const cp = require('child_process'); const osMod = require('os');
+  const dir = fs.mkdtempSync(path.join(osMod.tmpdir(), 'clinv-'));
+  const BUDGET = 120000; const t0 = Date.now(); const rem = () => BUDGET - (Date.now() - t0);
+  try {
+    const inPdf = path.join(dir, 'in.pdf'); fs.writeFileSync(inPdf, buffer);
+    try {
+      const txt = cp.execFileSync('pdftotext', ['-q', inPdf, '-'], { timeout: 20000, maxBuffer: 32 * 1024 * 1024 }).toString('utf8');
+      if (txt.replace(/\s/g, '').length >= 100) return buffer; // already searchable
+    } catch (e) {}
+    cp.execFileSync('pdftoppm', ['-r', '200', '-png', inPdf, path.join(dir, 'pg')], { stdio: 'ignore', timeout: Math.max(15000, rem()), maxBuffer: 64 * 1024 * 1024 });
+    const pngs = fs.readdirSync(dir).filter(f => /^pg.*\.png$/.test(f)).sort();
+    if (!pngs.length) return buffer;
+    const outPdfs = [];
+    for (const png of pngs) {
+      if (rem() < 12000) return buffer; // not enough time to finish every page cleanly
+      const outBase = path.join(dir, png.replace(/\.png$/, '') + '_ocr');
+      cp.execFileSync('tesseract', [path.join(dir, png), outBase, 'pdf'], { stdio: 'ignore', timeout: Math.max(10000, rem()), maxBuffer: 64 * 1024 * 1024 });
+      outPdfs.push(outBase + '.pdf');
+    }
+    if (outPdfs.length !== pngs.length) return buffer;
+    if (outPdfs.length === 1) return fs.readFileSync(outPdfs[0]);
+    const merged = path.join(dir, 'merged.pdf');
+    cp.execFileSync('pdfunite', [...outPdfs, merged], { stdio: 'ignore', timeout: Math.max(10000, rem()), maxBuffer: 64 * 1024 * 1024 });
+    return fs.readFileSync(merged);
+  } catch (e) { return buffer; }
+  finally { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {} }
+}
+
+// Bytes free on the attachments volume, so a backfill never fills the disk out
+// from under the live SQLite DB (a full volume is what causes SQLITE_FULL).
+function uploadDirFreeBytes() {
+  try { const s = fs.statfsSync(UPLOAD_DIR); return s.bavail * s.bsize; } catch (e) { return null; }
+}
+
+// Attach each synced Bill.com bill's invoice PDF (OCR'd/searchable) to its CL
+// journal entry. Batched like retag-projects: one Bill.com round trip + OCR per
+// bill is far too much for a single request, so the caller loops on next_offset
+// until remaining is 0. Idempotent via a billcom_sync_log 'invoice_doc' row.
+// Scoped to the entities in BILLCOM_INVOICE_ATTACH_ENTITIES (Banyan only for now).
+const BILLCOM_INVOICE_ATTACH_ENTITIES = new Set([41]);
+const MIN_FREE_BYTES_FOR_ATTACH = 250 * 1024 * 1024; // keep ≥250MB headroom for the DB
+app.post('/api/billcom/attach-invoices/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+ try {
   const eid = parseInt(req.params.entity_id);
-  const billId = String(req.params.bill_id);
+  if (!BILLCOM_INVOICE_ATTACH_ENTITIES.has(eid)) return res.status(400).json({ error: 'Invoice attachment is enabled for Banyan Residential only right now.' });
+  const dryRun = !!(req.body && req.body.dry_run);
+  const from = (req.body && req.body.from) || null;
+  const to = (req.body && req.body.to) || null;
+  const limit = Math.max(1, Math.min(parseInt((req.body && req.body.limit) || 10, 10) || 10, 40));
+  const offset = Math.max(0, parseInt((req.body && req.body.offset) || 0, 10) || 0);
   const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(eid);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
+
+  // Synced bills (have a CL entry) that don't yet have an invoice_doc logged.
+  let where = ''; const params = [eid];
+  if (from) { where += ' AND je.date >= ?'; params.push(from); }
+  if (to) { where += ' AND je.date <= ?'; params.push(to); }
+  const done = new Set(db.prepare("SELECT billcom_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'invoice_doc' AND status = 'success'").all(eid).map(r => String(r.billcom_id)));
+  const allSynced = db.prepare(
+    "SELECT bl.billcom_id, bl.cl_entry_id, bl.invoice_number, je.date, je.entry_num " +
+    "FROM billcom_sync_log bl JOIN journal_entries je ON je.id = bl.cl_entry_id " +
+    "WHERE bl.entity_id = ? AND bl.sync_type = 'bill' AND bl.status = 'success' AND bl.cl_entry_id IS NOT NULL" + where +
+    " ORDER BY je.date, je.entry_num"
+  ).all(...params).filter(r => !done.has(String(r.billcom_id)));
+  const total = allSynced.length;
+  const free = uploadDirFreeBytes();
+  if (dryRun) return res.json({ dry_run: true, entity_id: eid, needing_attachment: total, disk_free_mb: free != null ? Math.round(free / 1048576) : null });
+
+  if (free != null && free < MIN_FREE_BYTES_FOR_ATTACH) {
+    return res.status(507).json({ error: 'Not enough disk space to store invoice PDFs safely (free ' + Math.round(free / 1048576) + ' MB). Increase the Railway volume first.', disk_free_mb: Math.round(free / 1048576), needing_attachment: total });
+  }
+
+  const batch = allSynced.slice(offset, offset + limit);
+  const nextOffset = offset + batch.length;
+  const result = { entity_id: eid, total_needing: total, examined: batch.length, attached: 0, no_document: 0, errors: [], next_offset: nextOffset < total ? nextOffset : null, remaining: Math.max(0, total - nextOffset), details: [] };
+  if (!batch.length) return res.json(result);
+
   let session, devKey, base;
   try {
     devKey = billcomDecrypt(cfg.dev_key_enc);
     base = cfg.api_base_url || BILLCOM_BASE_URLS.production;
     session = await billcomLogin({ username: cfg.username, password: billcomDecrypt(cfg.password_enc), orgId: cfg.org_id, devKey, baseUrl: base });
-  } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
-  const H = { sessionId: session.sessionId, devKey, Accept: 'application/json' };
-  const out = { billId, base };
-  try {
-    const lr = await billcomFetch(base + '/documents/bills/' + encodeURIComponent(billId), { method: 'GET', headers: H }, 15000);
-    out.list_status = lr.status;
-    const lj = JSON.parse(await lr.text());
-    out.list_shape = Array.isArray(lj) ? { array_len: lj.length, first: lj[0] } : (lj.results ? { results_len: lj.results.length, first: lj.results[0] } : lj);
-    const docs = Array.isArray(lj) ? lj : (lj.results || []);
-    const dl = docs[0] && (docs[0].downloadLink || docs[0].url);
-    out.first_download_link = dl || null;
-    if (dl) {
-      const full = /^https?:/i.test(dl) ? dl : (base.replace(/\/connect\/v3.*$/, '') + dl);
-      out.download_url_used = full.slice(0, 120);
-      const dr = await billcomFetch(full, { method: 'GET', headers: { sessionId: session.sessionId, devKey } }, 20000);
-      const ct = dr.headers.get('content-type') || '';
-      const buf = Buffer.from(await dr.arrayBuffer());
-      out.download = { status: dr.status, content_type: ct, bytes: buf.length, head: buf.slice(0, 5).toString('latin1'), is_pdf: buf.slice(0, 5).toString('latin1') === '%PDF-' };
+  } catch (e) { return res.status(502).json({ error: 'Bill.com login failed: ' + e.message }); }
+
+  const now = new Date().toISOString();
+  const insAtt = db.prepare('INSERT INTO journal_attachments (entry_id, filename, original_name, mime_type, size, created_at) VALUES (?,?,?,?,?,?)');
+  const logDoc = db.prepare('INSERT INTO billcom_sync_log (entity_id, sync_type, billcom_id, cl_entry_id, status, message, created_at, invoice_number) VALUES (?,?,?,?,?,?,?,?)');
+  const deadline = Date.now() + 220000;
+
+  for (const row of batch) {
+    if (Date.now() > deadline) { result.remaining = Math.max(0, total - (offset + result.details.length)); result.next_offset = offset + result.details.length; break; }
+    try {
+      const doc = await billcomFetchBillDoc({ sessionId: session.sessionId, devKey, baseUrl: base, billId: String(row.billcom_id) });
+      if (!doc) {
+        result.no_document++;
+        logDoc.run(eid, 'invoice_doc', String(row.billcom_id), row.cl_entry_id, 'skip', 'no document in Bill.com', now, row.invoice_number || null);
+        result.details.push({ entry_num: row.entry_num, invoice_number: row.invoice_number, status: 'no_document' });
+        continue;
+      }
+      if (uploadDirFreeBytes() != null && uploadDirFreeBytes() < MIN_FREE_BYTES_FOR_ATTACH) { result.errors.push({ billcom_id: row.billcom_id, error: 'disk low, stopped' }); result.next_offset = offset + result.details.length; result.remaining = Math.max(0, total - (offset + result.details.length)); break; }
+      const pdf = makeSearchablePdf(doc.buffer);
+      const stored = 'billinv_' + String(row.billcom_id).replace(/[^A-Za-z0-9]/g, '') + '_' + Date.now() + '.pdf';
+      fs.writeFileSync(path.join(UPLOAD_DIR, stored), pdf);
+      db.transaction(() => {
+        insAtt.run(row.cl_entry_id, stored, doc.name, 'application/pdf', pdf.length, now);
+        logDoc.run(eid, 'invoice_doc', String(row.billcom_id), row.cl_entry_id, 'success', 'attached ' + doc.name + ' (' + Math.round(pdf.length / 1024) + ' KB)', now, row.invoice_number || null);
+      })();
+      result.attached++;
+      if (result.details.length < 100) result.details.push({ entry_num: row.entry_num, invoice_number: row.invoice_number, status: 'attached', filename: doc.name, kb: Math.round(pdf.length / 1024) });
+    } catch (e) {
+      result.errors.push({ billcom_id: row.billcom_id, invoice_number: row.invoice_number, error: e.message });
     }
-  } catch (e) { out.error = e.message; }
-  res.json(out);
+  }
+  res.json(result);
+ } catch (e) {
+  console.error('attach-invoices failed: ' + (e && e.stack || e));
+  if (!res.headersSent) res.status(500).json({ error: e.message });
+ }
 });
 
 // Un-sync: remove every CloudLedger journal entry that a Bill.com sync created
