@@ -5617,6 +5617,15 @@ function FinancialStatements({entityId,entityName,entityCode='',canEdit=true,isD
       if(!out)return;
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
       setResult(out.summary||{});
+      // CLRFI Midco I lender package is two deliverables from one click: the PDF
+      // above (consolidated balance sheet + statement of operations) and the
+      // Excel below (consolidated + consolidating schedules + NCI calculations).
+      const nm=(entityName||'').toLowerCase();
+      const isMidco=String(entityId)==='70'||/cl(r?)fi?\s*midco\s*i/.test(nm);
+      if(isMidco){
+        const xl=await api.financialStatementsExcel(entityId,asOf,period);
+        if(xl){const u2=URL.createObjectURL(xl.blob);const a2=document.createElement('a');a2.href=u2;a2.download=xl.filename;a2.click();URL.revokeObjectURL(u2);}
+      }
     }catch(e){setErr(e.message);}finally{setGen(false);}
   };
   const[xls,setXls]=useState(false);

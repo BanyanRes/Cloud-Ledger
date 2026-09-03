@@ -2780,7 +2780,7 @@ async function buildStatements(getBalances, opts) {
   }), { beginning: 0, contributions: 0, distributions: 0, netIncome: 0, ending: 0 });
 
   return {
-    meta: { entityName: displayEntityName(opts.entityName), rawEntityName: opts.entityName || '', entityCode: (opts.entityCode || ''), isConsolidated: !!opts.isConsolidated, asOf, priorDate: priorBsDate, longDate: longDate(asOf),
+    meta: { entityName: displayEntityName(opts.entityName), rawEntityName: opts.entityName || '', entityCode: (opts.entityCode || ''), isConsolidated: !!opts.isConsolidated, lenderMode: !!opts.lenderMode, asOf, priorDate: priorBsDate, longDate: longDate(asOf),
             priorLongDate: longDate(priorBsDate),
             // Inception-dated entities date every statement from inception.
             monthsEnded: inception
@@ -3654,7 +3654,7 @@ async function renderStatementsPdf(s, outOffsets) {
   }
 
   // ── 3. Statement of Cash Flows ──────────────────────────────────────────────
-  {
+  if (!m.lenderMode) {
     const cfTitle = (m.isConsolidated ? 'Consolidated ' : '') + (m.profile === 'banyan'
       ? 'Statement of Cash Flows \u2013 Tax Basis'
       : 'Statement of Cash Flows');
@@ -3729,7 +3729,7 @@ async function renderStatementsPdf(s, outOffsets) {
   }
 
   // ── 4. Statement of Changes in Members' Equity ──────────────────────────────
-  {
+  if (!m.lenderMode) {
     // County Line Rail Operations (COUNTYLI3 / entity 46) uses a TRANSPOSED
     // presentation per the CPA reference: activity runs down the rows (opening
     // balance, activity, ending balance) and each MEMBER is a column, plus a

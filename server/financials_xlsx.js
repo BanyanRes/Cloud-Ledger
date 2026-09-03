@@ -93,6 +93,7 @@ function makeSheet(sheetName) {
     sectionTitle(t) { rows.push([t]); meta.push({ bold: true, section: true }); },
     row: push,
     blank() { rows.push([]); meta.push({}); },
+    _amt0: AMT0,
     _finish() { return { sheetName, rows, meta, AMT0, amountColCount }; },
   };
 }
@@ -632,13 +633,192 @@ function buildEquity(s) {
   return sh._finish();
 }
 
+// -- Consolidating schedule sheet (multi-column: entities | Total | Elim | Consolidated) --
+// Renders one column per member entity, then a Total, Eliminations, and
+// Consolidated column, from a buildColumns() result (schedule.accounts, each
+// with byEntity/elimination/consolidated). Grouped by balance-sheet section or
+// income-statement type. Numbers are written straight through so they tie to the
+// consolidated face statements by construction.
+function buildConsolidatingSheet(sheetName, titleLines, schedule, columns, kind) {
+  const sh = makeSheet(sheetName);
+  const entIds = columns.map(c => c.entity_id);
+  const colLabels = columns.map(c => c.label);
+  sh.titleBlock(titleLines);
+  sh.colHeaders([...colLabels, 'Total', 'Eliminations', 'Consolidated']);
+  // Per-account row across all columns.
+  const rowFor = (a) => {
+    const per = entIds.map(id => num((a.byEntity || {})[id]));
+    const total = per.reduce((x, y) => x + y, 0);
+    const elim = num(a.elimination);
+    const cons = num(a.consolidated);
+    return [...per, total, elim, cons];
+  };
+  const accounts = (schedule.accounts || []);
+  // Group: balance sheet by type (Asset/Liability/Equity), income by type
+  // (Revenue then Expense). Within a group, sort by account code so the schedule
+  // reads like the CPA's account-ordered columns.
+  const groupsOrder = kind === 'bs'
+    ? [['Asset', 'Assets'], ['Liability', 'Liabilities'], ['Equity', "Members' Equity"]]
+    : [['Revenue', 'Revenue'], ['Expense', 'Operating Expenses']];
+  const nonZero = (a) => {
+    if (Math.abs(num(a.consolidated)) > 0.005 || Math.abs(num(a.elimination)) > 0.005) return true;
+    return entIds.some(id => Math.abs(num((a.byEntity || {})[id])) > 0.005);
+  };
+  for (const [type, heading] of groupsOrder) {
+    const rowsInGroup = accounts.filter(a => a.type === type && nonZero(a))
+      .sort((x, y) => String(x.code).localeCompare(String(y.code)));
+    if (!rowsInGroup.length) continue;
+    sh.sectionTitle(heading);
+    const feed = [];
+    for (const a of rowsInGroup) {
+      const label = (a.code ? (String(a.code) + '  ') : '') + (a.name || '');
+      feed.push(sh.row(label, rowFor(a), { indent: 16 }));
+    }
+    // Group total across every column, summed from the detail rows.
+    const totCols = colLabels.map((_, i) => rowsInGroup.reduce((x, a) => x + num((a.byEntity || {})[entIds[i]]), 0));
+    const totTotal = rowsInGroup.reduce((x, a) => x + num((a.byEntity || {})[entIds[0]]) * 0, 0); // placeholder
+    const totAll = [
+      ...totCols,
+      rowsInGroup.reduce((x, a) => x + colLabels.reduce((y, _, i) => y + num((a.byEntity || {})[entIds[i]]), 0), 0),
+      rowsInGroup.reduce((x, a) => x + num(a.elimination), 0),
+      rowsInGroup.reduce((x, a) => x + num(a.consolidated), 0),
+    ];
+    sh.row('Total ' + heading, totAll, { indent: 6, bold: true, ruleAbove: true, double: true, gapAfter: 1, sumOf: feed });
+  }
+  return sh._finish();
+}
+
+// -- NCI Calculations sheet (with live formulas) --
+// Rebuilds the CPA's noncontrolling-interest schedule with Excel formulas so the
+// whole thing recomputes if an input is edited. The only hard inputs are the
+// static ownership / capital figures (from the cap table) and the two live
+// drivers per subsidiary: opening retained earnings (1/1) and YTD net income.
+// Everything else — the NCI and controlling splits, the ending balances, the
+// totals — is a formula referencing those cells.
+function buildNciSheet(nci, meta) {
+  const sh = makeSheet('NCI Calculations');
+  // nci.subs: [{ label, ownership_pct, nci_capital, opening_re, ni_ytd, ... }]
+  // Recover controlling capital from the schedule if present; else 0.
+  const subs = (nci && nci.subs) ? nci.subs : [];
+  // Rows are laid out with two data columns (one per sub) plus a Total column,
+  // matching the CPA sheet: label in col A, CLIP in the first amount col,
+  // Silsbee in the second, Total in the third.
+  const AMT0 = sh._amt0 || 2;
+  // Column letters for the amount columns: first sub, second sub, total.
+  const nSub = subs.length;
+  const totalOffset = nSub; // total column is right after the subs
+  const colLet = (amtIdx) => colLetter(AMT0 + amtIdx + 1);
+  const rowRef = (rIdx1, amtIdx) => colLet(amtIdx) + rIdx1;
+
+  sh.titleBlock(['CLRFI Midco I, LLC', 'Noncontrolling Interest Calculations', meta && meta.longDate ? meta.longDate : '']);
+  // Header: sub labels + Total
+  sh.colHeaders([...subs.map(x => x.label), 'Total']);
+
+  // Helper to push a row of numbers (subs then total) with optional per-cell formula.
+  // amounts: array length nSub (subs). total is appended (formula SUM of subs).
+  const pushRow = (label, amounts, o) => {
+    const opts = o || {};
+    const row = [...amounts];
+    // total column value
+    const totalVal = amounts.reduce((a, b) => a + num(b), 0);
+    row.push(totalVal);
+    return sh.row(label, row, opts);
+  };
+
+  // Track 1-based row numbers we need to reference in formulas.
+  const R = {};
+
+  // Ownership %
+  R.own = pushRow('CLRF Ownership', subs.map(x => 1 - x.ownership_pct), { indent: 6 });
+  R.nciPct = pushRow('Noncontrolling Interest %', subs.map(x => x.ownership_pct), { indent: 6 });
+  sh.blank();
+  // Capital
+  R.nciCap = pushRow('Capital Contributed by NCI', subs.map(x => num(x.nci_capital)), { indent: 6, dollar: true });
+  sh.blank();
+  // Retained earnings 1/1
+  R.re = pushRow('Retained Earnings - 1/1/' + String(meta && meta.asOf ? meta.asOf : '2026').slice(0, 4),
+    subs.map(x => num(x.opening_re)), { indent: 6 });
+  // NCI share of opening RE  = ownership_pct * RE   (formula)
+  R.nciRe = pushRow('NCI at 1/1', subs.map(x => num(x.nci_share_re)), { indent: 6 });
+  sh.blank();
+  // Net income YTD
+  R.ni = pushRow('Net Income (Loss) - YTD', subs.map(x => num(x.ni_ytd)), { indent: 6 });
+  // NCI share of NI = ownership_pct * NI  (formula)
+  R.nciNi = pushRow('Net Income (Loss) for NCI - YTD', subs.map(x => num(x.nci_share_ni)), { indent: 6 });
+  sh.blank();
+  // NCI at period end = capital + nciRe + nciNi
+  R.nciEnd = pushRow('NCI at ' + (meta && meta.longDate ? meta.longDate : 'period end'),
+    subs.map(x => num(x.nci)), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true });
+
+  const built = sh._finish();
+  // Post-process: overwrite specific cells with live formulas that reference the
+  // input rows, so editing RE / NI / % / capital recomputes the schedule.
+  //   nciPct row:     = 1 - own            (per sub)   [kept static; drives below]
+  //   NCI at 1/1:     = nciPct * RE
+  //   NCI for NI:     = nciPct * NI
+  //   NCI at end:     = nci_capital + NCI@1/1 + NCI_for_NI
+  // The Total column on every row = SUM across the sub columns.
+  const fmap = built._nciFormulas = [];
+  const rowNum = (rIdx) => rIdx + 1; // 0-based -> 1-based
+  for (let i = 0; i < nSub; i++) {
+    const nciPctCell = rowRef(rowNum(R.nciPct), i);
+    const reCell = rowRef(rowNum(R.re), i);
+    const niCell = rowRef(rowNum(R.ni), i);
+    const capCell = rowRef(rowNum(R.nciCap), i);
+    const nciReCell = rowRef(rowNum(R.nciRe), i);
+    const nciNiCell = rowRef(rowNum(R.nciNi), i);
+    fmap.push({ r: R.nciRe, c: AMT0 + i, formula: nciPctCell + '*' + reCell });
+    fmap.push({ r: R.nciNi, c: AMT0 + i, formula: nciPctCell + '*' + niCell });
+    fmap.push({ r: R.nciEnd, c: AMT0 + i, formula: capCell + '+' + nciReCell + '+' + nciNiCell });
+  }
+  // Total columns: SUM across subs, for every data row.
+  const totC = AMT0 + totalOffset;
+  for (const rIdx of [R.nciCap, R.re, R.nciRe, R.ni, R.nciNi, R.nciEnd]) {
+    const L1 = colLetter(AMT0 + 1), L2 = colLetter(AMT0 + nSub);
+    fmap.push({ r: rIdx, c: totC, formula: 'SUM(' + L1 + rowNum(rIdx) + ':' + L2 + rowNum(rIdx) + ')' });
+  }
+  return built;
+}
+
 // Build the whole workbook (Buffer promise) from a built statements object.
-async function buildStatementsWorkbook(s) {
+// opts (all optional):
+//   lenderMode   — emit only Balance Sheet + Statements of Operations (drop the
+//                  cash-flow and members'-equity statements). Used for the Midco
+//                  lender package.
+//   schedules    — a buildScheduleSet() result { columns, balanceSheet,
+//                  incomeMonth }. When present, appends a Consolidating Balance
+//                  Sheet and a Consolidating Statement of Income.
+//   nci          — nciFigures() result; when present, appends an NCI
+//                  Calculations tab whose splits are live formulas.
+async function buildStatementsWorkbook(s, opts) {
+  const o = opts || {};
   const wb = new ExcelJS.Workbook();
   wb.creator = 'CloudLedger';
   wb.calcProperties = wb.calcProperties || {};
   wb.calcProperties.fullCalcOnLoad = true;
-  const built = [buildBalanceSheet(s), buildOperations(s), buildCashFlow(s), buildEquity(s)];
+
+  const built = [buildBalanceSheet(s), buildOperations(s)];
+  if (!o.lenderMode) { built.push(buildCashFlow(s), buildEquity(s)); }
+
+  // Consolidating schedules (multi-column), when a schedule set is provided.
+  if (o.schedules && o.schedules.columns) {
+    const sc = o.schedules;
+    const m = s.meta || {};
+    built.push(buildConsolidatingSheet('Consolidating BS',
+      [m.entityName || 'Consolidating Balance Sheet', 'Consolidating Balance Sheet', m.longDate || sc.asOf],
+      sc.balanceSheet, sc.columns, 'bs'));
+    built.push(buildConsolidatingSheet('Consolidating Income',
+      [m.entityName || 'Consolidating Statement of Income', 'Consolidating Statement of Income', m.longDate || sc.asOf],
+      sc.incomeMonth, sc.columns, 'pl'));
+  }
+
+  // NCI Calculations tab with live formulas, when NCI figures are provided.
+  let nciBuilt = null;
+  if (o.nci && o.nci.subs && o.nci.subs.length) {
+    nciBuilt = buildNciSheet(o.nci, s.meta || {});
+    built.push(nciBuilt);
+  }
+
   for (const b of built) {
     let name = b.sheetName.replace(/[\[\]:*?/\\]/g, ' ').slice(0, 31).trim();
     let k = 2; const base = name;
@@ -646,6 +826,15 @@ async function buildStatementsWorkbook(s) {
     const ws = wb.addWorksheet(name);
     ws.properties.defaultRowHeight = 15;
     renderSheet(ws, b);
+    // Apply any NCI live-formula overrides after the base render.
+    if (b._nciFormulas) {
+      for (const f of b._nciFormulas) {
+        const cell = ws.getCell(f.r + 1, f.c + 1);
+        const prior = (typeof cell.value === 'object' && cell.value && 'result' in cell.value) ? cell.value.result : cell.value;
+        cell.value = { formula: f.formula, result: (typeof prior === 'number' ? prior : num(prior)) };
+        cell.numFmt = MONEY_FMT;
+      }
+    }
   }
   return wb.xlsx.writeBuffer();
 }

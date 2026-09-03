@@ -11196,8 +11196,13 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
         ? (o) => Promise.resolve(consolidation.consolidatedBalances(db, consolGroup, o, (id, oo) => computeBalances(id, oo)))
         : (o) => Promise.resolve(computeBalances(eid, o));
       const nci = isConsolidated ? consolidation.nciFigures(db, consolGroup, asOf, period, (id, oo) => computeBalances(id, oo)) : null;
-      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: fsEntityCode, isConsolidated, nci });
-      const consolSchedules = isConsolidated ? consolidation.buildScheduleSet(db, consolGroup, asOf, (id, oo) => computeBalances(id, oo)) : null;
+      // Midco lender package: the PDF carries only the consolidated balance
+      // sheet and statement of operations (lenderMode drops the cash-flow and
+      // equity statements), and the consolidating schedules move to the Excel
+      // deliverable, so they are NOT appended to the PDF here.
+      const isMidcoPkg = isConsolidated && consolParent && (/clr?fi?\s*midco\s*i/i.test(consolParent.name || '') || String(consolParent.code || '') === 'CLRFIMID');
+      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: fsEntityCode, isConsolidated, nci, lenderMode: isMidcoPkg });
+      const consolSchedules = (isConsolidated && !isMidcoPkg) ? consolidation.buildScheduleSet(db, consolGroup, asOf, (id, oo) => computeBalances(id, oo)) : null;
 
       const files = req.files || {};
       const execSummaryBytes = files.execSummary && files.execSummary[0] ? files.execSummary[0].buffer : null;
@@ -11311,8 +11316,19 @@ app.get('/api/workpapers/financial-statements/:entity_id/excel', auth, requireEn
     const getBalances = isConsolidated
       ? (o) => Promise.resolve(consolidation.consolidatedBalances(db, consolGroup, o, (id, oo) => computeBalances(id, oo)))
       : (o) => Promise.resolve(computeBalances(eid, o));
-    const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: isConsolidated ? (consolParent.code || '') : entityCode, isConsolidated });
-    const buf = await financialsXlsx.buildStatementsWorkbook(statements);
+    // Midco (the only NCI consolidation) gets the lender package in Excel:
+    // consolidated BS + statement of operations, the consolidating schedules,
+    // and an NCI Calculations tab with live formulas. Every other entity keeps
+    // the standard four-statement workbook.
+    const isMidco = isConsolidated && consolParent && (/clr?fi?\s*midco\s*i/i.test(consolParent.name || '') || String(consolParent.code || '') === 'CLRFIMID');
+    const nci = isConsolidated ? consolidation.nciFigures(db, consolGroup, asOf, period, (id, oo) => computeBalances(id, oo)) : null;
+    const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: isConsolidated ? (consolParent.code || '') : entityCode, isConsolidated, nci });
+    let xlsxOpts = {};
+    if (isMidco) {
+      const schedules = consolidation.buildScheduleSet(db, consolGroup, asOf, (id, oo) => computeBalances(id, oo));
+      xlsxOpts = { lenderMode: true, schedules, nci };
+    }
+    const buf = await financialsXlsx.buildStatementsWorkbook(statements, xlsxOpts);
     const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
     const safeName = fsEntityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
     const fname = safeName + '_Financial_Statements_' + mm + '_' + yyyy + '.xlsx';
