@@ -6903,13 +6903,12 @@ function uploadDirFreeBytes() {
 // journal entry. Batched like retag-projects: one Bill.com round trip + OCR per
 // bill is far too much for a single request, so the caller loops on next_offset
 // until remaining is 0. Idempotent via a billcom_sync_log 'invoice_doc' row.
-// Scoped to the entities in BILLCOM_INVOICE_ATTACH_ENTITIES (Banyan only for now).
-const BILLCOM_INVOICE_ATTACH_ENTITIES = new Set([41]);
+// Enabled for any entity that has Bill.com configured (the cfg check below is the
+// gate); documents come through the same v3 API used for the sync.
 const MIN_FREE_BYTES_FOR_ATTACH = 250 * 1024 * 1024; // keep ≥250MB headroom for the DB
 app.post('/api/billcom/attach-invoices/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
  try {
   const eid = parseInt(req.params.entity_id);
-  if (!BILLCOM_INVOICE_ATTACH_ENTITIES.has(eid)) return res.status(400).json({ error: 'Invoice attachment is enabled for Banyan Residential only right now.' });
   const dryRun = !!(req.body && req.body.dry_run);
   const from = (req.body && req.body.from) || null;
   const to = (req.body && req.body.to) || null;

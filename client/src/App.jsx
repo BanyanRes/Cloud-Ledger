@@ -1751,7 +1751,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
             <button style={S.btnS} onClick={loadSyncLogs} disabled={syncLogsLoading||syncing}>{syncLogsLoading?'Loading...':'Refresh Log'}</button>
             <button style={{...S.btnS,color:'#b91c1c',borderColor:'#fca5a5'}} onClick={runUnsync} disabled={syncing||unsyncing}>{unsyncing?'Un-syncing...':'Un-sync'}</button>
             <button style={S.btnP} onClick={runSync} disabled={syncing||unsyncing}>{syncing?'Syncing...':'Sync Now'}</button>
-            {selectedEntity===41&&<button style={S.btnS} onClick={runAttachInvoices} disabled={attaching||syncing||unsyncing} title='Download each bill&apos;s invoice PDF from Bill.com (OCR&apos;d) and attach it to the journal entry'>{attaching?'Attaching…':'Attach invoices'}</button>}
+            {cfg&&cfg.configured&&<button style={S.btnS} onClick={runAttachInvoices} disabled={attaching||syncing||unsyncing} title='Download each bill&apos;s invoice PDF from Bill.com (OCR&apos;d) and attach it to the journal entry'>{attaching?'Attaching…':'Attach invoices'}</button>}
             {attachMsg&&<span style={{fontSize:12,color:T.textMuted,marginLeft:4}}>{attachMsg}</span>}
           </div>
         </div>
