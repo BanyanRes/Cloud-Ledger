@@ -7791,11 +7791,6 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // [windowFrom, windowTo] and is absent from the live window has truly been
   // deleted in Bill.com. A synced bill dated outside the window simply wasn't
   // fetched this run and must NOT be treated as deleted.
-  // Unmapped departments are reported the same way unmapped GL accounts are, so
-  // an untagged project is visible work rather than a silent omission.
-  if (unmappedDepts.size) {
-    result.bills.unmapped_departments = [...unmappedDepts.values()];
-  }
   // Paused bills, grouped by the unrecognized Bill.com department. Each carries a
   // suggested project (when the name unambiguously matches one) and the held bills,
   // so the sync screen can offer Link / Post as-is per department.
