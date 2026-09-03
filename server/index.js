@@ -334,6 +334,21 @@ db.exec(`
     FOREIGN KEY (entity_id) REFERENCES entities(id)
   );
   CREATE INDEX IF NOT EXISTS idx_bcpm_entity ON billcom_project_map(entity_id);
+  -- Departments the user has decided need NO project ("Post as-is"). A bill whose
+  -- Bill.com department is neither in billcom_project_map nor here is PAUSED by the
+  -- sync (its project isn't recognized), so it never posts with a silently dropped
+  -- project. Presence here = "post these bills with no project, on purpose."
+  CREATE TABLE IF NOT EXISTS billcom_project_skip (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL,
+    billcom_dept_id TEXT NOT NULL,
+    billcom_dept_name TEXT,
+    created_by TEXT,
+    created_at TEXT,
+    UNIQUE(entity_id, billcom_dept_id),
+    FOREIGN KEY (entity_id) REFERENCES entities(id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_bcps_entity ON billcom_project_skip(entity_id);
   CREATE TABLE IF NOT EXISTS billcom_sync_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id INTEGER NOT NULL,
@@ -6247,7 +6262,8 @@ app.get('/api/billcom/dimension-maps/:entity_id', auth, requireEntityAccess('ent
   const classes = db.prepare('SELECT billcom_class_id, billcom_class_name, cl_class_id FROM billcom_class_map WHERE entity_id = ? ORDER BY id').all(eid);
   const locations = db.prepare('SELECT billcom_job_id, billcom_job_name, cl_location_id FROM billcom_location_map WHERE entity_id = ? ORDER BY id').all(eid);
   const projects = db.prepare('SELECT billcom_dept_id, billcom_dept_name, cl_project_id FROM billcom_project_map WHERE entity_id = ? ORDER BY id').all(eid);
-  res.json({ classes, locations, projects });
+  const project_skips = db.prepare('SELECT billcom_dept_id, billcom_dept_name FROM billcom_project_skip WHERE entity_id = ? ORDER BY id').all(eid);
+  res.json({ classes, locations, projects, project_skips });
 });
 
 app.post('/api/billcom/dimension-maps/:entity_id/auto', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
@@ -6388,10 +6404,27 @@ app.put('/api/billcom/dimension-maps/:entity_id', auth, requireEntityAccess('ent
       }
       const upP = db.prepare('INSERT INTO billcom_project_map (entity_id, billcom_dept_id, billcom_dept_name, cl_project_id, created_at) VALUES (?,?,?,?,?) ON CONFLICT(entity_id, billcom_dept_id) DO UPDATE SET cl_project_id=excluded.cl_project_id, billcom_dept_name=excluded.billcom_dept_name');
       const delP = db.prepare('DELETE FROM billcom_project_map WHERE entity_id = ? AND billcom_dept_id = ?');
+      const upSkip = db.prepare('INSERT INTO billcom_project_skip (entity_id, billcom_dept_id, billcom_dept_name, created_by, created_at) VALUES (?,?,?,?,?) ON CONFLICT(entity_id, billcom_dept_id) DO UPDATE SET billcom_dept_name=excluded.billcom_dept_name');
+      const delSkip = db.prepare('DELETE FROM billcom_project_skip WHERE entity_id = ? AND billcom_dept_id = ?');
+      const _who = (req.user && (req.user.name || req.user.email)) || 'system';
       for (const p of projects) {
         if (!p.billcom_dept_id) continue;
-        if (p.cl_project_id == null) delP.run(eid, String(p.billcom_dept_id));
-        else upP.run(eid, String(p.billcom_dept_id), p.billcom_dept_name || null, parseInt(p.cl_project_id), now);
+        const did = String(p.billcom_dept_id);
+        if (p.no_project === true) {
+          // "Post as-is": record the department as intentionally project-less and
+          // clear any project mapping it had.
+          upSkip.run(eid, did, p.billcom_dept_name || null, _who, now);
+          delP.run(eid, did);
+        } else if (p.cl_project_id == null) {
+          // Unmap entirely: remove both the project mapping and any skip decision,
+          // so the department goes back to "unrecognized" (paused) on next sync.
+          delP.run(eid, did);
+          delSkip.run(eid, did);
+        } else {
+          // Link to a project; a linked department is never also a skip.
+          upP.run(eid, did, p.billcom_dept_name || null, parseInt(p.cl_project_id), now);
+          delSkip.run(eid, did);
+        }
       }
     });
     tx();
@@ -7155,10 +7188,42 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // Department (confirmed by Jimmy 2026-08-19), so this is what puts a synced
   // bill line onto a project-scoped report.
   const projMap = new Map(db.prepare('SELECT billcom_dept_id, cl_project_id FROM billcom_project_map WHERE entity_id = ?').all(entityId).map(r => [String(r.billcom_dept_id), r.cl_project_id]));
-  // Departments seen on synced lines that have no project mapping, so the sync
-  // report can say "map this department to a project" instead of silently
-  // posting an untagged line. Keyed by department id.
-  const unmappedDepts = new Map();
+  // Departments the user marked "post as-is, no project". A bill whose department
+  // is in here posts with a null project on purpose (not paused).
+  const projSkip = new Set(db.prepare('SELECT billcom_dept_id FROM billcom_project_skip WHERE entity_id = ?').all(entityId).map(r => String(r.billcom_dept_id)));
+  // A department that is in neither map is UNRECOGNIZED: the bill is paused (held
+  // out of posting) so its project is never silently dropped. Grouped by dept id;
+  // each carries the paused bills and a suggested project (below).
+  const pausedByDept = new Map();
+
+  // Suggest a CL project for an unrecognized Bill.com department by normalized
+  // name/code, the same rule the dimension-maps auto step uses: match on the
+  // project name, its code, or "code name", each with a leading % stripped; a key
+  // two projects both answer to is ambiguous and suggests nothing (so "Van Buren"
+  // and "%Van Buren" as separate projects are never guessed between).
+  const _pnorm = (s) => String(s || '').trim().toLowerCase().replace(/^%+/, '').replace(/\s+/g, ' ');
+  const _clProjRows = db.prepare('SELECT id, code, name FROM dim_projects WHERE entity_id = ?').all(entityId);
+  const _projByKey = new Map();
+  const _projNameById = new Map(_clProjRows.map(p => [p.id, p.name]));
+  const _addPKey = (k, id) => { const kk = _pnorm(k); if (!kk) return; const c = _projByKey.get(kk); if (c === undefined) _projByKey.set(kk, id); else if (c !== id && c !== '(AMB)') _projByKey.set(kk, '(AMB)'); };
+  for (const p of _clProjRows) { _addPKey(p.name, p.id); _addPKey(p.code, p.id); if (p.code && p.name) { _addPKey(p.code + ' ' + p.name, p.id); _addPKey(p.code + ' - ' + p.name, p.id); } }
+  const suggestProject = (deptName) => {
+    const hit = _projByKey.get(_pnorm(deptName));
+    if (hit === undefined) return { id: null, ambiguous: false };
+    if (hit === '(AMB)') return { id: null, ambiguous: true };
+    return { id: hit, name: _projNameById.get(hit) || null, ambiguous: false };
+  };
+  // Bill.com department id -> name, fetched once and only if we actually hit an
+  // unrecognized department (keeps a normal clean sync from paying for the call).
+  let _deptNameById = null;
+  const ensureDeptNames = async () => {
+    if (_deptNameById) return;
+    _deptNameById = new Map();
+    try {
+      const ds = await billcomListClassification({ ...listArgs, resource: 'departments' });
+      for (const d of (ds || [])) _deptNameById.set(String(d.id || ''), d.name || d.shortName || d.description || '');
+    } catch (e) { /* names fall back to the id */ }
+  };
 
   let session;
   try {
@@ -7545,6 +7610,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     }
 
     const debitLines = [];
+    const billUnresolvedDepts = new Set(); // Bill.com dept ids on this bill with no project mapping and no skip
     const billMissing = [];
     let totalDr = 0;
     for (const li of lineItems) {
@@ -7581,9 +7647,19 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
         continue;
       }
       const deptId = String(pick(cls, 'departmentId', 'deptId', 'department') || pick(li, 'departmentId', 'deptId') || '');
-      const projId = deptId ? (projMap.get(deptId) || null) : null;
-      if (deptId && !projId && !unmappedDepts.has(deptId)) unmappedDepts.set(deptId, { billcom_dept_id: deptId, affected_bills: 0 });
-      if (deptId && !projId) unmappedDepts.get(deptId).affected_bills++;
+      // Resolve the department to a project. Three cases:
+      //  - mapped        -> the project (posts with it)
+      //  - marked "skip" -> null on purpose (posts as-is, no project)
+      //  - unrecognized  -> record it; the bill is PAUSED below rather than post
+      //                     with a silently dropped project.
+      // A line with NO department is not paused — plenty of bills (overhead, G&A)
+      // legitimately have no project.
+      let projId = null;
+      if (deptId) {
+        if (projMap.has(deptId)) projId = projMap.get(deptId) || null;
+        else if (projSkip.has(deptId)) projId = null;
+        else billUnresolvedDepts.add(deptId);
+      }
       debitLines.push({
         account_code: mapping.cl_account_code, debit: amt, credit: 0,
         class_id: classMap.get(String(pick(cls, 'accountingClassId', 'classId') || '')) || null,
@@ -7647,6 +7723,33 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       ? ('Bill - ' + billVendor + (_lineDesc ? ': ' + _lineDesc : ''))
       : ('Bill.com bill #' + billNumber);
 
+    // PAUSE gate: the bill has a Bill.com department we don't recognize (not
+    // mapped to a project and not marked "post as-is"). Hold it out of posting so
+    // its project isn't silently dropped, and surface it — grouped by department,
+    // with a suggested project — for the user to Link or Post as-is, then re-sync.
+    if (billUnresolvedDepts.size) {
+      await ensureDeptNames();
+      for (const did of billUnresolvedDepts) {
+        if (!pausedByDept.has(did)) {
+          const dn = (_deptNameById && _deptNameById.get(did)) || '';
+          const sug = suggestProject(dn);
+          pausedByDept.set(did, {
+            billcom_dept_id: did, billcom_dept_name: dn,
+            suggested_cl_project_id: sug.id || null, suggested_cl_project_name: sug.name || null,
+            ambiguous: !!sug.ambiguous, bills: [],
+          });
+        }
+        pausedByDept.get(did).bills.push({
+          billcom_id: billId, invoice_number: billNumber, vendor: billVendor || '',
+          amount: totalDr, date: String(postingDate).slice(0, 10),
+        });
+      }
+      result.bills.paused = (result.bills.paused || 0) + 1;
+      try { logSync.run(entityId, 'bill', billId, null, 'skip', 'paused — Bill.com project not recognized', now, billNumber); } catch (e) {}
+      result.bills.details.push({ id: billId, invoice_number: billNumber, status: 'paused', reason: 'Bill.com project not recognized' });
+      continue;
+    }
+
     try {
       const insertedId = db.transaction(() => {
         // Record the soft-close override here, inside the same transaction as the
@@ -7692,6 +7795,12 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // an untagged project is visible work rather than a silent omission.
   if (unmappedDepts.size) {
     result.bills.unmapped_departments = [...unmappedDepts.values()];
+  }
+  // Paused bills, grouped by the unrecognized Bill.com department. Each carries a
+  // suggested project (when the name unambiguously matches one) and the held bills,
+  // so the sync screen can offer Link / Post as-is per department.
+  if (pausedByDept.size) {
+    result.bills.paused_projects = [...pausedByDept.values()].sort((a, b) => b.bills.length - a.bills.length);
   }
   result.bills.deleted = 0;
   const liveIds = new Set(bills.map(b => String(pick(b, 'id') || '')).filter(Boolean));
