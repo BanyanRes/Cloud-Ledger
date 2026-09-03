@@ -1453,7 +1453,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
     }
   },[syncResult,selectedEntity,clProjEntity]);
 
-  // Resolve one paused department (Link to a project, or Post as-is), then re-sync
+  // Resolve one paused department by linking it to a project, then re-sync
   // so its held bills post. `body` is {cl_project_id} or {no_project:true}.
   const resolveDept=async(dept,body)=>{
     if(!selectedEntity)return;
@@ -1810,7 +1810,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
               <div style={{fontSize:13,fontWeight:600,color:'#92400e'}}>Paused — Bill.com project not recognized ({nb} bill{nb===1?'':'s'} · {pp.length} department{pp.length===1?'':'s'})</div>
               {nsug>0&&<button style={{...S.btnS}} disabled={!!resolveBusy} onClick={acceptAllSuggested}>{resolveBusy==='__all__'?'Working…':'Accept all suggested'}</button>}
             </div>
-            <div style={{fontSize:12,color:'#92400e',marginBottom:10}}>These bills have a Bill.com department that isn't linked to a project yet, so they're held rather than post with a dropped project. Link each one to a project, or post its bills as-is with no project; it re-syncs automatically. Bills with no department are not paused.</div>
+            <div style={{fontSize:12,color:'#92400e',marginBottom:10}}>These bills have a Bill.com department that isn't linked to a project yet, so they're held rather than post with a dropped project. Link each department to the right project and it re-syncs automatically — future bills from that department map on their own. Bills with no department are not paused.</div>
             <div style={{display:'flex',flexDirection:'column',gap:10}}>
               {pp.map(d=>{ const busy=resolveBusy===d.billcom_dept_id||resolveBusy==='__all__'; const choice=deptChoice[d.billcom_dept_id]||''; const bl=d.bills||[]; return (
                 <div key={d.billcom_dept_id} style={{background:T.bgElevated||'#fff',border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:'10px 12px'}}>
@@ -1828,7 +1828,6 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
                       {clProjects.map(p=><option key={p.id} value={p.id}>{p.code?p.code+' — ':''}{p.name}</option>)}
                     </select>
                     <button style={{...S.btnS}} disabled={busy||!choice} onClick={()=>resolveDept(d,{cl_project_id:parseInt(choice,10)})}>{busy?'Working…':'Link'}</button>
-                    <button style={{...S.btnGhost}} disabled={busy} onClick={()=>resolveDept(d,{no_project:true})} title='Post these bills now with no project'>Post as-is</button>
                   </div>
                 </div>
               );})}
