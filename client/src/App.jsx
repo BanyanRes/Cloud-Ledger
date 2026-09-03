@@ -1316,11 +1316,6 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
   const[syncLogs,setSyncLogs]=useState([]);
   const[syncLogsLoading,setSyncLogsLoading]=useState(false);
   const[syncMsg,setSyncMsg]=useState('');const[syncErr,setSyncErr]=useState('');
-  // Paused-department (unrecognized project) resolution
-  const[clProjects,setClProjects]=useState([]);
-  const[clProjEntity,setClProjEntity]=useState(null);
-  const[deptChoice,setDeptChoice]=useState({});   // billcom_dept_id -> selected cl project id (string)
-  const[resolveBusy,setResolveBusy]=useState('');
 
   const loadMapping=useCallback(async()=>{
     if(!selectedEntity)return;
@@ -1409,7 +1404,6 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
     // already-synced bills, so we report the final batch's skipped count only.
     const tot={bs:0,be:0,ps:0,pe:0};
     const agingOv=new Map();
-    const pausedMap=new Map(); // billcom_dept_id -> {dept, bills[]} paused across batches
     try{
       while(round<MAX_ROUNDS){
         round++;
@@ -1420,11 +1414,9 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
         tot.bs+=(b.synced||0);tot.be+=(b.errors||0);
         tot.ps+=(py.synced||0);tot.pe+=(py.errors||0);
         (b.aging_overlaps||[]).forEach(o=>agingOv.set(o.id,o));
-        (b.paused_projects||[]).forEach(pp=>{ const ex=pausedMap.get(pp.billcom_dept_id); if(!ex){ pausedMap.set(pp.billcom_dept_id,{...pp,bills:[...(pp.bills||[])]}); } else { const seen=new Set(ex.bills.map(x=>x.billcom_id)); (pp.bills||[]).forEach(x=>{ if(!seen.has(x.billcom_id))ex.bills.push(x); }); } });
         if(!(b.budget_reached)) break; // caught up
       }
       if(last&&last.bills)last.bills.aging_overlaps=[...agingOv.values()];
-      if(last&&last.bills)last.bills.paused_projects=[...pausedMap.values()].sort((a,b)=>b.bills.length-a.bills.length);
       setSyncResult(last);
       const lb=(last&&last.bills)||{},lp=(last&&last.payments)||{};
       const capNote=(round>=MAX_ROUNDS)?' (stopped at batch limit \u2014 click Sync Now again to continue)':'';
@@ -1432,39 +1424,6 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
       loadSyncLogs();
     }catch(e){setSyncErr('Sync failed after '+round+' batch'+(round===1?'':'es')+': '+e.message+(tot.bs?(' ('+tot.bs+' bills already posted before the error)'):''));}
     setSyncing(false);
-  };
-
-  // Load the CL project list (for the paused-department dropdowns) the first time
-  // a sync reports paused bills for this entity, and pre-select each suggestion.
-  useEffect(()=>{
-    const pp=syncResult&&syncResult.bills&&syncResult.bills.paused_projects;
-    if(pp&&pp.length&&selectedEntity&&clProjEntity!==selectedEntity){
-      api.getProjects(selectedEntity).then(rows=>{
-        const list=Array.isArray(rows)?rows:((rows&&rows.projects)||[]);
-        setClProjects(list); setClProjEntity(selectedEntity);
-        const init={}; pp.forEach(d=>{ if(d.suggested_cl_project_id)init[d.billcom_dept_id]=String(d.suggested_cl_project_id); });
-        setDeptChoice(init);
-      }).catch(()=>{});
-    }
-  },[syncResult,selectedEntity,clProjEntity]);
-
-  // Resolve one paused department (Link to a project, or Post as-is), then re-sync
-  // so its held bills post. `body` is {cl_project_id} or {no_project:true}.
-  const resolveDept=async(dept,body)=>{
-    if(!selectedEntity)return;
-    setResolveBusy(dept.billcom_dept_id);
-    try{
-      await api.saveBillcomDimensionMaps(selectedEntity,{projects:[{billcom_dept_id:dept.billcom_dept_id,billcom_dept_name:dept.billcom_dept_name||null,...body}]});
-      setResolveBusy(''); await runSync();
-    }catch(e){ setSyncErr('Could not update mapping: '+e.message); setResolveBusy(''); }
-  };
-  const acceptAllSuggested=async()=>{
-    const pp=(syncResult&&syncResult.bills&&syncResult.bills.paused_projects)||[];
-    const rows=pp.filter(d=>d.suggested_cl_project_id).map(d=>({billcom_dept_id:d.billcom_dept_id,billcom_dept_name:d.billcom_dept_name||null,cl_project_id:d.suggested_cl_project_id}));
-    if(!rows.length)return;
-    setResolveBusy('__all__');
-    try{ await api.saveBillcomDimensionMaps(selectedEntity,{projects:rows}); setResolveBusy(''); await runSync(); }
-    catch(e){ setSyncErr('Could not accept suggestions: '+e.message); setResolveBusy(''); }
   };
 
   const runUnsync=async()=>{
@@ -1772,40 +1731,6 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
           </div>}
           <button style={{...S.btnS,marginTop:4}} onClick={()=>{setTab('mapping');if(cfg&&cfg.configured)loadMapping();}}>Open Account Mapping tab</button>
         </div>;})()}
-
-        {syncResult&&syncResult.bills&&syncResult.bills.paused_projects&&syncResult.bills.paused_projects.length>0&&(()=>{
-          const pp=syncResult.bills.paused_projects;
-          const nb=pp.reduce((s,d)=>s+((d.bills||[]).length),0);
-          const nsug=pp.filter(d=>d.suggested_cl_project_id).length;
-          return <div style={{padding:12,marginBottom:14,background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:T.radiusSm}}>
-            <div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:10,flexWrap:'wrap',marginBottom:6}}>
-              <div style={{fontSize:13,fontWeight:600,color:'#92400e'}}>Paused — Bill.com project not recognized ({nb} bill{nb===1?'':'s'} · {pp.length} department{pp.length===1?'':'s'})</div>
-              {nsug>0&&<button style={{...S.btnS}} disabled={!!resolveBusy} onClick={acceptAllSuggested}>{resolveBusy==='__all__'?'Working…':'Accept all suggested'}</button>}
-            </div>
-            <div style={{fontSize:12,color:'#92400e',marginBottom:10}}>These bills have a Bill.com department that isn't linked to a project yet, so they're held rather than post with a dropped project. Link each one to a project, or post its bills as-is with no project; it re-syncs automatically. Bills with no department are not paused.</div>
-            <div style={{display:'flex',flexDirection:'column',gap:10}}>
-              {pp.map(d=>{ const busy=resolveBusy===d.billcom_dept_id||resolveBusy==='__all__'; const choice=deptChoice[d.billcom_dept_id]||''; const bl=d.bills||[]; return (
-                <div key={d.billcom_dept_id} style={{background:T.bgElevated||'#fff',border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:'10px 12px'}}>
-                  <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:6}}>
-                    <span style={{fontFamily:'monospace',fontSize:12.5,fontWeight:600}}>{d.billcom_dept_name||d.billcom_dept_id}</span>
-                    {d.suggested_cl_project_id?<span style={{fontSize:10.5,fontWeight:700,color:'#15803d',background:'#eaf6ee',border:'1px solid #b7e0c4',borderRadius:100,padding:'1px 7px'}}>SUGGESTED</span>:<span style={{fontSize:10.5,fontWeight:700,color:'#b45309',background:'#fdf4e7',border:'1px solid #f0d4a8',borderRadius:100,padding:'1px 7px'}}>NEEDS PICK</span>}
-                    <span style={{fontSize:11.5,color:T.textMuted}}>{bl.length} bill{bl.length===1?'':'s'}</span>
-                    {d.suggested_cl_project_name&&<span style={{fontSize:11.5,color:'#15803d'}}>name matches {d.suggested_cl_project_name}</span>}
-                    {d.ambiguous&&<span style={{fontSize:11.5,color:'#b45309'}}>name matches more than one project — pick one</span>}
-                  </div>
-                  <div style={{fontSize:11.5,color:T.textMuted,marginBottom:8}}>{bl.slice(0,4).map((b,i)=><span key={i}>{i>0?'   |   ':''}<span style={{fontFamily:'monospace'}}>{b.invoice_number||b.billcom_id}</span>{b.vendor?' · '+b.vendor:''}{b.amount!=null?' · $'+Number(b.amount).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}):''}</span>)}{bl.length>4?'   … +'+(bl.length-4)+' more':''}</div>
-                  <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
-                    <select value={choice} disabled={busy} onChange={e=>setDeptChoice(c=>({...c,[d.billcom_dept_id]:e.target.value}))} style={{fontSize:13,padding:'7px 10px',borderRadius:T.radiusSm,border:'1px solid '+T.border,background:'#fff',minWidth:210}}>
-                      <option value=''>Select a project…</option>
-                      {clProjects.map(p=><option key={p.id} value={p.id}>{p.code?p.code+' — ':''}{p.name}</option>)}
-                    </select>
-                    <button style={{...S.btnS}} disabled={busy||!choice} onClick={()=>resolveDept(d,{cl_project_id:parseInt(choice,10)})}>{busy?'Working…':'Link'}</button>
-                    <button style={{...S.btnGhost}} disabled={busy} onClick={()=>resolveDept(d,{no_project:true})} title='Post these bills now with no project'>Post as-is</button>
-                  </div>
-                </div>
-              );})}
-            </div>
-          </div>;})()}
 
         {syncResult&&syncResult.payments&&syncResult.payments.skip_reason&&<div style={{padding:12,marginBottom:14,background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:T.radiusSm}}>
           <div style={{fontSize:13,fontWeight:600,color:'#92400e',marginBottom:6}}>Payments not synced</div>
