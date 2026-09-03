@@ -775,6 +775,7 @@ const BS_ACCOUNT_MAP_BANYANDEV = {
 // Construction Costs → Land → Permits and fees → Other development.
 const BS_SUB_ORDER_BANYANDEV = Object.assign({}, {
   'Current Assets': ['Cash and Cash Equivalents', 'Accounts Receivable, Net', 'Intercompany Receivable', 'Other Current Assets'],
+  'Investments': ['Long Term Investments'],
   'Other Assets': ['Soft Costs', 'Construction Costs', 'Land', 'Permits and fees', 'Other development'],
   'Current Liabilities': ['Accounts Payable', 'Accrued Liabilities'],
 });
@@ -791,6 +792,12 @@ function banyandevBsClassify(row) {
   const name = (row.name || '').toLowerCase();
   if (row.type === 'Asset') {
     if (isCashAccount(row)) return { section: 'Current Assets', sub: 'Cash and Cash Equivalents' };
+    // Pushed-down parent investment in the development sub (HP: 19033 Investment
+    // in HP Property Owner; Braker: its equivalent). A long-term equity holding,
+    // not a soft cost — shown under Investments -> Long Term Investments rather
+    // than folded into Other Assets (Max Meyer/CLA review, 2026-09-03). It fully
+    // eliminates in consolidation, so this only reclassifies the member column.
+    if (/investment in/.test(name)) return { section: 'Investments', sub: 'Long Term Investments' };
     if (/receivable|allowance|deposit/.test(name)) return { section: 'Current Assets', sub: 'Other Current Assets' };
     if (/^1121|^1123|construction cost|base construction/.test(code + ' ' + name)) return { section: 'Other Assets', sub: 'Construction Costs' };
     if (/^1101\d|land purchase/.test(code + ' ' + name)) return { section: 'Other Assets', sub: 'Land' };
@@ -4225,9 +4232,105 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     offsets.push({ label: curTitle, page: pdf.getPageCount() });
     newPage();
     const acc = schedules.incomeMonth.accounts || [];
-    // Mirror the statement of operations top-level groupings: Revenue, Operating
-    // Expenses, then Other Income (Expense) and Income Taxes (the shared
-    // otherIeRoute classifier picks those out), then Net Income.
+    // Only P&L accounts belong on the statement of income. The month window
+    // (buildColumns) also carries every balance-sheet account's month delta, so
+    // restrict to Revenue/Expense BEFORE routing — otherwise asset/liability
+    // accounts fall through and print as expenses.
+    const pl = acc.filter(a => a.type === 'Revenue' || a.type === 'Expense');
+
+    // ── Banyan development consolidations (HP / Braker) ────────────────────────
+    // Route through the SAME classifier the face Consolidated Statement of
+    // Operations uses (banyandevPlRoute), so the consolidating schedule reads
+    // with the identical grouping instead of the generic otherIeRoute path.
+    // Fixes (Max Meyer/CLA review, 2026-09-03): fee accounts 41110-41130 sit
+    // below the line in Other Income (they were above); 40100/40200/40450 sit
+    // above the line in Revenue (they were below); operating expenses break out
+    // into Payroll / Facilities / Utilities / … subsections; and Other-Expense
+    // lines (interest, franchise tax) print negated, as the section nets them.
+    if ((meta.profile || 'srn') === 'banyandev') {
+      const bdKey = /braker/i.test(String(meta.entityName || '')) ? 'braker' : 'hp';
+      const routeOf = new Map();
+      for (const a of pl) routeOf.set(a, banyandevPlRoute(bdKey, { code: a.code, name: a.name, type: a.type, subtype: a.subtype }));
+      const bkt = (b) => pl.filter(a => routeOf.get(a).bucket === b);
+      // Nested group→sub tree for a bucket, ordered by the face group order.
+      const treeOf = (rows, groupOrder) => {
+        const gmap = new Map();
+        for (const a of rows) {
+          const r = routeOf.get(a);
+          if (!gmap.has(r.group)) gmap.set(r.group, new Map());
+          const sm = gmap.get(r.group);
+          if (!sm.has(r.sub)) sm.set(r.sub, []);
+          sm.get(r.sub).push(a);
+        }
+        const gnames = [...new Set([...(groupOrder || []), ...gmap.keys()])].filter(g => gmap.has(g));
+        return gnames.map(g => {
+          const sm = gmap.get(g);
+          return { group: g, subs: [...sm.keys()].map(s => ({ sub: s, rows: byCode(sm.get(s)) })) };
+        });
+      };
+      // Account row with a presentation sign (Other-Expense rows print negated).
+      const acctRowSigned = (a, ind, sign) => {
+        ensure(rowH);
+        dtext(truncate((a.code ? a.code + ' ' : '') + (a.name || ''), reg, F.row, nameEnd - (nameLeft + ind)), nameLeft + ind, y, F.row, reg);
+        figs(i => r2(sign * val(a, i)), reg, dollarFirst); if (dollarFirst) dollarFirst = false; y -= rowH;
+      };
+      const rev = bkt('revenue'), opex = bkt('opex'), oi = bkt('otherIncome'), oe = bkt('otherExpense');
+
+      // Revenue — grouped (Revenue - Services / Adjusted Residential Rent), each
+      // with its subtotal, then Total Revenue and (HP) Gross Profit.
+      sectionHeader('Revenue');
+      dollarFirst = true;
+      for (const g of treeOf(rev, BANYANDEV_REVENUE_GROUP_ORDER)) {
+        subHeader(g.group);
+        const rows = byCode(g.subs.reduce((s, su) => s.concat(su.rows), []));
+        rows.forEach(a => acctRowAt(a, 18));
+        subSubtotal('Total ' + g.group, i => sumCol(rows, i));
+      }
+      subtotal('Total Revenue', i => sumCol(rev, i));
+      if (bdKey === 'hp') subtotal('Gross Profit', i => sumCol(rev, i), { noTopRule: true });
+
+      // Operating Expenses — grouped by the face order, each group subtotalled.
+      sectionHeader('Operating Expenses');
+      for (const g of treeOf(opex, BANYANDEV_OPEX_GROUP_ORDER)) {
+        subHeader(g.group);
+        const rows = byCode(g.subs.reduce((s, su) => s.concat(su.rows), []));
+        rows.forEach(a => acctRowAt(a, 18));
+        subSubtotal('Total ' + g.group, i => sumCol(rows, i));
+      }
+      subtotal('Total Operating Expenses', i => sumCol(opex, i));
+
+      // Other Income (Expense) — Other Income groups (positive), then Other
+      // Expense groups negated. The 'Other Expenses' group total is suppressed
+      // (BANYANDEV_NO_GROUP_TOTAL) exactly as on the face statement.
+      if (oi.length || oe.length) {
+        sectionHeader('Other Income (Expense)');
+        for (const g of treeOf(oi, BANYANDEV_OTHER_INCOME_GROUP_ORDER)) {
+          subHeader(g.group);
+          const rows = byCode(g.subs.reduce((s, su) => s.concat(su.rows), []));
+          rows.forEach(a => acctRowAt(a, 18));
+          subSubtotal('Total ' + g.group, i => sumCol(rows, i));
+        }
+        for (const g of treeOf(oe)) {
+          const showGroupTotal = !(BANYANDEV_NO_GROUP_TOTAL && BANYANDEV_NO_GROUP_TOTAL.has(g.group));
+          for (const su of g.subs) {
+            subHeader(su.sub);
+            su.rows.forEach(a => acctRowSigned(a, 26, -1));
+            subSubtotal('Total ' + su.sub, i => r2(-sumCol(su.rows, i)));
+          }
+          if (showGroupTotal) {
+            const rows = g.subs.reduce((s, su) => s.concat(su.rows), []);
+            subSubtotal('Total ' + g.group, i => r2(-sumCol(rows, i)));
+          }
+        }
+        subtotal('Total Other Income (Expense)', i => r2(sumCol(oi, i) - sumCol(oe, i)));
+      }
+      subtotal('Net Income (Loss)', i => r2(sumCol(rev, i) - sumCol(opex, i) + sumCol(oi, i) - sumCol(oe, i)), { double: true, noTopRule: true, dollar: true });
+      return;
+    }
+
+    // ── Generic profiles (srn, midco, …) ──────────────────────────────────────
+    // Mirror the statement-of-operations top-level groupings via the shared
+    // otherIeRoute classifier, then Net Income.
     const route = (a) => {
       const r = (typeof otherIeRoute === 'function') ? otherIeRoute(a) : null;
       if (r && r.bucket === 'otherIncome') return 'oi';
@@ -4235,11 +4338,6 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
       if (r && r.bucket === 'incomeTax') return 'it';
       return a.type === 'Revenue' ? 'rev' : 'exp';
     };
-    // Only P&L accounts belong on the statement of income. The month window
-    // (buildColumns) also carries every balance-sheet account's month delta, so
-    // restrict to Revenue/Expense BEFORE routing — otherwise asset/liability
-    // accounts fall through the route() default and print as expenses.
-    const pl = acc.filter(a => a.type === 'Revenue' || a.type === 'Expense');
     const rev = byCode(pl.filter(a => route(a) === 'rev'));
     const exp = byCode(pl.filter(a => route(a) === 'exp'));
     const oi = byCode(pl.filter(a => route(a) === 'oi'));
