@@ -820,7 +820,23 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
   // full. Every other account still comes out for its whole balance. With no
   // balancer flagged the rule stays one-sided by design and reports the
   // residual (the earlier behaviour, kept for a column CLA prints one-sided).
-  const mirrorRows = db.prepare('SELECT * FROM consol_full_eliminations WHERE group_id = ? ORDER BY sort_order, entity_id, account_code').all(group.id);
+  let mirrorRows = db.prepare('SELECT * FROM consol_full_eliminations WHERE group_id = ? ORDER BY sort_order, entity_id, account_code').all(group.id);
+  // June-2026-only: do NOT eliminate the $625 Buna -> Silsbee 'Due to Silsbee'
+  // (23395). Its matching receivable on Silsbee posts one day after cutoff (Buna
+  // JE99, 7/1/2026), so at 6/30 there is no asset-side leg to cancel against.
+  // Eliminating this one payable alone drops liabilities by $625 and throws the
+  // consolidated balance sheet out by exactly that amount. Leaving it in keeps
+  // the $625 in consolidated accounts payable, which is where it belongs until
+  // the timing difference self-corrects in the September package. Scoped to a
+  // June 2026 balance-sheet window on the Midco group; every other period
+  // eliminates it normally.
+  {
+    const asOfJune = o && o.as_of && String(o.as_of).slice(0, 7) === '2026-06';
+    const isMidco = group && String(group.scope_key || '') === 'midco';
+    if (asOfJune && isMidco) {
+      mirrorRows = mirrorRows.filter(m => String(m.account_code) !== '23395');
+    }
+  }
   if (mirrorRows.length) {
     const legs = mirrorRows.map(m => {
       const row = (rowsFor(m.entity_id) || []).find(x => String(x.code) === String(m.account_code));
