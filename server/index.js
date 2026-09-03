@@ -6834,55 +6834,6 @@ app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id
   res.json({ logs: rows });
 });
 
-// TEMP diagnostic: probe how to fetch a bill's invoice document from Bill.com v3.
-// Tries several candidate endpoints for one bill and reports each one's status,
-// content-type and a small structural snippet (no raw file bytes returned).
-// Admin-only; remove once the document API shape is confirmed.
-app.get('/api/billcom/_probe-doc/:entity_id/:bill_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
-  const eid = parseInt(req.params.entity_id);
-  const billId = String(req.params.bill_id);
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(eid);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
-  let session, devKey, base;
-  try {
-    const password = billcomDecrypt(cfg.password_enc);
-    devKey = billcomDecrypt(cfg.dev_key_enc);
-    base = cfg.api_base_url || BILLCOM_BASE_URLS.production;
-    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: base });
-  } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
-  const H = { sessionId: session.sessionId, devKey, Accept: 'application/json' };
-  const candidates = [
-    { name: 'bill-detail-keys', url: base + '/bills/' + encodeURIComponent(billId) },
-    { name: 'bill-documents', url: base + '/bills/' + encodeURIComponent(billId) + '/documents' },
-    { name: 'documents-by-bill', url: base + '/documents?billId=' + encodeURIComponent(billId) },
-    { name: 'documents-list', url: base + '/documents?max=3' },
-    { name: 'document-pages', url: base + '/documents/' + encodeURIComponent(billId) + '/pages' },
-  ];
-  const out = [];
-  for (const c of candidates) {
-    try {
-      const r = await billcomFetch(c.url, { method: 'GET', headers: H }, 12000);
-      const ct = r.headers.get('content-type') || '';
-      const buf = Buffer.from(await r.arrayBuffer());
-      let snippet;
-      if (ct.includes('json')) {
-        try {
-          const j = JSON.parse(buf.toString('utf8'));
-          const top = Array.isArray(j) ? { array_len: j.length, first_keys: j[0] ? Object.keys(j[0]) : [] } : Object.keys(j);
-          // For the bill detail, surface only keys whose name hints at documents.
-          snippet = c.name === 'bill-detail-keys'
-            ? { all_keys: Object.keys(j), doc_like: Object.keys(j).filter(k => /doc|attach|image|file|page|mailbox/i.test(k)), doc_values: Object.fromEntries(Object.keys(j).filter(k => /doc|attach|image|file|page|mailbox/i.test(k)).map(k => [k, j[k]])) }
-            : top;
-        } catch { snippet = buf.toString('utf8').slice(0, 200); }
-      } else {
-        snippet = { content_type: ct, bytes: buf.length, head_hex: buf.slice(0, 8).toString('hex') };
-      }
-      out.push({ name: c.name, url: c.url, status: r.status, content_type: ct, snippet });
-    } catch (e) { out.push({ name: c.name, url: c.url, error: e.message }); }
-  }
-  res.json({ bill_id: billId, base, results: out });
-});
-
 // Un-sync: remove every CloudLedger journal entry that a Bill.com sync created
 // for this entity, and clear the entity's sync log so a subsequent (corrected)
 // sync re-pulls from scratch. Scoped STRICTLY to entries recorded in
