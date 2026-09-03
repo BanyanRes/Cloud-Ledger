@@ -6967,6 +6967,15 @@ app.post('/api/billcom/attach-invoices/:entity_id', auth, requireEntityAccess('e
         result.details.push({ entry_num: row.entry_num, invoice_number: row.invoice_number, status: 'no_document' });
         continue;
       }
+      // Guard against a double-attach (e.g. two runs overlapping): if this entry
+      // already carries a same-named invoice, mark done and move on rather than
+      // attach a second copy.
+      const dupe = db.prepare('SELECT id FROM journal_attachments WHERE entry_id = ? AND original_name = ?').get(row.cl_entry_id, doc.name);
+      if (dupe) {
+        logDoc.run(eid, 'invoice_doc', String(row.billcom_id), row.cl_entry_id, 'success', 'already attached (' + doc.name + ')', now, row.invoice_number || null);
+        result.details.push({ entry_num: row.entry_num, invoice_number: row.invoice_number, status: 'already_attached' });
+        continue;
+      }
       if (uploadDirFreeBytes() != null && uploadDirFreeBytes() < MIN_FREE_BYTES_FOR_ATTACH) { result.errors.push({ billcom_id: row.billcom_id, error: 'disk low, stopped' }); result.next_offset = offset + result.details.length; result.remaining = Math.max(0, total - (offset + result.details.length)); break; }
       const pdf = makeSearchablePdf(doc.buffer);
       const stored = 'billinv_' + String(row.billcom_id).replace(/[^A-Za-z0-9]/g, '') + '_' + Date.now() + '.pdf';
