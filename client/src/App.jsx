@@ -5640,6 +5640,9 @@ function FinancialStatements({entityId,entityName,entityCode='',canEdit=true,isD
   const periods=[['monthly','Monthly'],['quarterly','Quarterly'],['annually','Annually']];
   const tieOk=preview&&preview.checks&&preview.checks.balanceSheetTies;
   const cfTie=preview&&preview.checks&&preview.checks.cashFlowTies;
+  // Midco's lender package omits the cash-flow statement, so its cash-flow
+  // tie-out warning is noise — hide it (and its note) for Midco.
+  const isMidcoFs=String(entityId)==='70'||/cl(r?)fi?\s*midco\s*i/.test((entityName||'').toLowerCase());
   return(<div>
     <div style={S.h1}>Financial Statements</div>
     <div style={{color:T.textMuted,marginBottom:16,fontSize:13,maxWidth:820}}>Generates a GL-derived statement package for {entityName||'this entity'} — Balance Sheet, Statements of Operations, Statement of Cash Flows, and Statement of Changes in Members' Equity — as of a date, then merges it into a single PDF with your uploaded executive summary{isDevEntity?' and requisition report. The requisition report\u2019s Current & Prior Invoice Log pages are removed automatically.':'.'}</div>
@@ -5670,9 +5673,9 @@ function FinancialStatements({entityId,entityName,entityCode='',canEdit=true,isD
         </div>
         <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
           <span style={{fontSize:12,padding:'4px 10px',borderRadius:6,background:(tieOk?T.green:T.red)+'22',color:tieOk?T.green:T.red,fontWeight:600}}>{tieOk?'✓ Balance sheet balances':'✗ Balance sheet out by '+fmt(preview.checks.balanceSheetDiff)}</span>
-          <span style={{fontSize:12,padding:'4px 10px',borderRadius:6,background:(cfTie?T.green:T.orange)+'22',color:cfTie?T.green:T.orange,fontWeight:600}}>{cfTie?'✓ Cash flow ties':'⚠ Cash flow off by '+fmt(preview.totals.cashFlowTieOut)}</span>
+          {!isMidcoFs&&<span style={{fontSize:12,padding:'4px 10px',borderRadius:6,background:(cfTie?T.green:T.orange)+'22',color:cfTie?T.green:T.orange,fontWeight:600}}>{cfTie?'✓ Cash flow ties':'⚠ Cash flow off by '+fmt(preview.totals.cashFlowTieOut)}</span>}
         </div>
-        {!cfTie&&<div style={{marginTop:8,fontSize:12,color:T.textMuted}}>A cash-flow difference is usually a mid-year chart change or an opening-balance gap; the statement still generates, with the residual disclosed in a note.</div>}
+        {!cfTie&&!isMidcoFs&&<div style={{marginTop:8,fontSize:12,color:T.textMuted}}>A cash-flow difference is usually a mid-year chart change or an opening-balance gap; the statement still generates, with the residual disclosed in a note.</div>}
       </div>}
     </div>
 
