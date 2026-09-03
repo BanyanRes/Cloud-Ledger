@@ -277,6 +277,7 @@ function buildBalanceSheet(s) {
   const m = s.meta;
   const meEquity = meEquityLabel(m);
   const bs = s.balanceSheet;
+  let _faceLinks = null;
   const sh = makeSheet('Balance Sheet');
   const title = m.profile === 'banyan'
     ? 'Statements of Assets, Liabilities, and ' + meEquity + ' \u2013 Tax Basis'
@@ -334,11 +335,21 @@ function buildBalanceSheet(s) {
     // the PDF.
     sh.row(meEquity, [], { indent: 6, bold: true });
     const equityFeed = [];
-    equityFeed.push(sh.row('Members’ Equity - County Line Rail Fund, LLC', cells(_nciP.membersTotal.cur, _nciP.membersTotal.pri), { indent: 16 }));
-    equityFeed.push(sh.row('Retained Earnings', cells(_nciP.reControlling.cur, _nciP.reControlling.pri), { indent: 16 }));
-    equityFeed.push(sh.row('Net Income (Loss) Attributable to CLRFI Midco I, LLC and Subsidiaries', cells(_nciP.niControlling.cur, _nciP.niControlling.pri), { indent: 16 }));
-    equityFeed.push(sh.row('Noncontrolling Interest', cells(_nciP.nciLine.cur, _nciP.nciLine.pri), { indent: 16 }));
+    const _memRow = sh.row('Members’ Equity - County Line Rail Fund, LLC', cells(_nciP.membersTotal.cur, _nciP.membersTotal.pri), { indent: 16 });
+    const _reRow = sh.row('Retained Earnings', cells(_nciP.reControlling.cur, _nciP.reControlling.pri), { indent: 16 });
+    const _niRow = sh.row('Net Income (Loss) Attributable to CLRFI Midco I, LLC and Subsidiaries', cells(_nciP.niControlling.cur, _nciP.niControlling.pri), { indent: 16 });
+    const _nciRow = sh.row('Noncontrolling Interest', cells(_nciP.nciLine.cur, _nciP.nciLine.pri), { indent: 16 });
+    equityFeed.push(_memRow, _reRow, _niRow, _nciRow);
     totalEquityRow = sh.row('Total ' + meEquity, cells(bs.totalEquity.cur, bs.totalEquity.pri), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: equityFeed });
+    const _ca = m._consolAddr, _na = m._nciAddr;
+    if (_ca || _na) {
+      _faceLinks = [];
+      const CURc = sh._amt0;
+      if (_ca && _ca.totalMembersEquity && _ca.nci) _faceLinks.push({ r: _memRow, c: CURc, formula: _ca.totalMembersEquity + '-' + _ca.nci });
+      if (_ca && _ca.retainedEarnings) _faceLinks.push({ r: _reRow, c: CURc, formula: _ca.retainedEarnings });
+      if (_ca && _ca.netIncome) _faceLinks.push({ r: _niRow, c: CURc, formula: _ca.netIncome });
+      if (_na && _na.total) _faceLinks.push({ r: _nciRow, c: CURc, formula: _na.total });
+    }
   } else {
     sh.row(meEquity, [], { indent: 6, bold: true });
     const equityFeed = [];
@@ -349,7 +360,9 @@ function buildBalanceSheet(s) {
   }
   // Total Liabilities and Members' Equity = Total Liabilities + Total Members' Equity.
   sh.row('Total Liabilities and ' + meEquity, cells(bs.totalLiabEquity.cur, bs.totalLiabEquity.pri), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: [totalLiabRow, totalEquityRow] });
-  return sh._finish();
+  const _bsBuilt = sh._finish();
+  if (_faceLinks) _bsBuilt._linkFormulas = _faceLinks;
+  return _bsBuilt;
 }
 
 // ── Statements of Operations sheet ──────────────────────────────────────────
@@ -663,7 +676,7 @@ function consolidatingHeaders(grouped) {
   return [...grouped.columns, 'Eliminations', 'Consolidated'];
 }
 
-function buildConsolidatingBalanceSheet(grouped, titleLines) {
+function buildConsolidatingBalanceSheet(grouped, titleLines, nciAddr) {
   const sh = makeSheet('Consolidating BS');
   const bs = grouped.balanceSheet;
   sh.titleBlock(titleLines);
@@ -697,20 +710,83 @@ function buildConsolidatingBalanceSheet(grouped, titleLines) {
   const liabTotals = bs.liabSections.map(renderSection);
   const totalLiabRow = sh.row('Total Liabilities', bs.totalLiabilities.map(num), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: liabTotals });
 
-  // Equity: Members' Equity (contributed), Retained Earnings, Net Income (Loss),
-  // then Total Members' Equity and Total Liabilities and Members' Equity.
+  // Equity: Members' Equity (contributed, includes the NCI line), Retained
+  // Earnings, Net Income (Loss), then Total Members' Equity and Total
+  // Liabilities and Members' Equity.
+  //
+  // NCI presentation is linked to the NCI Calculations tab exactly like CLA's
+  // workpaper: the Retained Earnings elimination pulls the NCI share of opening
+  // RE, the Net Income elimination pulls the NCI share of net income, and the
+  // Noncontrolling Interest line pulls the NCI carrying amount. Each is a
+  // cross-sheet formula so the chain traces. Consolidated = Total + Eliminations
+  // by formula. Column offsets: members are 0..n-1, Eliminations is n,
+  // Consolidated is n+1 (0-based amount offsets).
+  const memberN = grouped.columns.length;
+  const ELIM = memberN;       // 0-based amount offset of the Eliminations column
+  const CONS = memberN + 1;   // 0-based amount offset of the Consolidated column
+  const A = sh._amt0;         // first amount column (0-based cell col)
+  const cL = (off) => colLetter(A + off + 1);   // column letter for an amount offset
+  // Collect the rows whose elimination/consolidated we will overwrite with links.
+  const linkRows = [];   // { rowIdx0, kind }  kind: 're' | 'ni' | 'nci'
+
   sh.row("Members' Equity", [], { indent: 6, bold: true });
   const eqFeed = [];
-  for (const r of bs.contributed.rows) eqFeed.push(acctRow(r, 16));
+  let nciRowIdx = null;
+  for (const r of bs.contributed.rows) {
+    const idx = acctRow(r, 16);
+    eqFeed.push(idx);
+    if (String(r.code) === 'NCI') { nciRowIdx = idx; linkRows.push({ rowIdx0: idx, kind: 'nci' }); }
+  }
+  let reLastRowIdx = null;
   if (bs.retained && bs.retained.rows.length) {
     sh.row('Retained Earnings', [], { indent: 6, bold: true });
-    for (const r of bs.retained.rows) eqFeed.push(acctRow(r, 16));
+    for (const r of bs.retained.rows) { const idx = acctRow(r, 16); eqFeed.push(idx); reLastRowIdx = idx; }
+    if (reLastRowIdx != null) linkRows.push({ rowIdx0: reLastRowIdx, kind: 're' });
   }
   const niRow = sh.row('Net Income (Loss)', bs.netIncome.map(num), { indent: 16 });
   eqFeed.push(niRow);
+  linkRows.push({ rowIdx0: niRow, kind: 'ni' });
   const totalEqRow = sh.row("Total Members' Equity", bs.totalEquity.map(num), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: eqFeed });
-  sh.row("Total Liabilities and Members' Equity", bs.totalLiabEquity.map(num), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: [totalLiabRow, totalEqRow] });
-  return sh._finish();
+  const totalLERow = sh.row("Total Liabilities and Members' Equity", bs.totalLiabEquity.map(num), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: [totalLiabRow, totalEqRow] });
+
+  const built = sh._finish();
+
+  // Cross-sheet NCI links. Overwrite the Eliminations cell of the RE, NI and NCI
+  // rows with a formula referencing the NCI tab, then make each row's
+  // Consolidated cell = Total + Eliminations. The Total column offset is (ELIM-1)
+  // in CLA's layout? No — here Total is not a separate column: our member sum IS
+  // the total. Consolidated = SUM(members) + Eliminations, computed as
+  // (sum of member cells) + elimination cell.
+  const memberRange = cL(0) + ':' + cL(memberN - 1);
+  const linkFormulas = built._linkFormulas = [];
+  if (nciAddr) {
+    for (const lr of linkRows) {
+      const rowExcel = lr.rowIdx0 + 1;
+      let elimFormula = null;
+      if (lr.kind === 're') elimFormula = '=-' + nciAddr.reShare;
+      else if (lr.kind === 'ni') elimFormula = '=-' + nciAddr.niShare;
+      else if (lr.kind === 'nci') elimFormula = '=' + nciAddr.total;
+      if (elimFormula) {
+        linkFormulas.push({ r: lr.rowIdx0, c: A + ELIM, formula: elimFormula.slice(1) });
+        // Consolidated = sum(member cells) + elimination.
+        const consF = 'SUM(' + cL(0) + rowExcel + ':' + cL(memberN - 1) + rowExcel + ')+' + cL(ELIM) + rowExcel;
+        linkFormulas.push({ r: lr.rowIdx0, c: A + CONS, formula: consF });
+      }
+    }
+  }
+
+  // Expose consolidated-column (P) cell addresses for the Consolidated face to
+  // reference: Total Members' Equity, the NCI line, the last RE line, and the
+  // Net Income line — sheet-qualified.
+  const SQ = "'Consolidating BS'!";
+  const consCol = cL(CONS);
+  built._consolAddr = {
+    totalMembersEquity: SQ + consCol + (totalEqRow + 1),
+    nci: nciRowIdx != null ? (SQ + consCol + (nciRowIdx + 1)) : null,
+    retainedEarnings: reLastRowIdx != null ? (SQ + consCol + (reLastRowIdx + 1)) : null,
+    netIncome: SQ + consCol + (niRow + 1),
+  };
+  return built;
 }
 
 function buildConsolidatingIncome(grouped, titleLines) {
@@ -838,6 +914,13 @@ function buildNciSheet(nci, meta) {
     const L1 = colLetter(AMT0 + 1), L2 = colLetter(AMT0 + nSub);
     fmap.push({ r: rIdx, c: totC, formula: 'SUM(' + L1 + rowNum(rIdx) + ':' + L2 + rowNum(rIdx) + ')' });
   }
+  // Linking addresses (Total column, this sheet) for the cross-tab NCI chain:
+  // the NCI share of opening RE (H15), the NCI share of net income (H19), and
+  // the NCI carrying amount (H22) in CLA's workbook. Sheet-qualified so the
+  // Consolidating BS and Consolidated face can reference them.
+  const SQ = "'NCI Calculations'!";
+  const totCell = (rIdx) => SQ + colLetter(totC + 1) + rowNum(rIdx);
+  built._nciAddr = { reShare: totCell(R.nciRe), niShare: totCell(R.nciNi), total: totCell(R.nciEnd) };
   return built;
 }
 
@@ -858,43 +941,60 @@ async function buildStatementsWorkbook(s, opts) {
   wb.calcProperties = wb.calcProperties || {};
   wb.calcProperties.fullCalcOnLoad = true;
 
+  const m = s.meta || {};
+
+  // Build the NCI tab FIRST so its linking cell addresses are known before the
+  // Consolidating BS and the Consolidated face reference them (the whole NCI
+  // presentation chain traces to this tab, exactly like CLA's workpaper).
+  let nciBuilt = null, nciAddr = null;
+  if (o.nci && o.nci.subs && o.nci.subs.length) {
+    nciBuilt = buildNciSheet(o.nci, m);
+    nciAddr = nciBuilt._nciAddr || null;
+  }
+
+  // Consolidating BS is built next (it links to the NCI tab and exposes the
+  // consolidated-column addresses the face references).
+  let consolBs = null, consolIncome = null, consolAddr = null;
+  if (o.grouped) {
+    const asOf = (o.schedules && o.schedules.asOf) || m.asOf;
+    consolBs = buildConsolidatingBalanceSheet(o.grouped,
+      [m.entityName || '', 'Consolidating Balance Sheet', m.longDate || asOf], nciAddr);
+    consolAddr = consolBs._consolAddr || null;
+    consolIncome = buildConsolidatingIncome(o.grouped,
+      [m.entityName || '', 'Consolidating Statement of Income', 'For the Month Ended ' + (m.longDate || asOf)]);
+  }
+
+  // The face Balance Sheet references the Consolidating BS consolidated column
+  // and the NCI tab for its equity presentation; pass the addresses through meta.
+  if (consolAddr || nciAddr) {
+    s = Object.assign({}, s, { meta: Object.assign({}, m, { _consolAddr: consolAddr, _nciAddr: nciAddr }) });
+  }
+
+  // Sheet order matches CLA: face statements, consolidating schedules, NCI tab.
   const built = [buildBalanceSheet(s), buildOperations(s)];
   if (!o.lenderMode) { built.push(buildCashFlow(s), buildEquity(s)); }
-
-  // Consolidating schedules (multi-column), grouped to match the consolidated
-  // statements. opts.grouped is a financials.groupConsolidatingSchedule() tree.
-  if (o.grouped) {
-    const m = s.meta || {};
-    const asOf = (o.schedules && o.schedules.asOf) || m.asOf;
-    built.push(buildConsolidatingBalanceSheet(o.grouped,
-      [m.entityName || '', 'Consolidating Balance Sheet', m.longDate || asOf]));
-    built.push(buildConsolidatingIncome(o.grouped,
-      [m.entityName || '', 'Consolidating Statement of Income', 'For the Month Ended ' + (m.longDate || asOf)]));
-  }
-
-  // NCI Calculations tab with live formulas, when NCI figures are provided.
-  let nciBuilt = null;
-  if (o.nci && o.nci.subs && o.nci.subs.length) {
-    nciBuilt = buildNciSheet(o.nci, s.meta || {});
-    built.push(nciBuilt);
-  }
+  if (consolBs) built.push(consolBs);
+  if (consolIncome) built.push(consolIncome);
+  if (nciBuilt) built.push(nciBuilt);
 
   for (const b of built) {
-    let name = b.sheetName.replace(/[\[\]:*?/\\]/g, ' ').slice(0, 31).trim();
+    let name = String(b.sheetName).split('').map(function(ch){ return ('[]:*?/' + String.fromCharCode(92)).indexOf(ch) >= 0 ? ' ' : ch; }).join('').slice(0, 31).trim();
     let k = 2; const base = name;
     while (wb.getWorksheet(name)) { name = base.slice(0, 28) + ' ' + k; k++; }
     const ws = wb.addWorksheet(name);
     ws.properties.defaultRowHeight = 15;
     renderSheet(ws, b);
-    // Apply any NCI live-formula overrides after the base render.
-    if (b._nciFormulas) {
-      for (const f of b._nciFormulas) {
+    const applyF = (list) => {
+      if (!list) return;
+      for (const f of list) {
         const cell = ws.getCell(f.r + 1, f.c + 1);
         const prior = (typeof cell.value === 'object' && cell.value && 'result' in cell.value) ? cell.value.result : cell.value;
         cell.value = { formula: f.formula, result: (typeof prior === 'number' ? prior : num(prior)) };
         cell.numFmt = MONEY_FMT;
       }
-    }
+    };
+    applyF(b._nciFormulas);
+    applyF(b._linkFormulas);
   }
   return wb.xlsx.writeBuffer();
 }
