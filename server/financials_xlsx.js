@@ -324,12 +324,29 @@ function buildBalanceSheet(s) {
   const liabTotalRows = [];
   for (const sec of bs.liabSections) liabTotalRows.push(renderSection(sec, 'Total ' + sec.title, false));
   const totalLiabRow = sh.row('Total Liabilities', cells(bs.totalLiab.cur, bs.totalLiab.pri), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: liabTotalRows });
-  sh.row(meEquity, [], { indent: 6, bold: true });
-  const equityFeed = [];
-  for (const r of bs.equityRows) equityFeed.push(sh.row(r.name, cells(r.cur, r.pri), { indent: 16 }));
-  for (const r of (bs.retainedRows || [])) equityFeed.push(sh.row(r.name, cells(r.cur, r.pri), { indent: 16 }));
-  equityFeed.push(sh.row('Net Income (Loss)', cells(bs.niLine.cur, bs.niLine.pri), { indent: 16 }));
-  const totalEquityRow = sh.row('Total ' + meEquity, cells(bs.totalEquity.cur, bs.totalEquity.pri), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: equityFeed });
+  const _nciP = bs.nciPresentation;
+  let totalEquityRow;
+  if (m.profile === 'midco' && _nciP) {
+    // CLA consolidated presentation, matching the PDF: one collapsed
+    // Members' Equity line, Retained Earnings net of only the NCI RE-share, the
+    // controlling Net Income (Loss) Attributable to CLRFI Midco I, and the
+    // Noncontrolling Interest line. Keeps the Excel Balance Sheet tab tied to
+    // the PDF.
+    sh.row(meEquity, [], { indent: 6, bold: true });
+    const equityFeed = [];
+    equityFeed.push(sh.row('Members’ Equity - County Line Rail Fund, LLC', cells(_nciP.membersTotal.cur, _nciP.membersTotal.pri), { indent: 16 }));
+    equityFeed.push(sh.row('Retained Earnings', cells(_nciP.reControlling.cur, _nciP.reControlling.pri), { indent: 16 }));
+    equityFeed.push(sh.row('Net Income (Loss) Attributable to CLRFI Midco I, LLC and Subsidiaries', cells(_nciP.niControlling.cur, _nciP.niControlling.pri), { indent: 16 }));
+    equityFeed.push(sh.row('Noncontrolling Interest', cells(_nciP.nciLine.cur, _nciP.nciLine.pri), { indent: 16 }));
+    totalEquityRow = sh.row('Total ' + meEquity, cells(bs.totalEquity.cur, bs.totalEquity.pri), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: equityFeed });
+  } else {
+    sh.row(meEquity, [], { indent: 6, bold: true });
+    const equityFeed = [];
+    for (const r of bs.equityRows) equityFeed.push(sh.row(r.name, cells(r.cur, r.pri), { indent: 16 }));
+    for (const r of (bs.retainedRows || [])) equityFeed.push(sh.row(r.name, cells(r.cur, r.pri), { indent: 16 }));
+    equityFeed.push(sh.row('Net Income (Loss)', cells(bs.niLine.cur, bs.niLine.pri), { indent: 16 }));
+    totalEquityRow = sh.row('Total ' + meEquity, cells(bs.totalEquity.cur, bs.totalEquity.pri), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: equityFeed });
+  }
   // Total Liabilities and Members' Equity = Total Liabilities + Total Members' Equity.
   sh.row('Total Liabilities and ' + meEquity, cells(bs.totalLiabEquity.cur, bs.totalLiabEquity.pri), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: [totalLiabRow, totalEquityRow] });
   return sh._finish();
