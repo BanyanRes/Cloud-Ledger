@@ -6880,37 +6880,7 @@ app.get('/api/billcom/_probe-doc/:entity_id/:bill_id', auth, requireEntityAccess
       out.push({ name: c.name, url: c.url, status: r.status, content_type: ct, snippet });
     } catch (e) { out.push({ name: c.name, url: c.url, error: e.message }); }
   }
-  // Legacy v2 API probe: log in separately, then GetDocumentPages for this bill.
-  const v2 = { base: 'https://api.bill.com/api/v2' };
-  try {
-    const pw = billcomDecrypt(cfg.password_enc);
-    const lb = new URLSearchParams({ userName: cfg.username, password: pw, orgId: cfg.org_id, devKey });
-    const lr = await billcomFetch(v2.base + '/Login.json', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: lb.toString() }, 12000);
-    const lj = JSON.parse(await lr.text());
-    v2.login_status = lj.response_status;
-    const v2sid = lj.response_data && lj.response_data.sessionId;
-    v2.have_session = !!v2sid;
-    if (lj.response_status !== 0) v2.login_error = JSON.stringify(lj.response_data).slice(0, 200);
-    if (v2sid) {
-      for (const opt of [{ id: billId }, { id: billId, pageRetrievalOptions: { pageNumbers: [1] } }]) {
-        const gb = new URLSearchParams({ devKey, sessionId: v2sid, data: JSON.stringify(opt) });
-        const gr = await billcomFetch(v2.base + '/GetDocumentPages.json', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: gb.toString() }, 15000);
-        const ct = gr.headers.get('content-type') || '';
-        const buf = Buffer.from(await gr.arrayBuffer());
-        let snip;
-        if (ct.includes('json')) {
-          try {
-            const j = JSON.parse(buf.toString('utf8'));
-            const rd = j.response_data;
-            snip = { response_status: j.response_status, rd_keys: rd && typeof rd === 'object' ? Object.keys(rd) : typeof rd, rd_preview: JSON.stringify(rd).slice(0, 400) };
-          } catch { snip = buf.toString('utf8').slice(0, 200); }
-        } else { snip = { content_type: ct, bytes: buf.length, head_hex: buf.slice(0, 8).toString('hex') }; }
-        (v2.getDocumentPages = v2.getDocumentPages || []).push({ opt, status: gr.status, content_type: ct, snippet: snip });
-      }
-    }
-  } catch (e) { v2.error = e.message; }
-
-  res.json({ bill_id: billId, base, results: out, v2 });
+  res.json({ bill_id: billId, base, results: out });
 });
 
 // Un-sync: remove every CloudLedger journal entry that a Bill.com sync created
