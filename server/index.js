@@ -6923,24 +6923,14 @@ app.get('/api/billcom/_probe-doc/:entity_id/:bill_id', auth, requireEntityAccess
         if (v2.apiEndPoint) hosts.push(String(v2.apiEndPoint).replace(/\/api\/v2.*$/, '').replace(/\/$/, ''));
         hosts.push('https://api.bill.com');
         v2.image_attempts = [];
-        const sep = fileUrl.includes('?') ? '&' : '?';
-        const sid = encodeURIComponent(v2sid), dk = encodeURIComponent(devKey);
         for (const host of hosts) {
-          const variants = [
-            { label: 'query-sid-dk', url: host + fileUrl + sep + 'sessionId=' + sid + '&devKey=' + dk, headers: {} },
-            { label: 'cookie-sid', url: host + fileUrl, headers: { Cookie: 'sessionId=' + v2sid } },
-            { label: 'query+cookie', url: host + fileUrl + sep + 'sessionId=' + sid, headers: { Cookie: 'sessionId=' + v2sid } },
-          ];
-          for (const vr of variants) {
-            try {
-              const ir = await billcomFetch(vr.url, { method: 'GET', headers: vr.headers, redirect: 'manual' }, 20000);
-              const ct = ir.headers.get('content-type') || '';
-              const loc = ir.headers.get('location') || null;
-              const buf = Buffer.from(await ir.arrayBuffer());
-              const isHtml = ct.includes('html');
-              v2.image_attempts.push({ host, variant: vr.label, status: ir.status, content_type: ct, location: loc, bytes: buf.length, head_hex: buf.slice(0, 8).toString('hex'), body_preview: isHtml ? buf.toString('utf8').replace(/\s+/g, ' ').slice(0, 300) : undefined });
-            } catch (e) { v2.image_attempts.push({ host, variant: vr.label, error: e.message }); }
-          }
+          const full = host + fileUrl + (fileUrl.includes('?') ? '&' : '?') + 'sessionId=' + encodeURIComponent(v2sid) + '&devKey=' + encodeURIComponent(devKey);
+          try {
+            const ir = await billcomFetch(full, { method: 'GET', headers: { sessionId: v2sid, devKey } }, 20000);
+            const ct = ir.headers.get('content-type') || '';
+            const buf = Buffer.from(await ir.arrayBuffer());
+            v2.image_attempts.push({ host, status: ir.status, content_type: ct, bytes: buf.length, head: buf.slice(0, 8).toString('latin1'), head_hex: buf.slice(0, 8).toString('hex') });
+          } catch (e) { v2.image_attempts.push({ host, error: e.message }); }
         }
       }
     }
