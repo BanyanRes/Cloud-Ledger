@@ -11326,7 +11326,8 @@ app.get('/api/workpapers/financial-statements/:entity_id/excel', auth, requireEn
     let xlsxOpts = {};
     if (isMidco) {
       const schedules = consolidation.buildScheduleSet(db, consolGroup, asOf, (id, oo) => computeBalances(id, oo));
-      xlsxOpts = { lenderMode: true, schedules, nci };
+      const grouped = financials.groupConsolidatingSchedule(schedules, statements.meta);
+      xlsxOpts = { lenderMode: true, schedules, grouped, nci };
     }
     const buf = await financialsXlsx.buildStatementsWorkbook(statements, xlsxOpts);
     const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);

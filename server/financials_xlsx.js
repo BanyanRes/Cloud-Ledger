@@ -633,58 +633,102 @@ function buildEquity(s) {
   return sh._finish();
 }
 
-// -- Consolidating schedule sheet (multi-column: entities | Total | Elim | Consolidated) --
-// Renders one column per member entity, then a Total, Eliminations, and
-// Consolidated column, from a buildColumns() result (schedule.accounts, each
-// with byEntity/elimination/consolidated). Grouped by balance-sheet section or
-// income-statement type. Numbers are written straight through so they tie to the
-// consolidated face statements by construction.
-function buildConsolidatingSheet(sheetName, titleLines, schedule, columns, kind) {
-  const sh = makeSheet(sheetName);
-  const entIds = columns.map(c => c.entity_id);
-  const colLabels = columns.map(c => c.label);
+// -- Consolidating schedules (grouped to match the consolidated statements) --
+// Consume a financials.groupConsolidatingSchedule() tree so the columns read
+// with the SAME CLA groupings as the consolidated balance sheet and statement of
+// operations, with net income folded into equity and full totals — so every
+// column foots.
+//
+// Column layout: one column per member entity, then Eliminations, then
+// Consolidated (grouped.columns holds the member labels; the two trailing
+// columns are appended here).
+function consolidatingHeaders(grouped) {
+  return [...grouped.columns, 'Eliminations', 'Consolidated'];
+}
+
+function buildConsolidatingBalanceSheet(grouped, titleLines) {
+  const sh = makeSheet('Consolidating BS');
+  const bs = grouped.balanceSheet;
   sh.titleBlock(titleLines);
-  sh.colHeaders([...colLabels, 'Total', 'Eliminations', 'Consolidated']);
-  // Per-account row across all columns.
-  const rowFor = (a) => {
-    const per = entIds.map(id => num((a.byEntity || {})[id]));
-    const total = per.reduce((x, y) => x + y, 0);
-    const elim = num(a.elimination);
-    const cons = num(a.consolidated);
-    return [...per, total, elim, cons];
-  };
-  const accounts = (schedule.accounts || []);
-  // Group: balance sheet by type (Asset/Liability/Equity), income by type
-  // (Revenue then Expense). Within a group, sort by account code so the schedule
-  // reads like the CPA's account-ordered columns.
-  const groupsOrder = kind === 'bs'
-    ? [['Asset', 'Assets'], ['Liability', 'Liabilities'], ['Equity', "Members' Equity"]]
-    : [['Revenue', 'Revenue'], ['Expense', 'Operating Expenses']];
-  const nonZero = (a) => {
-    if (Math.abs(num(a.consolidated)) > 0.005 || Math.abs(num(a.elimination)) > 0.005) return true;
-    return entIds.some(id => Math.abs(num((a.byEntity || {})[id])) > 0.005);
-  };
-  for (const [type, heading] of groupsOrder) {
-    const rowsInGroup = accounts.filter(a => a.type === type && nonZero(a))
-      .sort((x, y) => String(x.code).localeCompare(String(y.code)));
-    if (!rowsInGroup.length) continue;
-    sh.sectionTitle(heading);
+  sh.colHeaders(consolidatingHeaders(grouped));
+  const first = { armed: false };
+  const acctRow = (r, indent) => { const idx = sh.row((r.code ? (String(r.code) + '  ') : '') + (r.name || ''), r.cols.map(num), { indent, dollar: first.armed }); first.armed = false; return idx; };
+
+  const renderSection = (sec) => {
+    sh.row(sec.section, [], { indent: 6, bold: true });
+    const showSubs = sec.subs.length > 1;
     const feed = [];
-    for (const a of rowsInGroup) {
-      const label = (a.code ? (String(a.code) + '  ') : '') + (a.name || '');
-      feed.push(sh.row(label, rowFor(a), { indent: 16 }));
+    for (const su of sec.subs) {
+      if (showSubs) sh.row(su.sub, [], { indent: 16 });
+      const ind = showSubs ? 26 : 16;
+      const rowIdx = su.rows.map(r => acctRow(r, ind));
+      if (showSubs && su.rows.length > 1) feed.push(sh.row('Total ' + su.sub, su.total.map(num), { indent: 20, ruleAbove: true, sumOf: rowIdx }));
+      else feed.push(...rowIdx);
     }
-    // Group total across every column, summed from the detail rows.
-    const totCols = colLabels.map((_, i) => rowsInGroup.reduce((x, a) => x + num((a.byEntity || {})[entIds[i]]), 0));
-    const totTotal = rowsInGroup.reduce((x, a) => x + num((a.byEntity || {})[entIds[0]]) * 0, 0); // placeholder
-    const totAll = [
-      ...totCols,
-      rowsInGroup.reduce((x, a) => x + colLabels.reduce((y, _, i) => y + num((a.byEntity || {})[entIds[i]]), 0), 0),
-      rowsInGroup.reduce((x, a) => x + num(a.elimination), 0),
-      rowsInGroup.reduce((x, a) => x + num(a.consolidated), 0),
-    ];
-    sh.row('Total ' + heading, totAll, { indent: 6, bold: true, ruleAbove: true, double: true, gapAfter: 1, sumOf: feed });
+    return sh.row('Total ' + sec.section, sec.total.map(num), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: feed });
+  };
+
+  // Assets
+  sh.sectionTitle('Assets');
+  first.armed = true;
+  const assetTotals = bs.assetSections.map(renderSection);
+  sh.row('Total Assets', bs.totalAssets.map(num), { indent: 6, bold: true, ruleAbove: true, double: true, gapAfter: 1, dollar: true, sumOf: assetTotals });
+
+  // Liabilities and Members' Equity
+  sh.sectionTitle("Liabilities and Members' Equity");
+  first.armed = true;
+  const liabTotals = bs.liabSections.map(renderSection);
+  const totalLiabRow = sh.row('Total Liabilities', bs.totalLiabilities.map(num), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: liabTotals });
+
+  // Equity: Members' Equity (contributed), Retained Earnings, Net Income (Loss),
+  // then Total Members' Equity and Total Liabilities and Members' Equity.
+  sh.row("Members' Equity", [], { indent: 6, bold: true });
+  const eqFeed = [];
+  for (const r of bs.contributed.rows) eqFeed.push(acctRow(r, 16));
+  if (bs.retained && bs.retained.rows.length) {
+    sh.row('Retained Earnings', [], { indent: 6, bold: true });
+    for (const r of bs.retained.rows) eqFeed.push(acctRow(r, 16));
   }
+  const niRow = sh.row('Net Income (Loss)', bs.netIncome.map(num), { indent: 16 });
+  eqFeed.push(niRow);
+  const totalEqRow = sh.row("Total Members' Equity", bs.totalEquity.map(num), { indent: 6, bold: true, ruleAbove: true, gapAfter: 1, sumOf: eqFeed });
+  sh.row("Total Liabilities and Members' Equity", bs.totalLiabEquity.map(num), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: [totalLiabRow, totalEqRow] });
+  return sh._finish();
+}
+
+function buildConsolidatingIncome(grouped, titleLines) {
+  const sh = makeSheet('Consolidating Income');
+  const inc = grouped.income;
+  sh.titleBlock(titleLines);
+  sh.colHeaders(consolidatingHeaders(grouped));
+  const first = { armed: false };
+  const acctRow = (r, indent) => { const idx = sh.row((r.code ? (String(r.code) + '  ') : '') + (r.name || ''), r.cols.map(num), { indent, dollar: first.armed }); first.armed = false; return idx; };
+  const netFeed = [];
+
+  sh.sectionTitle('Revenue');
+  first.armed = true;
+  const revRows = inc.revenue.rows.map(r => acctRow(r, 16));
+  const totRev = sh.row('Total Revenue', inc.revenue.total.map(num), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: revRows });
+  netFeed.push(totRev);
+
+  sh.sectionTitle('Operating Expenses');
+  const expRows = inc.opex.rows.map(r => acctRow(r, 16));
+  const totOpex = sh.row('Total Operating Expenses', inc.opex.total.map(num), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: expRows });
+  netFeed.push(totOpex);
+
+  if (inc.otherIE) {
+    sh.sectionTitle('Other Income (Expense)');
+    const oieRows = inc.otherIE.rows.map(r => acctRow(r, 16));
+    netFeed.push(sh.row('Total Other Income (Expense)', inc.otherIE.total.map(num), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: oieRows }));
+  }
+  if (inc.incomeTax) {
+    sh.sectionTitle('Income Taxes');
+    const itRows = inc.incomeTax.rows.map(r => acctRow(r, 16));
+    netFeed.push(sh.row('Total Income Taxes', inc.incomeTax.total.map(num), { indent: 6, bold: true, ruleAbove: true, ruleBelow: true, gapAfter: 1, sumOf: itRows }));
+  }
+  // Net Income (Loss) = Revenue - Operating Expenses + Other IE - Income Taxes;
+  // the summand rows carry their signs so a straight SUM ties (value-guarded).
+  sh.row('Net Income (Loss)', inc.netIncome.map(num), { indent: 6, bold: true, ruleAbove: true, double: true, dollar: true, sumOf: netFeed });
   return sh._finish();
 }
 
@@ -800,16 +844,15 @@ async function buildStatementsWorkbook(s, opts) {
   const built = [buildBalanceSheet(s), buildOperations(s)];
   if (!o.lenderMode) { built.push(buildCashFlow(s), buildEquity(s)); }
 
-  // Consolidating schedules (multi-column), when a schedule set is provided.
-  if (o.schedules && o.schedules.columns) {
-    const sc = o.schedules;
+  // Consolidating schedules (multi-column), grouped to match the consolidated
+  // statements. opts.grouped is a financials.groupConsolidatingSchedule() tree.
+  if (o.grouped) {
     const m = s.meta || {};
-    built.push(buildConsolidatingSheet('Consolidating BS',
-      [m.entityName || 'Consolidating Balance Sheet', 'Consolidating Balance Sheet', m.longDate || sc.asOf],
-      sc.balanceSheet, sc.columns, 'bs'));
-    built.push(buildConsolidatingSheet('Consolidating Income',
-      [m.entityName || 'Consolidating Statement of Income', 'Consolidating Statement of Income', m.longDate || sc.asOf],
-      sc.incomeMonth, sc.columns, 'pl'));
+    const asOf = (o.schedules && o.schedules.asOf) || m.asOf;
+    built.push(buildConsolidatingBalanceSheet(o.grouped,
+      [m.entityName || '', 'Consolidating Balance Sheet', m.longDate || asOf]));
+    built.push(buildConsolidatingIncome(o.grouped,
+      [m.entityName || '', 'Consolidating Statement of Income', 'For the Month Ended ' + (m.longDate || asOf)]));
   }
 
   // NCI Calculations tab with live formulas, when NCI figures are provided.

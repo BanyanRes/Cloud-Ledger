@@ -5485,8 +5485,110 @@ async function renderFundStatementsPdf(s, outOffsets) {
 }
 
 
+// Group a consolidating schedule (buildScheduleSet result) into the SAME
+// sectioned structure the face statements and the consolidating PDF use, so any
+// renderer — PDF or Excel — produces identical groupings. Returns a plain data
+// tree (no drawing), with per-column figures already summed. Columns are the
+// member entities in order, then Eliminations, then Consolidated.
+//
+// Balance sheet: Assets / Liabilities / Members' Equity sections (CLA order via
+// bsClassifyFor), Retained Earnings split out, current-year Net Income (Loss)
+// folded into equity as its own line, and Total Members' Equity + Total
+// Liabilities and Members' Equity totals — so every column foots.
+// Income: Revenue / Operating Expenses / Other Income (Expense) / Income Taxes
+// (shared otherIeRoute), with a closing Net Income (Loss) row.
+function groupConsolidatingSchedule(schedules, meta) {
+  const profile = (meta && meta.profile) || 'srn';
+  const cols = schedules.columns || [];
+  const nCols = cols.length + 2;            // members + Eliminations + Consolidated
+  const val = (a, i) => i < cols.length ? ((a.byEntity || {})[cols[i].entity_id] || 0)
+    : (i === cols.length ? (a.elimination || 0) : (a.consolidated || 0));
+  const sumCol = (rows, i) => r2(rows.reduce((x, a) => x + val(a, i), 0));
+  const allCols = (rows) => { const out = []; for (let i = 0; i < nCols; i++) out.push(sumCol(rows, i)); return out; };
+  const byCode = (rows) => rows.slice().sort((a, b) => String(a.code).localeCompare(String(b.code), undefined, { numeric: true }));
+  const nonZero = (a) => { for (let i = 0; i < nCols; i++) if (Math.abs(val(a, i)) > 0.004) return true; return false; };
+  const rowObj = (a) => ({ code: a.code, name: a.name, cols: (function () { const o = []; for (let i = 0; i < nCols; i++) o.push(val(a, i)); return o; })() });
+
+  const subOrderMap = profile === 'banyandev' ? BS_SUB_ORDER_BANYANDEV
+    : profile === 'banyan' ? BS_SUB_ORDER_BANYAN
+    : BS_SUB_ORDER_SRN;
+
+  const groupRows = (rows, sectionOrder) => {
+    const bySec = new Map();
+    for (const a of rows) {
+      const c = bsClassifyFor(profile, a);
+      if (!bySec.has(c.section)) bySec.set(c.section, new Map());
+      const subs = bySec.get(c.section);
+      if (!subs.has(c.sub)) subs.set(c.sub, []);
+      subs.get(c.sub).push(a);
+    }
+    const secNames = [...new Set([...sectionOrder, ...bySec.keys()])].filter(x => bySec.has(x));
+    return secNames.map(section => {
+      const subsMap = bySec.get(section);
+      const order = subOrderMap[section] || [];
+      const subNames = [...new Set([...order, ...subsMap.keys()])].filter(x => subsMap.has(x));
+      const subs = subNames.map(sub => {
+        const r = byCode(subsMap.get(sub));
+        return { sub, rows: r.map(rowObj), total: allCols(r) };
+      });
+      const allInSec = subs.reduce((s2, su) => s2.concat(subsMap.get(su.sub)), []);
+      return { section, subs, total: allCols(allInSec) };
+    });
+  };
+
+  // -- Balance sheet --
+  const acc = (schedules.balanceSheet.accounts || []).filter(nonZero);
+  const assets = acc.filter(a => a.type === 'Asset');
+  const liabs = acc.filter(a => a.type === 'Liability');
+  const equityAll = acc.filter(a => a.type === 'Equity');
+  const rev = acc.filter(a => a.type === 'Revenue'), exp = acc.filter(a => a.type === 'Expense');
+  const niCols = []; for (let i = 0; i < nCols; i++) niCols.push(r2(sumCol(rev, i) - sumCol(exp, i)));
+  const isRE = a => bsClassifyFor(profile, a).sub === 'Retained Earnings';
+  const contrib = byCode(equityAll.filter(a => !isRE(a)));
+  const retained = byCode(equityAll.filter(a => isRE(a)));
+  const equityTotal = []; for (let i = 0; i < nCols; i++) equityTotal.push(r2(sumCol(equityAll, i) + niCols[i]));
+  const leTotal = []; for (let i = 0; i < nCols; i++) leTotal.push(r2(sumCol(liabs, i) + sumCol(equityAll, i) + niCols[i]));
+
+  const balanceSheet = {
+    assetSections: groupRows(assets, BS_ASSET_ORDER),
+    totalAssets: allCols(assets),
+    liabSections: groupRows(liabs, ['Current Liabilities', 'Long Term Liabilities']),
+    totalLiabilities: allCols(liabs),
+    contributed: { rows: contrib.map(rowObj), total: allCols(contrib) },
+    retained: retained.length ? { rows: retained.map(rowObj), total: allCols(retained) } : null,
+    netIncome: niCols,
+    totalEquity: equityTotal,
+    totalLiabEquity: leTotal,
+  };
+
+  // -- Income --
+  const iacc = schedules.incomeMonth.accounts || [];
+  const pl = iacc.filter(a => a.type === 'Revenue' || a.type === 'Expense');
+  const route = (a) => {
+    const r = (typeof otherIeRoute === 'function') ? otherIeRoute(a) : null;
+    if (r && r.bucket === 'otherIncome') return 'oi';
+    if (r && r.bucket === 'otherExpense') return 'oe';
+    if (r && r.bucket === 'incomeTax') return 'it';
+    return a.type === 'Revenue' ? 'rev' : 'exp';
+  };
+  const gr = (k) => byCode(pl.filter(a => route(a) === k));
+  const iRev = gr('rev'), iExp = gr('exp'), iOi = gr('oi'), iOe = gr('oe'), iIt = gr('it');
+  const oiNet = []; for (let i = 0; i < nCols; i++) oiNet.push(r2(sumCol(iOi, i) - sumCol(iOe, i)));
+  const niIncome = []; for (let i = 0; i < nCols; i++) niIncome.push(r2(sumCol(iRev, i) - sumCol(iExp, i) + oiNet[i] - sumCol(iIt, i)));
+  const income = {
+    revenue: { rows: iRev.map(rowObj), total: allCols(iRev) },
+    opex: { rows: iExp.map(rowObj), total: allCols(iExp) },
+    otherIE: (iOi.length || iOe.length) ? { rows: iOi.concat(iOe).map(rowObj), total: oiNet } : null,
+    incomeTax: iIt.length ? { rows: iIt.map(rowObj), total: allCols(iIt) } : null,
+    netIncome: niIncome,
+  };
+
+  return { columns: cols.map(c => c.label), colCount: nCols, balanceSheet, income };
+}
+
 module.exports = {
   buildStatements,
+  groupConsolidatingSchedule,
   renderConsolidatingSchedulesPdf,
   buildTtmPL,
   buildFundStatements,
