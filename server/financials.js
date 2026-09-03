@@ -3163,7 +3163,17 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
           // landscape equity page (pitch is the min inter-column pitch).
           const DOLLAR_PREV_GAP = 12;
           const dollarInset = (Number.isFinite(pitch) ? pitch : 78) - DOLLAR_PREV_GAP;
-          const dx = cols[i] - dollarInset - valueInset;
+          // Keep a constant space between the '$' and the figure regardless of
+          // the figure's width: a wide total (e.g. $246,662,703.76) fills most
+          // of the column and would otherwise touch the sign, while a narrow
+          // one leaves a gap. Anchor the sign a fixed gap LEFT of the number's
+          // own left edge, but never further right than the column anchor above
+          // (so a very wide figure still can't collide with the sign).
+          const DOLLAR_NUM_GAP = 4;   // space between '$' and the figure
+          const dollarW = font.widthOfTextAtSize('$', FS.row);
+          const numLeft = cols[i] - w - valueInset;
+          const anchorDx = cols[i] - dollarInset - valueInset;
+          const dx = Math.min(anchorDx, numLeft - DOLLAR_NUM_GAP - dollarW);
           page.drawText('$', { x: dx, y: yNum, size: FS.row, font });
         }
       });
