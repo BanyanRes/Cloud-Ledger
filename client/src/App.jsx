@@ -1432,8 +1432,11 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
       const capNote=(round>=MAX_ROUNDS)?' (stopped at batch limit \u2014 click Sync Now again to continue)':'';
       setSyncMsg('Done in '+round+' batch'+(round===1?'':'es')+'. Bills: '+tot.bs+' posted, '+tot.be+' errors, '+(lb.skipped||0)+' skipped. Payments: '+tot.ps+' posted, '+tot.pe+' errors, '+(lp.skipped||0)+' skipped.'+(agingOv.size?(' '+agingOv.size+' already in A/P aging.'):'')+capNote);
       loadSyncLogs();
-    }catch(e){setSyncErr('Sync failed after '+round+' batch'+(round===1?'':'es')+': '+e.message+(tot.bs?(' ('+tot.bs+' bills already posted before the error)'):''));}
+    }catch(e){setSyncErr('Sync failed after '+round+' batch'+(round===1?'':'es')+': '+e.message+(tot.bs?(' ('+tot.bs+' bills already posted before the error)'):''));setSyncing(false);return;}
     setSyncing(false);
+    // Hands-off: after a successful sync, automatically pull each newly-synced
+    // bill's invoice PDF from Bill.com (OCR'd) and attach it to its journal entry.
+    if(cfg&&cfg.configured) runAttachInvoices();
   };
 
   // Load the CL project list (for the paused-department dropdowns) the first time
@@ -1751,7 +1754,6 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
             <button style={S.btnS} onClick={loadSyncLogs} disabled={syncLogsLoading||syncing}>{syncLogsLoading?'Loading...':'Refresh Log'}</button>
             <button style={{...S.btnS,color:'#b91c1c',borderColor:'#fca5a5'}} onClick={runUnsync} disabled={syncing||unsyncing}>{unsyncing?'Un-syncing...':'Un-sync'}</button>
             <button style={S.btnP} onClick={runSync} disabled={syncing||unsyncing}>{syncing?'Syncing...':'Sync Now'}</button>
-            {cfg&&cfg.configured&&<button style={S.btnS} onClick={runAttachInvoices} disabled={attaching||syncing||unsyncing} title='Download each bill&apos;s invoice PDF from Bill.com (OCR&apos;d) and attach it to the journal entry'>{attaching?'Attaching…':'Attach invoices'}</button>}
             {attachMsg&&<span style={{fontSize:12,color:T.textMuted,marginLeft:4}}>{attachMsg}</span>}
           </div>
         </div>
