@@ -345,7 +345,7 @@ function buildBalanceSheet(s) {
     if (_ca || _na) {
       _faceLinks = [];
       const CURc = sh._amt0;
-      if (_ca && _ca.totalMembersEquity && _ca.nci) _faceLinks.push({ r: _memRow, c: CURc, formula: _ca.totalMembersEquity + '-' + _ca.nci });
+      if (_ca && _ca.totalMembersEquity && _ca.nci) { let _mf = _ca.totalMembersEquity + '-' + _ca.nci; if (_ca.retainedEarnings) _mf += '-(' + _ca.retainedEarnings + ')'; if (_ca.netIncome) _mf += '-(' + _ca.netIncome + ')'; _faceLinks.push({ r: _memRow, c: CURc, formula: _mf }); }
       if (_ca && _ca.retainedEarnings) _faceLinks.push({ r: _reRow, c: CURc, formula: _ca.retainedEarnings });
       if (_ca && _ca.netIncome) _faceLinks.push({ r: _niRow, c: CURc, formula: _ca.netIncome });
       if (_na && _na.total) _faceLinks.push({ r: _nciRow, c: CURc, formula: _na.total });
