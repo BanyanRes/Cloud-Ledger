@@ -946,6 +946,30 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
       nci_label: nci.nciLabel,
     });
   }
+  // June-2026-only intercompany timing elimination ($625). The Buna ↔ Silsbee
+  // due-to/due-from pair is out of sync only at 6/30/2026 because Buna's
+  // offsetting entry (JE99) posts 7/1/2026 — one day after cutoff. Rather than
+  // book a correcting entry that would then reverse, the June consolidated
+  // balance sheet removes the $625 from accounts payable so it cross-foots;
+  // the item self-corrects in the September package. Scoped strictly to a June
+  // 2026 balance-sheet (as_of) window on the Midco group; a no-op otherwise.
+  {
+    const asOfJune = o && o.as_of && String(o.as_of).slice(0, 7) === '2026-06';
+    const isMidco = group && String(group.scope_key || '') === 'midco';
+    if (asOfJune && isMidco) {
+      // Reduce accounts payable (20000) on Buna by $625. AP is a positive-
+      // credit liability, so a positive adjustment amount lowers the
+      // consolidated liability, removing the unmatched timing balance.
+      const bunaMember = (membersOf(db, group.id) || []).find(m => {
+        const e = db.prepare('SELECT name, code FROM entities WHERE id=?').get(m.entity_id);
+        return e && (/buna/i.test(e.name || '') || String(e.code) === 'CLRBUNAP');
+      });
+      if (bunaMember) {
+        adjustments.push({ entity_id: bunaMember.entity_id, code: '20000', type: 'Liability', amount: 625.00 });
+      }
+    }
+  }
+
   // Collapse to one figure per (entity, account). The account's type travels
   // with it so a caller can render the entry as a debit or a credit — removing
   // a positive asset is a credit, removing positive equity is a debit.
