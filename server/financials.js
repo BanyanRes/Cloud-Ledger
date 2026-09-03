@@ -5556,6 +5556,25 @@ function groupConsolidatingSchedule(schedules, meta) {
   const isRE = a => bsClassifyFor(profile, a).sub === 'Retained Earnings';
   const contrib = byCode(equityAll.filter(a => !isRE(a)));
   const retained = byCode(equityAll.filter(a => isRE(a)));
+  // NCI presentation transform (Midco), CONSOLIDATED column only. The engine
+  // parks BOTH the NCI share of retained earnings AND the NCI share of net
+  // income on retained earnings (39000), so the raw RE is net of both. The
+  // face statements show RE net of only the RE share and carry the net-income
+  // share on the net-income line; match that so the schedule ties to the face.
+  // Add the NI share back to the consolidated RE line and take it off the
+  // consolidated net-income line. Total equity is unchanged (a move between two
+  // equity lines), so every column still foots; member and Eliminations columns
+  // are untouched.
+  {
+    const CONS = nCols - 1;
+    const bsNciRule = (schedules.balanceSheet.rules || []).find(r => r.type === 'nci');
+    const niShare = bsNciRule ? r2(bsNciRule.ni_reclass || 0) : 0;
+    if (Math.abs(niShare) > 0.004 && retained.length) {
+      const tgt = retained[retained.length - 1];
+      tgt.consolidated = r2((tgt.consolidated != null ? tgt.consolidated : 0) + niShare);
+      niCols[CONS] = r2(niCols[CONS] - niShare);
+    }
+  }
   const equityTotal = []; for (let i = 0; i < nCols; i++) equityTotal.push(r2(sumCol(equityAll, i) + niCols[i]));
   const leTotal = []; for (let i = 0; i < nCols; i++) leTotal.push(r2(sumCol(liabs, i) + sumCol(equityAll, i) + niCols[i]));
 
