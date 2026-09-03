@@ -965,7 +965,7 @@ function computeEliminations(db, group, o, computeBalances, rowsByEntity) {
         return e && (/buna/i.test(e.name || '') || String(e.code) === 'CLRBUNAP');
       });
       if (bunaMember) {
-        adjustments.push({ entity_id: bunaMember.entity_id, code: '20000', type: 'Liability', amount: 625.00 });
+        adjustments.push({ entity_id: bunaMember.entity_id, code: '20000', type: 'Liability', amount: -625.00 });
       }
     }
   }
