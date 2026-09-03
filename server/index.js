@@ -6922,7 +6922,10 @@ app.post('/api/billcom/attach-invoices/:entity_id', auth, requireEntityAccess('e
   let where = ''; const params = [eid];
   if (from) { where += ' AND je.date >= ?'; params.push(from); }
   if (to) { where += ' AND je.date <= ?'; params.push(to); }
-  const done = new Set(db.prepare("SELECT billcom_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'invoice_doc' AND status = 'success'").all(eid).map(r => String(r.billcom_id)));
+  // Already handled: attached ('success') OR checked and found no document in
+  // Bill.com ('skip'). Both are excluded so a repeated (offset 0) backfill loop
+  // terminates instead of re-checking no-document bills forever.
+  const done = new Set(db.prepare("SELECT billcom_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'invoice_doc' AND status IN ('success','skip')").all(eid).map(r => String(r.billcom_id)));
   const allSynced = db.prepare(
     "SELECT bl.billcom_id, bl.cl_entry_id, bl.invoice_number, je.date, je.entry_num " +
     "FROM billcom_sync_log bl JOIN journal_entries je ON je.id = bl.cl_entry_id " +
