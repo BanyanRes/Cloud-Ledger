@@ -1321,6 +1321,8 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
   const[clProjEntity,setClProjEntity]=useState(null);
   const[deptChoice,setDeptChoice]=useState({});   // billcom_dept_id -> selected cl project id (string)
   const[resolveBusy,setResolveBusy]=useState('');
+  const[attaching,setAttaching]=useState(false);
+  const[attachMsg,setAttachMsg]=useState('');
 
   const loadMapping=useCallback(async()=>{
     if(!selectedEntity)return;
@@ -1465,6 +1467,28 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
     setResolveBusy('__all__');
     try{ await api.saveBillcomDimensionMaps(selectedEntity,{projects:rows}); setResolveBusy(''); await runSync(); }
     catch(e){ setSyncErr('Could not accept suggestions: '+e.message); setResolveBusy(''); }
+  };
+
+  // Pull each synced bill's invoice PDF from Bill.com (OCR'd, searchable) and
+  // attach it to its journal entry. Loops the batched endpoint until nothing is
+  // left; each pass re-queries what still needs attaching, so offset stays 0.
+  const runAttachInvoices=async()=>{
+    if(!selectedEntity)return;
+    setAttaching(true);setAttachMsg('Checking Bill.com for invoices…');setSyncErr('');
+    let attached=0,noDoc=0,errs=0,rounds=0;const MAX=60;
+    try{
+      while(rounds<MAX){
+        rounds++;
+        const r=await api.attachBillcomInvoices(selectedEntity,{limit:6});
+        if(r&&r.error){ setSyncErr(r.error); break; }
+        attached+=(r.attached||0);noDoc+=(r.no_document||0);errs+=((r.errors||[]).length);
+        setAttachMsg('Attaching invoices… '+attached+' attached'+(noDoc?', '+noDoc+' had no document':'')+(r.total_needing?(' ('+Math.max(0,r.total_needing-(r.attached||0)-(r.no_document||0))+' to go)'):''));
+        if(!r.examined||(r.attached===0&&r.no_document===0&&(!r.errors||!r.errors.length))) break; // no progress -> stop
+        if(r.total_needing!=null&&r.total_needing<=((r.attached||0)+(r.no_document||0))) break;
+      }
+      setAttachMsg('Done. '+attached+' invoice'+(attached===1?'':'s')+' attached'+(noDoc?', '+noDoc+' bill'+(noDoc===1?'':'s')+' had no document in Bill.com':'')+(errs?', '+errs+' error'+(errs===1?'':'s'):'')+'.');
+    }catch(e){ setSyncErr('Attach invoices failed: '+e.message+(attached?(' ('+attached+' already attached)'):'')); }
+    setAttaching(false);
   };
 
   const runUnsync=async()=>{
@@ -1727,6 +1751,8 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
             <button style={S.btnS} onClick={loadSyncLogs} disabled={syncLogsLoading||syncing}>{syncLogsLoading?'Loading...':'Refresh Log'}</button>
             <button style={{...S.btnS,color:'#b91c1c',borderColor:'#fca5a5'}} onClick={runUnsync} disabled={syncing||unsyncing}>{unsyncing?'Un-syncing...':'Un-sync'}</button>
             <button style={S.btnP} onClick={runSync} disabled={syncing||unsyncing}>{syncing?'Syncing...':'Sync Now'}</button>
+            {selectedEntity===41&&<button style={S.btnS} onClick={runAttachInvoices} disabled={attaching||syncing||unsyncing} title='Download each bill&apos;s invoice PDF from Bill.com (OCR&apos;d) and attach it to the journal entry'>{attaching?'Attaching…':'Attach invoices'}</button>}
+            {attachMsg&&<span style={{fontSize:12,color:T.textMuted,marginLeft:4}}>{attachMsg}</span>}
           </div>
         </div>
 

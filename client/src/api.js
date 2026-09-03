@@ -211,6 +211,7 @@ export const api = {
   autoBillcomDimensionMaps: (eid) => request('/billcom/dimension-maps/' + eid + '/auto', { method: 'POST', body: {} }),
   saveBillcomDimensionMaps: (eid, body) => request('/billcom/dimension-maps/' + eid, { method: 'PUT', body }),
   retagBillcomProjects: (eid, body) => request('/billcom/retag-projects/' + eid, { method: 'POST', body: body || {} }),
+  attachBillcomInvoices: (eid, body) => request('/billcom/attach-invoices/' + eid, { method: 'POST', body: body || {} }),
   getGLDetail: (eid, opts = {}) => {
     const p = [];
     if (opts.from) p.push('from=' + opts.from);
