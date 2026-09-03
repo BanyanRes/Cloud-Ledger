@@ -10502,7 +10502,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/preview', auth, requir
     const period = ((req.body && req.body.period) || (req.query && req.query.period) || 'monthly');
     if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
     const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
-    const consolGroup = consolidation.groupForEntity(db, Number(eid));
+    const consolGroup = consolidation.groupForEntity(db, Number(eid), { membersRouteToParent: false });
     const consolParent = consolGroup ? db.prepare('SELECT name, code FROM entities WHERE id=?').get(consolGroup.parent_entity_id) : null;
     const isConsolidated = !!(consolGroup && consolParent && consolidation.scopeKeyFor(consolParent));
     const getBalances = isConsolidated
@@ -11187,7 +11187,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       // consolidated column (parent + members + operating TB - eliminations),
       // titled "Consolidated ..." under the PARENT's name, with the
       // consolidating schedules appended.
-      const consolGroup = consolidation.groupForEntity(db, Number(eid));
+      const consolGroup = consolidation.groupForEntity(db, Number(eid), { membersRouteToParent: false });
       const consolParent = consolGroup ? db.prepare('SELECT name, code FROM entities WHERE id=?').get(consolGroup.parent_entity_id) : null;
       const isConsolidated = !!(consolGroup && consolParent && consolidation.scopeKeyFor(consolParent));
       const fsEntityName = isConsolidated ? consolParent.name : entityName;
@@ -11309,7 +11309,7 @@ app.get('/api/workpapers/financial-statements/:entity_id/excel', auth, requireEn
     const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
     const entityName = ent ? ent.name : ('Entity ' + eid);
     const entityCode = ent ? ent.code : '';
-    const consolGroup = consolidation.groupForEntity(db, Number(eid));
+    const consolGroup = consolidation.groupForEntity(db, Number(eid), { membersRouteToParent: false });
     const consolParent = consolGroup ? db.prepare('SELECT name, code FROM entities WHERE id=?').get(consolGroup.parent_entity_id) : null;
     const isConsolidated = !!(consolGroup && consolParent && consolidation.scopeKeyFor(consolParent));
     const fsEntityName = isConsolidated ? consolParent.name : entityName;

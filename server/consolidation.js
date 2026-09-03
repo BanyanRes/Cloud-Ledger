@@ -475,12 +475,24 @@ function groupForParent(db, parentEntityId) {
 // ledger members. Lets a user generate the consolidated package from the
 // development entity they work in (e.g. HP Property Owner) and get the parent-
 // titled group package, not that member's standalone statements.
-function groupForEntity(db, entityId) {
+// opts.membersRouteToParent (default true): when a NON-parent member is passed,
+// resolve to the group so the member generates the consolidated package. This
+// suits Braker/HP, whose members are development ledgers never filed on their
+// own. For groups whose members ARE standalone reporting entities (Midco: Buna,
+// Silsbee, CLIP, SRN each need their own statements), pass false so a member
+// selected on its own renders standalone and only the parent yields the
+// consolidated package.
+function groupForEntity(db, entityId, opts) {
+  const o = opts || {};
   const asParent = groupForParent(db, entityId);
   if (asParent) return asParent;
   const mem = db.prepare('SELECT group_id FROM consol_members WHERE entity_id = ?').get(entityId);
   if (!mem) return null;
-  return db.prepare('SELECT * FROM consol_groups WHERE id = ?').get(mem.group_id);
+  const grp = db.prepare('SELECT * FROM consol_groups WHERE id = ?').get(mem.group_id);
+  // Midco members are standalone entities: don't sweep them into the
+  // consolidated package when selected individually.
+  if (grp && String(grp.scope_key || '') === 'midco' && o.membersRouteToParent === false) return null;
+  return grp;
 }
 
 function membersOf(db, groupId) {
