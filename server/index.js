@@ -6834,6 +6834,42 @@ app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id
   res.json({ logs: rows });
 });
 
+// TEMP diagnostic: confirm the supported v3 document endpoints for a bill.
+// GET /v3/documents/bills/{billId} -> list w/ downloadLink; then GET downloadLink.
+// Admin-only, read-only, returns metadata only (no file bytes). Remove after.
+app.get('/api/billcom/_probe-doc2/:entity_id/:bill_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const billId = String(req.params.bill_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(eid);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
+  let session, devKey, base;
+  try {
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    base = cfg.api_base_url || BILLCOM_BASE_URLS.production;
+    session = await billcomLogin({ username: cfg.username, password: billcomDecrypt(cfg.password_enc), orgId: cfg.org_id, devKey, baseUrl: base });
+  } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
+  const H = { sessionId: session.sessionId, devKey, Accept: 'application/json' };
+  const out = { billId, base };
+  try {
+    const lr = await billcomFetch(base + '/documents/bills/' + encodeURIComponent(billId), { method: 'GET', headers: H }, 15000);
+    out.list_status = lr.status;
+    const lj = JSON.parse(await lr.text());
+    out.list_shape = Array.isArray(lj) ? { array_len: lj.length, first: lj[0] } : (lj.results ? { results_len: lj.results.length, first: lj.results[0] } : lj);
+    const docs = Array.isArray(lj) ? lj : (lj.results || []);
+    const dl = docs[0] && (docs[0].downloadLink || docs[0].url);
+    out.first_download_link = dl || null;
+    if (dl) {
+      const full = /^https?:/i.test(dl) ? dl : (base.replace(/\/connect\/v3.*$/, '') + dl);
+      out.download_url_used = full.slice(0, 120);
+      const dr = await billcomFetch(full, { method: 'GET', headers: { sessionId: session.sessionId, devKey } }, 20000);
+      const ct = dr.headers.get('content-type') || '';
+      const buf = Buffer.from(await dr.arrayBuffer());
+      out.download = { status: dr.status, content_type: ct, bytes: buf.length, head: buf.slice(0, 5).toString('latin1'), is_pdf: buf.slice(0, 5).toString('latin1') === '%PDF-' };
+    }
+  } catch (e) { out.error = e.message; }
+  res.json(out);
+});
+
 // Un-sync: remove every CloudLedger journal entry that a Bill.com sync created
 // for this entity, and clear the entity's sync log so a subsequent (corrected)
 // sync re-pulls from scratch. Scoped STRICTLY to entries recorded in
