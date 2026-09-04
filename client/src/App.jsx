@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo, Fragment } from 'react';
 import { api } from './api';
+import { createPortal } from 'react-dom';
 import * as XLSX from 'xlsx';
 
 const fmt = n => { const v = Math.abs(n); const s = v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return n < 0 ? '(' + s + ')' : s; };
@@ -268,7 +269,7 @@ const NI = { dashboard:'\u25a3', journal:'\u270e', coa:'\u2630', ledger:'\u2261'
 // order ("chase 120" finds "10191 - CHASE Entity 120 Odyssey"). Arrow keys move the
 // highlight, Enter/Tab take it, Escape reverts.
 function AccountAutocomplete({accounts,value,onChange,placeholder,exclude,style,autoFocus,clearable}){
-  const[q,setQ]=useState('');const[open,setOpen]=useState(false);const[hi,setHi]=useState(0);const[placement,setPlacement]=useState('down');
+  const[q,setQ]=useState('');const[open,setOpen]=useState(false);const[hi,setHi]=useState(0);const[menu,setMenu]=useState(null);
   const ref=useRef(null);const inputRef=useRef(null);const listRef=useRef(null);
   const sel=accounts.find(a=>a.code===value);
   const filtered=useMemo(()=>{
@@ -285,11 +286,21 @@ function AccountAutocomplete({accounts,value,onChange,placeholder,exclude,style,
     });
     return out.sort((x,y)=>x.rank-y.rank||String(x.a.code).localeCompare(String(y.a.code))).map(x=>x.a);
   },[accounts,q,exclude]);
-  useEffect(()=>{const h=e=>{if(ref.current&&!ref.current.contains(e.target)){setOpen(false);setQ('');}};document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h);},[]);
+  useEffect(()=>{const h=e=>{const inAnchor=ref.current&&ref.current.contains(e.target);const inList=listRef.current&&listRef.current.contains(e.target);if(!inAnchor&&!inList){setOpen(false);setQ('');}};document.addEventListener('mousedown',h);return()=>document.removeEventListener('mousedown',h);},[]);
   useEffect(()=>{setHi(0);},[q,open]);
   useEffect(()=>{if(!open||!listRef.current)return;const el=listRef.current.children[hi];if(el&&el.scrollIntoView)el.scrollIntoView({block:'nearest'});},[hi,open]);
-  // Decide whether to open the dropdown upward or downward based on available space
-  const computePlacement=()=>{if(!inputRef.current)return;const r=inputRef.current.getBoundingClientRect();const below=window.innerHeight-r.bottom;const above=r.top;const desired=340;setPlacement(below<desired&&above>below?'up':'down');};
+  // The list renders in a portal with fixed positioning so no scrollable ancestor
+  // (the JE line table, a modal body) can clip it. Anchor to the input's viewport
+  // rect and cap the height to the space actually available on that side.
+  const computePlacement=()=>{if(!inputRef.current)return;const r=inputRef.current.getBoundingClientRect();
+    const GAP=4,EDGE=8,DESIRED=340;
+    const below=window.innerHeight-r.bottom-GAP-EDGE,above=r.top-GAP-EDGE;
+    const up=below<Math.min(DESIRED,above)&&above>below;
+    const maxH=Math.max(120,Math.min(DESIRED,up?above:below));
+    const left=Math.max(EDGE,Math.min(r.left,window.innerWidth-EDGE-Math.max(r.width,240)));
+    setMenu({left,top:r.bottom+GAP,bottom:window.innerHeight-r.top+GAP,width:r.width,maxH,up});};
+  // Keep the fixed list glued to the input while anything scrolls or the window resizes.
+  useEffect(()=>{if(!open)return;const h=()=>computePlacement();window.addEventListener('scroll',h,true);window.addEventListener('resize',h);return()=>{window.removeEventListener('scroll',h,true);window.removeEventListener('resize',h);};},[open]);
   const pick=(a,blur)=>{onChange(a.code);setOpen(false);setQ('');if(blur&&inputRef.current)inputRef.current.blur();};
   const onKey=e=>{
     if(e.key==='ArrowDown'){e.preventDefault();if(!open){computePlacement();setOpen(true);}else setHi(h=>Math.min(h+1,filtered.length-1));return;}
@@ -308,12 +319,12 @@ function AccountAutocomplete({accounts,value,onChange,placeholder,exclude,style,
       onKeyDown={onKey}/>
     {clearable&&value&&!open&&<button type="button" title="Clear" onClick={()=>onChange('')}
       style={{position:'absolute',right:4,top:'50%',transform:'translateY(-50%)',border:'none',background:'transparent',color:T.textMuted,cursor:'pointer',fontSize:14,lineHeight:1,padding:'0 4px'}}>&times;</button>}
-    {open&&<div ref={listRef} style={{position:'absolute',...(placement==='up'?{bottom:'100%',marginBottom:4}:{top:'100%',marginTop:4}),left:0,minWidth:'100%',width:'max-content',maxWidth:520,background:'#fff',border:'1px solid '+T.border,borderRadius:T.radiusSm,maxHeight:340,overflowY:'auto',zIndex:50,boxShadow:T.shadowLg}}>
+    {open&&menu&&createPortal(<div ref={listRef} style={{position:'fixed',left:menu.left,...(menu.up?{bottom:menu.bottom}:{top:menu.top}),minWidth:menu.width,width:'max-content',maxWidth:520,background:'#fff',border:'1px solid '+T.border,borderRadius:T.radiusSm,maxHeight:menu.maxH,overflowY:'auto',zIndex:1000,boxShadow:T.shadowLg}}>
       {filtered.length===0
         ?<div style={{padding:'8px 12px',fontSize:12,color:T.textMuted}}>No account matches “{q}”</div>
         :filtered.map((a,idx)=><div key={a.code} style={{padding:'8px 12px',cursor:'pointer',fontSize:12,display:'flex',justifyContent:'space-between',gap:12,whiteSpace:'nowrap',background:idx===hi?T.bgHover:(a.code===value?T.accentDim:'transparent')}}
           onMouseDown={e=>e.preventDefault()} onClick={()=>pick(a,true)} onMouseEnter={()=>setHi(idx)}>
-          <span><b style={{color:T.textBright}}>{a.code}</b> <span style={{color:T.textMuted}}>{a.name}</span></span><span style={S.tag(a.type)}>{a.type}</span></div>)}</div>}</div>);}
+          <span><b style={{color:T.textBright}}>{a.code}</b> <span style={{color:T.textMuted}}>{a.name}</span></span><span style={S.tag(a.type)}>{a.type}</span></div>)}</div>,document.body)}</div>);}
 
 // ─── Auth ───
 function AuthScreen({onLogin}){const[mode,setMode]=useState('login');const[email,setEmail]=useState('');const[pw,setPw]=useState('');const[name,setName]=useState('');const[confirmPw,setConfirmPw]=useState('');const[role,setRole]=useState('Accountant');
