@@ -440,7 +440,8 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
     :projects.map(pr=>({v:'project:'+pr.turnkey_project_id,label:'Project — '+pr.project_code+' — '+pr.project_name}));
   const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
   const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
-  const lineDimValue=l=>l.project_id?'project:'+l.project_id:l.location_id?'location:'+l.location_id:l.class_id?'class:'+l.class_id:'';
+  const _dimId=v=>{const s=String(v);const m=/^(\d+)\.0+$/.exec(s);return m?m[1]:s;};
+  const lineDimValue=l=>l.project_id?'project:'+_dimId(l.project_id):l.location_id?'location:'+_dimId(l.location_id):l.class_id?'class:'+_dimId(l.class_id):'';
   const setLineDim=(i,val)=>{
     if(val==='__new__'){addProjectInline(i);return;}
     const[kind,id]=val?val.split(':'):['',''];
@@ -2235,7 +2236,8 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
     :projects.map(pr=>({v:'project:'+pr.turnkey_project_id,label:'Project — '+pr.project_code+' — '+pr.project_name}));
   const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
   const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
-  const lineDimValue=l=>l.project_id?'project:'+l.project_id:l.location_id?'location:'+l.location_id:l.class_id?'class:'+l.class_id:'';
+  const _dimId=v=>{const s=String(v);const m=/^(\d+)\.0+$/.exec(s);return m?m[1]:s;};
+  const lineDimValue=l=>l.project_id?'project:'+_dimId(l.project_id):l.location_id?'location:'+_dimId(l.location_id):l.class_id?'class:'+_dimId(l.class_id):'';
   const setLineDim=(i,val)=>{
     if(val==='__new__'){addProjectInline(i);return;}
     const[kind,id]=val?val.split(':'):['',''];
