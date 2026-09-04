@@ -1813,6 +1813,14 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
           <button style={{...S.btnS,marginTop:4}} onClick={()=>{setTab('mapping');if(cfg&&cfg.configured)loadMapping();}}>Open Account Mapping tab</button>
         </div>;})()}
 
+        {syncResult&&syncResult.bills&&syncResult.bills.auto_linked&&syncResult.bills.auto_linked.length>0&&(()=>{
+          const al=syncResult.bills.auto_linked;
+          return <div style={{padding:'10px 12px',marginBottom:14,background:'#ecfdf5',border:'1px solid #a7f3d0',borderRadius:T.radiusSm}}>
+            <div style={{fontSize:13,fontWeight:600,color:'#065f46',marginBottom:4}}>Auto-linked {al.length} new department{al.length===1?'':'s'} to a matching project</div>
+            <div style={{fontSize:12,color:'#065f46'}}>{al.map((a,i)=>(<span key={a.billcom_dept_id}>{i>0?', ':''}{(a.billcom_dept_name||a.billcom_dept_id)} → {a.cl_project_name||('project '+a.cl_project_id)}</span>))}</div>
+            <div style={{fontSize:11,color:'#047857',marginTop:4}}>Posted automatically because the Bill.com department name matched exactly one CloudLedger project. The mapping is saved, so future bills from these map on their own.</div>
+          </div>;
+        })()}
         {syncResult&&syncResult.bills&&syncResult.bills.paused_projects&&syncResult.bills.paused_projects.length>0&&(()=>{
           const pp=syncResult.bills.paused_projects;
           const nb=pp.reduce((s,d)=>s+((d.bills||[]).length),0);

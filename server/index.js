@@ -7414,6 +7414,27 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     } catch (e) { /* names fall back to the id */ }
   };
 
+  // Level-1 auto-link (Jimmy 2026-09-04): when a bill carries a Bill.com department
+  // we don't have mapped, but its name/code matches EXACTLY one existing CL project
+  // (suggestProject's unambiguous hit), that is not a guess — link it now, persist the
+  // mapping so every future sync skips straight through, and let the bill post. Only a
+  // department with NO confident match (unknown name or an ambiguous one that two CL
+  // projects both answer to) is still paused for a human to resolve.
+  const _autoLinked = [];
+  const _insProjMap = db.prepare('INSERT INTO billcom_project_map (entity_id, billcom_dept_id, billcom_dept_name, cl_project_id, created_at) VALUES (?,?,?,?,?) ON CONFLICT(entity_id, billcom_dept_id) DO UPDATE SET cl_project_id=excluded.cl_project_id, billcom_dept_name=excluded.billcom_dept_name');
+  const autoLinkDept = async (deptId) => {
+    if (projMap.has(deptId)) return projMap.get(deptId) || null;
+    await ensureDeptNames();
+    const dn = (_deptNameById && _deptNameById.get(deptId)) || '';
+    const sug = suggestProject(dn);
+    if (!sug || !sug.id) return null; // unknown or ambiguous -> leave for the pause path
+    try { _insProjMap.run(entityId, deptId, dn || null, sug.id, new Date().toISOString()); } catch (e) {}
+    projMap.set(deptId, sug.id);
+    _autoLinked.push({ billcom_dept_id: deptId, billcom_dept_name: dn, cl_project_id: sug.id, cl_project_name: sug.name || null });
+    console.log('[billcom sync] entity ' + entityId + ': auto-linked department "' + (dn || deptId) + '" -> CL project ' + sug.id + ' (' + (sug.name || '') + ')');
+    return sug.id;
+  };
+
   let session;
   try {
     const password = billcomDecrypt(cfg.password_enc);
@@ -7847,7 +7868,14 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       if (deptId) {
         if (projMap.has(deptId)) projId = projMap.get(deptId) || null;
         else if (projSkip.has(deptId)) projId = null;
-        else billUnresolvedDepts.add(deptId);
+        else {
+          // Level-1: try to auto-link an unrecognized department to an exactly-
+          // matching CL project. A confident match posts now; no match / ambiguous
+          // falls through to the pause path.
+          const _linked = await autoLinkDept(deptId);
+          if (_linked) projId = _linked;
+          else billUnresolvedDepts.add(deptId);
+        }
       }
       debitLines.push({
         account_code: mapping.cl_account_code, debit: amt, credit: 0,
@@ -7986,6 +8014,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   if (pausedByDept.size) {
     result.bills.paused_projects = [...pausedByDept.values()].sort((a, b) => b.bills.length - a.bills.length);
   }
+  if (_autoLinked.length) result.bills.auto_linked = _autoLinked;
   result.bills.deleted = 0;
   const liveIds = new Set(bills.map(b => String(pick(b, 'id') || '')).filter(Boolean));
   {
