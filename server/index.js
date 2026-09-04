@@ -10501,9 +10501,9 @@ app.post('/api/workpapers/financial-statements/:entity_id/preview', auth, requir
     const asOf = (req.body && req.body.as_of) || (req.query && req.query.as_of);
     const period = ((req.body && req.body.period) || (req.query && req.query.period) || 'monthly');
     if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
-    const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
+    const ent = db.prepare('SELECT name, code, entity_type FROM entities WHERE id=?').get(eid);
     const consolGroup = consolidation.groupForEntity(db, Number(eid), { membersRouteToParent: false });
-    const consolParent = consolGroup ? db.prepare('SELECT name, code FROM entities WHERE id=?').get(consolGroup.parent_entity_id) : null;
+    const consolParent = consolGroup ? db.prepare('SELECT name, code, entity_type FROM entities WHERE id=?').get(consolGroup.parent_entity_id) : null;
     const isConsolidated = !!(consolGroup && consolParent && consolidation.scopeKeyFor(consolParent));
     const getBalances = isConsolidated
       ? (o) => Promise.resolve(consolidation.consolidatedBalances(db, consolGroup, o, (id, oo) => computeBalances(id, oo)))
@@ -10512,7 +10512,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/preview', auth, requir
     // (Midco). Null for Braker / HP. Drives the consolidated equity split and
     // the 'Less: NCI' statement-of-operations line.
     const nci = isConsolidated ? consolidation.nciFigures(db, consolGroup, asOf, period, (id, oo) => computeBalances(id, oo)) : null;
-    const s = await financials.buildStatements(getBalances, { asOf, period, entityName: isConsolidated ? consolParent.name : (ent ? ent.name : ('Entity ' + eid)), entityCode: isConsolidated ? (consolParent.code || '') : (ent ? ent.code : ''), isConsolidated, nci });
+    const s = await financials.buildStatements(getBalances, { asOf, period, entityName: isConsolidated ? consolParent.name : (ent ? ent.name : ('Entity ' + eid)), entityCode: isConsolidated ? (consolParent.code || '') : (ent ? ent.code : ''), entityType: isConsolidated ? (consolParent.entity_type || '') : (ent ? ent.entity_type : ''), isConsolidated, nci });
     res.json({
       meta: s.meta,
       checks: s.checks,
@@ -11177,7 +11177,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       const asOf = req.body.as_of;
       const period = req.body.period || 'monthly';
       if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
-      const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
+      const ent = db.prepare('SELECT name, code, entity_type FROM entities WHERE id=?').get(eid);
       const entityName = ent ? ent.name : ('Entity ' + eid);
       const entityCode = ent ? ent.code : '';
 
@@ -11188,10 +11188,12 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       // titled "Consolidated ..." under the PARENT's name, with the
       // consolidating schedules appended.
       const consolGroup = consolidation.groupForEntity(db, Number(eid), { membersRouteToParent: false });
-      const consolParent = consolGroup ? db.prepare('SELECT name, code FROM entities WHERE id=?').get(consolGroup.parent_entity_id) : null;
+      const consolParent = consolGroup ? db.prepare('SELECT name, code, entity_type FROM entities WHERE id=?').get(consolGroup.parent_entity_id) : null;
       const isConsolidated = !!(consolGroup && consolParent && consolidation.scopeKeyFor(consolParent));
       const fsEntityName = isConsolidated ? consolParent.name : entityName;
       const fsEntityCode = isConsolidated ? (consolParent.code || '') : entityCode;
+      // Shell entities get no Executive Summary page (Jimmy, 2026-09-04).
+      const fsEntityType = isConsolidated ? (consolParent.entity_type || '') : (ent ? ent.entity_type : '');
       const getBalances = isConsolidated
         ? (o) => Promise.resolve(consolidation.consolidatedBalances(db, consolGroup, o, (id, oo) => computeBalances(id, oo)))
         : (o) => Promise.resolve(computeBalances(eid, o));
@@ -11201,7 +11203,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       // equity statements), and the consolidating schedules move to the Excel
       // deliverable, so they are NOT appended to the PDF here.
       const isMidcoPkg = isConsolidated && consolParent && (/clr?fi?\s*midco\s*i/i.test(consolParent.name || '') || String(consolParent.code || '') === 'CLRFIMID');
-      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: fsEntityCode, isConsolidated, nci, lenderMode: isMidcoPkg });
+      const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: fsEntityCode, entityType: fsEntityType, isConsolidated, nci, lenderMode: isMidcoPkg });
       const consolSchedules = (isConsolidated && !isMidcoPkg) ? consolidation.buildScheduleSet(db, consolGroup, asOf, (id, oo) => computeBalances(id, oo)) : null;
 
       const files = req.files || {};
@@ -11306,11 +11308,11 @@ app.get('/api/workpapers/financial-statements/:entity_id/excel', auth, requireEn
     const asOf = req.query && req.query.as_of;
     const period = (req.query && req.query.period) || 'monthly';
     if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
-    const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
+    const ent = db.prepare('SELECT name, code, entity_type FROM entities WHERE id=?').get(eid);
     const entityName = ent ? ent.name : ('Entity ' + eid);
     const entityCode = ent ? ent.code : '';
     const consolGroup = consolidation.groupForEntity(db, Number(eid), { membersRouteToParent: false });
-    const consolParent = consolGroup ? db.prepare('SELECT name, code FROM entities WHERE id=?').get(consolGroup.parent_entity_id) : null;
+    const consolParent = consolGroup ? db.prepare('SELECT name, code, entity_type FROM entities WHERE id=?').get(consolGroup.parent_entity_id) : null;
     const isConsolidated = !!(consolGroup && consolParent && consolidation.scopeKeyFor(consolParent));
     const fsEntityName = isConsolidated ? consolParent.name : entityName;
     const getBalances = isConsolidated
@@ -11322,7 +11324,7 @@ app.get('/api/workpapers/financial-statements/:entity_id/excel', auth, requireEn
     // the standard four-statement workbook.
     const isMidco = isConsolidated && consolParent && (/clr?fi?\s*midco\s*i/i.test(consolParent.name || '') || String(consolParent.code || '') === 'CLRFIMID');
     const nci = isConsolidated ? consolidation.nciFigures(db, consolGroup, asOf, period, (id, oo) => computeBalances(id, oo)) : null;
-    const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: isConsolidated ? (consolParent.code || '') : entityCode, isConsolidated, nci });
+    const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: isConsolidated ? (consolParent.code || '') : entityCode, entityType: isConsolidated ? (consolParent.entity_type || '') : (ent ? ent.entity_type : ''), isConsolidated, nci });
     let xlsxOpts = {};
     if (isMidco) {
       const schedules = consolidation.buildScheduleSet(db, consolGroup, asOf, (id, oo) => computeBalances(id, oo));
@@ -11400,7 +11402,7 @@ app.post('/api/admin/exec-summaries/split', auth, requireRole('Admin'), (req, re
           const saved = writeStoredExecSummary(eid, singleBytes, who);
           usedEntities.add(eid);
           if (firstMatchedEid == null) firstMatchedEid = eid;
-          const ent = db.prepare('SELECT name, code FROM entities WHERE id=?').get(eid);
+          const ent = db.prepare('SELECT name, code, entity_type FROM entities WHERE id=?').get(eid);
           results.push({ page: i + 1, matched: true, key: def.key, entity_id: eid, entity_name: ent ? ent.name : null, entity_code: ent ? ent.code : null, file_id: saved.id });
         } catch (e) {
           results.push({ page: i + 1, matched: false, key: def.key, entity_id: eid, reason: 'save failed: ' + e.message });

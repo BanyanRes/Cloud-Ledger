@@ -89,6 +89,14 @@ function displayEntityName(name) {
 // different chart AND a different Statements-of-Operations shape (Operating
 // Expenses / Other Income (Expense) / Income Taxes), so it selects its own
 // profile by entity name/code. Every profile-aware helper keys off this switch.
+// Shell entities (entities.entity_type = 'shell' - the holding/fund shells with
+// no operations of their own) carry NO Executive Summary page in their statement
+// package, so their page footers must not reference one either (Jimmy,
+// 2026-09-04).
+function isShellEntity(meta) {
+  return String((meta && meta.entityType) || '').trim().toLowerCase() === 'shell';
+}
+
 function entityProfile(opts) {
   const name = String((opts && opts.entityName) || '').trim();
   const code = String((opts && opts.entityCode) || '').trim().toUpperCase();
@@ -2787,7 +2795,7 @@ async function buildStatements(getBalances, opts) {
   }), { beginning: 0, contributions: 0, distributions: 0, netIncome: 0, ending: 0 });
 
   return {
-    meta: { entityName: displayEntityName(opts.entityName), rawEntityName: opts.entityName || '', entityCode: (opts.entityCode || ''), isConsolidated: !!opts.isConsolidated, lenderMode: !!opts.lenderMode, asOf, priorDate: priorBsDate, longDate: longDate(asOf),
+    meta: { entityName: displayEntityName(opts.entityName), rawEntityName: opts.entityName || '', entityCode: (opts.entityCode || ''), entityType: String(opts.entityType || '').trim().toLowerCase(), isConsolidated: !!opts.isConsolidated, lenderMode: !!opts.lenderMode, asOf, priorDate: priorBsDate, longDate: longDate(asOf),
             priorLongDate: longDate(priorBsDate),
             // Inception-dated entities date every statement from inception.
             monthsEnded: inception
@@ -2899,7 +2907,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     // Summary". Month + year only, never the day (rule set by Jimmy 2026-08-26)
     // — the statement headings already carry the exact period end date.
     const period = meta.asOf ? monthYearLabel(meta.asOf) : meta.longDate;
-    const label = meta.entityName + ', ' + period + '  |  See Executive Summary';
+    const label = meta.entityName + ', ' + period + (isShellEntity(meta) ? '' : '  |  See Executive Summary');
     const w = reg.widthOfTextAtSize(label, FS.foot);
     page.drawText(label, { x: (PW - w) / 2, y: PAGE.mB - 12, size: FS.foot, font: reg, color: rgb(0.4, 0.4, 0.4) });
   }
@@ -3980,7 +3988,7 @@ async function renderCoverPdf(meta, tocEntries) {
   // Fall back to a label-only list if no page references were supplied.
   const entries = (tocEntries && tocEntries.length)
     ? tocEntries
-    : ['Executive Summary', 'Balance Sheets', 'Statements of Operations', 'Statement of Cash Flows', 'Statement of Changes in Members\u2019 Equity', 'Budget to Actual'].map(label => ({ label, page: null }));
+    : ['Executive Summary', 'Balance Sheets', 'Statements of Operations', 'Statement of Cash Flows', 'Statement of Changes in Members\u2019 Equity', 'Budget to Actual'].filter(label => !(isShellEntity(meta) && label === 'Executive Summary')).map(label => ({ label, page: null }));
   const LX = 120, RX = PAGE.w - 120;
   let ty = PAGE.h - 210;
   const sz = 11;
@@ -4054,7 +4062,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   };
   const footer = () => {
     const period = meta.asOf ? monthYearLabel(meta.asOf) : meta.longDate;
-    const label = meta.entityName + ', ' + period + '  |  See Executive Summary';
+    const label = meta.entityName + ', ' + period + (isShellEntity(meta) ? '' : '  |  See Executive Summary');
     dtext(label, (PW - reg.widthOfTextAtSize(label, F.foot)) / 2, PAGE.mB - 12, F.foot, reg, rgb(0.4, 0.4, 0.4));
   };
   const colHeaders = () => {
@@ -4574,12 +4582,17 @@ async function generatePackage({ statements, execSummaryBytes, execSummaryText, 
   //   3) the entity's stored default PDF (storedDefaultBytes) — legacy static.
   //   4) the built-in rendered default (execSummaries.js) — dynamic date.
   //   5) none → warn.
+  // Shell entities get no Executive Summary page at all - no stored text, no
+  // uploaded PDF, no built-in default, and no Table-of-Contents entry.
+  const skipExecSummary = isShellEntity(_m);
   let esText = null;
-  if (execSummaryText && Array.isArray(execSummaryText.blocks) && execSummaryText.blocks.length) {
+  if (!skipExecSummary && execSummaryText && Array.isArray(execSummaryText.blocks) && execSummaryText.blocks.length) {
     try { esText = await execSummaries.renderExecSummaryPdf(statements.meta, execSummaryText); }
     catch (e) { info.warnings.push('Stored exec-summary text render failed: ' + e.message); esText = null; }
   }
-  if (esText) {
+  if (skipExecSummary) {
+    info.execSummarySource = 'skipped_shell';
+  } else if (esText) {
     await appendToBody(esText, 'Executive Summary', true);
     info.execSummarySource = 'stored_text';
   } else if (execSummaryBytes) {
