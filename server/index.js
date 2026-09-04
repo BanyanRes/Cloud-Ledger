@@ -6834,6 +6834,56 @@ app.get('/api/billcom/sync-log/:entity_id', auth, requireEntityAccess('entity_id
   res.json({ logs: rows });
 });
 
+// READ-ONLY: list this entity's Bill.com departments that are NOT yet mapped to a
+// CL project (and not marked skip), each with a suggested project (normalized
+// name/code match, tolerating a leading code token like "P-10100.902 " and a
+// leading %). Writes nothing — used to build a mapping review worksheet.
+app.get('/api/billcom/dept-gaps/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(eid);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
+  let session, devKey, base;
+  try {
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    base = cfg.api_base_url || BILLCOM_BASE_URLS.production;
+    session = await billcomLogin({ username: cfg.username, password: billcomDecrypt(cfg.password_enc), orgId: cfg.org_id, devKey, baseUrl: base });
+  } catch (e) { return res.status(502).json({ error: 'login failed: ' + e.message }); }
+  let depts;
+  try { depts = await billcomListClassification({ sessionId: session.sessionId, devKey, baseUrl: base, resource: 'departments' }); }
+  catch (e) { return res.status(502).json({ error: 'fetch departments failed: ' + e.message }); }
+
+  const projMap = new Set(db.prepare('SELECT billcom_dept_id FROM billcom_project_map WHERE entity_id = ?').all(eid).map(r => String(r.billcom_dept_id)));
+  const skipSet = new Set(db.prepare('SELECT billcom_dept_id FROM billcom_project_skip WHERE entity_id = ?').all(eid).map(r => String(r.billcom_dept_id)));
+
+  // Normalize a name for matching: lowercase, drop a leading code token
+  // ("P-10100.902 ", "10100 "), drop leading %, collapse spaces. Keep semantic
+  // prefixes like "Land--" so "Land--Van Buren" never collapses into "Van Buren".
+  const norm = (s) => String(s || '').trim().toLowerCase()
+    .replace(/^[a-z]?-?\d[\d.\-]*\s+/i, '')  // leading code token
+    .replace(/^%+/, '').trim().replace(/\s+/g, ' ');
+  const clProjs = db.prepare('SELECT id, code, name FROM dim_projects WHERE entity_id = ?').all(eid);
+  const byKey = new Map();
+  const add = (k, id) => { const kk = norm(k); if (!kk) return; const c = byKey.get(kk); if (c === undefined) byKey.set(kk, id); else if (c !== id && c !== '(AMB)') byKey.set(kk, '(AMB)'); };
+  for (const p of clProjs) { add(p.name, p.id); add(p.code, p.id); if (p.code && p.name) add(p.code + ' ' + p.name, p.id); }
+  const nameById = new Map(clProjs.map(p => [p.id, (p.code ? p.code + ' - ' : '') + p.name]));
+
+  const gaps = [];
+  for (const d of (depts || [])) {
+    const did = String(d.id || '');
+    if (!did || projMap.has(did) || skipSet.has(did)) continue;
+    const nm = d.name || d.shortName || d.description || '';
+    const hit = byKey.get(norm(nm));
+    gaps.push({
+      billcom_dept_id: did, billcom_dept_name: nm,
+      suggested_cl_project_id: (hit && hit !== '(AMB)') ? hit : null,
+      suggested_cl_project: (hit && hit !== '(AMB)') ? nameById.get(hit) : null,
+      ambiguous: hit === '(AMB)',
+    });
+  }
+  gaps.sort((a, b) => (a.billcom_dept_name || '').localeCompare(b.billcom_dept_name || ''));
+  res.json({ entity_id: eid, total_departments: (depts || []).length, mapped: projMap.size, unmapped: gaps.length, gaps, cl_projects: clProjs.map(p => ({ id: p.id, label: (p.code ? p.code + ' - ' : '') + p.name })) });
+});
+
 // ── Bill.com invoice document -> CloudLedger journal attachment ──
 // Fetch a bill's invoice PDF via the supported v3 documents API (added by Bill.com
 // June 2024): GET /documents/bills/{billId} lists the docs, each with a
