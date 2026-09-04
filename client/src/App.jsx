@@ -104,6 +104,15 @@ const classTerm = () => CLASS_DIM_LABELS[_activeEntityCode] || 'Class';
 // SheetJS build used below cannot write cell borders at all, so a report that
 // wants them has no other path. Without `opts.style` nothing changes.
 function exportToExcel(data, fn, opts) { opts = opts || {}; const moneyFmt = opts.numFmt || '#,##0.00;(#,##0.00)';
+  // Safety net for every export: values pulled from the ledger can arrive as
+  // numeric STRINGS (the legacy GL import stored some amounts as text). Excel
+  // cannot run a formula or SUM over a text cell — that is what produced the
+  // #VALUE! balances and under-counted totals. Coerce clean numeric strings to
+  // real numbers, EXCEPT columns the caller marked as text (plainCols) and
+  // EXCEPT strings that must stay text: leading-zero codes ("0049"), anything
+  // with letters, dashes, commas, %, or spaces (dates, invoice #s, codes).
+  { const _plainSet = new Set(opts.plainCols || []); const _numRe = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
+    data = data.map(row => Array.isArray(row) ? row.map((v, c) => { if (_plainSet.has(c) || typeof v !== 'string') return v; const s = v.trim(); return (s && _numRe.test(s)) ? Number(s) : v; }) : row); }
   if (opts.style) {
     const _p = String(_activeEntityFileTag || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
     const _name = (_p && fn.indexOf(_p + '_') !== 0) ? (_p + '_' + fn) : fn;
