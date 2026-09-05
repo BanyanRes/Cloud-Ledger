@@ -112,7 +112,7 @@ function exportToExcel(data, fn, opts) { opts = opts || {}; const moneyFmt = opt
   // EXCEPT strings that must stay text: leading-zero codes ("0049"), anything
   // with letters, dashes, commas, %, or spaces (dates, invoice #s, codes).
   { const _plainSet = new Set(opts.plainCols || []); const _numRe = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
-    data = data.map(row => Array.isArray(row) ? row.map((v, c) => { if (_plainSet.has(c) || typeof v !== 'string') return v; const s = v.trim(); return (s && _numRe.test(s)) ? Number(s) : v; }) : row); }
+    data = data.map(row => Array.isArray(row) ? row.map((v, c) => { if (typeof v !== 'string') return v; const s = v.trim(); if (s === '') return null; if (_plainSet.has(c)) return v; return _numRe.test(s) ? Number(s) : v; }) : row); }
   if (opts.style) {
     const _p = String(_activeEntityFileTag || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
     const _name = (_p && fn.indexOf(_p + '_') !== 0) ? (_p + '_' + fn) : fn;
