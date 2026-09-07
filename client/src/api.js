@@ -656,6 +656,20 @@ export const api = {
     if (!res.ok) throw new Error(data.error || 'Budget status failed');
     return data;
   },
+  // Operating Budget-to-Actual schedule as JSON — the same data the package PDF
+  // renders, exposed for the standalone Reports > Operating Budget to Actual page.
+  // Returns { present:false, fiscal_year } when no budget is on file for the year.
+  budgetToActualPreview: async (eid, asOf) => {
+    const token = getToken();
+    const qs = 'as_of=' + encodeURIComponent(asOf);
+    const res = await fetch(API_BASE + '/workpapers/financial-statements/' + eid + '/budget/preview?' + qs, {
+      method: 'GET', headers: token ? { Authorization: 'Bearer ' + token } : {},
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Budget-to-Actual preview failed');
+    return data;
+  },
   financialStatementsWipStatus: async (eid, asOf) => {
     const token = getToken();
     const qs = 'as_of=' + encodeURIComponent(asOf);

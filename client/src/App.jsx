@@ -878,6 +878,7 @@ export default function App(){
       {id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},
       {id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},
       {id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
+      {id:'b2a',label:'Operating Budget to Actual',icon:'🎯',section:'reports'},
       {id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},
       {id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
       {id:'ttm',label:'Trailing 12 Months',icon:'📈',section:'reports'},
@@ -966,6 +967,7 @@ export default function App(){
         {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} isClrf={_activeEnt?.code==='COUNTYLI1'} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf} canEdit={canEdit}/>}
         {page==='bs'&&activeEntity&&<BalanceSheet entityId={activeEntity} entityName={entityName} asOf={bsAsOf} setAsOf={setBsAsOf} canEdit={canEdit}/>}
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo} canEdit={canEdit}/>}
+        {page==='b2a'&&activeEntity&&<BudgetToActualReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='customdetail'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='pivot'&&activeEntity&&dimsEnabled&&<PivotReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='pivot'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='ic_recon'&&canAccess('intercompany')&&<IntercompanyReconciliation entities={entities} activeEntity={activeEntity} setPage={setPage} key={'icr-'+rk}/>}
@@ -4376,6 +4378,154 @@ function isPnlPrior(filter,win,anchor){
   return rptPriorWindow(win);
 }
 const IS_DATE_FILTERS=[['ytd','Year to Date'],['month','Last Month'],['quarter','Last Quarter'],['year','Last Year'],['custom','Custom']];
+// ═══ Operating Budget to Actual ═══
+// Standalone Reports view of the same schedule the monthly package appends
+// (server/budget.js buildBudgetToActual → the "Profit and Loss - Actual vs
+// Budget" PDF). Six columns: Month Actual/Budget/Variance and Year-to-Date
+// Actual/Budget/Variance. Variance is FAVOURABLE-POSITIVE — revenue beats
+// budget by exceeding it (actual − budget), an expense by coming in under it
+// (budget − actual) — matching renderBudgetToActualPdf's varOf(). Excel export
+// writes every computed cell as a live formula (variances on every row,
+// subtotals via SUM, and the NOI / cash-flow / net-income rows via
+// cross-references), with cached values so the sheet reads before recalc.
+function BudgetToActualReport({entityId,entityName}){
+  // Default to the most recently completed month-end.
+  const defAsOf=useMemo(()=>{const d=new Date();d.setDate(1);d.setDate(0);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');},[]);
+  const[asOf,setAsOf]=useState(defAsOf);
+  const[data,setData]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
+  useEffect(()=>{let ok=true;setLoading(true);setErr('');
+    api.budgetToActualPreview(entityId,asOf).then(d=>{if(ok){setData(d);setLoading(false);}}).catch(e=>{if(ok){setErr(e.message);setData(null);setLoading(false);}});
+    return()=>{ok=false;};},[entityId,asOf]);
+  const present=data&&data.present;
+  const rows=(present&&data.rows)||[];
+  const monthsEnded=(()=>{const n=Number(String(asOf).slice(5,7));const nm=new Date(asOf+'T00:00:00').toLocaleString('en-US',{month:'long'});const yr=String(asOf).slice(0,4);return 'For the '+n+' Month'+(n===1?'':'s')+' Ended '+nm+' '+yr;})();
+  // Favourable-positive variance, same rule as the PDF.
+  const varOf=(r,a,b)=>((r.sense==='exp')?(b-a):(a-b));
+  // Column headers, in order.
+  const COLS=['Month Actual','Month Budget','Month Variance','YTD Actual','YTD Budget','YTD Variance'];
+  const cellVals=(r)=>[r.aM,r.bM,varOf(r,r.aM,r.bM),r.aY,r.bY,varOf(r,r.aY,r.bY)];
+  const varColor=v=>v>=0?T.green:T.red;
+  // A numeric cell. Variance columns (idx 2 & 5) are coloured by sign.
+  const numCell=(v,idx,style)=>{const isVar=idx===2||idx===5;return <td key={idx} style={{...style,textAlign:'right',...(isVar?{color:varColor(v)}:{})}}>{fmt(v)}</td>;};
+  const rowStyle=(kind)=>{
+    if(kind==='net')return{base:S.tdBold,fontSize:15,label:{...S.tdBold,fontSize:15}};
+    if(kind==='noi'||kind==='cashflow')return{base:{...S.td,fontWeight:700,color:T.textBright},label:{...S.td,fontWeight:700,color:T.textBright}};
+    if(kind==='total'||kind==='subtotal')return{base:{...S.tdR,fontWeight:700,color:T.textBright},label:{...S.td,fontWeight:700,color:T.textBright}};
+    return{base:{...S.tdR},label:S.indentTd};
+  };
+
+  const doExport=()=>{
+    const hdr=['Account',...COLS];
+    const d=[[entityName||'Operating Budget to Actual'],['Profit and Loss - Actual vs Budget'],[monthsEnded],[],hdr];
+    const F=[];
+    // Column letters: A=Account, B=Month Actual, C=Month Budget, D=Month Var,
+    // E=YTD Actual, F=YTD Budget, G=YTD Var. Data columns are spreadsheet cols 1..6.
+    const AM=1,BM=2,VMc=3,AY=4,BY=5,VYc=6;
+    // Track section/group member row spans so subtotals/totals SUM the right block,
+    // and named total rows so NOI / cash flow / net income can reference them.
+    let secFirst=null,secLast=null;   // current group's detail-row window (0-based sheet rows)
+    let totRevRow=null,totOpexRow=null,noiRow=null,debtRow=null,cfRow=null,otherSubRow=null;
+    const varFormula=(r,aCol,bCol,sense)=>sense==='exp'?(XLC(bCol)+r+'-'+XLC(aCol)+r):(XLC(aCol)+r+'-'+XLC(bCol)+r);
+    const pushVar=(sheetRow,sense)=>{const rr=sheetRow+1;
+      F.push({r:sheetRow,c:VMc,f:varFormula(rr,AM,BM,sense)});
+      F.push({r:sheetRow,c:VYc,f:varFormula(rr,AY,BY,sense)});};
+    for(const r of rows){
+      if(r.kind==='section'){d.push([r.label]);secFirst=null;secLast=null;continue;}
+      if(r.kind==='group'){d.push(['  '+r.label]);secFirst=null;secLast=null;continue;}
+      if(r.kind==='line'||r.kind==='debtline'){
+        const sense=r.sense==='exp'?'exp':(r.sense==='rev'?'rev':'other');
+        d.push(['    '+r.label,r.aM,r.bM,varOf(r,r.aM,r.bM),r.aY,r.bY,varOf(r,r.aY,r.bY)]);
+        const sr=d.length-1;pushVar(sr,sense);
+        if(r.kind==='debtline')debtRow=sr; else {if(secFirst===null)secFirst=sr;secLast=sr;}
+        continue;
+      }
+      if(r.kind==='subtotal'||r.kind==='total'){
+        const sense=/revenue/i.test(r.label)?'rev':(r.sense==='other'?'other':'exp');
+        d.push([r.label,r.aM,r.bM,varOf(r,r.aM,r.bM),r.aY,r.bY,varOf(r,r.aY,r.bY)]);
+        const sr=d.length-1;
+        // SUM the just-closed detail block for the money columns.
+        if(secFirst!==null&&secLast!==null&&secLast>=secFirst){
+          for(const c of [AM,BM,AY,BY])F.push({r:sr,c,f:'SUM('+XLC(c)+(secFirst+1)+':'+XLC(c)+(secLast+1)+')'});
+        }
+        pushVar(sr,sense);
+        if(r.kind==='total'&&/revenue/i.test(r.label))totRevRow=sr;
+        else if(r.kind==='total')totOpexRow=sr;
+        else if(/other income/i.test(r.label))otherSubRow=sr;
+        secFirst=null;secLast=null;
+        continue;
+      }
+      if(r.kind==='noi'){
+        d.push([r.label,r.aM,r.bM,varOf(r,r.aM,r.bM),r.aY,r.bY,varOf(r,r.aY,r.bY)]);
+        const sr=d.length-1;noiRow=sr;
+        // NOI = Total Revenue − Total Operating Expenses, per money column.
+        if(totRevRow!==null&&totOpexRow!==null){
+          for(const c of [AM,BM,AY,BY])F.push({r:sr,c,f:XLC(c)+(totRevRow+1)+'-'+XLC(c)+(totOpexRow+1)});
+        }
+        pushVar(sr,'rev');
+        continue;
+      }
+      if(r.kind==='cashflow'){
+        d.push([r.label,r.aM,r.bM,varOf(r,r.aM,r.bM),r.aY,r.bY,varOf(r,r.aY,r.bY)]);
+        const sr=d.length-1;cfRow=sr;
+        // Cash Flow After Debt Service = NOI − Interest Expense.
+        if(noiRow!==null&&debtRow!==null){
+          for(const c of [AM,BM,AY,BY])F.push({r:sr,c,f:XLC(c)+(noiRow+1)+'-'+XLC(c)+(debtRow+1)});
+        }
+        pushVar(sr,'rev');
+        continue;
+      }
+      if(r.kind==='net'){
+        d.push([r.label,r.aM,r.bM,varOf(r,r.aM,r.bM),r.aY,r.bY,varOf(r,r.aY,r.bY)]);
+        const sr=d.length-1;
+        // Net Income = base + Total Other Income (Expense). The base is the last
+        // operating result row: Cash Flow After Debt Service when debt service is
+        // present (it already nets interest out of NOI), otherwise NOI itself.
+        // This keeps the sheet's Net Income tied to the book without double-
+        // counting the debt line.
+        const baseRow=(cfRow!==null)?cfRow:noiRow;
+        for(const c of [AM,BM,AY,BY]){
+          const parts=[];
+          if(baseRow!==null)parts.push(XLC(c)+(baseRow+1));
+          if(otherSubRow!==null)parts.push(XLC(c)+(otherSubRow+1));
+          if(parts.length)F.push({r:sr,c,f:parts.join('+')});
+        }
+        pushVar(sr,'rev');
+        continue;
+      }
+    }
+    exportToExcel(d,'Budget_to_Actual_'+asOf+'.xlsx',{formulas:F});
+  };
+
+  return(<div>
+    <div style={S.card}><div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',flexWrap:'wrap',gap:10}}>
+      <div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div><label style={S.label}>Period end</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
+      </div>
+      <div style={{display:'flex',gap:8,alignItems:'center'}}>{present&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div>
+    </div></div>
+    <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Profit and Loss - Actual vs Budget</div><div style={{fontSize:13,color:T.textMuted}}>{monthsEnded}</div></div>
+    {loading&&<div style={{padding:24,textAlign:'center',color:T.textMuted}}>Loading…</div>}
+    {err&&!loading&&<div style={{padding:16,background:T.red+'12',border:'1px solid '+T.red+'40',borderRadius:8,color:T.red,fontSize:13}}>{err}</div>}
+    {!loading&&!err&&!present&&<div style={{padding:24,textAlign:'center',color:T.textMuted,background:T.bgElevated,border:'1px dashed '+T.border,borderRadius:8}}>
+      No operating budget is on file for {String(asOf).slice(0,4)}. Upload one under Reports → Financial Statements to see the Budget-to-Actual schedule.
+    </div>}
+    {!loading&&!err&&present&&<div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:820}}><thead><tr>
+      <th style={S.th}>Account</th>{COLS.map((c,i)=><th key={i} style={S.thR}>{c}</th>)}
+    </tr></thead><tbody>
+      {rows.map((r,i)=>{
+        if(r.kind==='section')return <tr key={i}><td style={S.sectionHeader} colSpan={7}>{r.label}</td></tr>;
+        if(r.kind==='group')return <tr key={i}><td style={{...S.td,fontWeight:600,paddingLeft:20,color:T.textBright}} colSpan={7}>{r.label}</td></tr>;
+        const st=rowStyle(r.kind);const vals=cellVals(r);
+        const big=r.kind==='net';
+        const trStyle=big?S.grandTotalRow:(r.kind==='subtotal'||r.kind==='total'?S.subtotalRow:(r.kind==='noi'||r.kind==='cashflow'?{background:T.bgElevated}:undefined));
+        return <tr key={i} style={trStyle}><td style={st.label}>{r.label}</td>{vals.map((v,idx)=>numCell(v,idx,st.base))}</tr>;
+      })}
+    </tbody></table></div>}
+    {present&&data.unmapped&&data.unmapped.budgetLabels&&data.unmapped.budgetLabels.length>0&&
+      <div style={{marginTop:12,fontSize:12,color:T.textMuted}}>Unmapped budget lines (shown at nil actual): {data.unmapped.budgetLabels.join(', ')}.</div>}
+  </div>);
+}
+
 function IncomeStatement({entityId,entityName,from,setFrom,to,setTo,canEdit=true}){
   const[drillAcct,setDrillAcct]=useState(null);const[rk,setRk]=useState(0);
   const[dateFilter,setDateFilter]=useState('ytd');const[compare,setCompare]=useState(false);
