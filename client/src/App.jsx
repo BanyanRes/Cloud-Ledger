@@ -4393,11 +4393,53 @@ function BudgetToActualReport({entityId,entityName}){
   const defAsOf=useMemo(()=>{const d=new Date();d.setDate(1);d.setDate(0);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');},[]);
   const[asOf,setAsOf]=useState(defAsOf);
   const[data,setData]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
+  const[rk,setRk]=useState(0);
+  // Account name/type by code, so a drill-down can hand the modal a full acct.
+  const[acctMap,setAcctMap]=useState({});
+  useEffect(()=>{let ok=true;api.getAccounts(entityId).then(as=>{if(ok){const m={};(as||[]).forEach(a=>{m[String(a.code)]={code:String(a.code),name:a.name,type:a.type};});setAcctMap(m);}}).catch(()=>{});return()=>{ok=false;};},[entityId]);
   useEffect(()=>{let ok=true;setLoading(true);setErr('');
     api.budgetToActualPreview(entityId,asOf).then(d=>{if(ok){setData(d);setLoading(false);}}).catch(e=>{if(ok){setErr(e.message);setData(null);setLoading(false);}});
-    return()=>{ok=false;};},[entityId,asOf]);
+    return()=>{ok=false;};},[entityId,asOf,rk]);
   const present=data&&data.present;
   const rows=(present&&data.rows)||[];
+  // Drill windows. Month actual = balance(asOf) − balance(prior month-end), so the
+  // month window is the first of the report month through asOf. YTD actual =
+  // balance(asOf) − balance(prior year-end), so the YTD window is Jan 1 → asOf.
+  const monthFrom=String(asOf).slice(0,8)+'01';
+  const ytdFrom=String(asOf).slice(0,4)+'-01-01';
+  // Annotate subtotal / total / NOI / cash-flow / net rows with the GL codes that
+  // feed them, so those figures are drillable too — not just the detail lines.
+  //   • subtotal → the current group's line codes
+  //   • total    → all revenue codes (Total Revenue) or all operating-expense
+  //                codes (Total Operating Expenses)
+  //   • noi / cashflow / net → every operating account seen so far, so the drill
+  //     opens the full set of accounts behind the result
+  const rowsA=useMemo(()=>{
+    let groupCodes=[],revCodes=[],opexCodes=[],allCodes=[];
+    const uniq=a=>Array.from(new Set(a.map(String)));
+    return rows.map(r=>{
+      if(r.kind==='group'){groupCodes=[];return r;}
+      if(r.kind==='section'){groupCodes=[];return r;}
+      if(r.kind==='line'){const cs=(r.codes||[]).map(String);groupCodes.push(...cs);allCodes.push(...cs);
+        if(r.sense==='rev')revCodes.push(...cs);else if(r.sense==='exp')opexCodes.push(...cs);
+        return r;}
+      if(r.kind==='debtline'){const cs=(r.codes||[]).map(String);allCodes.push(...cs);return r;}
+      if(r.kind==='subtotal')return {...r,drillCodes:uniq(groupCodes)};
+      if(r.kind==='total')return {...r,drillCodes:uniq(/revenue/i.test(r.label)?revCodes:opexCodes)};
+      if(r.kind==='noi'||r.kind==='cashflow'||r.kind==='net')return {...r,drillCodes:uniq(allCodes)};
+      return r;
+    });
+  },[rows]);
+  // Drill state: the account to open, and the period window for the clicked column.
+  const[drill,setDrill]=useState(null);           // {acct, from, to}
+  const[drillPick,setDrillPick]=useState(null);   // {codes, from, to, label} — multi-code chooser
+  const acctFor=(code)=>acctMap[String(code)]||{code:String(code),name:'',type:'Revenue'};
+  const openDrill=(codes,from,to,label)=>{
+    const cs=(codes||[]).map(String);
+    if(cs.length===0)return;
+    if(cs.length===1){setDrill({acct:acctFor(cs[0]),from,to});return;}
+    setDrillPick({codes:cs,from,to,label});
+  };
   const monthsEnded=(()=>{const n=Number(String(asOf).slice(5,7));const nm=new Date(asOf+'T00:00:00').toLocaleString('en-US',{month:'long'});const yr=String(asOf).slice(0,4);return 'For the '+n+' Month'+(n===1?'':'s')+' Ended '+nm+' '+yr;})();
   // Favourable-positive variance, same rule as the PDF.
   const varOf=(r,a,b)=>((r.sense==='exp')?(b-a):(a-b));
@@ -4405,8 +4447,14 @@ function BudgetToActualReport({entityId,entityName}){
   const COLS=['Month Actual','Month Budget','Month Variance','YTD Actual','YTD Budget','YTD Variance'];
   const cellVals=(r)=>[r.aM,r.bM,varOf(r,r.aM,r.bM),r.aY,r.bY,varOf(r,r.aY,r.bY)];
   const varColor=v=>v>=0?T.green:T.red;
-  // A numeric cell. Variance columns (idx 2 & 5) are coloured by sign.
-  const numCell=(v,idx,style)=>{const isVar=idx===2||idx===5;return <td key={idx} style={{...style,textAlign:'right',...(isVar?{color:varColor(v)}:{})}}>{fmt(v)}</td>;};
+  // A numeric cell. Variance columns (idx 2 & 5) are coloured by sign. When
+  // `onClick` is supplied the figure becomes a drill-down link (Actual columns
+  // only — budget and variance have no GL detail behind them).
+  const numCell=(v,idx,style,onClick)=>{const isVar=idx===2||idx===5;
+    const base={...style,textAlign:'right',...(isVar?{color:varColor(v)}:{})};
+    if(!onClick)return <td key={idx} style={base}>{fmt(v)}</td>;
+    return <td key={idx} style={{...base,cursor:'pointer'}} onClick={onClick} title="View transactions"><span style={{borderBottom:'1px dotted '+T.accent,color:base.color||T.accent}}>{fmt(v)}</span></td>;
+  };
   const rowStyle=(kind)=>{
     if(kind==='net')return{base:S.tdBold,fontSize:15,label:{...S.tdBold,fontSize:15}};
     if(kind==='noi'||kind==='cashflow')return{base:{...S.td,fontWeight:700,color:T.textBright},label:{...S.td,fontWeight:700,color:T.textBright}};
@@ -4512,17 +4560,39 @@ function BudgetToActualReport({entityId,entityName}){
     {!loading&&!err&&present&&<div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:820}}><thead><tr>
       <th style={S.th}>Account</th>{COLS.map((c,i)=><th key={i} style={S.thR}>{c}</th>)}
     </tr></thead><tbody>
-      {rows.map((r,i)=>{
+      {rowsA.map((r,i)=>{
         if(r.kind==='section')return <tr key={i}><td style={S.sectionHeader} colSpan={7}>{r.label}</td></tr>;
         if(r.kind==='group')return <tr key={i}><td style={{...S.td,fontWeight:600,paddingLeft:20,color:T.textBright}} colSpan={7}>{r.label}</td></tr>;
         const st=rowStyle(r.kind);const vals=cellVals(r);
         const big=r.kind==='net';
         const trStyle=big?S.grandTotalRow:(r.kind==='subtotal'||r.kind==='total'?S.subtotalRow:(r.kind==='noi'||r.kind==='cashflow'?{background:T.bgElevated}:undefined));
-        return <tr key={i} style={trStyle}><td style={st.label}>{r.label}</td>{vals.map((v,idx)=>numCell(v,idx,st.base))}</tr>;
+        // Actual figures drill to the GL. Detail lines drill to their own account(s);
+        // subtotals/totals/NOI/net drill to every account feeding the section.
+        const codes=(r.codes&&r.codes.length)?r.codes:(r.drillCodes||[]);
+        const canDrill=codes&&codes.length>0;
+        // idx 0 = Month Actual (month window), idx 3 = YTD Actual (YTD window).
+        const clickFor=(idx)=>{
+          if(!canDrill)return null;
+          if(idx===0)return ()=>openDrill(codes,monthFrom,asOf,r.label);
+          if(idx===3)return ()=>openDrill(codes,ytdFrom,asOf,r.label);
+          return null;
+        };
+        return <tr key={i} style={trStyle}><td style={st.label}>{r.label}</td>{vals.map((v,idx)=>numCell(v,idx,st.base,clickFor(idx)))}</tr>;
       })}
     </tbody></table></div>}
     {present&&data.unmapped&&data.unmapped.budgetLabels&&data.unmapped.budgetLabels.length>0&&
       <div style={{marginTop:12,fontSize:12,color:T.textMuted}}>Unmapped budget lines (shown at nil actual): {data.unmapped.budgetLabels.join(', ')}.</div>}
+    {present&&<div style={{marginTop:8,fontSize:11,color:T.textDim}}>Tip: click any actual figure to see the transactions behind it.</div>}
+    {/* Multi-account chooser: a budget line mapped to more than one GL account. */}
+    {drillPick&&<div style={S.modal} onClick={()=>setDrillPick(null)}><div style={{...S.modalBox,width:'min(460px,94vw)',padding:20}} onClick={e=>e.stopPropagation()}>
+      <button style={S.modalClose} onClick={()=>setDrillPick(null)}>&times;</button>
+      <div style={{fontSize:16,fontWeight:700,color:T.textBright,marginBottom:4}}>{drillPick.label}</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:14}}>This line rolls up {drillPick.codes.length} accounts — pick one to see its transactions.</div>
+      <div style={{display:'flex',flexDirection:'column',gap:6}}>{drillPick.codes.map(c=>{const a=acctFor(c);return(
+        <button key={c} onClick={()=>{setDrill({acct:a,from:drillPick.from,to:drillPick.to});setDrillPick(null);}} style={{textAlign:'left',padding:'10px 12px',background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,cursor:'pointer',fontSize:13,color:T.textBright}}>{a.code}{a.name?' — '+a.name:''}</button>
+      );})}</div>
+    </div></div>}
+    {drill&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drill.acct} from={drill.from} to={drill.to} onClose={()=>setDrill(null)} onChanged={()=>setRk(k=>k+1)}/>}
   </div>);
 }
 
