@@ -1408,24 +1408,24 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   // 5. Update titles (date / requisition number).
   if (meta.asOfDate && b2a.getCell('L1')) b2a.getCell('L1').value = meta.asOfDate;
   if (meta.reqNumber) {
-    if (meta.fixReportNumberHeader) {
-      // Update the existing "Requisition Report #N" line in place (preserving any
-      // suffix like ' (Phase 2)'), and remove any duplicate report line. Prefer a
-      // correctly-spelled 'Requisition Report' cell over a stray 'Requistion' one.
-      // If the budget tab has NO report line (e.g. Silsbee Phase 1, whose B4 holds
-      // the date), leave it untouched — never blindly write B4.
-      const rptCells = [];
-      for (let r = 1; r <= 8; r++) for (let c = 1; c <= 6; c++) {
-        if (/requi\w*\s*report\s*#/i.test(cellStr(b2a.getCell(r, c)))) rptCells.push(b2a.getCell(r, c));
-      }
-      if (rptCells.length) {
-        const primary = rptCells.find(cl => /requisition\s*report/i.test(cellStr(cl))) || rptCells[rptCells.length - 1];
-        const curTitle = cellStr(primary).trim();
-        primary.value = /#\s*\d+/.test(curTitle) ? curTitle.replace(/#\s*\d+/, '#' + meta.reqNumber) : ('Requisition Report #' + meta.reqNumber);
-        for (const cl of rptCells) if (cl !== primary) cl.value = null;
-      }
-    } else if (b2a.getCell('B4')) {
-      b2a.getCell('B4').value = 'Requistion Report # ' + meta.reqNumber;
+    // Show ONLY the current requisition number. Templates carry the prior report
+    // number on a second line (e.g. B4 "Requisition Report # 2", B5 "Requisition
+    // Report #1"); the prior line must not be repeated. Update the current line in
+    // place (preserving any suffix like " (Phase 2)"), preferring a correctly
+    // spelled 'Requisition Report' cell over a stray 'Requistion' one, then blank
+    // every other report-number cell. If the budget tab has NO report line (e.g.
+    // Silsbee Phase 1, whose B4 holds the date), leave it untouched — never
+    // blindly write B4. Runs for all entities (formerly gated to the dev-fee-
+    // collapse set, which left CLIP/other phases showing the stale prior line).
+    const rptCells = [];
+    for (let r = 1; r <= 8; r++) for (let c = 1; c <= 6; c++) {
+      if (/requi\w*\s*report\s*#/i.test(cellStr(b2a.getCell(r, c)))) rptCells.push(b2a.getCell(r, c));
+    }
+    if (rptCells.length) {
+      const primary = rptCells.find(cl => /requisition\s*report/i.test(cellStr(cl))) || rptCells[rptCells.length - 1];
+      const curTitle = cellStr(primary).trim();
+      primary.value = /#\s*\d+/.test(curTitle) ? curTitle.replace(/#\s*\d+/, '#' + meta.reqNumber) : ('Requisition Report #' + meta.reqNumber);
+      for (const cl of rptCells) if (cl !== primary) cl.value = null;
     }
   }
 
@@ -1443,6 +1443,13 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   // Advance the free-text date headers on the B2A tab (Previous/Inception-to,
   // this-period, To-Date/Incurred-to, As-of). Best-effort cosmetic; never block.
   try { if (meta.asOfDate) advanceB2AHeaderDates(b2a, meta.asOfDate); } catch (e) { /* cosmetic */ }
+
+  // Fill the B2A "Previous Application / Inception to <prior date>" column from
+  // the Prior Invoice Log. Some templates (e.g. CLIP Phase 3) ship this column
+  // hardcoded 0 on every row and never advance it, so the prior period's draw
+  // never carries forward and the To-Date = Previous + This-period line understates
+  // history. Best-effort; never block.
+  try { fillB2APreviousFromPriorLog(b2a, curWs, priorWs); } catch (e) { /* best-effort */ }
 
   if (contingencyWarnings.length) {
     for (const w of contingencyWarnings) console.warn('[requisition rollForward] ' + w);
@@ -1562,6 +1569,118 @@ function advanceB2AHeaderDates(b2a, asOfDate) {
     }
   }
   return changed;
+}
+
+// Populate the Budget-to-Actual "Previous Application / Inception to <prior>"
+// column from the Prior Invoice Log.
+//
+// Most templates ship this column as a live SUMIF over the Prior Invoice Log
+// (mirroring the "Payment this period" column's SUMIF over the Current Invoice
+// Log), which self-updates every roll-forward and needs no help. But some — e.g.
+// CLIP Phase 3 — ship it as a HARDCODED 0 on every account row and never advance
+// it, so the prior period's cumulative draw never carries into the new report:
+// column I (= Previous + This period) then shows only this month's activity and
+// understates inception-to-date.
+//
+// For each account row that HAS a current-period SUMIF (over the Current Invoice
+// Log) but whose previous/inception cell is a bare literal (0 or blank, i.e. NOT
+// already a formula), we synthesize the previous cell by cloning that row's
+// current SUMIF and swapping the Current-Log sheet-name argument for the Prior-
+// Log one. Deriving it from the row's own current formula keeps the match key
+// (the account-name/bank-category criteria), the summed column, and the exact
+// sheet-name quoting identical between the two columns — so the "previous" total
+// ties to the Prior Invoice Log's Amount column exactly the way "this period"
+// ties to the Current log. The cached result is seeded by summing the Prior log,
+// so the number displays before Excel recalculates. Rows that already carry a
+// prior-log SUMIF are left untouched (idempotent).
+function fillB2APreviousFromPriorLog(b2a, curWs, priorWs) {
+  if (!b2a || !curWs || !priorWs) return 0;
+  const curName = curWs.name, priorName = priorWs.name;
+  const round2 = (n) => Math.round(n * 100) / 100;
+
+  // Escape a sheet name for use in a RegExp; match it with optional surrounding
+  // single quotes so 'Current Invoice Log ' and Current Invoice Log both match.
+  const esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const curRe = new RegExp("'?" + esc(curName) + "'?(?=\\s*!)", 'g');
+  // Rewrite a current-period SUMIF into the prior-period equivalent: point every
+  // Current-Log sheet reference at the Prior Log, quoting the prior name.
+  const toPrior = (f) => f.replace(curRe, "'" + priorName + "'");
+
+  // Sum the Prior Invoice Log's Amount column (COL.amount) where the Bank Cost
+  // Category (COL.bankcat) equals `key` — the same criteria the SUMIF uses — so
+  // the seeded cached result matches what Excel will compute. Skip SUBTOTAL rows.
+  const pl = Math.max(priorWs.rowCount || 0, priorWs.actualRowCount || 0);
+  const priorSumFor = (key) => {
+    const want = String(key == null ? '' : key).trim().toLowerCase();
+    if (!want) return 0;
+    let t = 0;
+    for (let r = logDataStart(priorWs); r <= pl; r++) {
+      const f = cellFormula(priorWs.getCell(r, COL.amount));
+      if (f && /SUBTOTAL/i.test(f)) continue;
+      const bc = cellStr(priorWs.getCell(r, COL.bankcat)).trim().toLowerCase();
+      if (bc !== want) continue;
+      const a = cellNum(priorWs.getCell(r, COL.amount));
+      if (a != null) t += a;
+    }
+    return round2(t);
+  };
+
+  let filled = 0;
+  const last = Math.max(b2a.rowCount || 0, b2a.actualRowCount || 0);
+  const maxC = Math.min(30, Math.max(b2a.columnCount || 0, b2a.actualColumnCount || 0, 15));
+  for (let r = 3; r <= last; r++) {
+    // Find this row's current-period SUMIF (over the Current Invoice Log) and,
+    // separately, note whether a prior-log SUMIF already exists on the row.
+    let curCol = null, curFormula = null, hasPriorSumif = false;
+    for (let c = 1; c <= maxC; c++) {
+      const f = cellFormula(b2a.getCell(r, c));
+      if (!f || !/SUMIF/i.test(f)) continue;
+      if (new RegExp("'?" + esc(curName) + "'?\\s*!").test(f)) { curCol = c; curFormula = f; }
+      else if (new RegExp("'?" + esc(priorName) + "'?\\s*!").test(f)) hasPriorSumif = true;
+    }
+    if (curCol == null || hasPriorSumif) continue;   // no this-period SUMIF, or prior already present
+
+    // The "previous / inception" column is the one whose header band (rows 1..r)
+    // says previous/prior/inception AND, on this row, currently holds a bare
+    // literal (0/blank/self-arithmetic) rather than a formula. Search left of the
+    // current-period column first (Previous sits before This-period on every
+    // template), then anywhere in the band.
+    const headerSaysPrev = (c) => {
+      for (let hr = 1; hr < r; hr++) {
+        const s = b2a.getCell(hr, c).value;
+        if (typeof s === 'string' && /(previous|prior|inception)/i.test(s)) return true;
+      }
+      return false;
+    };
+    const isBareLiteral = (c) => {
+      const cell = b2a.getCell(r, c);
+      if (cellFormula(cell)) return false;            // already a formula — leave it
+      const v = cell.value;
+      return v == null || v === '' || v === 0 || (typeof v === 'number' && v === 0);
+    };
+    let prevCol = null;
+    for (let c = curCol - 1; c >= 1; c--) { if (headerSaysPrev(c) && isBareLiteral(c)) { prevCol = c; break; } }
+    if (prevCol == null) for (let c = 1; c <= maxC; c++) { if (c !== curCol && headerSaysPrev(c) && isBareLiteral(c)) { prevCol = c; break; } }
+    if (prevCol == null) continue;
+
+    // Build the prior-period SUMIF from this row's current one and seed its value
+    // from the Prior log. Seed by matching the Prior Log's Bank Cost Category
+    // (COL.bankcat) against this row's ACCOUNT KEY — the cell the SUMIF's criteria
+    // argument points at. That criteria is almost always column B (the account
+    // name) on the B2A, so read the key from the criteria reference when we can
+    // parse it, else fall back to column B. (The seed is only for pre-recalc
+    // display; Excel recomputes the real figure from the formula on open.)
+    const priorFormula = toPrior(curFormula);
+    if (priorFormula === curFormula) continue;        // sheet name didn't appear — don't guess
+    let keyCol = 2;                                    // default: account name in column B
+    const critM = curFormula.match(/SUMIF\s*\([^,]*,\s*(?:'[^']*'!)?\$?([A-Za-z]{1,3})\$?(\d+)/i);
+    if (critM && Number(critM[2]) === r) { keyCol = critM[1].toUpperCase().split('').reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0); }
+    const key = cellStr(b2a.getCell(r, keyCol)).trim();
+    const seed = priorSumFor(key);
+    b2a.getCell(r, prevCol).value = seed ? { formula: priorFormula, result: seed } : { formula: priorFormula };
+    filled++;
+  }
+  return filled;
 }
 
 // Map cost code -> the row it occupies on the Budget-to-Actual, so the Current
