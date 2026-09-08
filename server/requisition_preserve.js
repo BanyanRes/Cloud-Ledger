@@ -212,6 +212,49 @@ async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
       if (drawXml !== before) { out.file(drawName, drawXml); out.file(relName, relXml); changed = true; }
     }
 
+    // (2d) Strip broken EXTERNAL hyperlinks. Uploaded invoice/JE source workbooks
+    //      sometimes carry a hyperlink on a description cell pointing at a file on
+    //      the original author's machine (e.g. a "...\AppData\...\Loan Closing
+    //      JE.xlsx" path baked into a cell by whoever built the source). That path
+    //      is a relative external OPC relationship Excel cannot resolve, so on open
+    //      it rewrites the worksheet part and shows "Replaced Part: /xl/worksheets/
+    //      sheetN.xml part with XML error. Load error." It also leaks a third
+    //      party's folder layout into our report. Remove every worksheet hyperlink
+    //      relationship whose TargetMode is External, then drop the matching
+    //      <hyperlink> cell elements (and an emptied <hyperlinks> wrapper). Internal
+    //      in-workbook hyperlinks (location="Sheet!A1", no relationship) are left
+    //      untouched. Best-effort and non-fatal.
+    for (const relName of Object.keys(out.files)) {
+      const sm = relName.match(/^xl\/worksheets\/_rels\/(sheet\d+\.xml)\.rels$/);
+      if (!sm || out.files[relName].dir) continue;
+      let relXml = await out.file(relName).async('string');
+      const extIds = [];
+      const newRelXml = relXml.replace(/<Relationship\b[^>]*\/>/g, (rel) => {
+        if (/Type="[^"]*\/hyperlink"/.test(rel) && /TargetMode="External"/.test(rel)) {
+          const idm = rel.match(/Id="([^"]+)"/);
+          if (idm) { extIds.push(idm[1]); return ''; }
+        }
+        return rel;
+      });
+      if (!extIds.length) continue;
+      const sheetName = 'xl/worksheets/' + sm[1];
+      const sf = out.file(sheetName); if (!sf) continue;
+      let sheetXml = await sf.async('string');
+      const idSet = new Set(extIds);
+      sheetXml = sheetXml.replace(/<hyperlink\b[^>]*\/>/g, (hl) => {
+        const idm = hl.match(/r:id="([^"]+)"/);
+        return (idm && idSet.has(idm[1])) ? '' : hl;
+      });
+      // Drop the wrapper if it is now empty (an empty <hyperlinks/> is itself a
+      // schema violation Excel would flag).
+      sheetXml = sheetXml
+        .replace(/<hyperlinks>\s*<\/hyperlinks>/g, '')
+        .replace(/<hyperlinks\s*\/>/g, '');
+      out.file(relName, newRelXml);
+      out.file(sheetName, sheetXml);
+      changed = true;
+    }
+
     // (3) Strip bare directory entries. A proper OOXML/OPC package (like the one
     //     Excel writes) contains only file parts, never folder entries. JSZip
     //     re-emits a folder entry for every directory when it generates the zip,
