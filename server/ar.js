@@ -1083,7 +1083,12 @@ function registerArRoutes(app, ctx) {
       if (inv.status === 'void') return res.json({ success: true, already: true });
       const paid = db.prepare('SELECT COUNT(*) AS n FROM ar_receipts WHERE invoice_id = ?').get(inv.id).n;
       if (paid) throw new Error('Invoice has payments recorded; delete the receipts before voiding.');
-      const voidDate = isDate(req.body && req.body.date) ? req.body.date : todayStr();
+      // Reverse in the SAME period the invoice was booked, so the accrual and its
+      // reversal always net within one month and the aging can't split across a
+      // month-end. Date the reversal to the accrual JE's date (fall back to the
+      // invoice date, then today) rather than the day the void is clicked.
+      const accrualJe = inv.je_id ? db.prepare('SELECT date FROM journal_entries WHERE id = ?').get(inv.je_id) : null;
+      const voidDate = (accrualJe && accrualJe.date) || inv.invoice_date || todayStr();
       const lines = db.prepare('SELECT * FROM ar_invoice_lines WHERE invoice_id = ? ORDER BY sort, id').all(inv.id);
       db.transaction(() => {
         if (inv.status === 'draft') {
