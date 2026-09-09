@@ -2850,6 +2850,7 @@ function ArInvoiceDetail({entityId,invoice,bankAccts,canEdit,busy,act,onClose}){
   const inv=invoice;
   const[sendTo,setSendTo]=useState(inv.customer_email||'');
   const[pay,setPay]=useState({date:today(),amount:'',bank_account_code:bankAccts[0]?bankAccts[0].code:'',memo:''});
+  const[reDate,setReDate]=useState(inv.invoice_date||today());const[showRedate,setShowRedate]=useState(false);
   const isCm=inv.doc_type==='credit_memo';
   // Open credit memos for THIS invoice's customer, offered for application
   // when the invoice still has an open balance. Not loaded for a credit memo.
@@ -2899,7 +2900,17 @@ function ArInvoiceDetail({entityId,invoice,bankAccts,canEdit,busy,act,onClose}){
           onClick={()=>{if(confirm('Delete draft '+inv.invoice_num+' and its journal entry?'))act(()=>api.deleteArInvoice(entityId,inv.id),'del').then(()=>onClose());}}>Delete Draft</button>}
         {canEdit&&!isVoid&&<button style={{...S.btnGhost,color:T.orange}} disabled={!!busy}
           onClick={()=>{if(confirm(isDraft?'Void this draft? Its journal entry will be removed.':'Void '+inv.invoice_num+'? A reversing journal entry will be posted.'))act(()=>api.voidArInvoice(entityId,inv.id),'void');}}>Void</button>}
+        {canEdit&&!isVoid&&<button style={S.btnS} disabled={!!busy} onClick={()=>{setReDate(inv.invoice_date||today());setShowRedate(v=>!v);}}>Change date</button>}
       </div>
+      {canEdit&&!isVoid&&showRedate&&<div style={{...S.card,marginBottom:12}}>
+        <div style={{fontSize:13,fontWeight:600,color:T.textBright,marginBottom:8}}>Change invoice date</div>
+        <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
+          <div style={{flex:'0 0 170px'}}><label style={S.label}>New invoice date</label><input style={S.input} type="date" value={reDate} onChange={e=>setReDate(e.target.value)}/></div>
+          <button style={S.btnP} disabled={!!busy||!reDate} onClick={()=>act(()=>api.redateArInvoice(entityId,inv.id,{date:reDate}),'redate').then(r=>{if(r)setShowRedate(false);})}>{busy==='redate'?'Saving…':'Save date'}</button>
+          <button style={S.btnGhost} disabled={!!busy} onClick={()=>setShowRedate(false)}>Cancel</button>
+        </div>
+        <div style={{fontSize:11,color:T.textMuted,marginTop:8}}>Moves the invoice's revenue journal entry to the same date, so revenue is recognized in the new period — same entry, nothing duplicated. The due date shifts by the same number of days.</div>
+      </div>}
       {canEdit&&!isVoid&&<div style={{...S.card,marginBottom:12}}>
         <div style={{fontSize:13,fontWeight:600,color:T.textBright,marginBottom:8}}>Send to customer</div>
         <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>

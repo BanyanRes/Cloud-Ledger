@@ -1019,6 +1019,47 @@ function registerArRoutes(app, ctx) {
     } catch (e) { fail(res, e); }
   });
 
+  // Change an invoice's date WITHOUT re-issuing it. Unlike the draft-only PATCH
+  // above (which rebuilds the accrual JE), this works on issued/sent invoices and
+  // re-dates the invoice's existing accrual JE IN PLACE — same entry number, same
+  // amounts, just a new date — so the invoice date and its revenue recognition
+  // always move together. Nothing is created or deleted, so revenue can never be
+  // duplicated. The due date shifts by the same number of days unless overridden.
+  app.patch('/api/entities/:eid/ar/invoices/:id/date', ...writers, (req, res) => {
+    try {
+      const eid = req.params.eid, b = req.body || {};
+      const newDate = b.date;
+      if (!isDate(newDate)) throw new Error('A valid date (YYYY-MM-DD) is required.');
+      const inv = db.prepare('SELECT * FROM ar_invoices WHERE id = ? AND entity_id = ?').get(req.params.id, eid);
+      if (!inv) return res.status(404).json({ error: 'Not found' });
+      if (inv.status === 'void') throw new Error('A void invoice cannot be re-dated.');
+      if (inv.status === 'paid') throw new Error('This invoice is fully paid; remove the receipts before changing its date.');
+
+      // Keep the invoice→due gap unless the caller supplies a new due date.
+      let newDue = isDate(b.due_date) ? b.due_date : null;
+      if (!newDue && isDate(inv.due_date) && isDate(inv.invoice_date)) {
+        newDue = addDays(newDate, daysBetween(inv.invoice_date, inv.due_date));
+      }
+
+      const opts = { userEmail: req.user && req.user.email, override: b.override_period_lock, reason: b.override_reason, source: 'ar-redate' };
+      db.transaction(() => {
+        // Re-date the linked accrual JE in place (only if it actually moves).
+        if (inv.je_id) {
+          const je = db.prepare('SELECT date FROM journal_entries WHERE id = ?').get(inv.je_id);
+          if (je && je.date !== newDate) {
+            periods.assertPostable(db, eid, je.date, opts); // period we're leaving
+            periods.assertPostable(db, eid, newDate, opts);  // period we're entering
+            db.prepare("UPDATE journal_entries SET date = ?, updated_by = ?, updated_at = datetime('now') WHERE id = ?")
+              .run(newDate, who(req), inv.je_id);
+          }
+        }
+        db.prepare('UPDATE ar_invoices SET invoice_date = ?, due_date = COALESCE(?, due_date) WHERE id = ?')
+          .run(newDate, newDue, inv.id);
+      })();
+      res.json(invoiceWithLines(db, eid, inv.id));
+    } catch (e) { fail(res, e); }
+  });
+
   app.delete('/api/entities/:eid/ar/invoices/:id', ...writers, (req, res) => {
     const eid = req.params.eid;
     const inv = db.prepare('SELECT * FROM ar_invoices WHERE id = ? AND entity_id = ?').get(req.params.id, eid);
