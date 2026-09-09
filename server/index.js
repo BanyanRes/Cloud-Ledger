@@ -765,6 +765,12 @@ if (!entHideDimCols.includes('hide_dims')) {
 }
 const bslCols = db.prepare("PRAGMA table_info(billcom_sync_log)").all().map(c => c.name);
 if (!bslCols.includes('invoice_number')) { db.exec("ALTER TABLE billcom_sync_log ADD COLUMN invoice_number TEXT"); console.log('[db migrate] billcom_sync_log.invoice_number added'); }
+// Bill re-sync change detection (issue: edited bills in Bill.com didn't update in CL).
+// sync_hash = fingerprint of the posted JE content (lines + date + memo/doc/vendor);
+// bc_updated_time = Bill.com's own updatedTime, used as a cheap fast-path so an
+// unchanged bill still skips without a detail fetch. Both nullable/legacy-safe.
+if (!bslCols.includes('sync_hash')) { db.exec("ALTER TABLE billcom_sync_log ADD COLUMN sync_hash TEXT"); console.log('[db migrate] billcom_sync_log.sync_hash added'); }
+if (!bslCols.includes('bc_updated_time')) { db.exec("ALTER TABLE billcom_sync_log ADD COLUMN bc_updated_time TEXT"); console.log('[db migrate] billcom_sync_log.bc_updated_time added'); }
 // ── Fund reporting (CLRF, entity 40) ────────────────────────────────────────
 // GP vs LP designation on investor classes. Defaults to 'LP'; specific classes
 // are tagged 'GP' via the Fund Reporting admin UI. Drives the GP/LP columns of
@@ -7324,6 +7330,10 @@ app.post('/api/billcom/ap-aging-check/:entity_id', auth, requireEntityAccess('en
 app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  // Preview (dry-run): compare live Bill.com against posted JEs and REPORT what
+  // would be created/updated, writing nothing. Lets you see the re-sync update
+  // list before anything is edited. ?preview=1 or { preview:true }.
+  const preview = (req.query && (req.query.preview === '1' || req.query.preview === 'true')) || (req.body && req.body.preview === true);
 
   const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
   if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
@@ -7595,6 +7605,55 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // bills re-fetches and re-scans the same 25 bills every batch and never advances.
   const alreadyPreCutoff = db.prepare("SELECT 1 FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'bill' AND billcom_id = ? AND status = 'skip_cutoff' LIMIT 1");
 
+  // ── Bill re-sync (change detection) ──────────────────────────────────────────
+  // Bill.com edits (GL code / amount / dimensions) used to be ignored: a bill with
+  // any prior 'success' row was skipped forever. Now we keep the LATEST synced JE
+  // + its fingerprint so a changed bill can be edited in place on the next sync.
+  const latestBillSync = db.prepare(
+    "SELECT cl_entry_id, sync_hash, bc_updated_time FROM billcom_sync_log " +
+    "WHERE entity_id = ? AND sync_type = 'bill' AND billcom_id = ? AND status = 'success' AND cl_entry_id IS NOT NULL " +
+    "ORDER BY id DESC LIMIT 1"
+  );
+  // logSync variant that also records the content fingerprint + Bill.com updatedTime
+  // (used for create + update success rows; skip/error rows keep the plain logSync).
+  const logSyncH = db.prepare(
+    'INSERT INTO billcom_sync_log (entity_id, sync_type, billcom_id, cl_entry_id, status, message, created_at, invoice_number, sync_hash, bc_updated_time) VALUES (?,?,?,?,?,?,?,?,?,?)'
+  );
+  // A bill is "paid" in CL once a Bill.com payment JE has relieved it (memo
+  // "… relieve bill <billId>"); those rows log under sync_type='payment' with
+  // billcom_id "<payId>:<billId>". Used to protect the AP subledger from a silent
+  // amount change on a bill that cash has already been posted against.
+  const hasPaymentForBill = db.prepare(
+    "SELECT 1 FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'payment' AND billcom_id LIKE ? AND status = 'success' LIMIT 1"
+  );
+  const existingJeLines = db.prepare(
+    "SELECT account_code, debit, credit, class_id, location_id, project_id, description FROM journal_lines WHERE entry_id = ? ORDER BY id"
+  );
+  // Stable fingerprint of the postable content of a bill's JE. Two syncs of the
+  // same bill produce the same string iff nothing that affects the ledger changed.
+  // Lines are canonicalised (sorted, amounts fixed to cents) so ordering never
+  // causes a false "changed".
+  const canonLines = (lines) => (lines || []).map(l => ({
+    a: String(l.account_code),
+    d: (+(l.debit || 0)).toFixed(2),
+    c: (+(l.credit || 0)).toFixed(2),
+    cl: l.class_id || null, lo: l.location_id || null, pr: l.project_id || null,
+    ds: String(l.description || '').trim(),
+  })).sort((x, y) => JSON.stringify(x).localeCompare(JSON.stringify(y)));
+  const billFingerprint = ({ lines, date, memo, vendor, docNumber }) => {
+    const payload = JSON.stringify({
+      lines: canonLines(lines),
+      date: String(date || '').slice(0, 10),
+      memo: String(memo || ''), vendor: String(vendor || ''), doc: String(docNumber || ''),
+    });
+    return cryptoMod.createHash('sha256').update(payload).digest('hex');
+  };
+  result.bills.updated = 0;
+  result.bills.unchanged = 0;
+  result.bills.update_flagged = [];
+  result.bills.update_preview = []; // dry-run: bills that WOULD change on re-sync
+  result.bills.would_create = 0;    // dry-run: brand-new bills that would post
+
   // Front-load the per-bill detail fetches in parallel (bounded concurrency) so the
   // posting loop below isn't blocked one network round-trip at a time. Best-effort
   // CACHE only: the loop still applies every skip/gate and fetches inline on a miss,
@@ -7674,21 +7733,37 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   for (const bill of bills) {
     const billId = String(pick(bill, 'id') || '');
     if (!billId) continue;
+    // Set when this bill already has a synced JE and may need an in-place update
+    // (see the already-synced branch below and the post/update site further down).
+    let updateEntryId = null, updatePriorHash = null;
     if (!isBillEligible(bill)) {
       result.bills.skipped++;
       result.bills.details.push({ id: billId, status: 'skip', reason: 'not approved' });
       continue;
     }
-    if (alreadySynced.get(entityId, 'bill', billId)) {
-      // Backfill the vendor on the existing JE if it's missing (covers bills
-      // synced before vendor was captured). Uses the list object's invoice # +
-      // vendor id; falls back to billId, matching the original memo.
-      const vn = vendorOf(bill);
-      const bnum = pick(bill, 'invoiceNumber', 'invoice_number') || billId;
-      if (vn && bnum) { try { backfillVendor.run(vn, entityId, 'Bill.com bill #' + bnum); } catch (e) {} }
-      result.bills.skipped++;
-      result.bills.details.push({ id: billId, status: 'skip', reason: 'already synced' });
-      continue;
+    // Already synced once? Decide skip vs. update. If Bill.com's updatedTime is
+    // unchanged from our last sync, the bill can't have changed — skip cheaply, no
+    // detail fetch (same cost as before). Otherwise treat it as an UPDATE candidate:
+    // fall through, rebuild the JE from current Bill.com data, and edit the posted
+    // JE in place if the content actually differs (verified at the post site below).
+    {
+      const priorSync = latestBillSync.get(entityId, billId);
+      if (priorSync) {
+        const listUpdated = pick(bill, 'updatedTime', 'updated_time') || null;
+        if (priorSync.bc_updated_time && listUpdated && String(listUpdated) === String(priorSync.bc_updated_time)) {
+          // Unchanged since last sync. Backfill a missing vendor (legacy bills) and skip.
+          const vn = vendorOf(bill);
+          const bnum = pick(bill, 'invoiceNumber', 'invoice_number') || billId;
+          if (!preview && vn && bnum) { try { backfillVendor.run(vn, entityId, 'Bill.com bill #' + bnum); } catch (e) {} }
+          result.bills.skipped++;
+          result.bills.details.push({ id: billId, status: 'skip', reason: 'already synced (unchanged)' });
+          continue;
+        }
+        // updatedTime changed, or a legacy row with none stored: rebuild and compare
+        // to the posted JE at the post site; edit in place only if it truly differs.
+        updateEntryId = priorSync.cl_entry_id;
+        updatePriorHash = priorSync.sync_hash || null;
+      }
     }
     if (alreadyPreCutoff.get(entityId, billId)) {
       result.bills.skipped++;
@@ -7703,7 +7778,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     // (already booked in the GL). Done here on the list object — before the
     // per-run budget gate and the detail fetch — so overlaps neither consume the
     // batch budget nor need a detail round-trip. Reported in aging_overlaps.
-    if (agingLines.length) {
+    if (agingLines.length && !updateEntryId) {
       const listNumber = pick(bill, 'invoiceNumber', 'invoice_number') || pick(pick(bill, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || billId;
       const listVendor = vendorOf(bill) || '';
       const listAmount = Number(pick(bill, 'amount', 'amountDue', 'invoiceAmount') || 0) || null;
@@ -7784,7 +7859,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       // the skip applies to this run only and is counted for reporting.
       const decidedOnGl = !useGlPosting || (glMapReady && !!glPostDay);
       if (decidedOnGl) {
-        try { logSync.run(entityId, 'bill', billId, null, 'skip_cutoff', why, now, billNumber); } catch (e) {}
+        if (!preview) { try { logSync.run(entityId, 'bill', billId, null, 'skip_cutoff', why, now, billNumber); } catch (e) {} }
       } else {
         result.bills.provisional_cutoff_skips = (result.bills.provisional_cutoff_skips || 0) + 1;
       }
@@ -7967,6 +8042,100 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       continue;
     }
 
+    // Fingerprint of what THIS sync would post, plus Bill.com's own updatedTime
+    // (stored so the next sync can skip an unchanged bill without a detail fetch).
+    const listUpdated = pick(bill, 'updatedTime', 'updated_time') || pick(detail, 'updatedTime', 'updated_time') || null;
+    const newHash = billFingerprint({ lines, date: postingDate, memo, vendor: billVendor, docNumber: String(billNumber || '') });
+
+    // ── UPDATE path: this bill already has a posted JE. Compare and, if it truly
+    //    changed, edit that JE in place (chosen over reverse+repost: one clean
+    //    entry, same number). Guards protect the AP subledger and closed periods.
+    if (updateEntryId) {
+      const curEntry = db.prepare('SELECT entry_num, date, memo, vendor, doc_number FROM journal_entries WHERE id = ? AND entity_id = ?').get(updateEntryId, entityId);
+      if (!curEntry) {
+        // JE vanished under us (manual delete). Fall through and re-create it.
+        updateEntryId = null;
+      } else {
+        const curLines = existingJeLines.all(updateEntryId);
+        const curHash = billFingerprint({ lines: curLines, date: curEntry.date, memo: curEntry.memo, vendor: curEntry.vendor, docNumber: curEntry.doc_number });
+        if (curHash === newHash) {
+          // Nothing that affects the ledger changed. Refresh the stored fingerprint +
+          // updatedTime so the cheap fast-path skips it next run, and move on.
+          // (Preview writes nothing.)
+          if (!preview) { try { logSyncH.run(entityId, 'bill', billId, updateEntryId, 'success', 'no change on re-sync (JE #' + curEntry.entry_num + ')', now, billNumber, newHash, listUpdated); } catch (e) {} }
+          result.bills.unchanged++;
+          result.bills.details.push({ id: billId, status: 'unchanged', cl_entry_id: updateEntryId });
+          continue;
+        }
+        // A real change. Build a readable diff (old vs new amount + GL codes), used
+        // for both the preview list and the flagged-exception records.
+        const curApTotal = curLines.filter(l => String(l.account_code) === String(apAccount)).reduce((s, l) => s + (l.credit || 0), 0);
+        const totalChanged = Math.abs(totalDr - curApTotal) > 0.005;
+        const glCodesOf = (ls) => [...new Set(ls.filter(l => (l.debit || 0) > 0.005).map(l => String(l.account_code)))].sort();
+        const oldGl = glCodesOf(curLines), newGl = glCodesOf(lines);
+        const diff = { id: billId, invoice_number: billNumber, vendor: billVendor || curEntry.vendor || '', entry_num: curEntry.entry_num, cl_entry_id: updateEntryId,
+          old_amount: +curApTotal.toFixed(2), new_amount: +totalDr.toFixed(2), amount_changed: totalChanged,
+          old_gl: oldGl, new_gl: newGl, gl_changed: JSON.stringify(oldGl) !== JSON.stringify(newGl) };
+        if (totalChanged && hasPaymentForBill.get(entityId, '%:' + billId)) {
+          if (!preview) { try { logSync.run(entityId, 'bill', billId, updateEntryId, 'skip', 'amount changed in Bill.com but a payment is already applied — manual review', now, billNumber); } catch (e) {} }
+          const rec = { ...diff, action: 'flag', reason: 'amount changed with payment already applied' };
+          result.bills.update_flagged.push(rec);
+          result.bills.update_preview.push(rec);
+          result.bills.details.push({ id: billId, status: 'flagged', reason: 'amount changed with payment applied', cl_entry_id: updateEntryId });
+          continue;
+        }
+        // Guard 2 — hard-closed year (either the existing JE's date or the new
+        // posting date) can't be edited. Soft-close is overridable, like a new post.
+        let hardClosed = null;
+        for (const chkDay of [String(curEntry.date).slice(0, 10), postDay]) {
+          try { periods.assertPostable(db, entityId, chkDay, { userEmail: (req.user && req.user.email) || 'billcom-sync', source: 'billcom-sync' }); }
+          catch (e) { if (e && e.code === 'HARD_CLOSED') { hardClosed = chkDay; break; } if (!e || e.code !== 'SOFT_CLOSED') throw e; }
+        }
+        if (hardClosed) {
+          if (!preview) { try { logSync.run(entityId, 'bill', billId, updateEntryId, 'skip', 'change falls in hard-closed year (' + hardClosed + ') — manual review', now, billNumber); } catch (e) {} }
+          const rec = { ...diff, action: 'flag', reason: 'change falls in hard-closed year (' + hardClosed + ')' };
+          result.bills.update_flagged.push(rec);
+          result.bills.update_preview.push(rec);
+          result.bills.details.push({ id: billId, status: 'flagged', reason: 'hard-closed period', cl_entry_id: updateEntryId });
+          continue;
+        }
+        // Preview: record what WOULD be updated, change nothing.
+        if (preview) {
+          result.bills.update_preview.push({ ...diff, action: 'update' });
+          result.bills.details.push({ id: billId, status: 'would_update', cl_entry_id: updateEntryId, entry_num: curEntry.entry_num });
+          continue;
+        }
+        // Edit in place: same entry, new header + lines, in one transaction.
+        try {
+          db.transaction(() => {
+            periods.assertPostable(db, entityId, postDay, { userEmail: (req.user && req.user.email) || 'billcom-sync', override: true, reason: 'Bill.com re-sync update (' + billNumber + ')', source: 'billcom-sync' });
+            db.prepare('UPDATE journal_entries SET date = ?, memo = ?, vendor = ?, doc_number = ? WHERE id = ?')
+              .run(postingDate, memo, billVendor, String(billNumber || '') || null, updateEntryId);
+            db.prepare('DELETE FROM journal_lines WHERE entry_id = ?').run(updateEntryId);
+            for (const l of lines) {
+              db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, class_id, location_id, project_id, description) VALUES (?,?,?,?,?,?,?,?)')
+                .run(updateEntryId, l.account_code, l.debit, l.credit, l.class_id || null, l.location_id || null, l.project_id || null, l.description || '');
+            }
+            logSyncH.run(entityId, 'bill', billId, updateEntryId, 'success', 'updated JE #' + curEntry.entry_num + ' from Bill.com re-sync', now, billNumber, newHash, listUpdated);
+          })();
+          result.bills.updated++;
+          result.bills.update_preview.push({ ...diff, action: 'updated' });
+          result.bills.details.push({ id: billId, status: 'updated', cl_entry_id: updateEntryId, entry_num: curEntry.entry_num });
+        } catch (e) {
+          result.bills.errors++;
+          logSync.run(entityId, 'bill', billId, updateEntryId, 'error', 'JE update failed: ' + e.message, now, billNumber);
+          result.bills.details.push({ id: billId, status: 'error', reason: 'update failed: ' + e.message });
+        }
+        continue;
+      }
+    }
+
+    // Preview: a brand-new bill would be created; report it, write nothing.
+    if (preview) {
+      result.bills.would_create++;
+      result.bills.details.push({ id: billId, status: 'would_create', invoice_number: billNumber, amount: +totalDr.toFixed(2) });
+      continue;
+    }
     try {
       const insertedId = db.transaction(() => {
         // Record the soft-close override here, inside the same transaction as the
@@ -7982,7 +8151,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
           db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, class_id, location_id, project_id, description) VALUES (?,?,?,?,?,?,?,?)')
             .run(r.lastInsertRowid, l.account_code, l.debit, l.credit, l.class_id || null, l.location_id || null, l.project_id || null, l.description || '');
         }
-        logSync.run(entityId, 'bill', billId, r.lastInsertRowid, 'success', 'created JE #' + num + ' (posted ' + String(postingDate).slice(0, 10) + ' by ' + postingBasis + ')', now, billNumber);
+        logSyncH.run(entityId, 'bill', billId, r.lastInsertRowid, 'success', 'created JE #' + num + ' (posted ' + String(postingDate).slice(0, 10) + ' by ' + postingBasis + ')', now, billNumber, newHash, listUpdated);
         return r.lastInsertRowid;
       })();
       result.bills.synced++;
@@ -8017,7 +8186,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   if (_autoLinked.length) result.bills.auto_linked = _autoLinked;
   result.bills.deleted = 0;
   const liveIds = new Set(bills.map(b => String(pick(b, 'id') || '')).filter(Boolean));
-  {
+  if (!preview) { // preview never deletes
     // synced bills that still have a live CL entry, keyed by billcom_id -> cl_entry_id,
     // limited to those whose CL entry date is inside the fetched window.
     const syncedBills = db.prepare(
@@ -8091,7 +8260,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     const payResult = performPaymentReconcileCore({
       entityId, apAccount, clearingAccount, cashAccount,
       payments, asOf: new Date().toISOString().slice(0, 10), cutoffDate,
-      dryRun: false, actor, now, billInvoiceDateById,
+      dryRun: !!preview, actor, now, billInvoiceDateById,
     });
     // Fold the two-leg result into the sync response shape the client expects
     // (synced = bill reliefs + funds transfers created; errors/skipped summed).
