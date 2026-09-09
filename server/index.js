@@ -7159,18 +7159,6 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
       const amount = Number(pick(alloc, 'amount') || 0);
       if (!billId || amount <= 0) { result.leg1.skipped++; continue; }
 
-      // Conversion-cutoff rule (by INVOICE date, not payment date): if the bill
-      // this payment settles is dated on/before the cutoff, the invoice is already
-      // in CL (entered via JE pre-conversion) and its payoff belongs to the opening
-      // state — so skip the payment no matter when it was actually paid. cutoffDate
-      // is exclusive: invoiceDate < cutoffDate means pre-conversion.
-      const invDate = invDateOf(billId);
-      if (invDate && String(invDate) < cutoffDate) {
-        result.leg1.skipped++;
-        result.leg1.details.push({ id: payId + ':' + billId, status: 'skip', reason: 'invoice pre-conversion (' + invDate + ' < ' + cutoffDate + ')' });
-        continue;
-      }
-
       const dedupId = payId + ':' + billId;
       if (alreadySynced.get(entityId, 'payment', dedupId)) {
         result.leg1.skipped++;
@@ -7182,6 +7170,22 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
       if (!billEntryId) {
         result.leg1.skipped++;
         result.leg1.details.push({ id: dedupId, status: 'skip', reason: 'bill not synced to CL (likely pre-cutover)', billId });
+        continue;
+      }
+
+      // Conversion-cutoff by POSTING date, consistent with the bill sync (which
+      // gates on GL posting date, NOT invoice date). The synced bill's own CL
+      // journal-entry date is its authoritative posting date. A bill posted
+      // on/before the cutoff belongs to the opening balance, so its payoff is part
+      // of opening state and is skipped; a bill posted AFTER the cutoff is a real
+      // CL payable whose payment relieves it, even when the invoice predates the
+      // cutoff. (Previously gated on invoice date, which wrongly skipped payments
+      // for pre-cutoff invoices that posted after the cutoff.)
+      const billPostRow = db.prepare('SELECT date FROM journal_entries WHERE id = ? AND entity_id = ?').get(billEntryId, entityId);
+      const billPostDate = billPostRow ? String(billPostRow.date) : null;
+      if (billPostDate && billPostDate < cutoffDate) {
+        result.leg1.skipped++;
+        result.leg1.details.push({ id: dedupId, status: 'skip', reason: 'bill posted pre-conversion (' + billPostDate + ' < ' + cutoffDate + ')' });
         continue;
       }
 
