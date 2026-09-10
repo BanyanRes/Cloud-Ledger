@@ -131,6 +131,11 @@ const sumCols = (F, tr, dcols, first, last) => { if (last < first || tr == null)
 // that sums subtotal rows rather than a contiguous block). `rows` = 0-based row idxs.
 const sumRows = (F, tr, dcols, rows) => { if (!rows || !rows.length || tr == null) return; for (const c of dcols) { const L = XLC(c); F.push({ r: tr, c, f: 'SUM(' + rows.map(r => L + (r + 1)).join(',') + ')' }); } };
 const BLANK_JE = () => ({date:today(),memo:'',lines:[{account_code:'',debit:'',credit:'',description:''},{account_code:'',debit:'',credit:'',description:''}]});
+// First day of the month AFTER the given ISO date (default auto-reversal date).
+const firstOfNextMonth = (dateStr) => { const s=String(dateStr||'').slice(0,10); const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(s); const b=m?new Date(+m[1],+m[2]-1,+m[3]):new Date(); const d=new Date(b.getFullYear(),b.getMonth()+1,1); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-01'; };
+// Build a New-JE form (dated today, memo suffixed "(copy)") from an existing entry
+// so it can be duplicated into an editable, not-yet-posted draft.
+const jeFromEntry = (entry) => { const f2=n=>Number(n)>0?Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''; return {date:today(),memo:((entry&&entry.memo)||'')+' (copy)',lines:((entry&&entry.lines)||[]).map(l=>({account_code:l.account_code,debit:f2(l.debit),credit:f2(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null}))}; };
 const SIDEBAR_KEY = 'cl_sidebar';
 
 // ─── Cloud Ledger Logo SVG ───
@@ -417,6 +422,7 @@ function QuickAddAccountModal({entityId,onClose,onCreated}){const[form,setForm]=
 // ─── JE Modal — form state received from App (persists across open/close) ───
 function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,onPosted,form,setForm,pendingFiles,setPendingFiles}){
   const[accounts,setAccounts]=useState([]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[posting,setPosting]=useState(false);const[posted,setPosted]=useState('');
+  const[autoReverse,setAutoReverse]=useState(false);const[reverseDate,setReverseDate]=useState('');
   const[projects,setProjects]=useState([]);
   const[dimProjects,setDimProjects]=useState([]);
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
@@ -460,16 +466,17 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
       class_id:kind==='class'?id:null}:l)}));
   };
   const tDr=form.lines.reduce((s,l)=>s+parseAmt(l.debit),0);const tCr=form.lines.reduce((s,l)=>s+parseAmt(l.credit),0);const bal=Math.abs(tDr-tCr)<0.005&&tDr>0;
-  const discard=()=>{setForm(BLANK_JE());setPendingFiles([]);};
+  const discard=()=>{setForm(BLANK_JE());setPendingFiles([]);setAutoReverse(false);setReverseDate('');};
   const onFilesSelected=e=>{const files=Array.from(e.target.files);if(files.length>0)setPendingFiles(p=>[...p,...files]);e.target.value='';};
   const post=async()=>{if(!form.date||!form.memo.trim()){setErr('Date and memo required');return;}if(form.lines.some(l=>!l.account_code)){setErr('All lines need an account');return;}if(!bal){setErr('Entry must balance');return;}
     setPosting(true);setErr('');
-    const _basePayload=override=>({date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null})),...(override||{})});
+    const _basePayload=override=>({date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null})),...(autoReverse?{auto_reverse:true,reverse_date:reverseDate||firstOfNextMonth(form.date)}:{}),...(override||{})});
     const _doPost=async override=>{
       const r=await api.createEntry(entityId,_basePayload(override));
       let msg='JE-'+String(r.entry_num).padStart(4,'0')+' posted';
+      if(r.reversal)msg+=' + auto-reversal JE-'+String(r.reversal.entry_num).padStart(4,'0');
       if(pendingFiles.length>0){try{const u=await api.uploadAttachments(entityId,r.id,pendingFiles);msg+=' with '+u.length+' attachment(s)';}catch(ue){msg+=' (attachments failed: '+ue.message+')';}}
-      setForm(BLANK_JE());setPendingFiles([]);setPosted(msg+'!');setTimeout(()=>setPosted(''),5000);if(onPosted)onPosted();
+      setForm(BLANK_JE());setPendingFiles([]);setAutoReverse(false);setReverseDate('');setPosted(msg+'!');setTimeout(()=>setPosted(''),5000);if(onPosted)onPosted();
     };
     try{await _doPost();}
     catch(e){
@@ -495,7 +502,15 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
       </div></div>
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
-        <div style={{...S.col,flex:4}}><label style={S.label}>Memo / Description</label><input style={S.input} placeholder="What is this entry for?" value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
+        <div style={{...S.col,flex:4}}><label style={S.label}>Memo / Description</label><input style={S.input} placeholder="What is this entry for?" value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div>
+      <div style={{display:'flex',alignItems:'center',gap:14,marginTop:14,flexWrap:'wrap'}}>
+        <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,color:T.textBright,cursor:'pointer'}}>
+          <input type="checkbox" checked={autoReverse} onChange={e=>{const on=e.target.checked;setAutoReverse(on);if(on&&!reverseDate)setReverseDate(firstOfNextMonth(form.date));}}/>
+          Auto-reverse this entry
+        </label>
+        {autoReverse&&<div style={{...S.col,maxWidth:190}}><label style={S.label}>Reversal date</label><input style={S.input} type="date" value={reverseDate} onChange={e=>setReverseDate(e.target.value)}/></div>}
+        {autoReverse&&<span style={{fontSize:11,color:T.textDim,maxWidth:360}}>A mirror entry (debits &amp; credits swapped) posts on this date. Default is the 1st of next month.</span>}
+      </div></div>
     <div style={{...S.cardFlush,marginBottom:16,maxHeight:'52vh',overflowY:'auto'}}><table className="cl-colresize" style={S.table}><thead style={{position:'sticky',top:0,zIndex:2,background:T.bgElevated}}><tr><th style={{...S.th,minWidth:300}}>Account</th>{showDims&&<th style={{...S.th,width:140}}>Dimension</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
         <AccountAutocomplete accounts={accounts} value={l.account_code} onChange={c=>updateLine(i,'account_code',c)} placeholder="Select account…" style={S.select} clearable/></td>
@@ -961,7 +976,7 @@ export default function App(){
         onReorder={ids=>saveNavOrder(openCatDef.key,ids)}/>}
       <div style={S.main}>{(()=>{const en=entities.find(e=>e.id===activeEntity);const entityName=en?en.name:'';return<>
         {page==='dashboard'&&<Dashboard entityId={activeEntity} setActiveEntity={setActiveEntity} setPage={setPage} user={user} key={rk}/>}
-        {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)} openJEId={pendingJEId} clearOpenJE={()=>setPendingJEId(null)}/>}
+        {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)} onDuplicate={(entry)=>{setJeForm(jeFromEntry(entry));setShowJE(true);}} openJEId={pendingJEId} clearOpenJE={()=>setPendingJEId(null)}/>}
         {page==='coa'&&activeEntity&&<ChartOfAccounts entityId={activeEntity} entityName={entityName} canEdit={canEdit}/>}
         {page==='dimensions'&&activeEntity&&dimsEnabled&&<DimensionsManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='ar_customers'&&activeEntity&&arFull&&<CustomersManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
@@ -2219,7 +2234,7 @@ function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSum
   </div>);}
 
 // ═══ Edit JE Modal ═══
-function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,accounts:initAccounts,onClose,onSaved}){
+function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,accounts:initAccounts,onClose,onSaved,onDuplicate}){
   // dimsEnabled defaults to true: report drilldowns (AccountDrillDownModal, ApAgingReport,
   // FundReporting) open this modal without the prop and only ever do so for real
   // accounting/fund entities, so the full Location/Class/Project dimension list must show —
@@ -2297,6 +2312,14 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
   const del=async()=>{if(!confirm('Delete JE-'+String(entry.entry_num).padStart(4,'0')+'? This permanently removes the entry and all its lines. This cannot be undone.'))return;
     setSaving(true);setErr('');try{await api.deleteEntry(entityId,entry.id);onSaved();onClose();}catch(e){setErr(e.message);setSaving(false);}};
   const[xlBusy,setXlBusy]=useState(false);
+  const[showRev,setShowRev]=useState(false);const[revDate,setRevDate]=useState('');const[revBusy,setRevBusy]=useState(false);
+  const doReverse=async(override)=>{setRevBusy(true);setErr('');
+    try{const r=await api.reverseEntry(entityId,entry.id,{reverse_date:revDate||firstOfNextMonth(entry.date),...(override||{})});onSaved();onClose();}
+    catch(e){const d=e.detail||{};
+      if(d.code==='SOFT_CLOSED'){const mon=(d.period&&d.period.month)||'that month';if(window.confirm(mon+' is soft-closed. Post the reversal into it anyway?')){return doReverse({override_period_lock:true});}else{setErr('Reversal cancelled — '+mon+' is soft-closed.');}}
+      else if(d.code==='HARD_CLOSED'){setErr((d.error||'That fiscal year is closed.')+' Reopening it is a separate admin action.');}
+      else setErr(d.error||e.message);}
+    finally{setRevBusy(false);}};
   const downloadXlsx=async()=>{setXlBusy(true);setErr('');
     try{const out=await api.entryXlsx(entityId,entry.id);if(!out)return;
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
@@ -2318,6 +2341,7 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
     {entry.updated_by&&entry.updated_at&&<div style={{fontSize:11,color:T.orange,marginBottom:16,fontStyle:'italic'}}>
       Last edited by {entry.updated_by} on {fmtPst(entry.updated_at)}
     </div>}
+    {(entry.reverses_entry_id||entry.reversal_entry_id)&&<div style={{fontSize:11,color:T.teal,marginBottom:8,fontWeight:600}}>{entry.reverses_entry_id?'↩ This entry is a reversal of another journal entry.':'↩ This entry has been reversed by a later journal entry.'}</div>}
     {!(entry.updated_by&&entry.updated_at)&&<div style={{marginBottom:16}}/>}
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
@@ -2349,17 +2373,165 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
         <button style={{...S.btnGhost,color:T.red,fontSize:10}} onClick={()=>deleteAtt(a)}>Delete</button>
       </div>)}</div>}
     </div>
-    <div style={{display:'flex',gap:10,alignItems:'center'}}>
+    {showRev&&<div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12,padding:'10px 14px',background:T.bgElevated,border:'1px solid '+T.orange+'40',borderRadius:T.radiusSm,flexWrap:'wrap'}}>
+      <span style={{fontSize:12,color:T.textBright,fontWeight:600}}>Reverse on</span>
+      <input style={{...S.input,maxWidth:170}} type="date" value={revDate} onChange={e=>setRevDate(e.target.value)}/>
+      <span style={{fontSize:11,color:T.textDim}}>Posts a mirror entry with debits &amp; credits swapped.</span>
+      <div style={{flex:1}}/>
+      <button style={S.btnS} onClick={()=>setShowRev(false)} disabled={revBusy}>Cancel</button>
+      <button style={{...S.btnP,padding:'8px 20px'}} onClick={()=>doReverse()} disabled={revBusy}>{revBusy?'Posting…':'Post Reversal'}</button>
+    </div>}
+    <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
       <button style={S.btnS} onClick={addLine}>+ Add line</button>
       <button style={{...S.btnS,color:T.teal,borderColor:T.teal+'40'}} onClick={()=>setShowAddAcct(true)}>+ New account</button>
       <button style={{...S.btnS,color:T.red,borderColor:T.red+'40'}} onClick={del} disabled={saving} title="Permanently delete this journal entry">Delete JE</button>
       <button style={{...S.btnS,color:T.green,borderColor:T.green+'40'}} onClick={downloadXlsx} disabled={xlBusy} title="Download this journal entry as an Excel file with formulas">{xlBusy?'Preparing…':'Download Excel'}</button>
+      {onDuplicate&&<button style={{...S.btnS,color:T.accent,borderColor:T.accent+'40'}} onClick={()=>{onDuplicate(entry);onClose();}} title="Copy this entry into a new editable draft">Duplicate</button>}
+      {!entry.reverses_entry_id&&!entry.reversal_entry_id&&<button style={{...S.btnS,color:T.orange,borderColor:T.orange+'40'}} onClick={()=>{if(!revDate)setRevDate(firstOfNextMonth(entry.date));setShowRev(v=>!v);}} disabled={revBusy} title="Post a reversing entry">Reverse</button>}
       <div style={{flex:1}}/>
       {!bal&&tDr>0&&<span style={{fontSize:12,color:T.orange,fontWeight:600}}>Off by ${fmt(tDr-tCr)}</span>}
       {bal&&<span style={{fontSize:12,color:T.green,fontWeight:600}}>Balanced</span>}
       {err&&<span style={S.err}>{err}</span>}
       <button style={S.btnS} onClick={onClose}>Cancel</button>
       <button style={{...S.btnP,padding:'10px 28px',fontSize:14,opacity:saving?.6:1}} onClick={save} disabled={saving}>{saving?'Saving...':'Save Changes'}</button></div>
+    {showAddAcct&&<QuickAddAccountModal entityId={entityId} onClose={()=>setShowAddAcct(false)} onCreated={a=>setAccounts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)))}/>}
+  </div></div>);}
+
+// ═══ Recurring Journal Entry Templates (template + manual post) ═══
+function RecurringTemplatesModal({entityId,entityName,dimsEnabled=true,onClose,onPosted}){
+  const isTurnkeyEntity=/turnkey\s*rail/i.test(entityName||'');
+  const[tpls,setTpls]=useState(null);const[accounts,setAccounts]=useState([]);
+  const[dimProjects,setDimProjects]=useState([]);const[tkProjects,setTkProjects]=useState([]);
+  const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
+  const[err,setErr]=useState('');const[msg,setMsg]=useState('');const[busy,setBusy]=useState(false);
+  const[editing,setEditing]=useState(null);const[showAddAcct,setShowAddAcct]=useState(false);
+  const[postId,setPostId]=useState(null);const[postDate,setPostDate]=useState('');
+  const load=useCallback(async()=>{const t=await api.getRecurring(entityId);setTpls(t||[]);},[entityId]);
+  useEffect(()=>{load();api.getAccounts(entityId).then(setAccounts).catch(()=>{});api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>{});api.getTurnkeyProjects().then(d=>setTkProjects(d||[])).catch(()=>{});api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>{});api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>{});},[entityId,load]);
+  const useDimProjects=!isTurnkeyEntity&&dimsEnabled;
+  const showProject=isTurnkeyEntity||useDimProjects;
+  const showLocation=dimsEnabled&&locations.length>0;const showClass=dimsEnabled&&classes.length>0;
+  const showDims=showProject||showLocation||showClass;
+  const projOpts=useDimProjects?dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)})):tkProjects.map(pr=>({v:'project:'+pr.turnkey_project_id,label:'Project — '+pr.project_code+' — '+pr.project_name}));
+  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
+  const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
+  const _dimId=v=>{const s=String(v);const m=/^(\d+)\.0+$/.exec(s);return m?m[1]:s;};
+  const lineDimValue=l=>l.project_id?'project:'+_dimId(l.project_id):l.location_id?'location:'+_dimId(l.location_id):l.class_id?'class:'+_dimId(l.class_id):'';
+  const FREQS=[['weekly','Weekly'],['monthly','Monthly'],['quarterly','Quarterly'],['semiannually','Semi-annually'],['annually','Annually']];
+  const freqLabel=f=>(FREQS.find(x=>x[0]===f)||[f,f])[1];
+
+  const blankTpl=()=>({name:'',memo:'',doc_number:'',frequency:'monthly',next_date:today(),auto_reverse:false,active:1,lines:[{account_code:'',debit:'',credit:'',description:''},{account_code:'',debit:'',credit:'',description:''}]});
+  const editFrom=t=>({id:t.id,name:t.name,memo:t.memo||'',doc_number:t.doc_number||'',frequency:t.frequency||'monthly',next_date:(t.next_date||'').slice(0,10),auto_reverse:!!t.auto_reverse,active:t.active,lines:(t.lines||[]).map(l=>({account_code:l.account_code,project_id:l.project_id||'',location_id:l.location_id||'',class_id:l.class_id||'',description:l.description||'',debit:l.debit>0?Number(l.debit).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?Number(l.credit).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
+
+  const setLine=(i,k,v)=>setEditing(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,[k]:v}:l)}));
+  const setLineDim=(i,val)=>{const[kind,id]=val?val.split(':'):['',''];setEditing(f=>({...f,lines:f.lines.map((l,j)=>j===i?{...l,project_id:kind==='project'?id:'',location_id:kind==='location'?id:'',class_id:kind==='class'?id:''}:l)}));};
+  const addLine=()=>setEditing(f=>({...f,lines:[...f.lines,{account_code:'',debit:'',credit:'',description:''}]}));
+  const rmLine=i=>setEditing(f=>({...f,lines:f.lines.filter((_,j)=>j!==i)}));
+
+  const tDr=editing?editing.lines.reduce((s,l)=>s+parseAmt(l.debit),0):0;
+  const tCr=editing?editing.lines.reduce((s,l)=>s+parseAmt(l.credit),0):0;
+  const bal=Math.abs(tDr-tCr)<0.005&&tDr>0;
+
+  const saveTpl=async()=>{
+    if(!editing.name.trim()){setErr('Template name required');return;}
+    const lines=editing.lines.filter(l=>l.account_code).map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null}));
+    if(lines.length<2){setErr('At least 2 lines with an account');return;}
+    if(!bal){setErr('Template must balance');return;}
+    const body={name:editing.name.trim(),memo:editing.memo,doc_number:editing.doc_number,frequency:editing.frequency,next_date:editing.next_date,auto_reverse:editing.auto_reverse,active:editing.active,lines};
+    setBusy(true);setErr('');
+    try{if(editing.id)await api.updateRecurring(entityId,editing.id,body);else await api.createRecurring(entityId,body);setEditing(null);await load();}
+    catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+  const del=async t=>{if(!confirm('Delete recurring template "'+t.name+'"? Journal entries already posted from it are not affected.'))return;try{await api.deleteRecurring(entityId,t.id);load();}catch(e){setErr(e.message);}};
+  const toggleActive=async t=>{try{await api.updateRecurring(entityId,t.id,{active:t.active?0:1});load();}catch(e){setErr(e.message);}};
+  const doPost=async(t,override)=>{setBusy(true);setErr('');
+    try{const r=await api.postRecurring(entityId,t.id,{...(postDate?{date:postDate}:{}),...(override||{})});
+      setPostId(null);setPostDate('');await load();if(onPosted)onPosted();
+      setMsg('Posted JE-'+String(r.entry_num).padStart(4,'0')+(r.reversal?' + auto-reversal JE-'+String(r.reversal.entry_num).padStart(4,'0'):'')+(r.next_date?' · next date '+r.next_date:''));setTimeout(()=>setMsg(''),7000);}
+    catch(e){const d=e.detail||{};
+      if(d.code==='SOFT_CLOSED'){const mon=(d.period&&d.period.month)||'that month';if(window.confirm(mon+' is soft-closed. Post into it anyway?')){return doPost(t,{override_period_lock:true});}else setErr('Post cancelled — '+mon+' is soft-closed.');}
+      else if(d.code==='HARD_CLOSED'){setErr((d.error||'That fiscal year is closed.')+' Reopening it is a separate admin action.');}
+      else setErr(d.error||e.message);}
+    finally{setBusy(false);}};
+
+  return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,width:'min(1100px, 96vw)',maxWidth:'96vw',height:'auto',maxHeight:'92vh',overflow:'auto'}} onClick={e=>e.stopPropagation()}>
+    <button style={S.modalClose} onClick={onClose}>&times;</button>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+      <div style={{fontSize:18,fontWeight:700,color:T.textBright}}>Recurring Journal Entries</div>
+      {!editing&&<button style={S.btnP} onClick={()=>{setErr('');setEditing(blankTpl());}}>+ New Template</button>}
+    </div>
+    <div style={{fontSize:12,color:T.textMuted,marginBottom:16}}>{entityName} · templates you post manually each period. Posting creates a real journal entry and advances the template's next date.</div>
+    {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
+    {msg&&<div style={{...S.success,marginBottom:12}}>{msg}</div>}
+
+    {!editing&&<>
+      {tpls===null?<div style={{textAlign:'center',padding:40,color:T.textDim}}>Loading…</div>:
+       tpls.length===0?<div style={{...S.card,textAlign:'center',padding:50,color:T.textDim}}>No recurring templates yet. Click “+ New Template” to create one.</div>:
+       <div style={{display:'flex',flexDirection:'column',gap:8}}>{tpls.map(t=>{const dr=(t.lines||[]).reduce((s,l)=>s+(l.debit||0),0);return(
+        <div key={t.id} style={{...S.card,padding:14,marginBottom:0,opacity:t.active?1:0.6}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
+            <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+              <span style={{fontWeight:700,color:T.textBright,fontSize:14}}>{t.name}</span>
+              <span style={{fontSize:11,fontWeight:600,color:T.accent,background:T.accentDim,padding:'2px 8px',borderRadius:10}}>{freqLabel(t.frequency)}</span>
+              {t.auto_reverse?<span style={{fontSize:11,fontWeight:600,color:T.orange,background:T.orange+'18',padding:'2px 8px',borderRadius:10}}>auto-reverse</span>:null}
+              {!t.active&&<span style={{fontSize:11,color:T.textDim}}>inactive</span>}
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+              <span style={{fontSize:12,color:T.textMuted}}>Next: {t.next_date||'—'}</span>
+              <span style={{fontSize:12,color:T.textMuted}}>${fmt(dr)}</span>
+              <button style={{...S.btnP,padding:'5px 12px',fontSize:11}} onClick={()=>{setErr('');setPostId(t.id);setPostDate(t.next_date||today());}}>Post now</button>
+              <button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>{setErr('');setEditing(editFrom(t));}}>Edit</button>
+              <button style={{...S.btnS,padding:'5px 10px',fontSize:11}} onClick={()=>toggleActive(t)}>{t.active?'Deactivate':'Activate'}</button>
+              <button style={{...S.btnD,padding:'5px 10px',fontSize:11}} onClick={()=>del(t)}>Delete</button>
+            </div>
+          </div>
+          {t.memo&&<div style={{fontSize:12,color:T.textMuted,marginTop:6}}>{t.memo}</div>}
+          {postId===t.id&&<div style={{display:'flex',alignItems:'center',gap:10,marginTop:10,padding:'10px 12px',background:T.bgElevated,border:'1px solid '+T.accent+'40',borderRadius:T.radiusSm,flexWrap:'wrap'}}>
+            <span style={{fontSize:12,fontWeight:600,color:T.textBright}}>Post dated</span>
+            <input style={{...S.input,maxWidth:160}} type="date" value={postDate} onChange={e=>setPostDate(e.target.value)}/>
+            {t.auto_reverse&&<span style={{fontSize:11,color:T.orange}}>+ auto-reversal on the 1st of the following month</span>}
+            <div style={{flex:1}}/>
+            <button style={S.btnS} onClick={()=>{setPostId(null);setPostDate('');}} disabled={busy}>Cancel</button>
+            <button style={{...S.btnP,padding:'8px 18px'}} onClick={()=>doPost(t)} disabled={busy}>{busy?'Posting…':'Post Entry'}</button>
+          </div>}
+        </div>);})}</div>}
+    </>}
+
+    {editing&&<div>
+      <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:16,marginBottom:14}}>
+        <div style={S.row}>
+          <div style={{...S.col,flex:2}}><label style={S.label}>Template name</label><input style={S.input} placeholder="e.g. Monthly rent accrual" value={editing.name} onChange={e=>setEditing(f=>({...f,name:e.target.value}))}/></div>
+          <div style={{...S.col,maxWidth:170}}><label style={S.label}>Frequency</label><select style={S.select} value={editing.frequency} onChange={e=>setEditing(f=>({...f,frequency:e.target.value}))}>{FREQS.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div>
+          <div style={{...S.col,maxWidth:170}}><label style={S.label}>Next date</label><input style={S.input} type="date" value={editing.next_date} onChange={e=>setEditing(f=>({...f,next_date:e.target.value}))}/></div>
+        </div>
+        <div style={{...S.row,marginTop:10}}>
+          <div style={{...S.col,flex:3}}><label style={S.label}>Memo</label><input style={S.input} placeholder="Memo applied to each posted entry" value={editing.memo} onChange={e=>setEditing(f=>({...f,memo:e.target.value}))}/></div>
+          <div style={{...S.col,maxWidth:170}}><label style={S.label}>Doc / Invoice #</label><input style={S.input} placeholder="optional" value={editing.doc_number} onChange={e=>setEditing(f=>({...f,doc_number:e.target.value}))}/></div>
+        </div>
+        <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,color:T.textBright,cursor:'pointer',marginTop:12}}>
+          <input type="checkbox" checked={editing.auto_reverse} onChange={e=>setEditing(f=>({...f,auto_reverse:e.target.checked}))}/>
+          Auto-reverse each posted entry (mirror entry on the 1st of the following month)
+        </label>
+      </div>
+      <div style={{...S.cardFlush,marginBottom:14,maxHeight:'44vh',overflowY:'auto'}}><table className="cl-colresize" style={S.table}><thead style={{position:'sticky',top:0,zIndex:2,background:T.bgElevated}}><tr><th style={{...S.th,minWidth:280}}>Account</th>{showDims&&<th style={{...S.th,width:140}}>Dimension</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:130}}>Debit</th><th style={{...S.thR,width:130}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
+        <tbody>{editing.lines.map((l,i)=><tr key={i}>
+          <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><AccountAutocomplete accounts={accounts} value={l.account_code} onChange={c=>setLine(i,'account_code',c)} placeholder="Select account…" style={S.select} clearable/></td>
+          {showDims&&<td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><select style={S.select} value={lineDimValue(l)} onChange={e=>setLineDim(i,e.target.value)}><option value="">— none —</option>{showProject&&<optgroup label="Project">{projOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}{showLocation&&<optgroup label="Location">{locOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}{showClass&&<optgroup label={classTerm()}>{clsOpts.map(o=><option key={o.v} value={o.v}>{o.label}</option>)}</optgroup>}</select></td>}
+          <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={S.input} placeholder="(optional)" value={l.description||''} onChange={e=>setLine(i,'description',e.target.value)}/></td>
+          <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.debit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)setLine(i,'debit',f);}} onBlur={e=>setLine(i,'debit',blurAmt(e.target.value))}/></td>
+          <td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}><input style={{...S.input,textAlign:'right'}} placeholder="0.00" value={l.credit} onChange={e=>{const f=fmtAmt(e.target.value);if(f!==null)setLine(i,'credit',f);}} onBlur={e=>setLine(i,'credit',blurAmt(e.target.value))}/></td>
+          <td style={{padding:'6px',borderBottom:'1px solid '+T.borderLight,textAlign:'center'}}>{editing.lines.length>2&&<button style={S.btnGhost} onClick={()=>rmLine(i)}>&times;</button>}</td></tr>)}
+          <tr style={{background:T.bgElevated}}><td colSpan={2+(showDims?1:0)} style={{...S.tdBold,textAlign:'right',fontSize:12}}>TOTAL</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tDr)}</td><td style={{...S.tdBold,textAlign:'right',fontSize:15}}>${fmt(tCr)}</td><td style={S.tdBold}></td></tr></tbody></table></div>
+      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+        <button style={S.btnS} onClick={addLine}>+ Add line</button>
+        <button style={{...S.btnS,color:T.teal,borderColor:T.teal+'40'}} onClick={()=>setShowAddAcct(true)}>+ New account</button>
+        <div style={{flex:1}}/>
+        {!bal&&tDr>0&&<span style={{fontSize:12,color:T.orange,fontWeight:600}}>Off by ${fmt(tDr-tCr)}</span>}
+        {bal&&<span style={{fontSize:12,color:T.green,fontWeight:600}}>Balanced</span>}
+        <button style={S.btnS} onClick={()=>{setEditing(null);setErr('');}} disabled={busy}>Cancel</button>
+        <button style={{...S.btnP,padding:'10px 24px'}} onClick={saveTpl} disabled={busy}>{busy?'Saving…':(editing.id?'Save Template':'Create Template')}</button>
+      </div>
+    </div>}
     {showAddAcct&&<QuickAddAccountModal entityId={entityId} onClose={()=>setShowAddAcct(false)} onCreated={a=>setAccounts(p=>[...p,a].sort((x,y)=>x.code.localeCompare(y.code)))}/>}
   </div></div>);}
 
@@ -2447,8 +2619,8 @@ function BulkJEModal({entityId,onClose,onPosted}){
 }
 
 // ═══ Journal List ═══
-function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry,openJEId,clearOpenJE}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');const[q,setQ]=useState('');
-  const[editEntry,setEditEntry]=useState(null);const[showBulk,setShowBulk]=useState(false);
+function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry,onDuplicate,openJEId,clearOpenJE}){const[entries,setEntries]=useState([]);const[accounts,setAccounts]=useState([]);const[from,setFrom]=useState('');const[to,setTo]=useState('');const[q,setQ]=useState('');
+  const[editEntry,setEditEntry]=useState(null);const[showBulk,setShowBulk]=useState(false);const[showRecurring,setShowRecurring]=useState(false);
   const[colW,setColW]=useState(()=>{try{const s=JSON.parse(localStorage.getItem('cl_je_colw'));if(s&&typeof s.acct==='number')return s;}catch(e){}return{acct:380,desc:300,debit:140,credit:140};});
   useEffect(()=>{try{localStorage.setItem('cl_je_colw',JSON.stringify(colW));}catch(e){}},[colW]);
   const startColDrag=(key,ev)=>{ev.preventDefault();ev.stopPropagation();const sx=ev.clientX;const sw=colW[key];const min=key==='acct'?60:key==='desc'?50:44;document.body.style.userSelect='none';const mv=e=>setColW(p=>({...p,[key]:Math.max(min,sw+(e.clientX-sx))}));const up=()=>{document.body.style.userSelect='';window.removeEventListener('mousemove',mv);window.removeEventListener('mouseup',up);};window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);};
@@ -2458,7 +2630,7 @@ function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry,op
   // When arriving from global search with a target JE, open it once entries load.
   useEffect(()=>{if(openJEId&&entries.length){const hit=entries.find(e=>e.id===openJEId);if(hit){setEditEntry(hit);}if(clearOpenJE)clearOpenJE();}},[openJEId,entries]);const del=async id=>{if(!confirm('Delete this journal entry?'))return;await api.deleteEntry(entityId,id);load();};const acctName=code=>accounts.find(a=>a.code===code)?.name||'?';
   const shown=entries.filter(e=>{const t=q.trim().toLowerCase();if(!t)return true;const enStr=String(e.entry_num);const jeNum='je-'+enStr.padStart(4,'0');const qn=t.replace(/^je[-\s]?/,'').replace(/^0+(?=\d)/,'');if(jeNum.includes(t)||enStr.includes(t)||(/^\d+$/.test(qn)&&(enStr===qn||enStr.includes(qn))))return true;if((e.date||'').toLowerCase().includes(t))return true;if((e.memo||'').toLowerCase().includes(t))return true;const amtQ=t.replace(/[$,\s]/g,'');const amtMatch=amtQ&&/^[0-9.]+$/.test(amtQ)&&(e.lines||[]).some(l=>{const d=Number(l.debit||0),c=Number(l.credit||0);return String(d).includes(amtQ)||String(c).includes(amtQ)||d.toFixed(2).includes(amtQ)||c.toFixed(2).includes(amtQ);});if(amtMatch)return true;return (e.lines||[]).some(l=>(l.account_code||'').toLowerCase().includes(t)||(acctName(l.account_code)||'').toLowerCase().includes(t)||(l.description||'').toLowerCase().includes(t)||(l.class_name||'').toLowerCase().includes(t)||(l.location_name||'').toLowerCase().includes(t)||(l.project_name||'').toLowerCase().includes(t));}).sort((a,b)=>{const _t=q.trim().toLowerCase();const _qn=_t.replace(/^je[- ]?/,'').replace(/^0+/,'');if(!/^[0-9]+$/.test(_qn))return 0;const _r=e=>{const en=String(e.entry_num);return en===_qn?0:en.indexOf(_qn)===0?1:en.includes(_qn)?2:3;};return _r(a)-_r(b);});
-  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}><div><div style={S.h1}>Journal Entries</div><div style={S.sub}>{entityName} &middot; {q?shown.length+' of '+entries.length:entries.length} entries{!canEdit&&' · read-only'}</div></div>{canEdit&&<div style={{display:'flex',gap:8}}><button style={S.btnS} onClick={()=>setShowBulk(true)}>Bulk Upload</button><button style={S.btnP} onClick={onNewEntry}>+ New Entry</button></div>}</div>
+  return(<div><div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}><div><div style={S.h1}>Journal Entries</div><div style={S.sub}>{entityName} &middot; {q?shown.length+' of '+entries.length:entries.length} entries{!canEdit&&' · read-only'}</div></div>{canEdit&&<div style={{display:'flex',gap:8}}><button style={S.btnS} onClick={()=>setShowRecurring(true)}>Recurring</button><button style={S.btnS} onClick={()=>setShowBulk(true)}>Bulk Upload</button><button style={S.btnP} onClick={onNewEntry}>+ New Entry</button></div>}</div>
     <div style={S.filterBar}><div><label style={S.label}>From</label><input style={S.inputSm} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
       <div><label style={S.label}>To</label><input style={S.inputSm} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
       <div style={{flex:1,minWidth:200}}><label style={S.label}>Search</label><input style={{...S.inputSm,width:'100%'}} placeholder="JE#, memo, date, account, amount, description..." value={q} onChange={e=>setQ(e.target.value)}/></div>
@@ -2481,8 +2653,9 @@ function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry,op
             <td style={{...S.tdR,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{l.debit>0?fmt(l.debit):''}</td><td style={{...S.tdR,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{l.credit>0?fmt(l.credit):''}</td></tr>)}</tbody></table></div>
         {e.attachments?.length>0&&<div style={{marginTop:10,display:'flex',flexWrap:'wrap',gap:4}}>{e.attachments.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>)}</div>}
       </div>)}</div>}
-    {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} isTurnkeyEntity={/turnkey\s*rail/i.test(entityName||'')} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={load}/>}
+    {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} isTurnkeyEntity={/turnkey\s*rail/i.test(entityName||'')} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={load} onDuplicate={onDuplicate}/>}
     {showBulk&&<BulkJEModal entityId={entityId} onClose={()=>setShowBulk(false)} onPosted={()=>{setShowBulk(false);load();}}/>}
+    {showRecurring&&<RecurringTemplatesModal entityId={entityId} entityName={entityName} dimsEnabled={dimsEnabled} onClose={()=>setShowRecurring(false)} onPosted={load}/>}
   </div>);}
 
 // ═══ Dimensions (Locations & Classes) manager ═══

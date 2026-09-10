@@ -546,6 +546,51 @@ if (!jeCols.includes('vendor')) db.exec("ALTER TABLE journal_entries ADD COLUMN 
 // document's own number - a Bill.com invoiceNumber, a check number, an AR invoice
 // number - so every detail report can show a Doc column beside the JE number.
 if (!jeCols.includes('doc_number')) { db.exec("ALTER TABLE journal_entries ADD COLUMN doc_number TEXT"); console.log('[db migrate] journal_entries.doc_number added'); }
+// Auto-reversing entries: an entry that reverses another carries reverses_entry_id
+// pointing at its source; the source carries reversal_entry_id pointing at its
+// reversal. Both nullable; a normal (non-reversing) entry has both NULL. Used to
+// label the pair in the UI and to stop an entry being reversed twice.
+if (!jeCols.includes('reversal_entry_id')) { db.exec("ALTER TABLE journal_entries ADD COLUMN reversal_entry_id INTEGER"); console.log('[db migrate] journal_entries.reversal_entry_id added'); }
+if (!jeCols.includes('reverses_entry_id')) { db.exec("ALTER TABLE journal_entries ADD COLUMN reverses_entry_id INTEGER"); console.log('[db migrate] journal_entries.reverses_entry_id added'); }
+// Recurring templates: the entry created from a template records which template
+// it came from (informational; a template deletion leaves posted entries intact).
+if (!jeCols.includes('recurring_template_id')) { db.exec("ALTER TABLE journal_entries ADD COLUMN recurring_template_id INTEGER"); console.log('[db migrate] journal_entries.recurring_template_id added'); }
+
+// Recurring journal-entry templates (template + manual post model — no scheduler).
+// A template stores the entry shape (memo, doc_number, lines with dimensions) plus
+// a frequency and a next_date. Posting from a template creates a real journal entry
+// dated next_date, then advances next_date by the frequency. auto_reverse marks the
+// template so each posted entry also gets an auto-reversal on the following month's 1st.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS je_recurring_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    memo TEXT NOT NULL DEFAULT '',
+    doc_number TEXT,
+    frequency TEXT NOT NULL DEFAULT 'monthly',
+    next_date TEXT,
+    auto_reverse INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    last_posted_date TEXT,
+    created_by TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS je_recurring_template_lines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    template_id INTEGER NOT NULL REFERENCES je_recurring_templates(id) ON DELETE CASCADE,
+    account_code TEXT NOT NULL,
+    debit REAL DEFAULT 0,
+    credit REAL DEFAULT 0,
+    description TEXT DEFAULT '',
+    project_id INTEGER,
+    class_id INTEGER,
+    location_id INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_recur_tpl_entity ON je_recurring_templates(entity_id);
+  CREATE INDEX IF NOT EXISTS idx_recur_tpl_line ON je_recurring_template_lines(template_id);
+`);
 
 // Entity type: 'accounting' (default, standard ledger entity) | 'development' | 'shell' (tracks location + investor/class dimensions)
 // (real-estate development project; unlocks Requisition Report / Invoice Packet features)
@@ -3354,6 +3399,31 @@ app.put('/api/entities/:eid/accounts/:code', auth, requireEntityAccess(), requir
 });
 
 // ═══ Journal Entries ═══
+// Reversal date default: the first day of the month AFTER the source entry's date
+// (standard accrual-reversal convention). Callers may override with any date.
+function jeFirstOfNextMonth(dateStr) {
+  const s = String(dateStr || '').slice(0, 10);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  const base = m ? new Date(+m[1], +m[2] - 1, +m[3]) : new Date();
+  const nd = new Date(base.getFullYear(), base.getMonth() + 1, 1);
+  return nd.getFullYear() + '-' + String(nd.getMonth() + 1).padStart(2, '0') + '-01';
+}
+// Insert a reversal of `source` (with `sourceLines`) dated `reverseDate`, with the
+// debit and credit of every line swapped. Raw inserts (no transaction of its own)
+// so it composes inside a caller's transaction. Links both entries and returns the
+// new reversal's { id, entry_num }. Does NOT validate the period — the caller must
+// assertPostable(reverseDate) first.
+function jeInsertReversal(eid, source, sourceLines, reverseDate, userName) {
+  const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id=?').get(eid).m || 0) + 1;
+  const jeNo = 'JE-' + String(source.entry_num).padStart(4, '0');
+  const memo = 'Reversal of ' + jeNo + (source.memo ? ' — ' + source.memo : '');
+  const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, doc_number, created_by, reverses_entry_id) VALUES (?,?,?,?,?,?,?)')
+    .run(eid, num, reverseDate, memo, source.doc_number || null, userName, source.id);
+  const ins = db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?,?)');
+  for (const l of sourceLines) ins.run(r.lastInsertRowid, l.account_code, +(l.credit || 0), +(l.debit || 0), l.description || '', l.project_id || null, l.class_id || null, l.location_id || null);
+  db.prepare('UPDATE journal_entries SET reversal_entry_id=? WHERE id=?').run(r.lastInsertRowid, source.id);
+  return { id: r.lastInsertRowid, entry_num: num };
+}
 app.get('/api/entities/:eid/entries', auth, requireEntityAccess(), (req, res) => {
   const { from, to } = req.query; let sql = 'SELECT * FROM journal_entries WHERE entity_id = ?'; const params = [req.params.eid];
   if (from) { sql += ' AND date >= ?'; params.push(from); } if (to) { sql += ' AND date <= ?'; params.push(to); }
@@ -3508,15 +3578,172 @@ app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole(
   const { date, memo, lines, doc_number } = req.body; if (!date||!memo||!lines||lines.length<2) return res.status(400).json({ error: 'Invalid' });
   const tDr = lines.reduce((s,l) => s+(l.debit||0), 0); const tCr = lines.reduce((s,l) => s+(l.credit||0), 0);
   if (Math.abs(tDr-tCr) > 0.005) return res.status(400).json({ error: 'Must balance' });
-  try { periods.assertPostable(db, req.params.eid, date, { userEmail: req.user.email, override: req.body.override_period_lock, reason: req.body.override_reason, source: 'manual-je' }); }
+  // Optional auto-reversing: when auto_reverse is set, a mirror entry (debits and
+  // credits swapped) is posted on reverse_date (defaults to the 1st of next month).
+  const autoReverse = !!req.body.auto_reverse;
+  const reverseDate = autoReverse ? (String(req.body.reverse_date || '').slice(0, 10) || jeFirstOfNextMonth(date)) : null;
+  const lockOpts = { userEmail: req.user.email, override: req.body.override_period_lock, reason: req.body.override_reason, source: 'manual-je' };
+  try {
+    periods.assertPostable(db, req.params.eid, date, lockOpts);
+    if (autoReverse) periods.assertPostable(db, req.params.eid, reverseDate, { ...lockOpts, source: 'manual-je-reversal' });
+  }
   catch (e) { if (periods.sendPeriodError(res, e)) return; throw e; }
   const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id=?').get(req.params.eid).m||0)+1;
   const result = db.transaction(() => {
     const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, doc_number, created_by) VALUES (?,?,?,?,?,?)').run(req.params.eid, num, date, memo, (doc_number || '').trim() || null, req.user.name);
     for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?,?)').run(r.lastInsertRowid, l.account_code, l.debit||0, l.credit||0, l.description||'', l.project_id||null, l.class_id||null, l.location_id||null);
+    let reversal = null;
+    if (autoReverse) {
+      const src = { id: r.lastInsertRowid, entry_num: num, memo, doc_number: (doc_number || '').trim() || null };
+      reversal = jeInsertReversal(req.params.eid, src, lines, reverseDate, req.user.name);
+    }
+    return { id: r.lastInsertRowid, reversal };
+  })();
+  res.json({ id: result.id, entry_num: num, reversal: result.reversal });
+});
+
+// Reverse an existing posted entry: create a mirror entry (debits/credits swapped)
+// dated reverse_date (defaults to the 1st of the month after the source's date).
+// Refuses to reverse an entry that already has a live reversal, or a reversal itself.
+app.post('/api/entities/:eid/entries/:id/reverse', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const src = db.prepare('SELECT * FROM journal_entries WHERE id=? AND entity_id=?').get(req.params.id, req.params.eid);
+  if (!src) return res.status(404).json({ error: 'Entry not found' });
+  if (src.reverses_entry_id) return res.status(400).json({ error: 'This entry is itself a reversal.' });
+  if (src.reversal_entry_id) {
+    const still = db.prepare('SELECT id, entry_num FROM journal_entries WHERE id=? AND entity_id=?').get(src.reversal_entry_id, req.params.eid);
+    if (still) return res.status(400).json({ error: 'Already reversed by JE-' + String(still.entry_num).padStart(4, '0') + '.' });
+  }
+  const reverseDate = String(req.body.reverse_date || '').slice(0, 10) || jeFirstOfNextMonth(src.date);
+  try { periods.assertPostable(db, req.params.eid, reverseDate, { userEmail: req.user.email, override: req.body.override_period_lock, reason: req.body.override_reason, source: 'je-reverse' }); }
+  catch (e) { if (periods.sendPeriodError(res, e)) return; throw e; }
+  const lines = db.prepare('SELECT account_code, debit, credit, description, project_id, class_id, location_id FROM journal_lines WHERE entry_id=?').all(src.id);
+  const reversal = db.transaction(() => jeInsertReversal(req.params.eid, src, lines, reverseDate, req.user.name))();
+  res.json({ success: true, reversal, source_entry_num: src.entry_num });
+});
+
+// ═══ Recurring journal-entry templates (template + manual post) ═══
+// Advance a date by one interval of `frequency`, preserving day-of-month and
+// clamping to the target month's last day (so a Jan-31 monthly template lands on
+// Feb-28/29, not overflowing into March).
+function jeAdvanceDate(dateStr, frequency) {
+  const s = String(dateStr || '').slice(0, 10);
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return null;
+  let y = +m[1], mo = +m[2] - 1; const d = +m[3];
+  if (frequency === 'weekly') {
+    const dt = new Date(y, mo, d); dt.setDate(dt.getDate() + 7);
+    return dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
+  }
+  const add = frequency === 'quarterly' ? 3 : frequency === 'semiannually' ? 6 : frequency === 'annually' ? 12 : 1;
+  mo += add; y += Math.floor(mo / 12); mo = ((mo % 12) + 12) % 12;
+  const lastDay = new Date(y, mo + 1, 0).getDate();
+  const day = Math.min(d, lastDay);
+  return y + '-' + String(mo + 1).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+}
+const JE_FREQS = ['weekly', 'monthly', 'quarterly', 'semiannually', 'annually'];
+
+app.get('/api/entities/:eid/recurring', auth, requireEntityAccess(), (req, res) => {
+  const tpls = db.prepare('SELECT * FROM je_recurring_templates WHERE entity_id=? ORDER BY active DESC, name COLLATE NOCASE ASC').all(req.params.eid);
+  const lineStmt = db.prepare(`SELECT tl.*, dp.name AS project_name, dp.code AS project_code,
+      dc.name AS class_name, dl.name AS location_name
+    FROM je_recurring_template_lines tl
+    LEFT JOIN dim_projects dp ON dp.id = tl.project_id
+    LEFT JOIN dim_classes dc ON dc.id = tl.class_id
+    LEFT JOIN dim_locations dl ON dl.id = tl.location_id
+    WHERE tl.template_id = ? ORDER BY tl.id`);
+  res.json(tpls.map(t => ({ ...t, lines: lineStmt.all(t.id) })));
+});
+
+function jeValidateTemplateLines(lines) {
+  if (!Array.isArray(lines) || lines.length < 2) return 'A template needs at least 2 lines';
+  const tDr = lines.reduce((s, l) => s + (l.debit || 0), 0);
+  const tCr = lines.reduce((s, l) => s + (l.credit || 0), 0);
+  if (Math.abs(tDr - tCr) > 0.005) return 'Template must balance (debits must equal credits)';
+  if (lines.some(l => !l.account_code)) return 'Every line needs an account';
+  return null;
+}
+
+app.post('/api/entities/:eid/recurring', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const { name, memo, doc_number, frequency, next_date, auto_reverse, active, lines } = req.body;
+  if (!name || !String(name).trim()) return res.status(400).json({ error: 'Template name required' });
+  const lineErr = jeValidateTemplateLines(lines); if (lineErr) return res.status(400).json({ error: lineErr });
+  const freq = JE_FREQS.includes(frequency) ? frequency : 'monthly';
+  const id = db.transaction(() => {
+    const r = db.prepare("INSERT INTO je_recurring_templates (entity_id,name,memo,doc_number,frequency,next_date,auto_reverse,active,created_by) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run(req.params.eid, String(name).trim(), String(memo || '').trim(), String(doc_number || '').trim() || null, freq, String(next_date || '').slice(0, 10) || null, auto_reverse ? 1 : 0, active === 0 || active === false ? 0 : 1, req.user.name || req.user.email);
+    const ins = db.prepare('INSERT INTO je_recurring_template_lines (template_id,account_code,debit,credit,description,project_id,class_id,location_id) VALUES (?,?,?,?,?,?,?,?)');
+    for (const l of lines) ins.run(r.lastInsertRowid, l.account_code, l.debit || 0, l.credit || 0, l.description || '', l.project_id || null, l.class_id || null, l.location_id || null);
     return r.lastInsertRowid;
   })();
-  res.json({ id: result, entry_num: num });
+  res.json({ id });
+});
+
+app.put('/api/entities/:eid/recurring/:id', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const t = db.prepare('SELECT * FROM je_recurring_templates WHERE id=? AND entity_id=?').get(req.params.id, req.params.eid);
+  if (!t) return res.status(404).json({ error: 'Template not found' });
+  const { name, memo, doc_number, frequency, next_date, auto_reverse, active, lines } = req.body;
+  if (name !== undefined && !String(name).trim()) return res.status(400).json({ error: 'Template name required' });
+  if (lines !== undefined) { const lineErr = jeValidateTemplateLines(lines); if (lineErr) return res.status(400).json({ error: lineErr }); }
+  const freq = frequency !== undefined ? (JE_FREQS.includes(frequency) ? frequency : 'monthly') : t.frequency;
+  db.transaction(() => {
+    db.prepare("UPDATE je_recurring_templates SET name=?,memo=?,doc_number=?,frequency=?,next_date=?,auto_reverse=?,active=?,updated_at=datetime('now') WHERE id=?")
+      .run(
+        name !== undefined ? String(name).trim() : t.name,
+        memo !== undefined ? String(memo || '').trim() : t.memo,
+        doc_number !== undefined ? (String(doc_number || '').trim() || null) : t.doc_number,
+        freq,
+        next_date !== undefined ? (String(next_date || '').slice(0, 10) || null) : t.next_date,
+        auto_reverse !== undefined ? (auto_reverse ? 1 : 0) : t.auto_reverse,
+        active !== undefined ? (active === 0 || active === false ? 0 : 1) : t.active,
+        t.id
+      );
+    if (Array.isArray(lines)) {
+      db.prepare('DELETE FROM je_recurring_template_lines WHERE template_id=?').run(t.id);
+      const ins = db.prepare('INSERT INTO je_recurring_template_lines (template_id,account_code,debit,credit,description,project_id,class_id,location_id) VALUES (?,?,?,?,?,?,?,?)');
+      for (const l of lines) ins.run(t.id, l.account_code, l.debit || 0, l.credit || 0, l.description || '', l.project_id || null, l.class_id || null, l.location_id || null);
+    }
+  })();
+  res.json({ success: true });
+});
+
+app.delete('/api/entities/:eid/recurring/:id', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), (req, res) => {
+  db.prepare('DELETE FROM je_recurring_templates WHERE id=? AND entity_id=?').run(req.params.id, req.params.eid);
+  res.json({ success: true });
+});
+
+// Post an actual journal entry from a template. Body: { date?, reverse_date?,
+// override_period_lock?, override_reason? }. Uses the template's next_date when no
+// date is given, posts the entry (tagged recurring_template_id), optionally posts
+// its auto-reversal, then advances the template's next_date by its frequency.
+app.post('/api/entities/:eid/recurring/:id/post', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const t = db.prepare('SELECT * FROM je_recurring_templates WHERE id=? AND entity_id=?').get(req.params.id, req.params.eid);
+  if (!t) return res.status(404).json({ error: 'Template not found' });
+  const tLines = db.prepare('SELECT account_code,debit,credit,description,project_id,class_id,location_id FROM je_recurring_template_lines WHERE template_id=? ORDER BY id').all(t.id);
+  const lineErr = jeValidateTemplateLines(tLines); if (lineErr) return res.status(400).json({ error: lineErr });
+  const postDate = String(req.body.date || '').slice(0, 10) || t.next_date || new Date().toISOString().slice(0, 10);
+  const autoReverse = req.body.auto_reverse !== undefined ? !!req.body.auto_reverse : !!t.auto_reverse;
+  const reverseDate = autoReverse ? (String(req.body.reverse_date || '').slice(0, 10) || jeFirstOfNextMonth(postDate)) : null;
+  const lockOpts = { userEmail: req.user.email, override: req.body.override_period_lock, reason: req.body.override_reason, source: 'recurring-je' };
+  try {
+    periods.assertPostable(db, req.params.eid, postDate, lockOpts);
+    if (autoReverse) periods.assertPostable(db, req.params.eid, reverseDate, { ...lockOpts, source: 'recurring-je-reversal' });
+  } catch (e) { if (periods.sendPeriodError(res, e)) return; throw e; }
+  const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id=?').get(req.params.eid).m || 0) + 1;
+  const out = db.transaction(() => {
+    const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, doc_number, created_by, recurring_template_id) VALUES (?,?,?,?,?,?,?)')
+      .run(req.params.eid, num, postDate, t.memo || t.name, t.doc_number || null, req.user.name || req.user.email, t.id);
+    const ins = db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?,?)');
+    for (const l of tLines) ins.run(r.lastInsertRowid, l.account_code, l.debit || 0, l.credit || 0, l.description || '', l.project_id || null, l.class_id || null, l.location_id || null);
+    let reversal = null;
+    if (autoReverse) {
+      const src = { id: r.lastInsertRowid, entry_num: num, memo: t.memo || t.name, doc_number: t.doc_number || null };
+      reversal = jeInsertReversal(req.params.eid, src, tLines, reverseDate, req.user.name || req.user.email);
+    }
+    const advanced = jeAdvanceDate(t.next_date || postDate, t.frequency) || t.next_date;
+    db.prepare("UPDATE je_recurring_templates SET last_posted_date=?, next_date=?, updated_at=datetime('now') WHERE id=?").run(postDate, advanced, t.id);
+    return { id: r.lastInsertRowid, reversal, next_date: advanced };
+  })();
+  res.json({ id: out.id, entry_num: num, reversal: out.reversal, next_date: out.next_date, posted_date: postDate });
 });
 
 // ─── Bulk journal-entry upload (one journal LINE per row) ────────────────────

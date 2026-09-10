@@ -104,6 +104,16 @@ export const api = {
     return request('/entities/' + eid + '/entries/bulk/preview', { method: 'POST', body: fd });
   },
   bulkEntriesCommit: (eid, entries) => request('/entities/' + eid + '/entries/bulk', { method: 'POST', body: { entries } }),
+  // Reverse an existing posted entry (swaps dr/cr) on reverse_date; opts may carry
+  // reverse_date and override_period_lock/override_reason.
+  reverseEntry: (eid, id, opts = {}) => request('/entities/' + eid + '/entries/' + id + '/reverse', { method: 'POST', body: opts }),
+
+  // Recurring journal-entry templates (template + manual post)
+  getRecurring: (eid) => request('/entities/' + eid + '/recurring'),
+  createRecurring: (eid, data) => request('/entities/' + eid + '/recurring', { method: 'POST', body: data }),
+  updateRecurring: (eid, id, data) => request('/entities/' + eid + '/recurring/' + id, { method: 'PUT', body: data }),
+  deleteRecurring: (eid, id) => request('/entities/' + eid + '/recurring/' + id, { method: 'DELETE' }),
+  postRecurring: (eid, id, opts = {}) => request('/entities/' + eid + '/recurring/' + id + '/post', { method: 'POST', body: opts }),
 
   // Period locking
   getPeriods: (eid) => request('/entities/' + eid + '/periods'),
