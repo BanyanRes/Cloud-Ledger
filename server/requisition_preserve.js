@@ -20,6 +20,38 @@
 // ─────────────────────────────────────────────────────────────────────────
 const JSZip = require('jszip');
 
+// Map each worksheet's DISPLAY NAME to its part path (xl/worksheets/sheetN.xml)
+// by resolving workbook.xml's <sheet name r:id> through workbook.xml.rels. The
+// physical part-file numbering is NOT stable across writers: ExcelJS renumbers
+// the sheetN.xml files when it re-saves, so the same logical sheet can be
+// sheet22.xml in the source and a different sheetN.xml in the output. Copying
+// per-sheet content (e.g. conditional formatting) by identical FILENAME therefore
+// lands it on the wrong worksheet. Callers pair sheets by name via this map.
+async function sheetPartMap(zip) {
+  const map = new Map();
+  try {
+    const wbXml = await zip.file('xl/workbook.xml').async('string');
+    const relsXml = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+    const rid2t = {};
+    for (const m of relsXml.match(/<Relationship\b[^>]*>/g) || []) {
+      const id = (m.match(/Id="([^"]+)"/) || [])[1];
+      const tgt = (m.match(/Target="([^"]+)"/) || [])[1];
+      if (id && tgt) rid2t[id] = tgt;
+    }
+    const unesc = (s) => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, d) => String.fromCharCode(+d));
+    for (const m of wbXml.match(/<sheet\b[^>]*?\/?>/g) || []) {
+      const nm = (m.match(/name="([^"]*)"/) || [])[1];
+      const rid = (m.match(/r:id="([^"]+)"/) || [])[1];
+      if (nm == null || !rid || !rid2t[rid]) continue;
+      let t = rid2t[rid].replace(/^\//, '');
+      if (!t.startsWith('xl/')) t = 'xl/' + t;
+      map.set(unesc(nm), t);
+    }
+  } catch (_) { /* leave empty; caller falls back to no CF restore */ }
+  return map;
+}
+
 async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
   try {
     const out = await JSZip.loadAsync(outBuf);
@@ -93,18 +125,22 @@ async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
     // emit a malformed, typeless <cfRule priority="1"/> with no rule body), which
     // makes Excel show "we found a problem" and strip the formatting on open. We
     // copy the exact original CF blocks from the source sheet back into the output
-    // sheet, matched by worksheet part name. Best-effort and non-fatal.
+    // sheet, PAIRED BY WORKSHEET NAME (not part filename): ExcelJS renumbers the
+    // sheetN.xml parts, so matching by filename dropped the Budget-to-Actual's
+    // over-budget "Balance remaining < 0 -> red" rules and scattered other sheets'
+    // rules onto the wrong tabs (Max, HP, 2026-09-10). Best-effort and non-fatal.
     try {
-      const sheetRe = /^xl\/worksheets\/sheet\d+\.xml$/;
-      const srcSheets = Object.keys(src.files).filter(n => sheetRe.test(n) && !src.files[n].dir);
-      for (const name of srcSheets) {
-        if (!out.files[name]) continue;
-        const srcXml = await src.file(name).async('string');
+      const srcMap = await sheetPartMap(src);
+      const outMap = await sheetPartMap(out);
+      for (const [sheetName, srcPart] of srcMap) {
+        const outPart = outMap.get(sheetName);
+        if (!outPart || !src.files[srcPart] || !out.files[outPart]) continue;
+        const srcXml = await src.file(srcPart).async('string');
         const origCF = (srcXml.match(/<conditionalFormatting\b[\s\S]*?<\/conditionalFormatting>/g) || []).join('');
-        let outXml = await out.file(name).async('string');
+        let outXml = await out.file(outPart).async('string');
         const outHasCF = /<conditionalFormatting\b/.test(outXml);
         if (!origCF) {
-          if (outHasCF) { outXml = outXml.replace(/<conditionalFormatting\b[\s\S]*?<\/conditionalFormatting>/g, ''); out.file(name, outXml); changed = true; }
+          if (outHasCF) { outXml = outXml.replace(/<conditionalFormatting\b[\s\S]*?<\/conditionalFormatting>/g, ''); out.file(outPart, outXml); changed = true; }
           continue;
         }
         if (outHasCF) {
@@ -115,7 +151,7 @@ async function finalizeRequisitionWorkbook(originalBuf, outBuf) {
         } else {
           outXml = outXml.replace('</worksheet>', origCF + '</worksheet>');
         }
-        out.file(name, outXml); changed = true;
+        out.file(outPart, outXml); changed = true;
       }
       const srcStyles = await src.file('xl/styles.xml').async('string');
       const srcDxfs = (srcStyles.match(/<dxfs\b[\s\S]*?<\/dxfs>/) || srcStyles.match(/<dxfs\b[^>]*\/>/) || [null])[0];

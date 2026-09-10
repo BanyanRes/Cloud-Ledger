@@ -1061,6 +1061,14 @@ async function rollForward(workbook, newCurrent, meta = {}) {
   const priorGroups = parseLogGroups(priorWs);
   const curByCode = currentRowsByCode(curWs);
 
+  // Capture the invoice logs' Grand Total rows BEFORE they are rebuilt below.
+  // The Budget-to-Actual reconciliation cells reference these by FIXED row
+  // (e.g. ='Current Invoice Log'!G135-J70 and ='Prior Invoice Log'!G1173-I70);
+  // replaceCurrentLog / rebuildPriorLog move the Grand Total as the logs grow, so
+  // we repoint those refs to the new rows after the rebuild (Max, HP, 2026-09-10).
+  const _reconOldCurGT = findRowByLabel(curWs, ['Grand Total', 'Grant Total']);
+  const _reconOldPriorGT = findRowByLabel(priorWs, ['Grand Total', 'Grant Total']);
+
   // Bank Cost Category (col D) map: cost code -> the bank category used in the
   // prior/current logs. The B2A "this period" SUMIF keys on this column, so every
   // current-log row must carry it; app-provided invoices often omit it. Build the
@@ -1220,6 +1228,20 @@ async function rollForward(workbook, newCurrent, meta = {}) {
     codeOrder: b2aCodeOrder(b2a, _logCodes),
     priorOrder: _priorOrder,
   });
+
+  // 3.05 Repoint the Budget-to-Actual reconciliation cells whose invoice-log
+  //      Grand Total references are pinned to a FIXED row (captured above as
+  //      _reconOldCurGT / _reconOldPriorGT). The logs were just rebuilt, moving
+  //      the Grand Total, so ='Current Invoice Log'!G135-J70 and
+  //      ='Prior Invoice Log'!G1173-I70 would otherwise read a blank row. Uses
+  //      the ACTUAL sheet names and preserves the column; full-column SUMIF refs
+  //      carry no row number and are untouched. (Max, HP, 2026-09-10.)
+  if (b2a) {
+    const _newCurGT = (curInfo && curInfo.grandTotalRow) || findRowByLabel(curWs, ['Grand Total', 'Grant Total']);
+    const _newPriorGT = (landmarks && landmarks.grandTotalRow) || findRowByLabel(priorWs, ['Grand Total', 'Grant Total']);
+    if (_reconOldCurGT && _newCurGT) repointB2ALogGrandTotal(b2a, curWs.name, _reconOldCurGT, _newCurGT);
+    if (_reconOldPriorGT && _newPriorGT) repointB2ALogGrandTotal(b2a, priorWs.name, _reconOldPriorGT, _newPriorGT);
+  }
 
   // 3.1 Repoint those dev-fee tabs' fixed Current-Invoice-Log references to the
   //     new Grand Total / Development Fee Total rows. If there is no dev fee this
@@ -1972,6 +1994,30 @@ function detectContingencyCols(b2a) {
   return (prev && curr && prev !== curr) ? { prev, curr } : null;
 }
 
+// Repoint any Budget-to-Actual formula that references an invoice log's Grand
+// Total by a FIXED row (e.g. ='Current Invoice Log'!G135-J70) to the log's NEW
+// Grand Total row after the log has been rebuilt. Only single-cell references to
+// `logName` at `oldRow` move; full-column SUMIF ranges ('...'!$C:$C) carry no row
+// number and are left alone. The column is preserved; the cached result is dropped
+// so Excel recomputes on open (finalizeRequisitionWorkbook sets fullCalcOnLoad).
+function repointB2ALogGrandTotal(sheet, logName, oldRow, newRow) {
+  if (!sheet || !oldRow || !newRow || oldRow === newRow) return 0;
+  const esc = logName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp("('" + esc + "'!\\$?[A-Za-z]{1,3}\\$?)" + oldRow + "(?![0-9])", 'g');
+  let count = 0;
+  const last = Math.max(sheet.rowCount || 0, sheet.actualRowCount || 0);
+  for (let r = 1; r <= last; r++) {
+    const row = sheet.getRow(r);
+    row.eachCell({ includeEmpty: false }, (cell) => {
+      const f = cellFormula(cell);
+      if (!f || f.indexOf(logName) === -1) return;
+      const nf = f.replace(re, (m, pre) => pre + newRow);
+      if (nf !== f) { cell.value = { formula: nf }; count++; }
+    });
+  }
+  return count;
+}
+
 function rollForwardContingency(b2a) {
   if (!b2a) return { moved: 0 };
   // Roll on the detected Previous/Current Contingency columns. Older code
@@ -1986,13 +2032,19 @@ function rollForwardContingency(b2a) {
     const pCell = b2a.getCell(r, COL_PREV);
     const cCell = b2a.getCell(r, COL_CURR);
 
-    // Skip subtotal/total rows: any cell-referencing formula in prev or curr
-    // makes cellNum return null. (Literal-arithmetic formulas still resolve.)
-    if (formulaHasCellRef(cellFormula(pCell)) || formulaHasCellRef(cellFormula(cCell))) continue;
+    // Skip subtotal/total rows only: their PREVIOUS-column cell aggregates the
+    // block (=SUM / =SUBTOTAL), which folding would corrupt. A cell reference in
+    // the CURRENT column ALONE does not mark a subtotal — a genuine contingency
+    // line can legitimately hold =-G46 there (HP "Soft Cost Contingency"), and it
+    // must still roll its prior-period value into Previous. Checking only the
+    // Previous column fixes that line while still skipping true subtotals, whose
+    // Previous cell is itself an aggregate. (Max, HP, 2026-09-10.)
+    if (formulaHasCellRef(cellFormula(pCell))) continue;
 
     const cVal = cellNum(cCell);
     if (cVal == null || cVal === 0) continue; // nothing to fold in this row
 
+    const cFormula = cellFormula(cCell); // e.g. "-G46" on a live contingency line, or null for a literal
     const pFormula = cellFormula(pCell); // literal-arithmetic formula, or null
     const pVal = cellNum(pCell) || 0;
     const newP = round2(pVal + cVal);
@@ -2005,8 +2057,13 @@ function rollForwardContingency(b2a) {
     } else {
       pCell.value = newP;
     }
-    // Reset the current-period contingency column to 0 for the new period.
-    cCell.value = 0;
+    // Reset the current-period contingency for the new period. A LITERAL current
+    // value is cleared to 0. A FORMULA-driven current cell (=-G46, which tracks
+    // this block's live reallocations) is LEFT INTACT: the block's own current
+    // cells are rolled to 0 in this same pass, so it recomputes to 0 for the new
+    // period while Previous has absorbed the prior amount — and it stays live for
+    // when the new period's reallocations are entered.
+    if (!cFormula) cCell.value = 0;
     moved++;
   }
   return { moved };
