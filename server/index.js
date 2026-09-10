@@ -10618,6 +10618,20 @@ require('./carryclawback').registerCarryClawbackRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ CLRF workpaper: Partners' Capital Account Statements (PCAP) ═══
+// Quarterly. One "Statement of Changes in Capital" per investor (commitment
+// summary + YTD/ITD capital roll-forward), combined into a single workbook, plus
+// a review matrix. Fully GL-sourced by investor class; ties to the fund
+// Statement of Changes in Partners' Capital. See server/pcap.js.
+require('./pcap').registerPcapRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLIP Development Costs ═══
 // GET /api/entities/:eid/dev-costs?as_of=YYYY-MM-DD — total capitalized
 // development cost (Total Long Term Investments + Total Other Assets), the
