@@ -10603,6 +10603,21 @@ require('./gpfees').registerGpFeesRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ CLRF workpaper: Carried Interest / Clawback (side letter §17(c)) ═══
+// Quarterly. Per-LP LPA §9.3 waterfall build-up (Return of Capital → 8% Preferred
+// Return → 80/20 catch-up → 80/20 residual), carry earned to date, and the
+// hypothetical clawback. The 8% Preferred Return is IRR-based on true call dates
+// (not in CL's opening-balance GL), so it is injected from Weaver's preferred-
+// return workpaper via the request body. See server/carryclawback.js.
+require('./carryclawback').registerCarryClawbackRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLIP Development Costs ═══
 // GET /api/entities/:eid/dev-costs?as_of=YYYY-MM-DD — total capitalized
 // development cost (Total Long Term Investments + Total Other Assets), the
