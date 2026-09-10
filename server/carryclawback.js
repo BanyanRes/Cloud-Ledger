@@ -114,6 +114,17 @@ function buildData(ctx, quarter, opts = {}) {
 
   const prefByClass = opts.prefByClass || null;
   const accumCarryByClass = opts.accumCarryByClass || null;
+  // Fund-level preferred return + return of capital are maintained per quarter
+  // from the fund's preferred-return workpaper (8% XIRR on equalized LP cash
+  // flows) and stored in fund_preferred_return. Read them when the caller didn't
+  // pass an explicit override.
+  let storedPref = null;
+  if (!prefByClass && opts.prefTotal == null) {
+    try {
+      storedPref = db.prepare('SELECT roc, pref, note FROM fund_preferred_return WHERE entity_id = ? AND quarter_end = ?')
+        .get(eid, quarter.end) || null;
+    } catch (e) { storedPref = null; }
+  }
   const sumAcct = (rows, codes) => r2(rows
     .filter((b) => codes.includes(String(b.code)))
     .reduce((s, b) => s + (Number(b.balance) || 0), 0));
@@ -142,17 +153,24 @@ function buildData(ctx, quarter, opts = {}) {
 
   const lps = partners.filter((p) => p.partner_type === 'LP');
   const sum = (arr, k) => r2(arr.reduce((s, x) => s + (Number(x[k]) || 0), 0));
-  const prefKnown = prefByClass ? lps.every((p) => p.pref !== null) : (opts.prefTotal != null);
-  const prefTotal = prefByClass ? sum(lps, 'pref') : (opts.prefTotal != null ? r2(opts.prefTotal) : null);
+  const prefTotal = prefByClass ? sum(lps, 'pref')
+    : (opts.prefTotal != null ? r2(opts.prefTotal)
+      : (storedPref && storedPref.pref != null ? r2(storedPref.pref) : null));
+  const prefKnown = prefByClass ? lps.every((p) => p.pref !== null) : (prefTotal != null);
   const distributable = sum(lps, 'distributable');
-  const roc = sum(lps, 'roc');
+  const rocCL = sum(lps, 'roc');
+  // §17(c) Return of Capital: use the maintained workpaper figure when present so
+  // the build-up ties to the fund's preferred-return workpaper; otherwise the
+  // CL-derived unreturned contributions.
+  const rocBuildup = opts.rocTotal != null ? r2(opts.rocTotal)
+    : (storedPref && storedPref.roc != null ? r2(storedPref.roc) : rocCL);
 
   const fund = {
     entity_id: eid, entity_name: ent ? ent.name : ('entity ' + eid),
     lp_count: lps.length, gp_count: partners.length - lps.length,
-    distributable, roc,
+    distributable, roc: rocBuildup, roc_cl: rocCL,
     pref: prefKnown ? prefTotal : null,
-    excess: prefKnown ? r2(distributable - roc - prefTotal) : null,
+    excess: prefKnown ? r2(distributable - rocBuildup - prefTotal) : null,
     // Carry build-up: sum of per-LP carry (0 in a shortfall). Only meaningful when
     // pref is per-class; with a fund-level pref override the tiers stay 0 unless
     // the aggregate excess is positive.
@@ -160,11 +178,13 @@ function buildData(ctx, quarter, opts = {}) {
     catchupLP: prefByClass && prefKnown ? sum(lps, 'catchupLP') : 0,
     residualLP: prefByClass && prefKnown ? sum(lps, 'residualLP') : 0,
     residualGP: prefByClass && prefKnown ? sum(lps, 'residualGP') : 0,
-    carry_quarter: prefByClass && prefKnown ? sum(lps, 'carryGP') : (prefKnown && prefTotal != null && (distributable - roc - prefTotal) > 0 ? null : 0),
+    carry_quarter: prefByClass && prefKnown ? sum(lps, 'carryGP') : (prefKnown && prefTotal != null && (distributable - rocBuildup - prefTotal) > 0 ? null : 0),
     accum_carry: accumCarryByClass ? sum(lps, 'accum_carry') : r2(opts.accumCarryTotal || 0),
     pref_known: prefKnown,
-    pref_source: prefByClass ? 'per-LP (Weaver preferred-return workpaper)'
-      : (opts.prefTotal != null ? 'fund-level override' : null),
+    pref_source: prefByClass ? 'per-LP preferred-return workpaper'
+      : (opts.prefTotal != null ? 'fund-level override'
+        : (storedPref ? ('stored preferred-return workpaper' + (storedPref.note ? ' (' + storedPref.note + ')' : '')) : null)),
+    roc_note: (opts.rocTotal != null || (storedPref && storedPref.roc != null)) ? 'per preferred-return workpaper' : 'CL general ledger',
   };
   // §17(c)(iii) clawback if liquidated & dissolved today = carry received to date
   // in excess of carry earned on a hypothetical liquidation. Zero while in
@@ -320,7 +340,11 @@ function buildWorkbook(data) {
     ['', F()],
     ['Tie-out to the ' + q.label + ' fund statements: Distributable assets should equal Limited Partners’ capital on the Statement of Assets, Liabilities and Partners’ Capital. This run: $' + fund.distributable.toLocaleString('en-US', { minimumFractionDigits: 2 }) + ' across ' + fund.lp_count + ' LP classes.', F()],
     ['', F()],
-    ['Q1 2026 is a shortfall (distributable < Return of Capital + Preferred Return), so every carry tier, carried interest to date, and clawback is $0.', F()],
+    [(!fund.pref_known
+        ? 'Preferred Return is pending the fund preferred-return workpaper — carry tiers, carried interest to date, and clawback are not finalized until it is supplied. Return of Capital source: ' + (fund.roc_note || 'CL general ledger') + '.'
+        : ((fund.excess != null && fund.excess < 0)
+            ? (q.label + ' is a shortfall (distributable < Return of Capital + Preferred Return), so every carry tier, carried interest to date, and clawback is $0. Return of Capital and Preferred Return per the fund preferred-return workpaper; distributable per CL.')
+            : (q.label + ' has distributable assets above Return of Capital + Preferred Return; carried interest accrues per the LPA §9.3 waterfall (see the Waterfall Detail tab).'))), F()],
   ];
   let nr = 1;
   for (const [text, font] of notes) { const c = nt.getCell('A' + nr); c.value = text; c.font = font; c.alignment = { wrapText: true }; nr++; }
@@ -380,6 +404,7 @@ function registerCarryClawbackRoutes(app, ctx) {
           entity_id: eid,
           prefByClass: body.pref_by_class || null,
           prefTotal: body.pref_total != null ? body.pref_total : null,
+          rocTotal: body.roc_total != null ? body.roc_total : null,
           accumCarryByClass: body.accum_carry_by_class || null,
           accumCarryTotal: body.accum_carry_total != null ? body.accum_carry_total : 0,
         });

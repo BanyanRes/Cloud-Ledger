@@ -5223,6 +5223,30 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
     }catch(e){ setErr(e.message||String(e)); }
     finally{ setBusy(false); }
   };
+  // Carry workpaper: maintained preferred return + return of capital per quarter.
+  const isCarry=kind==='carry';
+  const[prefIn,setPrefIn]=useState('');
+  const[rocIn,setRocIn]=useState('');
+  const[prefNote,setPrefNote]=useState('');
+  const[prefMsg,setPrefMsg]=useState('');
+  const[savingPref,setSavingPref]=useState(false);
+  useEffect(()=>{ if(!isCarry||!isQuarterEnd(qe))return; let live=true;
+    (async()=>{ const row=await api.preferredReturnGet(entityId,qe);
+      if(!live)return;
+      setPrefIn(row&&row.pref!=null?String(row.pref):'');
+      setRocIn(row&&row.roc!=null?String(row.roc):'');
+      setPrefNote(row&&row.note?row.note:'');
+      setPrefMsg(row?('Loaded stored values for '+qe+'.'):('No stored values for '+qe+' yet — enter them to compute the build-up.'));
+    })();
+    return()=>{live=false;};
+  },[qe,isCarry,entityId]);
+  const savePref=async()=>{
+    setSavingPref(true);setPrefMsg('');
+    try{ await api.preferredReturnSave(entityId,{quarter_end:qe,pref:prefIn===''?null:Number(prefIn),roc:rocIn===''?null:Number(rocIn),note:prefNote||null});
+      setPrefMsg('Saved. Run the report to use these figures.');
+    }catch(e){ setPrefMsg('Save failed: '+(e.message||e)); }
+    finally{ setSavingPref(false); }
+  };
   const s=result||{};
   return(<div><div style={S.card}>
     {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
@@ -5237,6 +5261,17 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
     {!valid&&qe&&<div style={{fontSize:12,color:T.orange,marginTop:10}}>
       Enter a quarter end date: March 31, June 30, September 30 or December 31.</div>}
     {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
+    {isCarry&&<div style={{...S.card,marginTop:14,padding:14,background:'#fbfbfd'}}>
+      <div style={{fontWeight:700,color:T.textBright,marginBottom:6}}>Preferred-return inputs ({qe})</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:10,maxWidth:720,lineHeight:1.5}}>From the fund&rsquo;s preferred-return workpaper (8% XIRR on equalized LP cash flows). Distributable assets come from CloudLedger; enter Return of Capital and Preferred Return here so the §17(c) build-up ties to the workpaper. Saved per quarter.</div>
+      <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div><label style={S.label}>Return of Capital</label><input style={S.inputSm} type="number" value={rocIn} onChange={e=>setRocIn(e.target.value)} placeholder="137875481.49"/></div>
+        <div><label style={S.label}>Preferred Return</label><input style={S.inputSm} type="number" value={prefIn} onChange={e=>setPrefIn(e.target.value)} placeholder="9206565.12"/></div>
+        <div style={{flex:'1 1 180px'}}><label style={S.label}>Note (optional)</label><input style={S.inputSm} value={prefNote} onChange={e=>setPrefNote(e.target.value)} placeholder="Weaver PR wp"/></div>
+        <button style={{...S.btnP,opacity:(savingPref||!canEdit||!valid)?0.5:1}} disabled={savingPref||!canEdit||!valid} onClick={savePref}>{savingPref?'Saving…':'Save inputs'}</button>
+      </div>
+      {prefMsg&&<div style={{fontSize:12,color:T.textMuted,marginTop:8}}>{prefMsg}</div>}
+    </div>}
     {result&&<div style={{...S.card,marginTop:18,padding:14,background:'#f3faf5'}}>
       <div style={{fontWeight:700,color:T.green,marginBottom:8}}>
         {s.quarter} workpaper downloaded{s.replaced>0?' · replaced the previous copy':''}</div>

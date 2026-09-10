@@ -587,6 +587,29 @@ export const api = {
     return { blob: await res.blob(), filename: m ? m[1] : cfg.name, summary };
   },
 
+  // Fund preferred return + return of capital, maintained per quarter (from the
+  // fund's preferred-return workpaper) and read by the carry/clawback workpaper.
+  preferredReturnGet: async (eid, quarterEnd) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/entities/' + eid + '/preferred-return?quarter_end=' + encodeURIComponent(quarterEnd),
+      { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    if (!res.ok) return null;
+    return res.json();
+  },
+  preferredReturnSave: async (eid, payload) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/entities/' + eid + '/preferred-return', {
+      method: 'PUT',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
+      body: JSON.stringify(payload),
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Save failed');
+    return data;
+  },
+
   // Workpapers › Valuation Summary (CLRF): take the prior quarter's valuation
   // workbook and inject the GL-derived figures for the target quarter, saving a
   // copy under Workpapers › Valuation › <quarter>.

@@ -803,6 +803,23 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_fundinv_entity ON fund_investments(entity_id);
 `);
 console.log('[db migrate] fund_investments ensured');
+// Fund preferred return + return of capital, maintained per quarter from the
+// fund's preferred-return workpaper (8% XIRR on equalized LP cash flows). Read by
+// the carry/clawback workpaper for the §17(c) build-up.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS fund_preferred_return (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+    quarter_end TEXT NOT NULL,
+    roc REAL,
+    pref REAL,
+    note TEXT,
+    updated_at TEXT,
+    UNIQUE(entity_id, quarter_end)
+  );
+  CREATE INDEX IF NOT EXISTS idx_fundpref_entity ON fund_preferred_return(entity_id);
+`);
+console.log('[db migrate] fund_preferred_return ensured');
 // turnkey_project_map redesigned: no longer stores per-project account codes
 // (single COA on the company entity now). We add cl_entity_id linking to the
 // COMPANY entity (same for all projects). Keep existing rows on upgrade.
@@ -2807,6 +2824,34 @@ app.put('/api/entities/:eid/commitments/by-class/:classId', auth, requireEntityA
   const r = db.prepare(`INSERT INTO investor_commitments (entity_id, class_id, commitment_amount, called_amount, commit_date, notes, created_at, updated_at)
     VALUES (?, ?, ?, 0, NULL, NULL, ?, ?)`).run(eid, classId, commitment, now, now);
   res.json({ id: r.lastInsertRowid, class_id: classId, commitment_amount: commitment, created: true });
+});
+
+// ── Fund preferred return + return of capital, maintained per quarter from the
+//    fund's preferred-return workpaper (8% XIRR on equalized LP cash flows). Read
+//    by the carry/clawback workpaper for the §17(c) build-up. ──
+app.get('/api/entities/:eid/preferred-return', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = req.params.eid;
+  if (req.query && req.query.quarter_end) {
+    const row = db.prepare('SELECT * FROM fund_preferred_return WHERE entity_id=? AND quarter_end=?').get(eid, req.query.quarter_end);
+    return res.json(row || null);
+  }
+  res.json(db.prepare('SELECT * FROM fund_preferred_return WHERE entity_id=? ORDER BY quarter_end DESC').all(eid));
+});
+app.put('/api/entities/:eid/preferred-return', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = req.params.eid;
+  const qe = req.body && req.body.quarter_end;
+  if (!qe || !/^\d{4}-\d{2}-\d{2}$/.test(qe)) return res.status(400).json({ error: 'quarter_end (YYYY-MM-DD) required' });
+  const num = (v) => (v == null || v === '' ? null : Number(v));
+  const roc = num(req.body.roc), pref = num(req.body.pref), note = req.body.note || null;
+  const now = new Date().toISOString();
+  const existing = db.prepare('SELECT id FROM fund_preferred_return WHERE entity_id=? AND quarter_end=?').get(eid, qe);
+  if (existing) {
+    db.prepare('UPDATE fund_preferred_return SET roc=?, pref=?, note=?, updated_at=? WHERE id=?').run(roc, pref, note, now, existing.id);
+    return res.json({ id: existing.id, entity_id: Number(eid), quarter_end: qe, roc, pref, note, updated: true });
+  }
+  const r = db.prepare('INSERT INTO fund_preferred_return (entity_id, quarter_end, roc, pref, note, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(eid, qe, roc, pref, note, now);
+  res.json({ id: r.lastInsertRowid, entity_id: Number(eid), quarter_end: qe, roc, pref, note, created: true });
 });
 
 // ── Fund GP/LP allocation preview. Returns the commitment-based ownership split
