@@ -5566,9 +5566,11 @@ async function buildFundStatements(opts) {
     tieOut: cashTieOut,
   };
 
+  // Present the fund's full legal name on the face statements (matches Weaver).
+  const FUND_LEGAL_NAMES = { 'County Line Rail Fund': 'County Line Rail Fund I, LP' };
   return {
     meta: {
-      entityName: displayEntityName(opts.entityName),
+      entityName: FUND_LEGAL_NAMES[String(opts.entityName || '').trim()] || displayEntityName(opts.entityName),
       asOf,
       longDate: longDate(asOf),
       periodLabel: 'For the Quarter Ended ' + longDate(asOf),
