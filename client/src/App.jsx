@@ -875,7 +875,10 @@ export default function App(){
       {id:'consolidation',label:'Consolidation',icon:'🧩',section:'consolidation'},
     ]},
     {key:'REPORTS',label:'Reports',icon:'📊',items:[
-      {id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'},
+      // CLRF is a pure LP fund: its statement package is the ASC 946 set under
+      // Fund Reporting, not the generic GL/Members'-Equity package. Hide the
+      // generic Financial Statements report for it so the wrong one isn't run.
+      ...(!isCLRF?[{id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'}]:[]),
       {id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},
       {id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
       {id:'b2a',label:'Operating Budget to Actual',icon:'🎯',section:'reports'},
@@ -997,7 +1000,8 @@ export default function App(){
         {page==='wp_pcap'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="pcap" title="PCAP Statements" description="One Statement of Changes in Capital per investor (commitment summary plus year-to-date and inception-to-date roll-forward), a review matrix, and notes. Sourced entirely from the general ledger by investor class; ties to the fund Statement of Changes in Partners' Capital. A copy is filed under Workpapers › Partners' Capital Accounts by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_pcapsched'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="pcapSchedule" title="Partners’ Capital Accounts Schedule" description="The 80-line supplementary schedule: one row per investor (Limited Partners then General Partners) with subtotals and a grand total, matching the fund administrator's schedule column-for-column. Reuses the PCAP engine, so it ties to the PCAP statements. A copy is filed under Workpapers › Partners' Capital Accounts Schedule by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
+        {page==='wp_finstmts'&&activeEntity&&!isCLRF&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
+        {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='fundrep'&&activeEntity&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
       </>})()}</div></div>
