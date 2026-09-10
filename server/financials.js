@@ -2903,6 +2903,17 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     if (layout._subline) textC(layout._subline, FS.sub, reg, PH - PAGE.mT - 2);
   }
   function drawFooter() {
+    // The CLRF fund package is issued under CL while Weaver remains responsible
+    // for the official financials, so every page must carry "No Assurance
+    // Provided" (matching Weaver's own footer) instead of the entity/period
+    // exec-summary line used by the operating-entity statements. Flag set by
+    // renderFundStatementsPdf via meta.noAssurance (Jimmy, 2026-09-10).
+    if (meta.noAssurance) {
+      const label = 'No Assurance Provided';
+      const w = reg.widthOfTextAtSize(label, FS.foot);
+      page.drawText(label, { x: (PW - w) / 2, y: PAGE.mB - 12, size: FS.foot, font: reg, color: rgb(0.4, 0.4, 0.4) });
+      return;
+    }
     // Centered footer on every page: "<entity>, <Month YYYY>  |  See Executive
     // Summary". Month + year only, never the day (rule set by Jimmy 2026-08-26)
     // — the statement headings already carry the exact period end date.
@@ -5477,6 +5488,7 @@ async function renderFundStatementsPdf(s, outOffsets) {
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
   const fonts = { reg, bold };
   const m = s.meta;
+  m.noAssurance = true; // CL issues this package no-assurance while Weaver owns the official FS
   const money = v => acct(v, { dash: true });
   const RIGHT = PAGE.w - PAGE.mR;
   const oneCol = [RIGHT];

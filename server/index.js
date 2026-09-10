@@ -10603,6 +10603,48 @@ require('./gpfees').registerGpFeesRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ CLRF workpaper: Carried Interest / Clawback (side letter §17(c)) ═══
+// Quarterly. Per-LP LPA §9.3 waterfall build-up (Return of Capital → 8% Preferred
+// Return → 80/20 catch-up → 80/20 residual), carry earned to date, and the
+// hypothetical clawback. The 8% Preferred Return is IRR-based on true call dates
+// (not in CL's opening-balance GL), so it is injected from Weaver's preferred-
+// return workpaper via the request body. See server/carryclawback.js.
+require('./carryclawback').registerCarryClawbackRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
+// ═══ CLRF workpaper: Partners' Capital Account Statements (PCAP) ═══
+// Quarterly. One "Statement of Changes in Capital" per investor (commitment
+// summary + YTD/ITD capital roll-forward), combined into a single workbook, plus
+// a review matrix. Fully GL-sourced by investor class; ties to the fund
+// Statement of Changes in Partners' Capital. See server/pcap.js.
+require('./pcap').registerPcapRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
+// ═══ CLRF workpaper: Partners' Capital Accounts schedule (80-line) ═══
+// Quarterly. One row per investor (LP then GP) with subtotals and grand total,
+// matching the FS supplementary schedule. Reuses the PCAP engine; ties to the
+// PCAP statements and the fund Statement of Changes. See server/pcapschedule.js.
+require('./pcapschedule').registerPcapScheduleRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLIP Development Costs ═══
 // GET /api/entities/:eid/dev-costs?as_of=YYYY-MM-DD — total capitalized
 // development cost (Total Long Term Investments + Total Other Assets), the
