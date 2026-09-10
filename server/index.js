@@ -10632,6 +10632,19 @@ require('./pcap').registerPcapRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ CLRF workpaper: Partners' Capital Accounts schedule (80-line) ═══
+// Quarterly. One row per investor (LP then GP) with subtotals and grand total,
+// matching the FS supplementary schedule. Reuses the PCAP engine; ties to the
+// PCAP statements and the fund Statement of Changes. See server/pcapschedule.js.
+require('./pcapschedule').registerPcapScheduleRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLIP Development Costs ═══
 // GET /api/entities/:eid/dev-costs?as_of=YYYY-MM-DD — total capitalized
 // development cost (Total Long Term Investments + Total Other Assets), the
