@@ -11787,7 +11787,39 @@ app.get('/api/entities/:eid/fund-statements.pdf', auth, requireEntityAccess(), r
       pcapData = pcap.buildData({ db, computeBalances: (e, o) => computeBalances(e, o) }, quarter, { entity_id: Number(eid) });
     } catch (e) { pcapData = null; }
     const model = await financials.buildFundStatements({ asOf, entityName, getBalances, investments, partnerClasses, commitments, pcap: pcapData });
-    const bytes = await financials.renderFundStatementsPdf(model, []);
+
+    // Supplementary schedules (quick append): render each existing CLRF
+    // workpaper's primary sheet to PDF and fold it into the package after a
+    // "Supplementary Schedules" divider (only for quarter-end periods).
+    const supp = [];
+    if (pcapData) {
+      const { xlsxSheetToPdf } = require('./xlsxToPdf');
+      const ctx = { db, computeBalances: (e, o) => computeBalances(e, o) };
+      // 1. Partners' Capital Accounts (reuses the pcap roll-forward)
+      try {
+        const wb = require('./pcapschedule').buildWorkbook(pcapData);
+        const buf = Buffer.from(await wb.xlsx.writeBuffer());
+        const r = await xlsxSheetToPdf(buf, 'Partners’ Capital Accounts', { printArea: false, dropAboveHeader: false });
+        supp.push({ tocLabel: "Partners' Capital Accounts", bytes: r.bytes });
+      } catch (e) { console.error('fund-supp pcap-schedule:', e.message); }
+      // 2. Schedule of Fees Paid To The General Partners and Affiliates
+      try {
+        const gpfees = require('./gpfees');
+        const data = gpfees.buildData(ctx, gpfees.resolveQuarter(asOf));
+        const buf = Buffer.from(await gpfees.buildWorkbook(data).xlsx.writeBuffer());
+        const r = await xlsxSheetToPdf(buf, 'Summary of Fees', { printArea: false, dropAboveHeader: false });
+        supp.push({ tocLabel: 'Schedule of Fees Paid To The General Partners and Affiliates', bytes: r.bytes });
+      } catch (e) { console.error('fund-supp gpfees:', e.message); }
+      // 3. Carried Interest Reporting per Section 17(c)
+      try {
+        const carry = require('./carryclawback');
+        const data = carry.buildData(ctx, carry.resolveQuarter(asOf), { entity_id: Number(eid) });
+        const buf = Buffer.from(await carry.buildWorkbook(data).xlsx.writeBuffer());
+        const r = await xlsxSheetToPdf(buf, 'Carried Interest', { printArea: false, dropAboveHeader: false });
+        supp.push({ tocLabel: 'Carried Interest Reporting per Section §17(c) of GCM Grosvenor Side Letter Agreement', bytes: r.bytes });
+      } catch (e) { console.error('fund-supp carry:', e.message); }
+    }
+    const bytes = await financials.renderFundStatementsPdf(model, [], supp);
 
     const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
     const safeName = entityName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
