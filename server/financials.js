@@ -2878,7 +2878,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     // On every page: draw the repeated date-line heading + a wider blank space
     // (~2 lines) between the heading and the column headers / first row so the
     // top of the statement doesn't look cramped.
-    if (dateLine) { textC(dateLine, FS.sub, reg, PH - PAGE.mT - 2); y -= 14; }
+    if (dateLine) { textC(dateLine, opts.plainHeader ? 11 : FS.sub, reg, PH - PAGE.mT - (opts.plainHeader ? 8 : 2)); y -= (opts.plainHeader ? 18 : 14); }
     y -= 20;
     // Repeat the column headers on continuation pages (not the very first page,
     // where the statement body calls colHeaders() itself in the right spot).
@@ -2897,8 +2897,12 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     page.drawText(str, { x: (PW - w) / 2, y: yy, size, font });
   }
   function drawHeader() {
-    textC(meta.entityName, FS.title, bold, PH - PAGE.mT + 22);
-    textC(statementTitle, FS.sub, bold, PH - PAGE.mT + 10);
+    // The CLRF fund package matches Weaver's plain (non-bold) serif header.
+    const hf = opts.plainHeader ? reg : bold;
+    const tSize = opts.plainHeader ? 12.5 : FS.title;
+    const sSize = opts.plainHeader ? 12.5 : FS.sub;
+    textC(meta.entityName, tSize, hf, PH - PAGE.mT + 24);
+    textC(statementTitle, sSize, hf, PH - PAGE.mT + 8);
     // Optional extra sub-line set by a statement (rarely used now).
     if (layout._subline) textC(layout._subline, FS.sub, reg, PH - PAGE.mT - 2);
   }
@@ -2909,7 +2913,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     // exec-summary line used by the operating-entity statements. Flag set by
     // renderFundStatementsPdf via meta.noAssurance (Jimmy, 2026-09-10).
     if (meta.noAssurance) {
-      const label = 'No Assurance Provided';
+      const label = 'No Assurance Provided.';
       const w = reg.widthOfTextAtSize(label, FS.foot);
       page.drawText(label, { x: (PW - w) / 2, y: PAGE.mB - 12, size: FS.foot, font: reg, color: rgb(0.4, 0.4, 0.4) });
       return;
@@ -5109,6 +5113,48 @@ function monthLabel(dateStr) {
 //     Expense that isn't one of the above and isn't the 6101xx unrealized G/L
 //     contra (which belongs to the investment fair-value mark, not operations).
 // ═══════════════════════════════════════════════════════════════════════════
+
+// Whole-dollar accounting format — Weaver rounds the face statements to whole
+// dollars (no cents); negatives in parentheses, zero as a dash.
+function acctW(n) {
+  const v = Math.round(Number(n) || 0);
+  if (v === 0) return '-';
+  const s = Math.abs(v).toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return v < 0 ? '(' + s + ')' : s;
+}
+
+// Fund balance-sheet line mapping (matches Weaver's presentation). Liability GL
+// accounts collapse into Weaver's presentation lines, in Weaver's order.
+const FUND_LIAB_LINES = [
+  { key: 'affil',   label: 'Due to affiliates',                        match: c => /^2110/.test(c) },
+  { key: 'apacc',   label: 'Accounts payable and accrued expenses',    match: c => /^(2020|2100|2101|2102|2103|2104|2105|2107|2109|211[2-9])/.test(c) },
+  { key: 'mgmt',    label: 'Management fees payable',                   match: c => /^2106/.test(c) },
+  { key: 'mgr',     label: 'Due to manager',                           match: c => /^2108/.test(c) },
+  { key: 'portco',  label: 'Due to portfolio investments',             match: c => /^2111/.test(c) },
+  { key: 'members', label: 'Due to members',                           match: c => /^230/.test(c) },
+];
+function fundLiabLine(code) {
+  const c = String(code);
+  const hit = FUND_LIAB_LINES.find(l => l.match(c));
+  return hit || null;
+}
+// Non-investment, non-cash asset relabels → Weaver's presentation labels.
+function fundAssetLabel(code, name) {
+  const c = String(code);
+  if (/^12001/.test(c)) return 'Interest receivable';           // 120010
+  if (/^1011/.test(c) || /^1012/.test(c)) return 'Due from portfolio investments'; // 101100
+  if (/^1502/.test(c)) return 'Prepaid advisory fees';          // 150200
+  if (/^1503/.test(c)) return 'Prepaid insurance';              // 150300
+  if (/^1801/.test(c) || /^1800/.test(c)) return 'Other assets';// 180100
+  return name;
+}
+// Cash-flow line label for a working-capital account movement.
+function cfMoveLabel(assetOrLiab, label, delta) {
+  // delta is the balance change (cur - beg) in natural sign.
+  const dir = delta > 0 ? 'Increase' : 'Decrease';
+  return dir + ' in ' + label.charAt(0).toLowerCase() + label.slice(1);
+}
+
 async function buildFundStatements(opts) {
   const asOf = opts.asOf;
   const ys = yearStart(asOf);
@@ -5158,21 +5204,46 @@ async function buildFundStatements(opts) {
   }
   const curAssets = assetRows(curMap);
 
-  // Assets are presented investments-first, then the rest in code order.
+  // Assets are presented investments-first, then Cash and cash equivalents
+  // (grouped), then the remaining assets relabeled to Weaver's presentation.
   const assetLines = [];
   if (!isZero(curAssets.investFV) || !isZero(curAssets.investCost)) {
-    assetLines.push({ name: 'Portfolio investments, at fair value (cost ' + acct(curAssets.investCost, { dash: false }) + ')', amount: curAssets.investFV, invest: true });
+    assetLines.push({ name: 'Portfolio investments, at fair value (cost $' + acctW(curAssets.investCost) + ')', amount: curAssets.investFV, invest: true });
   }
-  for (const r of curAssets.rows) assetLines.push({ name: r.name, amount: r.amount });
+  const isCashCode0 = code => codeStarts(code, ['1002', '1005', '1072']);
+  const cashTotal = r2(curAssets.rows.filter(r => isCashCode0(r.code)).reduce((s, r) => s + r.amount, 0));
+  if (!isZero(cashTotal)) assetLines.push({ name: 'Cash and cash equivalents', amount: cashTotal });
+  const otherAssetsBS = curAssets.rows.filter(r => !isCashCode0(r.code));
+  const assetByLabel = new Map();
+  for (const r of otherAssetsBS) {
+    const lab = fundAssetLabel(r.code, r.name);
+    assetByLabel.set(lab, r2((assetByLabel.get(lab) || 0) + r.amount));
+  }
+  for (const [name, amount] of assetByLabel) { if (!isZero(amount)) assetLines.push({ name, amount }); }
   const totalAssets = r2(assetLines.reduce((s, l) => s + l.amount, 0));
 
-  // Liabilities: list each non-zero liability account by name, code order.
-  const liabLines = [];
+  // Liabilities: collapse GL accounts into Weaver's presentation lines, in
+  // Weaver's order; anything unmatched falls through by name/code.
+  const liabByKey = new Map();
+  const liabExtra = [];
   for (const r of curMap.values()) {
     if (r.type !== 'Liability' || isZero(bal(r))) continue;
-    liabLines.push({ code: String(r.code), name: r.name, amount: r2(bal(r)) });
+    const line = fundLiabLine(r.code);
+    if (line) {
+      const cur = liabByKey.get(line.key) || { label: line.label, amount: 0 };
+      cur.amount = r2(cur.amount + bal(r));
+      liabByKey.set(line.key, cur);
+    } else {
+      liabExtra.push({ code: String(r.code), name: r.name, amount: r2(bal(r)) });
+    }
   }
-  liabLines.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+  const liabLines = [];
+  for (const l of FUND_LIAB_LINES) {
+    const v = liabByKey.get(l.key);
+    if (v && !isZero(v.amount)) liabLines.push({ name: v.label, amount: v.amount });
+  }
+  liabExtra.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+  for (const e of liabExtra) liabLines.push({ name: e.name, amount: e.amount });
   const totalLiab = r2(liabLines.reduce((s, l) => s + l.amount, 0));
 
   // Partners' capital total = all Equity accounts + current-period net income
@@ -5326,35 +5397,58 @@ async function buildFundStatements(opts) {
   const gpCommitShare = haveCommitments ? (gpCommit / totalCommit) : 0;
   const gpNetLoss = haveCommitments ? r2(fundTotals.netLoss * gpCommitShare) : gpAgg.netLoss;
 
-  const groups = {
-    GP: {
-      beginning: gpBeginning,
-      contributions: gpAgg.contributions,
-      syndication: gpAgg.syndication,
-      netLoss: gpNetLoss,
-      ending: r2(gpBeginning + gpAgg.contributions + gpAgg.syndication + gpAgg.other + gpNetLoss),
-    },
-    LP: {},
-  };
-  // LP = fund − GP for every column, so the two columns always re-foot exactly.
-  groups.LP = {
-    beginning: r2(fundTotals.beginning - groups.GP.beginning),
-    contributions: r2(fundTotals.contributions - groups.GP.contributions),
-    syndication: r2(fundTotals.syndication - groups.GP.syndication),
-    netLoss: r2(fundTotals.netLoss - groups.GP.netLoss),
-    ending: r2(fundTotals.ending - groups.GP.ending),
-  };
-  const capTotals = {
-    beginning: fundTotals.beginning,
-    contributions: fundTotals.contributions,
-    syndication: fundTotals.syndication,
-    netLoss: fundTotals.netLoss,
-    ending: fundTotals.ending,
-  };
+  // Weaver's Statement of Changes breaks activity into five rows (contributions,
+  // capital call refunds, syndication costs, waived development fees, net
+  // investment loss), split GP/LP. When the PCAP roll-forward is supplied
+  // (opts.pcap) use it — the validated per-investor engine — so the statement
+  // ties to the Partners' Capital Accounts schedule exactly. Otherwise fall back
+  // to the GL-movement approximation (net contributions only).
+  let groups, capTotals;
+  if (opts.pcap && opts.pcap.investors && opts.pcap.investors.length) {
+    const aggP = (pred) => {
+      const g = { beginning: 0, contributions: 0, refunds: 0, syndication: 0, waived: 0, transfers: 0, netLoss: 0, ending: 0 };
+      for (const inv of opts.pcap.investors) {
+        if (!pred(inv)) continue;
+        const y = inv.ytd;
+        g.beginning = r2(g.beginning + y.beginning);
+        g.contributions = r2(g.contributions + y.contributions);
+        g.refunds = r2(g.refunds + y.returnOfCapital);
+        g.syndication = r2(g.syndication + y.syndication);
+        g.waived = r2(g.waived + y.waivedDevFees);
+        g.transfers = r2(g.transfers + y.transfers);
+        g.netLoss = r2(g.netLoss + y.netInvestment + y.managementFee + y.unrealized);
+        g.ending = r2(g.ending + y.ending);
+      }
+      return g;
+    };
+    groups = { GP: aggP(i => i.partner_type === 'GP'), LP: aggP(i => i.partner_type === 'LP') };
+    capTotals = aggP(() => true);
+    anyClassData = true;
+  } else {
+    groups = {
+      GP: {
+        beginning: gpBeginning, contributions: gpAgg.contributions, refunds: 0,
+        syndication: gpAgg.syndication, waived: 0, transfers: 0, netLoss: gpNetLoss,
+        ending: r2(gpBeginning + gpAgg.contributions + gpAgg.syndication + gpAgg.other + gpNetLoss),
+      }, LP: {},
+    };
+    groups.LP = {
+      beginning: r2(fundTotals.beginning - groups.GP.beginning),
+      contributions: r2(fundTotals.contributions - groups.GP.contributions),
+      refunds: 0, syndication: r2(fundTotals.syndication - groups.GP.syndication),
+      waived: 0, transfers: 0, netLoss: r2(fundTotals.netLoss - groups.GP.netLoss),
+      ending: r2(fundTotals.ending - groups.GP.ending),
+    };
+    capTotals = {
+      beginning: fundTotals.beginning, contributions: fundTotals.contributions, refunds: 0,
+      syndication: fundTotals.syndication, waived: 0, transfers: 0,
+      netLoss: fundTotals.netLoss, ending: fundTotals.ending,
+    };
+  }
 
   // GP/LP ending split for the balance-sheet capital section.
-  const capGP = groups.GP.ending;
-  const capLP = groups.LP.ending;
+  const capGP = r2(groups.GP.ending);
+  const capLP = r2(groups.LP.ending);
 
   // ── 2. Schedule of Investments (from config) ────────────────────────────────
   // Group underlyings by parent_name (holding company); a blank parent means the
@@ -5390,63 +5484,85 @@ async function buildFundStatements(opts) {
     hasData: investments.length > 0,
   };
 
-  // ── 5. Statement of Cash Flows (indirect) ───────────────────────────────────
-  // Beginning balances at year start − 1 day; deltas over the YTD window. Cash
-  // is every asset account whose name/code reads as cash & equivalents.
-  const isCashCode = code => codeStarts(code, ['1002', '1005', '1072']);
-  const cashCur = sumWhere(bsCur, r => r.type === 'Asset' && isCashCode(r.code));
-  const cashBeg = sumWhere(bsBeg, r => r.type === 'Asset' && isCashCode(r.code));
+  // ── 5. Statement of Cash Flows (indirect, itemized like Weaver) ─────────────
+  const isCashCodeCF = code => codeStarts(code, ['1002', '1005', '1072']);
+  const cashCur = sumWhere(bsCur, r => r.type === 'Asset' && isCashCodeCF(r.code));
+  const cashBeg = sumWhere(bsBeg, r => r.type === 'Asset' && isCashCodeCF(r.code));
+  const curBalOf = code => (curMap.get(code) ? bal(curMap.get(code)) : 0);
+  const begBalOf = code => (begMap.get(code) ? bal(begMap.get(code)) : 0);
+  const deltaOf = code => r2(curBalOf(code) - begBalOf(code));
 
-  // Working-capital deltas: change in each non-cash, non-investment asset and
-  // each liability over the period. Sign for cash-flow: asset increase uses
-  // cash (negative), liability increase provides cash (positive).
-  const deltaAsset = code => r2((curMap.get(code) ? bal(curMap.get(code)) : 0) - (begMap.get(code) ? bal(begMap.get(code)) : 0));
-  const allAssetCodes = new Set([...curMap.keys(), ...begMap.keys()].filter(c => {
+  // Investment activity: gross purchases (debits) and returns of capital
+  // (credits) on the investment PURCHASE accounts (1201xx). The capitalized-
+  // expense account (1202xx) moves only for the non-cash waived development fee,
+  // so it is excluded from cash and shown as a supplemental non-cash disclosure.
+  const isInvestPurchaseCode = code => codeStarts(code, ['1201']);
+  let purchases = 0, returns = 0;
+  for (const r of isYtd) {
+    if (r.type === 'Asset' && isInvestPurchaseCode(r.code)) {
+      purchases = r2(purchases + (Number(r.total_debit) || 0));
+      returns = r2(returns + (Number(r.total_credit) || 0));
+    }
+  }
+
+  // Per-account working-capital deltas, grouped by Weaver's presentation labels.
+  const allAssetCodesCF = new Set([...curMap.keys(), ...begMap.keys()].filter(c => {
     const ref = curMap.get(c) || begMap.get(c); return ref && ref.type === 'Asset';
   }));
-  const allLiabCodes = new Set([...curMap.keys(), ...begMap.keys()].filter(c => {
+  const allLiabCodesCF = new Set([...curMap.keys(), ...begMap.keys()].filter(c => {
     const ref = curMap.get(c) || begMap.get(c); return ref && ref.type === 'Liability';
   }));
-
-  let wcAssets = 0, wcLiab = 0, investChange = 0;
-  for (const c of allAssetCodes) {
-    if (isCashCode(c)) continue;
-    if (isInvest(c)) { investChange = r2(investChange + deltaAsset(c)); continue; }
-    wcAssets = r2(wcAssets - deltaAsset(c)); // asset increase reduces cash
+  const wcAssetMap = new Map(); // label -> signed balance delta
+  for (const c of allAssetCodesCF) {
+    if (isCashCodeCF(c) || isInvest(c)) continue;
+    const d = deltaOf(c);
+    if (isZero(d)) continue;
+    const ref = curMap.get(c) || begMap.get(c);
+    const label = fundAssetLabel(c, ref.name);
+    wcAssetMap.set(label, r2((wcAssetMap.get(label) || 0) + d));
   }
-  for (const c of allLiabCodes) {
-    const d = r2((curMap.get(c) ? bal(curMap.get(c)) : 0) - (begMap.get(c) ? bal(begMap.get(c)) : 0));
-    wcLiab = r2(wcLiab + d); // liability increase provides cash
+  const wcLiabMap = new Map();
+  for (const c of allLiabCodesCF) {
+    const d = deltaOf(c);
+    if (isZero(d)) continue;
+    const line = fundLiabLine(c);
+    const ref = curMap.get(c) || begMap.get(c);
+    const label = line ? line.label : ref.name;
+    wcLiabMap.set(label, r2((wcLiabMap.get(label) || 0) + d));
   }
-  // Equity contributions/refunds/syndication over the period = financing.
-  // Financing = movement of real capital-flow equity accounts only
-  // (contributions + syndication). The accumulated / retained-earnings accounts
-  // (390xxx) move because of the prior-year soft close, not because of cash, so
-  // they are excluded — otherwise they double-count the net loss and the cash
-  // flow won't reconcile.
-  const isCapitalFlowEquity = code => codeStarts(code, CONTRIB_PREFIXES) || codeStarts(code, SYND_PREFIX);
-  const eqFlowCur = sumWhere(bsCur, r => r.type === 'Equity' && isCapitalFlowEquity(r.code));
-  const eqFlowBeg = sumWhere(bsBeg, r => r.type === 'Equity' && isCapitalFlowEquity(r.code));
-  const financingEquity = r2(eqFlowCur - eqFlowBeg);
+  let wcAssetsTot = 0, wcLiabTot = 0;
+  const wcItems = [];
+  for (const [label, d] of wcAssetMap) { if (isZero(d)) continue; wcItems.push({ label: cfMoveLabel('asset', label, d), amount: r2(-d) }); wcAssetsTot = r2(wcAssetsTot - d); }
+  for (const [label, d] of wcLiabMap) { if (isZero(d)) continue; wcItems.push({ label: cfMoveLabel('liab', label, d), amount: r2(d) }); wcLiabTot = r2(wcLiabTot + d); }
 
-  const netOperating = r2(niYtd + wcAssets + wcLiab);
-  const netInvesting = r2(-investChange); // investment asset increase = cash outflow
-  const netFinancing = r2(financingEquity);
-  const netChange = r2(netOperating + netInvesting + netFinancing);
+  const operatingItems = [];
+  if (!isZero(purchases)) operatingItems.push({ label: 'Purchases of investments in real estate', amount: r2(-purchases) });
+  if (!isZero(returns)) operatingItems.push({ label: 'Return of capital from investment', amount: r2(returns) });
+
+  // Financing = cash contributions / capital call refunds / syndication costs,
+  // taken from the (pcap-driven) changes model so it ties to the Statement of
+  // Changes in Partners' Capital.
+  const finContrib = r2(capTotals.contributions);
+  const finRefunds = r2(capTotals.refunds);
+  const finSynd = r2(capTotals.syndication);
+  const noncashWaived = r2(capTotals.waived);
+
+  const netOperating = r2(niYtd - purchases + returns + wcAssetsTot + wcLiabTot);
+  const netFinancing = r2(finContrib + finRefunds + finSynd);
+  const netChange = r2(netOperating + netFinancing);
   const cashTieOut = r2(cashCur - (cashBeg + netChange));
 
   const cashFlow = {
-    netLoss: niYtd,
-    changeWCAssets: wcAssets,
-    changeWCLiab: wcLiab,
+    netLoss: r2(niYtd),
+    operatingItems,
+    wcItems,
     netOperating,
-    investChange: r2(-investChange),
-    netInvesting,
-    financingEquity,
+    financing: { contributions: finContrib, refunds: finRefunds, syndication: finSynd },
     netFinancing,
     netChange,
     cashBeg: r2(cashBeg),
     cashEnd: r2(cashCur),
+    noncashWaived,
     tieOut: cashTieOut,
   };
 
@@ -5481,50 +5597,54 @@ async function buildFundStatements(opts) {
 // Partners' Capital (landscape), Statement of Cash Flows.
 // If outOffsets is passed it is filled with { label, page } for the TOC.
 // ═══════════════════════════════════════════════════════════════════════════
-async function renderFundStatementsPdf(s, outOffsets) {
-  const track = (label, tocLabel) => { if (outOffsets) outOffsets.push({ label: (tocLabel || label), page: pdf.getPageCount() }); };
-  const pdf = await PDFDocument.create();
-  const reg = await pdf.embedFont(StandardFonts.Helvetica);
-  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const fonts = { reg, bold };
+async function renderFundStatementsPdf(s, outOffsets, supp) {
+  supp = Array.isArray(supp) ? supp : [];
   const m = s.meta;
   m.noAssurance = true; // CL issues this package no-assurance while Weaver owns the official FS
-  const money = v => acct(v, { dash: true });
+  const periodLine = m.periodLabel || ('For the Period Ended ' + m.longDate);
+  const APOS = '’';
+  const partnersCap = 'Partners' + APOS + ' Capital';
+
+  // ── Phase 1: the five face statements (+ divider + appended schedules) ───────
+  const pdf = await PDFDocument.create();
+  const reg = await pdf.embedFont(StandardFonts.TimesRoman);
+  const bold = await pdf.embedFont(StandardFonts.TimesRomanBold);
+  const fonts = { reg, bold };
+  const money = v => acctW(v);                 // Weaver rounds the face statements to whole dollars
   const RIGHT = PAGE.w - PAGE.mR;
   const oneCol = [RIGHT];
+  const bodyOffsets = [];
+  const track = (label) => bodyOffsets.push({ label, page: pdf.getPageCount() });
 
-  // ── 1. Statement of Assets, Liabilities, and Partners' Capital ──────────────
+  // 1. Statement of Assets, Liabilities, and Partners' Capital
   {
-    const L = makeLayout(pdf, fonts, m, 'Statement of Assets, Liabilities, and Partners\u2019 Capital', { dateLine: m.longDate });
-    track('Statement of Assets, Liabilities, and Partners\u2019 Capital');
-    L.start();
-    L.setCols(oneCol);
+    const title = 'Statement of Assets, Liabilities, and ' + partnersCap;
+    const L = makeLayout(pdf, fonts, m, title, { dateLine: m.longDate, plainHeader: true });
+    track(title);
+    L.start(); L.setCols(oneCol);
     const a = s.assetsLiabCapital;
     L.sectionTitle('Assets');
     a.assetLines.forEach((l, i) => L.row(l.name, [money(l.amount)], { indent: 16, dollarPrefix: i === 0 }));
-    L.row('Total assets', [money(a.totalAssets)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, gapAfter: 10 });
-
-    L.sectionTitle('Liabilities and partners\u2019 capital');
-    L.row('Liabilities:', [], { indent: 10, boldRow: true });
+    L.row('Total assets', [money(a.totalAssets)], { indent: 6, ruleAbove: true, doubleBelow: true, dollarPrefix: true, gapAfter: 10 });
+    L.sectionTitle('Liabilities and partners' + APOS + ' capital');
+    L.row('Liabilities:', [], { indent: 6 });
     a.liabLines.forEach((l, i) => L.row(l.name, [money(l.amount)], { indent: 20, dollarPrefix: i === 0 }));
-    L.row('Total liabilities', [money(a.totalLiab)], { indent: 10, boldRow: true, ruleAbove: true, gapAfter: 8 });
-
-    L.row('Partners\u2019 capital:', [], { indent: 10, boldRow: true });
+    L.row('Total liabilities', [money(a.totalLiab)], { indent: 10, ruleAbove: true, gapAfter: 8 });
+    L.row('Partners' + APOS + ' capital:', [], { indent: 6 });
     if (!isZero(a.capGP) || a.capGP !== a.totalCapital) L.row('General partners', [money(a.capGP)], { indent: 20 });
     L.row('Limited partners', [money(a.capLP)], { indent: 20 });
-    L.row('Total partners\u2019 capital', [money(a.totalCapital)], { indent: 10, boldRow: true, ruleAbove: true, gapAfter: 8 });
-    L.row('Total liabilities and partners\u2019 capital', [money(a.totalLiabCapital)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+    L.row('Total partners' + APOS + ' capital', [money(a.totalCapital)], { indent: 10, ruleAbove: true, gapAfter: 8 });
+    L.row('Total liabilities and partners' + APOS + ' capital', [money(a.totalLiabCapital)], { indent: 6, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
   }
 
-  // ── 2. Schedule of Investments ──────────────────────────────────────────────
+  // 2. Schedule of Investments
   {
-    const L = makeLayout(pdf, fonts, m, 'Schedule of Investments', { dateLine: m.longDate });
+    const L = makeLayout(pdf, fonts, m, 'Schedule of Investments', { dateLine: m.longDate, plainHeader: true });
     track('Schedule of Investments');
     L.start();
-    // Columns: Acquisition date | Cost | Fair Value | % of Capital
     const sCols = [RIGHT - 300, RIGHT - 180, RIGHT - 60, RIGHT];
     L.setCols(sCols);
-    L.colHeaders(['Date of\nAcquisition', 'Cost', 'Fair Value', '% of\nCapital'], { bottomAlign: true, underline: true, colBox: true });
+    L.colHeaders(['Date of\nAcquisition', 'Cost', 'Fair Value', 'Fair Value\nPercentage of\n' + partnersCap], { bottomAlign: true, underline: true, colBox: true });
     const sch = s.schedule;
     if (!sch.hasData) {
       L.row('No investment detail configured. Add underlyings in Fund Reporting settings.', [], { indent: 10 });
@@ -5544,77 +5664,143 @@ async function renderFundStatementsPdf(s, outOffsets) {
     }
   }
 
-  // ── 3. Statement of Operations ──────────────────────────────────────────────
+  // 3. Statement of Operations
   {
-    const L = makeLayout(pdf, fonts, m, 'Statement of Operations', { dateLine: m.periodLabel || ('For the Period Ended ' + m.longDate) });
+    const L = makeLayout(pdf, fonts, m, 'Statement of Operations', { dateLine: periodLine, plainHeader: true });
     track('Statement of Operations');
-    L.start();
-    L.setCols(oneCol);
+    L.start(); L.setCols(oneCol);
     const o = s.operations;
     L.sectionTitle('Investment income:');
     o.investmentIncome.forEach(r => L.row(r.name, [money(r.amount)], { indent: 16 }));
-    L.row('Total investment income', [money(o.totalInvestmentIncome)], { indent: 16, boldRow: true, dollarPrefix: true, gapAfter: 6 });
+    L.row('Total investment income', [money(o.totalInvestmentIncome)], { indent: 16, dollarPrefix: true, gapAfter: 6 });
     L.sectionTitle('Expenses:');
     o.expenses.forEach(r => L.row(r.name, [money(r.amount)], { indent: 16 }));
-    L.row('Total expenses', [money(o.totalExpenses)], { indent: 16, boldRow: true, ruleAbove: true, gapAfter: 6 });
-    L.row('Net investment loss', [money(o.netInvestmentLoss)], { indent: 6, boldRow: true, ruleAbove: true });
-    L.row('Net decrease in partners\u2019 capital resulting from operations', [money(o.netResult)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+    L.row('Total expenses', [money(o.totalExpenses)], { indent: 16, ruleAbove: true, gapAfter: 6 });
+    L.row('Net investment loss', [money(o.netInvestmentLoss)], { indent: 6, ruleAbove: true });
+    L.row('Net decrease in partners' + APOS + ' capital resulting from operations', [money(o.netResult)], { indent: 6, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
   }
 
-  // ── 4. Statement of Changes in Partners' Capital (landscape, GP/LP/Total) ────
+  // 4. Statement of Changes in Partners' Capital (portrait, GP / LP / Total)
   {
-    const L = makeLayout(pdf, fonts, m, 'Statement of Changes in Partners\u2019 Capital', { landscape: true, dateLine: m.periodLabel || ('For the Period Ended ' + m.longDate) });
-    const LRIGHT = PAGE.h - PAGE.mR;
-    track('Statement of Changes in Partners\u2019 Capital');
+    const L = makeLayout(pdf, fonts, m, 'Statement of Changes in ' + partnersCap, { dateLine: periodLine, plainHeader: true });
+    track('Statement of Changes in ' + partnersCap);
     L.start();
-    const c1 = 300;
-    const PITCH = (LRIGHT - c1) / 2;
-    const cols = [c1, c1 + PITCH, LRIGHT];
-    L.setCols(cols);
+    const c1 = RIGHT - 258, c2 = RIGHT - 140, c3 = RIGHT;
+    L.setCols([c1, c2, c3]);
     L.colHeaders(['General Partners', 'Limited Partners', 'Total'], { bottomAlign: true, underline: true, colBox: true });
-    const cc = s.changesInCapital;
-    const g = cc.groups, t = cc.totals;
-    const rowvals = (key) => [acct(g.GP[key]), acct(g.LP[key]), acct(t[key])];
-    L.row('Balance, beginning of period', rowvals('beginning'), { indent: 10, valueInset: 4 });
-    L.row('Capital contributions (refunds), net', rowvals('contributions'), { indent: 10, valueInset: 4 });
-    if (!isZero(t.syndication)) L.row('Syndication costs', rowvals('syndication'), { indent: 10, valueInset: 4 });
-    L.row('Net decrease resulting from operations', rowvals('netLoss'), { indent: 10, valueInset: 4 });
-    L.row('Balance, end of period', rowvals('ending'), { indent: 10, boldRow: true, ruleAbove: true, doubleBelow: true, valueInset: 4 });
-    if (!cc.hasClassData) {
-      L.space(8);
-      L.row('Note: GP/LP split requires investor classes tagged in Fund Reporting settings; shown as Limited Partners until tagged.', [], { indent: 10 });
-    }
+    const cc = s.changesInCapital, g = cc.groups, t = cc.totals;
+    const yr = String(m.asOf).slice(0, 4);
+    const rv = (k) => [money(g.GP[k]), money(g.LP[k]), money(t[k])];
+    L.row('Balance at January 1, ' + yr, rv('beginning'), { indent: 8, valueInset: 4, dollarPrefix: true });
+    L.row('Capital contributions', rv('contributions'), { indent: 16, valueInset: 4 });
+    L.row('Capital call refunds', rv('refunds'), { indent: 16, valueInset: 4 });
+    if (!isZero(t.syndication)) L.row('Syndication costs', rv('syndication'), { indent: 16, valueInset: 4 });
+    if (!isZero(t.waived)) L.row('Waived development fees', rv('waived'), { indent: 16, valueInset: 4 });
+    if (!isZero(t.transfers)) L.row('Transfers of interest', rv('transfers'), { indent: 16, valueInset: 4 });
+    L.row('Net investment loss', rv('netLoss'), { indent: 16, valueInset: 4, ruleAbove: true });
+    L.row('Balance at ' + m.longDate, rv('ending'), { indent: 8, ruleAbove: true, doubleBelow: true, valueInset: 4, dollarPrefix: true });
   }
 
-  // ── 5. Statement of Cash Flows ──────────────────────────────────────────────
+  // 5. Statement of Cash Flows (indirect, itemized)
   {
-    const L = makeLayout(pdf, fonts, m, 'Statement of Cash Flows', { dateLine: m.periodLabel || ('For the Period Ended ' + m.longDate) });
+    const L = makeLayout(pdf, fonts, m, 'Statement of Cash Flows', { dateLine: periodLine, plainHeader: true });
     track('Statement of Cash Flows');
-    L.start();
-    L.setCols(oneCol);
+    L.start(); L.setCols(oneCol);
     const cf = s.cashFlow;
     L.sectionTitle('Operating activities:');
-    L.row('Net decrease in partners\u2019 capital resulting from operations', [money(cf.netLoss)], { indent: 16, dollarPrefix: true });
-    L.row('Adjustments to reconcile to net cash used in operating activities:', [], { indent: 16 });
-    if (!isZero(cf.investChange)) L.row('Purchases of investments, net of returns of capital', [money(cf.investChange)], { indent: 28 });
-    if (!isZero(cf.changeWCAssets)) L.row('Changes in operating assets', [money(cf.changeWCAssets)], { indent: 28 });
-    if (!isZero(cf.changeWCLiab)) L.row('Changes in operating liabilities', [money(cf.changeWCLiab)], { indent: 28 });
-    L.row('Net cash used in operating activities', [money(r2(cf.netOperating + cf.investChange))], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
-
+    L.row('Net decrease in partners' + APOS + ' capital resulting from operations', [money(cf.netLoss)], { indent: 10, dollarPrefix: true });
+    L.row('', [], { indent: 10, labelLines: ['Adjustments to reconcile net decrease in partners' + APOS + ' capital resulting', 'from operations to net cash used in operating activities:'] });
+    (cf.operatingItems || []).forEach(it => L.row(it.label, [money(it.amount)], { indent: 22 }));
+    L.row('Changes in operating assets and liabilities:', [], { indent: 16 });
+    (cf.wcItems || []).forEach(it => L.row(it.label, [money(it.amount)], { indent: 22 }));
+    L.row('Net cash used in operating activities', [money(cf.netOperating)], { indent: 6, ruleAbove: true, gapAfter: 8 });
     L.sectionTitle('Financing activities:');
-    if (!isZero(cf.financingEquity)) L.row('Capital contributions, net of refunds and syndication costs', [money(cf.financingEquity)], { indent: 28 });
-    L.row('Net cash provided by financing activities', [money(cf.netFinancing)], { indent: 6, boldRow: true, ruleAbove: true, gapAfter: 8 });
+    L.row('Capital contributions', [money(cf.financing.contributions)], { indent: 16 });
+    L.row('Capital call refunds', [money(cf.financing.refunds)], { indent: 16 });
+    if (!isZero(cf.financing.syndication)) L.row('Syndication costs', [money(cf.financing.syndication)], { indent: 16 });
+    L.row('Net cash provided by financing activities', [money(cf.netFinancing)], { indent: 6, ruleAbove: true, gapAfter: 8 });
+    L.row('Net change in cash and cash equivalents', [money(cf.netChange)], { indent: 6 });
+    L.row('Cash and cash equivalents, beginning of period', [money(cf.cashBeg)], { indent: 6, ruleBelow: true });
+    L.row('Cash and cash equivalents, end of period', [money(cf.cashEnd)], { indent: 6, doubleBelow: true, dollarPrefix: true, gapAfter: 10 });
+    if (!isZero(cf.noncashWaived)) {
+      L.sectionTitle('Supplemental disclosure of noncash financing activities');
+      L.row('Waived development fees excluded from contributions', [money(cf.noncashWaived)], { indent: 6, doubleBelow: true, dollarPrefix: true });
+    }
+    if (!isZero(cf.tieOut)) { L.space(6); L.row('Note: reconciled change differs from cash movement by ' + money(cf.tieOut) + '.', [], { indent: 6 }); }
+  }
 
-    L.row('Net change in cash and cash equivalents', [money(cf.netChange)], { indent: 6, boldRow: true, ruleAbove: true });
-    L.row('Cash and cash equivalents, beginning of period', [money(cf.cashBeg)], { indent: 6 });
-    L.row('Cash and cash equivalents, end of period', [money(cf.cashEnd)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
-    if (!isZero(cf.tieOut)) {
-      L.space(6);
-      L.row('Note: reconciled change differs from cash movement by ' + money(cf.tieOut) + '.', [], { indent: 6 });
+  // ── Supplementary Schedules divider + appended schedule PDFs ─────────────────
+  const suppOffsets = [];
+  if (supp.length) {
+    const dp = pdf.addPage([PAGE.w, PAGE.h]);
+    const dt = 'Supplementary Schedules';
+    const dw = bold.widthOfTextAtSize(dt, 12);
+    dp.drawText(dt, { x: (PAGE.w - dw) / 2, y: PAGE.h - PAGE.mT - 4, size: 12, font: bold });
+    for (const sp of supp) {
+      try {
+        const ext = await PDFDocument.load(sp.bytes);
+        suppOffsets.push({ label: sp.tocLabel || sp.label, page: pdf.getPageCount() });
+        const pgs = await pdf.copyPages(ext, ext.getPageIndices());
+        pgs.forEach(p => pdf.addPage(p));
+      } catch (e) { /* skip a schedule that failed to load */ }
     }
   }
 
-  return await pdf.save();
+  // ── Phase 2: front matter (cover + Contents), prepended ──────────────────────
+  const front = await PDFDocument.create();
+  const fReg = await front.embedFont(StandardFonts.TimesRoman);
+  const fBold = await front.embedFont(StandardFonts.TimesRomanBold);
+  const centerAt = (page, txt, size, font, yy) => {
+    const w = font.widthOfTextAtSize(txt, size);
+    page.drawText(txt, { x: (PAGE.w - w) / 2, y: yy, size, font });
+  };
+  const cover = front.addPage([PAGE.w, PAGE.h]);
+  centerAt(cover, m.entityName, 13, fReg, PAGE.h - 300);
+  centerAt(cover, 'Financial Statements', 13, fReg, PAGE.h - 324);
+  centerAt(cover, periodLine, 11, fReg, PAGE.h - 344);
+  const toc = front.addPage([PAGE.w, PAGE.h]);
+  centerAt(toc, m.entityName, 13, fReg, PAGE.h - PAGE.mT - 20);
+  centerAt(toc, 'Financial Statements', 13, fReg, PAGE.h - PAGE.mT - 44);
+  centerAt(toc, periodLine, 11, fReg, PAGE.h - PAGE.mT - 64);
+  centerAt(toc, 'Contents', 12, fBold, PAGE.h - PAGE.mT - 130);
+  let ty = PAGE.h - PAGE.mT - 170;
+  const finalPage = bpg => bpg + 3; // cover(1) + contents(2), then body page 0 -> folio 3
+  const grpHeader = (label) => { toc.drawText(label, { x: PAGE.mL, y: ty, size: 10, font: fReg }); ty -= 16; };
+  const tocLine = (label, pageNum) => {
+    const maxW = RIGHT - (PAGE.mL + 20) - 40;
+    let first = label, second = '';
+    if (fReg.widthOfTextAtSize(label, 10) > maxW) {
+      const words = label.split(' '); first = '';
+      for (const w of words) { if (fReg.widthOfTextAtSize((first ? first + ' ' : '') + w, 10) > maxW) break; first = first ? first + ' ' + w : w; }
+      second = label.slice(first.length).trim();
+    }
+    toc.drawText(first, { x: PAGE.mL + 20, y: ty, size: 10, font: fReg });
+    if (second) { ty -= 14; toc.drawText(second, { x: PAGE.mL + 20, y: ty, size: 10, font: fReg }); }
+    const ps = String(pageNum), pw = fReg.widthOfTextAtSize(ps, 10);
+    toc.drawText(ps, { x: RIGHT - pw, y: ty, size: 10, font: fReg });
+    ty -= 16;
+  };
+  grpHeader('Financial Statements');
+  for (const o of bodyOffsets) tocLine(o.label, finalPage(o.page));
+  if (suppOffsets.length) { ty -= 8; grpHeader('Supplementary Schedules'); for (const o of suppOffsets) tocLine(o.label, finalPage(o.page)); }
+
+  // ── Assemble final = front (cover + contents) + body ─────────────────────────
+  const finalDoc = await PDFDocument.create();
+  const fpz = await finalDoc.copyPages(front, front.getPageIndices());
+  fpz.forEach(p => finalDoc.addPage(p));
+  const bpz = await finalDoc.copyPages(pdf, pdf.getPageIndices());
+  bpz.forEach(p => finalDoc.addPage(p));
+
+  const fFoot = await finalDoc.embedFont(StandardFonts.TimesRoman);
+  const allPages = finalDoc.getPages();
+  for (let i = 2; i < allPages.length; i++) {
+    const pg = allPages[i], num = String(i + 1);
+    const w = fFoot.widthOfTextAtSize(num, 8);
+    pg.drawText(num, { x: (pg.getWidth() - w) / 2, y: PAGE.mB - 22, size: 8, font: fFoot, color: rgb(0.4, 0.4, 0.4) });
+  }
+
+  if (outOffsets) bodyOffsets.forEach(o => outOffsets.push({ label: o.label, page: o.page + 2 }));
+  return await finalDoc.save();
 }
 
 

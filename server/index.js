@@ -11777,7 +11777,16 @@ app.get('/api/entities/:eid/fund-statements.pdf', auth, requireEntityAccess(), r
     const commitments = db.prepare(`SELECT class_id, commitment_amount FROM investor_commitments WHERE entity_id = ?`).all(eid);
 
     const getBalances = (o) => Promise.resolve(computeBalances(eid, o));
-    const model = await financials.buildFundStatements({ asOf, entityName, getBalances, investments, partnerClasses, commitments });
+    // PCAP roll-forward drives the Statement of Changes' five-row GP/LP split and
+    // the cash-flow financing lines (quarter-end periods only; falls back to the
+    // GL-movement approximation otherwise).
+    let pcapData = null;
+    try {
+      const pcap = require('./pcap');
+      const quarter = pcap.resolveQuarter(asOf);
+      pcapData = pcap.buildData({ db, computeBalances: (e, o) => computeBalances(e, o) }, quarter, { entity_id: Number(eid) });
+    } catch (e) { pcapData = null; }
+    const model = await financials.buildFundStatements({ asOf, entityName, getBalances, investments, partnerClasses, commitments, pcap: pcapData });
     const bytes = await financials.renderFundStatementsPdf(model, []);
 
     const mm = asOf.slice(5, 7), yyyy = asOf.slice(0, 4);
