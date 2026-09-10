@@ -819,6 +819,16 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_fundpref_entity ON fund_preferred_return(entity_id);
 `);
+// Dated equalized LP net cash-flow schedule (JSON array of {date, amount}) backing
+// the 8% XIRR preferred-return solve, so the standalone preferred-return workpaper
+// can reproduce and verify Weaver's calculation line by line.
+{
+  const fprCols = db.prepare("PRAGMA table_info(fund_preferred_return)").all().map(c => c.name);
+  if (!fprCols.includes('cashflows')) {
+    db.exec("ALTER TABLE fund_preferred_return ADD COLUMN cashflows TEXT");
+    console.log('[db migrate] fund_preferred_return.cashflows added');
+  }
+}
 console.log('[db migrate] fund_preferred_return ensured');
 // turnkey_project_map redesigned: no longer stores per-project account codes
 // (single COA on the company entity now). We add cl_entity_id linking to the
@@ -2843,15 +2853,31 @@ app.put('/api/entities/:eid/preferred-return', auth, requireEntityAccess(), requ
   if (!qe || !/^\d{4}-\d{2}-\d{2}$/.test(qe)) return res.status(400).json({ error: 'quarter_end (YYYY-MM-DD) required' });
   const num = (v) => (v == null || v === '' ? null : Number(v));
   const roc = num(req.body.roc), pref = num(req.body.pref), note = req.body.note || null;
-  const now = new Date().toISOString();
-  const existing = db.prepare('SELECT id FROM fund_preferred_return WHERE entity_id=? AND quarter_end=?').get(eid, qe);
-  if (existing) {
-    db.prepare('UPDATE fund_preferred_return SET roc=?, pref=?, note=?, updated_at=? WHERE id=?').run(roc, pref, note, now, existing.id);
-    return res.json({ id: existing.id, entity_id: Number(eid), quarter_end: qe, roc, pref, note, updated: true });
+  // Optional dated LP net cash-flow schedule for the XIRR reproduction. Accept an
+  // array of {date:'YYYY-MM-DD', amount:Number}; store as JSON, or null to clear.
+  let cashflows = null;
+  if (req.body.cashflows !== undefined) {
+    const cf = req.body.cashflows;
+    if (cf === null || cf === '') { cashflows = null; }
+    else if (Array.isArray(cf)) {
+      const clean = cf
+        .map((x) => ({ date: String(x.date || '').slice(0, 10), amount: Number(x.amount) }))
+        .filter((x) => /^\d{4}-\d{2}-\d{2}$/.test(x.date) && Number.isFinite(x.amount));
+      if (clean.length !== cf.length) return res.status(400).json({ error: 'cashflows entries must be {date:YYYY-MM-DD, amount:number}' });
+      cashflows = clean.length ? JSON.stringify(clean) : null;
+    } else { return res.status(400).json({ error: 'cashflows must be an array or null' }); }
   }
-  const r = db.prepare('INSERT INTO fund_preferred_return (entity_id, quarter_end, roc, pref, note, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(eid, qe, roc, pref, note, now);
-  res.json({ id: r.lastInsertRowid, entity_id: Number(eid), quarter_end: qe, roc, pref, note, created: true });
+  const now = new Date().toISOString();
+  const existing = db.prepare('SELECT id, cashflows FROM fund_preferred_return WHERE entity_id=? AND quarter_end=?').get(eid, qe);
+  if (existing) {
+    // Preserve the stored schedule when the caller omits cashflows entirely.
+    const cfVal = req.body.cashflows !== undefined ? cashflows : existing.cashflows;
+    db.prepare('UPDATE fund_preferred_return SET roc=?, pref=?, note=?, cashflows=?, updated_at=? WHERE id=?').run(roc, pref, note, cfVal, now, existing.id);
+    return res.json({ id: existing.id, entity_id: Number(eid), quarter_end: qe, roc, pref, note, has_cashflows: !!cfVal, updated: true });
+  }
+  const r = db.prepare('INSERT INTO fund_preferred_return (entity_id, quarter_end, roc, pref, note, cashflows, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(eid, qe, roc, pref, note, cashflows, now);
+  res.json({ id: r.lastInsertRowid, entity_id: Number(eid), quarter_end: qe, roc, pref, note, has_cashflows: !!cashflows, created: true });
 });
 
 // ── Fund GP/LP allocation preview. Returns the commitment-based ownership split
@@ -10688,6 +10714,21 @@ require('./pcapschedule').registerPcapScheduleRoutes(app, {
   requireRole,
   workpapersDir: WORKPAPERS_DIR,
   computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
+// ═══ CLRF workpaper: Preferred Return (fund-level 8% XIRR) ═══
+// Quarterly. Reproduces Weaver's fund-level preferred-return calculation: the
+// dated equalized LP net cash-flow schedule, Return of Capital, and the Preferred
+// Return solved so the LP-stream XIRR equals 8% (annually compounded). Reads the
+// stored roc/pref/cashflows from fund_preferred_return; when a dated schedule is
+// present it recomputes and verifies the 8% IRR, otherwise it presents the stored
+// summary. Standalone reviewable workpaper folded into the quarterly package.
+require('./preferredreturn').registerPreferredReturnRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
 });
 
 // ═══ CLIP Development Costs ═══

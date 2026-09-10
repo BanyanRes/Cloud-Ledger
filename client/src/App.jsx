@@ -894,6 +894,7 @@ export default function App(){
       ...(isCLRF?[{id:'wp_mgmtfee',label:'Management Fee',icon:'📄',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_gpfees',label:'GP Fees & Expenses',icon:'🤝',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_valuation',label:'Investment & Valuation',icon:'🏦',section:'workpapers'}]:[]),
+      ...(isCLRF?[{id:'wp_pref',label:'Preferred Return',icon:'📈',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_carry',label:'Carried Interest',icon:'📊',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_pcap',label:'PCAP Statements',icon:'📄',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_pcapsched',label:'Partners’ Capital Accounts',icon:'📋',section:'workpapers'}]:[]),
@@ -991,6 +992,7 @@ export default function App(){
         {page==='wp_mgmtfee'&&activeEntity&&isCLRF&&<MgmtFeeWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_gpfees'&&activeEntity&&isCLRF&&<GpFeesWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_valuation'&&activeEntity&&isCLRF&&<ValuationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='wp_pref'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="pref" title="Preferred Return" description="The fund-level 8% preferred return (annually compounded, IRR-based): the equalized Limited-Partner net cash-flow schedule, Return of Capital, and the Preferred Return solved so the LP-stream IRR reaches 8%. Enter Return of Capital and Preferred Return from the fund's preferred-return workpaper below; when a dated cash-flow schedule is loaded, this workpaper recomputes and verifies the 8% result. Feeds the Carried Interest §17(c) build-up. A copy is filed under Workpapers › Preferred Return by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_carry'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="carry" title="Carried Interest / Clawback" description="Side letter §17(c) build-up: distributable assets, return of capital, preferred return, and the per-LP waterfall (return of capital → 8% preferred return → 80/20 catch-up → 80/20 residual), carried interest to date, and the hypothetical clawback. The preferred-return line is pending the fund's preferred-return workpaper. A copy is filed under Workpapers › Carried Interest & Clawback by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_pcap'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="pcap" title="PCAP Statements" description="One Statement of Changes in Capital per investor (commitment summary plus year-to-date and inception-to-date roll-forward), a review matrix, and notes. Sourced entirely from the general ledger by investor class; ties to the fund Statement of Changes in Partners' Capital. A copy is filed under Workpapers › Partners' Capital Accounts by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_pcapsched'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="pcapSchedule" title="Partners’ Capital Accounts Schedule" description="The 80-line supplementary schedule: one row per investor (Limited Partners then General Partners) with subtotals and a grand total, matching the fund administrator's schedule column-for-column. Reuses the PCAP engine, so it ties to the PCAP statements. A copy is filed under Workpapers › Partners' Capital Accounts Schedule by year and quarter." key={activeEntity+'-'+rk}/>}
@@ -5223,23 +5225,26 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
     }catch(e){ setErr(e.message||String(e)); }
     finally{ setBusy(false); }
   };
-  // Carry workpaper: maintained preferred return + return of capital per quarter.
+  // Carry & Preferred-Return workpapers: maintained preferred return + return of
+  // capital per quarter (both read/write the same fund_preferred_return store).
   const isCarry=kind==='carry';
+  const isPref=kind==='pref';
+  const showPrefInputs=isCarry||isPref;
   const[prefIn,setPrefIn]=useState('');
   const[rocIn,setRocIn]=useState('');
   const[prefNote,setPrefNote]=useState('');
   const[prefMsg,setPrefMsg]=useState('');
   const[savingPref,setSavingPref]=useState(false);
-  useEffect(()=>{ if(!isCarry||!isQuarterEnd(qe))return; let live=true;
+  useEffect(()=>{ if(!showPrefInputs||!isQuarterEnd(qe))return; let live=true;
     (async()=>{ const row=await api.preferredReturnGet(entityId,qe);
       if(!live)return;
       setPrefIn(row&&row.pref!=null?String(row.pref):'');
       setRocIn(row&&row.roc!=null?String(row.roc):'');
       setPrefNote(row&&row.note?row.note:'');
-      setPrefMsg(row?('Loaded stored values for '+qe+'.'):('No stored values for '+qe+' yet — enter them to compute the build-up.'));
+      setPrefMsg(row?('Loaded stored values for '+qe+(row.has_cashflows?' (dated cash-flow schedule on file).':'.')):('No stored values for '+qe+' yet — enter them to compute the build-up.'));
     })();
     return()=>{live=false;};
-  },[qe,isCarry,entityId]);
+  },[qe,showPrefInputs,entityId]);
   const savePref=async()=>{
     setSavingPref(true);setPrefMsg('');
     try{ await api.preferredReturnSave(entityId,{quarter_end:qe,pref:prefIn===''?null:Number(prefIn),roc:rocIn===''?null:Number(rocIn),note:prefNote||null});
@@ -5261,9 +5266,9 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
     {!valid&&qe&&<div style={{fontSize:12,color:T.orange,marginTop:10}}>
       Enter a quarter end date: March 31, June 30, September 30 or December 31.</div>}
     {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
-    {isCarry&&<div style={{...S.card,marginTop:14,padding:14,background:'#fbfbfd'}}>
+    {showPrefInputs&&<div style={{...S.card,marginTop:14,padding:14,background:'#fbfbfd'}}>
       <div style={{fontWeight:700,color:T.textBright,marginBottom:6}}>Preferred-return inputs ({qe})</div>
-      <div style={{fontSize:12,color:T.textMuted,marginBottom:10,maxWidth:720,lineHeight:1.5}}>From the fund&rsquo;s preferred-return workpaper (8% XIRR on equalized LP cash flows). Distributable assets come from CloudLedger; enter Return of Capital and Preferred Return here so the §17(c) build-up ties to the workpaper. Saved per quarter.</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:10,maxWidth:720,lineHeight:1.5}}>From the fund&rsquo;s preferred-return workpaper (8% XIRR on equalized LP cash flows). Enter Return of Capital and Preferred Return here; {isPref?'the Preferred Return workpaper presents and (when a dated schedule is on file) reproduces the 8% solve, and':'the §17(c) build-up ties to these figures, and'} the same figures feed {isPref?'the Carried Interest §17(c) build-up':'the Preferred Return workpaper'}. Saved per quarter.</div>
       <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
         <div><label style={S.label}>Return of Capital</label><input style={S.inputSm} type="number" value={rocIn} onChange={e=>setRocIn(e.target.value)} placeholder="137875481.49"/></div>
         <div><label style={S.label}>Preferred Return</label><input style={S.inputSm} type="number" value={prefIn} onChange={e=>setPrefIn(e.target.value)} placeholder="9206565.12"/></div>
@@ -5296,6 +5301,14 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
           <tr><td style={S.td}>Total commitment</td><td style={S.tdR}>{fmt(s.commitment)}</td></tr>
           <tr style={S.grandTotalRow}><td style={S.tdBold}>Ending partners’ capital</td>
             <td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.ending)}</td></tr>
+        </>}
+        {kind==='pref'&&<>
+          <tr><td style={S.td}>Return of capital</td><td style={S.tdR}>{s.roc==null?'—':fmt(s.roc)}</td></tr>
+          <tr><td style={S.td}>Preferred return (8%)</td><td style={S.tdR}>{s.pref==null?'—':fmt(s.pref)}</td></tr>
+          <tr><td style={S.td}>Computed IRR</td><td style={S.tdR}>{s.schedule_loaded&&s.irr!=null?(s.irr*100).toFixed(4)+'% '+(s.irr_ties?'✓ 8%':'(review)'):'schedule not loaded'}</td></tr>
+          {s.schedule_loaded&&<tr><td style={S.td}>Return of capital ties (−Σ cash flows)</td><td style={S.tdR}>{s.roc_ties?'✓':'review'}</td></tr>}
+          <tr style={S.grandTotalRow}><td style={S.tdBold}>Total return threshold</td>
+            <td style={{...S.tdBold,textAlign:'right'}}>{s.total==null?'—':fmt(s.total)}</td></tr>
         </>}
       </tbody></table>
       {s.saved_to&&<div style={{fontSize:12,color:T.textMuted}}>Filed at <strong>{s.saved_to}</strong></div>}
