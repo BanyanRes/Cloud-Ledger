@@ -894,6 +894,9 @@ export default function App(){
       ...(isCLRF?[{id:'wp_mgmtfee',label:'Management Fee',icon:'📄',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_gpfees',label:'GP Fees & Expenses',icon:'🤝',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_valuation',label:'Investment & Valuation',icon:'🏦',section:'workpapers'}]:[]),
+      ...(isCLRF?[{id:'wp_carry',label:'Carried Interest',icon:'📊',section:'workpapers'}]:[]),
+      ...(isCLRF?[{id:'wp_pcap',label:'PCAP Statements',icon:'📄',section:'workpapers'}]:[]),
+      ...(isCLRF?[{id:'wp_pcapsched',label:'Partners’ Capital Accounts',icon:'📋',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
@@ -988,6 +991,9 @@ export default function App(){
         {page==='wp_mgmtfee'&&activeEntity&&isCLRF&&<MgmtFeeWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_gpfees'&&activeEntity&&isCLRF&&<GpFeesWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_valuation'&&activeEntity&&isCLRF&&<ValuationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='wp_carry'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="carry" title="Carried Interest / Clawback" description="Side letter §17(c) build-up: distributable assets, return of capital, preferred return, and the per-LP waterfall (return of capital → 8% preferred return → 80/20 catch-up → 80/20 residual), carried interest to date, and the hypothetical clawback. The preferred-return line is pending the fund's preferred-return workpaper. A copy is filed under Workpapers › Carried Interest & Clawback by year and quarter." key={activeEntity+'-'+rk}/>}
+        {page==='wp_pcap'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="pcap" title="PCAP Statements" description="One Statement of Changes in Capital per investor (commitment summary plus year-to-date and inception-to-date roll-forward), a review matrix, and notes. Sourced entirely from the general ledger by investor class; ties to the fund Statement of Changes in Partners' Capital. A copy is filed under Workpapers › Partners' Capital Accounts by year and quarter." key={activeEntity+'-'+rk}/>}
+        {page==='wp_pcapsched'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="pcapSchedule" title="Partners’ Capital Accounts Schedule" description="The 80-line supplementary schedule: one row per investor (Limited Partners then General Partners) with subtotals and a grand total, matching the fund administrator's schedule column-for-column. Reuses the PCAP engine, so it ties to the PCAP statements. A copy is filed under Workpapers › Partners' Capital Accounts Schedule by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
@@ -5190,6 +5196,78 @@ function MemorizedReportsPage({entityId,entityName,canEdit=true,onOpen}){
 // Enter a quarter end, run the report. The server reads the four portfolio-company
 // ledgers, files one copy per period under the entity's workpaper folder, and
 // returns the .xlsx, which is downloaded here.
+// ─── Workpapers › generic CLRF quarterly xlsx workpaper (carry, PCAP, PCAP
+// schedule). Quarter-end picker → POST → download → summary. ──────────────────
+function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,description}){
+  const QUARTER_ENDS=['03-31','06-30','09-30','12-31'];
+  const isQuarterEnd=(d)=>/^\d{4}-\d{2}-\d{2}$/.test(d)&&QUARTER_ENDS.includes(d.slice(5));
+  const defaultQE=()=>{const t=today();const y=Number(t.slice(0,4));const cands=[];
+    for(const yy of [y,y-1])for(const mm of QUARTER_ENDS)cands.push(yy+'-'+mm);
+    const past=cands.filter(d=>d<=t).sort();return past.length?past[past.length-1]:(y-1)+'-12-31';};
+  const[qe,setQe]=useState(defaultQE());
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const[result,setResult]=useState(null);
+  const valid=isQuarterEnd(qe);
+  const run=async()=>{
+    if(!valid)return;
+    setBusy(true);setErr('');setResult(null);
+    try{
+      const r=await api.clrfWorkpaper(entityId,qe,kind);
+      if(!r)return;
+      const url=URL.createObjectURL(r.blob);
+      const a=document.createElement('a');a.href=url;a.download=r.filename;
+      document.body.appendChild(a);a.click();document.body.removeChild(a);
+      setTimeout(()=>URL.revokeObjectURL(url),4000);
+      setResult(r.summary||{});
+    }catch(e){ setErr(e.message||String(e)); }
+    finally{ setBusy(false); }
+  };
+  const s=result||{};
+  return(<div><div style={S.card}>
+    {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
+    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>{title}</div>
+    <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:760,lineHeight:1.5}}>{description}</div>
+    <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
+      <div><label style={S.label}>Quarter End Date</label>
+        <input style={S.inputSm} type="date" value={qe} onChange={e=>{setQe(e.target.value);setErr('');setResult(null);}}/></div>
+      <button style={{...S.btnP,opacity:(!valid||busy||!canEdit)?0.5:1}} disabled={!valid||busy||!canEdit} onClick={run}>
+        {busy?'Running…':'Run Report'}</button>
+    </div>
+    {!valid&&qe&&<div style={{fontSize:12,color:T.orange,marginTop:10}}>
+      Enter a quarter end date: March 31, June 30, September 30 or December 31.</div>}
+    {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
+    {result&&<div style={{...S.card,marginTop:18,padding:14,background:'#f3faf5'}}>
+      <div style={{fontWeight:700,color:T.green,marginBottom:8}}>
+        {s.quarter} workpaper downloaded{s.replaced>0?' · replaced the previous copy':''}</div>
+      <table style={{...S.table,minWidth:360,marginBottom:10}}><tbody>
+        {kind==='carry'&&<>
+          <tr><td style={S.td}>Distributable assets</td><td style={S.tdR}>{fmt(s.distributable)}</td></tr>
+          <tr><td style={S.td}>Return of capital</td><td style={S.tdR}>{fmt(s.roc)}</td></tr>
+          <tr><td style={S.td}>Preferred return</td><td style={S.tdR}>{s.pref==null?'Pending (Weaver)':fmt(s.pref)}</td></tr>
+          <tr><td style={S.td}>Excess/(shortfall)</td><td style={S.tdR}>{s.excess==null?'—':fmt(s.excess)}</td></tr>
+          <tr style={S.grandTotalRow}><td style={S.tdBold}>Carried interest this quarter</td>
+            <td style={{...S.tdBold,textAlign:'right'}}>{s.carry_quarter==null?'—':fmt(s.carry_quarter)}</td></tr>
+        </>}
+        {kind==='pcap'&&<>
+          <tr><td style={S.td}>Investors</td><td style={S.tdR}>{s.investors}</td></tr>
+          <tr><td style={S.td}>YTD contributions</td><td style={S.tdR}>{fmt(s.ytd_contributions)}</td></tr>
+          <tr><td style={S.td}>Total commitment</td><td style={S.tdR}>{fmt(s.commitment)}</td></tr>
+          <tr style={S.grandTotalRow}><td style={S.tdBold}>Ending partners’ capital</td>
+            <td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.ytd_ending)}</td></tr>
+        </>}
+        {kind==='pcapSchedule'&&<>
+          <tr><td style={S.td}>Rows (LP / GP)</td><td style={S.tdR}>{s.lp_rows} / {s.gp_rows}</td></tr>
+          <tr><td style={S.td}>Total commitment</td><td style={S.tdR}>{fmt(s.commitment)}</td></tr>
+          <tr style={S.grandTotalRow}><td style={S.tdBold}>Ending partners’ capital</td>
+            <td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.ending)}</td></tr>
+        </>}
+      </tbody></table>
+      {s.saved_to&&<div style={{fontSize:12,color:T.textMuted}}>Filed at <strong>{s.saved_to}</strong></div>}
+    </div>}
+  </div></div>);
+}
+
 function GpFeesWorkpaper({entityId,entityName,canEdit=true}){
   const QUARTER_ENDS=['03-31','06-30','09-30','12-31'];
   const isQuarterEnd=(d)=>/^\d{4}-\d{2}-\d{2}$/.test(d)&&QUARTER_ENDS.includes(d.slice(5));

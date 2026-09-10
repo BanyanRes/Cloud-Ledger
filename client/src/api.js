@@ -558,6 +558,35 @@ export const api = {
     return { blob: await res.blob(), filename: m ? m[1] : 'CLRF_GP_Fees.xlsx', summary };
   },
 
+  // Workpapers › CLRF quarterly xlsx workpapers: carried interest / clawback,
+  // PCAP statements, and the Partners' Capital Accounts schedule. Same shape as
+  // gpFeesGenerate; each files a copy under the entity's workpaper folder.
+  clrfWorkpaper: async (eid, quarterEnd, kind) => {
+    const map = {
+      carry: { path: 'carry-clawback', hdr: 'x-carry-summary', name: 'CLRF_Carried_Interest.xlsx' },
+      pcap: { path: 'pcap', hdr: 'x-pcap-summary', name: 'CLRF_PCAP.xlsx' },
+      pcapSchedule: { path: 'pcap-schedule', hdr: 'x-pcap-schedule-summary', name: 'CLRF_Partners_Capital_Accounts.xlsx' },
+    };
+    const cfg = map[kind];
+    if (!cfg) throw new Error('Unknown workpaper kind: ' + kind);
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/' + cfg.path + '/' + eid + '/generate', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
+      body: JSON.stringify({ quarter_end: quarterEnd }),
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) {
+      let data = {}; try { data = await res.json(); } catch {}
+      throw new Error(data.error || 'Report failed');
+    }
+    let summary = {}; try { summary = JSON.parse(res.headers.get(cfg.hdr) || '{}'); } catch {}
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    return { blob: await res.blob(), filename: m ? m[1] : cfg.name, summary };
+  },
+
   // Workpapers › Valuation Summary (CLRF): take the prior quarter's valuation
   // workbook and inject the GL-derived figures for the target quarter, saving a
   // copy under Workpapers › Valuation › <quarter>.
