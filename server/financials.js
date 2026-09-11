@@ -5599,6 +5599,189 @@ async function buildFundStatements(opts) {
 // Partners' Capital (landscape), Statement of Cash Flows.
 // If outOffsets is passed it is filled with { label, page } for the TOC.
 // ═══════════════════════════════════════════════════════════════════════════
+// ─── Native supplementary-schedule renderers (Weaver format, Times serif) ─────
+// Each renders into the shared makeLayout engine so the supplementary schedules
+// match the face statements and Weaver's issued package. Cents are shown (Weaver
+// shows cents on the supplementary schedules).
+
+// Carried Interest §17(c) (portrait) — mirrors Weaver's Carried Interest page.
+function renderCarrySchedule(pdf, fonts, meta, data) {
+  const { reg, bold, ital } = fonts;
+  const RIGHT = PAGE.w - PAGE.mR;
+  const money = v => acct(v, { dash: true });
+  const f = data.fund;
+  const known = f.pref_known !== false;
+  const title = 'Carried Interest Reporting per Section §17(c) of GCM Grosvenor Side Letter Agreement';
+  const L = makeLayout(pdf, fonts, meta, title, { dateLine: meta.periodLabel, plainHeader: true });
+  L.start();
+  L.setCols([RIGHT]);
+  const SECT_X = PAGE.mL + 66;
+  const DESC = 130;
+  { const top = L.y;
+    const sh = 'Side Letter §'; L.page.drawText(sh, { x: SECT_X - bold.widthOfTextAtSize(sh, 8) / 2, y: top, size: 8, font: bold });
+    const ah = 'Amount'; L.page.drawText(ah, { x: RIGHT - 55 - bold.widthOfTextAtSize(ah, 8) / 2, y: top, size: 8, font: bold });
+    L.page.drawLine({ start: { x: PAGE.mL, y: top - 3 }, end: { x: RIGHT, y: top - 3 }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
+    L.y = top - 16;
+  }
+  const line = (marker, desc, amount, o = {}) => {
+    const y0 = L.y;
+    if (marker) L.page.drawText(marker, { x: SECT_X - ital.widthOfTextAtSize(marker, 9) / 2, y: y0, size: 9, font: ital });
+    L.row(desc, [amount === null ? null : money(amount)], { indent: DESC, dollarPrefix: true, boldRow: o.bold, ruleAbove: o.ruleAbove, doubleBelow: o.doubleBelow, labelLines: o.labelLines });
+  };
+  line(null, 'Carried interest build-up', null, { bold: true });
+  line(null, '   Distributable assets as of quarter-end', f.distributable);
+  line(null, '      Return of Capital', f.roc === null ? null : -f.roc);
+  line(null, '      Preferred Return', f.pref === null ? null : -f.pref);
+  line(null, 'Excess/(Shortfall)', f.excess, { bold: true, ruleAbove: true });
+  L.space(6);
+  line(null, 'Current distributable assets subject to carried interest', known ? Math.max(0, f.excess || 0) : null, { bold: true });
+  L.space(4);
+  line('§17(c)(i)', '   Catch-Up to GP (80%)', known ? f.catchupGP : null);
+  line(null, '   Catch-Up to LP (20%)', known ? f.catchupLP : null);
+  line(null, '   Residual Split – LP (80%)', known ? f.residualLP : null);
+  line(null, '   Residual Split – GP (20%)', known ? f.residualGP : null);
+  L.space(4);
+  line(null, '   Accumulated carried interest as of beginning of quarter', f.accum_carry);
+  line(null, '   Accumulated carried interest as of end of quarter', known ? r2(f.accum_carry + (f.carry_quarter || 0)) : null);
+  line(null, '   Total carried interest in quarter', f.carry_quarter);
+  L.space(6);
+  line('§17(c)(ii)', 'Carried interest earned to date (cumulative)', f.carry_to_date, { ruleAbove: true });
+  L.space(6);
+  line('§17(c)(iii)', '', f.clawback, { ruleAbove: true, labelLines: ['Clawback that the GP would have to pay if the Partnership were dissolved', '& liquidated today'] });
+}
+
+// Partners' Capital Accounts (landscape) — mirrors Weaver's schedule.
+function renderPcapSchedule(pdf, fonts, meta, data) {
+  const { reg, bold } = fonts;
+  const money = v => acctW(v);       // Weaver shows the capital-accounts schedule in whole dollars
+  const LRIGHT = PAGE.h - PAGE.mR;   // landscape right edge
+  const LLEFT = PAGE.mL;
+  const yr = String(meta.asOf).slice(0, 4);
+  const L = makeLayout(pdf, fonts, meta, 'Partners’ Capital Accounts', { landscape: true, dateLine: meta.periodLabel, plainHeader: true });
+  L.start();
+  // Column geometry: a narrow Partner # label, then 11 numeric columns.
+  const N = 11;
+  const firstColLeft = LLEFT + 26;               // right edge of the "Partner #" gutter
+  const usable = LRIGHT - firstColLeft;
+  const wCol = usable / N;
+  const cols = []; for (let i = 1; i <= N; i++) cols.push(firstColLeft + i * wCol);
+  L.setCols(cols);
+  L.colHeaders([
+    'Capital\nCommitments', '% of\nCommitments', 'Partners’ Capital\nat January 1,\n' + yr,
+    'Contributions', 'Capital Call\nRefunds', 'Syndication\nCosts', 'Waived\nDevelopment Fees',
+    'Total\nExpenses', 'Net Decrease in\nPartners’ Capital\nResulting from\nOperations',
+    'Transfers of\nInterest', 'Partners’ Capital\nat ' + meta.longDate.replace(', ' + yr, ',\n' + yr),
+  ], { bottomAlign: true, underline: true, colBox: true });
+  // "Partner #" header at the far left, aligned to the header baseline.
+  L.page.drawText('Partner #', { x: LLEFT, y: L.y + 12, size: 7.5, font: bold });
+
+  const totalCommit = (data.totals && data.totals.commitment) || 0;
+  const invs = data.investors || [];
+  const rowFor = (inv, n, first) => {
+    const y = inv.ytd;
+    const netLoss = r2((y.netInvestment || 0) + (y.managementFee || 0) + (y.unrealized || 0));
+    const pct = totalCommit ? (inv.commitment / totalCommit * 100) : 0;
+    const cells = [
+      money(inv.commitment), pct.toFixed(4) + '%', money(y.beginning),
+      money(y.contributions), money(y.returnOfCapital), money(y.syndication), money(y.waivedDevFees),
+      money(netLoss), money(netLoss), money(y.transfers), money(y.ending),
+    ];
+    L.page.drawText(String(n), { x: LLEFT, y: L.y, size: 7.5, font: reg });
+    L.row('', cells, { indent: 0, dollarPrefix: first, dollarCols: [0, 2, 3, 4, 5, 6, 7, 8, 9, 10], valueInset: 2 });
+  };
+  let n = 0;
+  const lps = invs.filter(i => i.partner_type === 'LP');
+  const gps = invs.filter(i => i.partner_type === 'GP');
+  if (lps.length) { L.row('Limited Partners', [], { indent: 0, boldRow: true }); }
+  lps.forEach((inv, i) => rowFor(inv, ++n, i === 0));
+  if (gps.length) { L.space(4); L.row('General Partners', [], { indent: 0, boldRow: true }); }
+  gps.forEach((inv, i) => rowFor(inv, ++n, i === 0));
+  // Grand total
+  const t = data.totals && data.totals.ytd;
+  if (t) {
+    const netLoss = r2((t.netInvestment || 0) + (t.managementFee || 0) + (t.unrealized || 0));
+    L.row('Total', [
+      money(data.totals.commitment), '100.0000%', money(t.beginning),
+      money(t.contributions), money(t.returnOfCapital), money(t.syndication), money(t.waivedDevFees),
+      money(netLoss), money(netLoss), money(t.transfers), money(t.ending),
+    ], { indent: 0, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols: [0, 2, 3, 4, 5, 6, 7, 8, 9, 10], valueInset: 2 });
+  }
+}
+
+// Schedule of Fees Paid To The General Partners and Affiliates (landscape).
+function renderFeesSchedule(pdf, fonts, meta, data) {
+  const { reg, bold, ital } = fonts;
+  const money = v => acct(v, { dash: true });
+  const LRIGHT = PAGE.h - PAGE.mR;
+  const L = makeLayout(pdf, fonts, meta, 'Schedule of Fees Paid To The General Partners and Affiliates', { landscape: true, dateLine: meta.periodLabel, plainHeader: true });
+  L.start();
+  // Columns: Fee Type | Description | Basis of Calculation | GP Affiliate | Portfolio Company | Amount
+  const AMT = LRIGHT;
+  const cols = [AMT];
+  L.setCols(cols);
+  // Layout x anchors (landscape, ~684pt usable from mL=54 to LRIGHT).
+  const X = { feeType: PAGE.mL, desc: PAGE.mL + 118, basis: PAGE.mL + 300, affil: PAGE.mL + 470, port: PAGE.mL + 560 };
+  const wrap = (font, text, size, maxW) => {
+    const words = String(text).split(' '); const lines = []; let cur = '';
+    for (const w of words) { const t = cur ? cur + ' ' + w : w; if (font.widthOfTextAtSize(t, size) > maxW && cur) { lines.push(cur); cur = w; } else cur = t; }
+    if (cur) lines.push(cur); return lines;
+  };
+  const FS_ = 7.5;
+  // header row
+  { const top = L.y;
+    const hdr = (t, x, center) => { const w = bold.widthOfTextAtSize(t, 8); L.page.drawText(t, { x: center ? x - w / 2 : x, y: top, size: 8, font: bold }); };
+    hdr('Fee Type', X.feeType); hdr('Description', X.desc); hdr('Basis of Calculation', X.basis);
+    hdr('GP Affiliate', X.affil); hdr('Portfolio Company', X.port);
+    const at = 'Amount'; L.page.drawText(at, { x: AMT - bold.widthOfTextAtSize(at, 8), y: top, size: 8, font: bold });
+    L.page.drawLine({ start: { x: PAGE.mL, y: top - 3 }, end: { x: AMT, y: top - 3 }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
+    L.y = top - 16;
+  }
+  const cfg = data; // { categories:[{label,totalLabel,affiliate,description,basis,total,rows:[{portfolio,amount}]}], grandTotal }
+  let grand = 0;
+  for (const cat of cfg.categories) {
+    const blockTop = L.y;
+    // wrapped text blocks
+    L.page.drawText(cat.label, { x: X.feeType, y: blockTop, size: FS_, font: ital.constructor ? ital : bold });
+    const descLines = wrap(reg, cat.description, FS_, X.basis - X.desc - 8);
+    descLines.forEach((ln, i) => L.page.drawText(ln, { x: X.desc, y: blockTop - i * 10, size: FS_, font: reg }));
+    const basisLines = wrap(reg, cat.basis, FS_, X.affil - X.basis - 8);
+    basisLines.forEach((ln, i) => L.page.drawText(ln, { x: X.basis, y: blockTop - i * 10, size: FS_, font: reg }));
+    L.page.drawText(cat.affiliate, { x: X.affil, y: blockTop, size: FS_, font: reg });
+    // portfolio rows on the right
+    let ry = blockTop;
+    for (const r of cat.rows) {
+      L.page.drawText(r.portfolio, { x: X.port, y: ry, size: FS_, font: reg });
+      const av = money(r.amount); const aw = reg.widthOfTextAtSize(av, FS_);
+      L.page.drawText(av, { x: AMT - aw, y: ry, size: FS_, font: reg });
+      L.page.drawText('$', { x: AMT - 78, y: ry, size: FS_, font: reg });
+      ry -= 12;
+    }
+    // total row for the category
+    const tl = 'Total ' + cat.totalLabel; L.page.drawText(tl, { x: X.affil, y: ry, size: FS_, font: bold });
+    const tv = money(cat.total); const tw = bold.widthOfTextAtSize(tv, FS_);
+    L.page.drawText(tv, { x: AMT - tw, y: ry, size: FS_, font: bold });
+    L.page.drawText('$', { x: AMT - 78, y: ry, size: FS_, font: bold });
+    L.page.drawLine({ start: { x: X.port - 4, y: ry + 10 }, end: { x: AMT, y: ry + 10 }, thickness: 0.5, color: rgb(0.2, 0.2, 0.2) });
+    grand = r2(grand + cat.total);
+    // advance below the taller of the text block or the portfolio rows
+    const textH = Math.max(descLines.length, basisLines.length, cat.rows.length + 1) * 12 + 14;
+    L.y = blockTop - textH;
+  }
+  // grand total
+  L.space(4);
+  { const y = L.y;
+    L.page.drawText('Total fees and expenses to GP/Affiliates', { x: X.feeType, y, size: FS_, font: bold });
+    const gv = money(cfg.grandTotal != null ? cfg.grandTotal : grand); const gw = bold.widthOfTextAtSize(gv, FS_);
+    L.page.drawText(gv, { x: AMT - gw, y, size: FS_, font: bold });
+    L.page.drawText('$', { x: AMT - 78, y, size: FS_, font: bold });
+    L.page.drawLine({ start: { x: AMT - 90, y: y + 10 }, end: { x: AMT, y: y + 10 }, thickness: 0.5, color: rgb(0.2, 0.2, 0.2) });
+    L.page.drawLine({ start: { x: AMT - 90, y: y - 3 }, end: { x: AMT, y: y - 3 }, thickness: 0.5, color: rgb(0.2, 0.2, 0.2) });
+    L.page.drawLine({ start: { x: AMT - 90, y: y - 5 }, end: { x: AMT, y: y - 5 }, thickness: 0.5, color: rgb(0.2, 0.2, 0.2) });
+    L.y = y - 20;
+  }
+  L.page.drawText("Note: None of the fees presented above is applied to offset the Fund's Management Fee payable to the General Partner.", { x: PAGE.mL, y: L.y, size: 7.5, font: ital });
+}
+
 async function renderFundStatementsPdf(s, outOffsets, supp) {
   supp = Array.isArray(supp) ? supp : [];
   const m = s.meta;
@@ -5758,13 +5941,15 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     const dt = 'Supplementary Schedules';
     const dw = bold.widthOfTextAtSize(dt, 36);
     dp.drawText(dt, { x: (PAGE.w - dw) / 2, y: PAGE.h / 2 - 18, size: 36, font: bold });
+    const supFonts = { reg, bold, ital };
     for (const sp of supp) {
       try {
-        const ext = await PDFDocument.load(sp.bytes);
         suppOffsets.push({ label: sp.tocLabel || sp.label, page: pdf.getPageCount() });
-        const pgs = await pdf.copyPages(ext, ext.getPageIndices());
-        pgs.forEach(p => pdf.addPage(p));
-      } catch (e) { /* skip a schedule that failed to load */ }
+        if (sp.kind === 'pcap') renderPcapSchedule(pdf, supFonts, m, sp.data);
+        else if (sp.kind === 'fees') renderFeesSchedule(pdf, supFonts, m, sp.data);
+        else if (sp.kind === 'carry') renderCarrySchedule(pdf, supFonts, m, sp.data);
+        else if (sp.bytes) { const ext = await PDFDocument.load(sp.bytes); const pgs = await pdf.copyPages(ext, ext.getPageIndices()); pgs.forEach(x => pdf.addPage(x)); }
+      } catch (e) { /* skip a schedule that failed */ }
     }
   }
 

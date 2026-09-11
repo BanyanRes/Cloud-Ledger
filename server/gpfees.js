@@ -612,4 +612,27 @@ function registerGpFeesRoutes(app, ctx) {
     });
 }
 
-module.exports = { registerGpFeesRoutes, findWorkpaper, resolveQuarter, buildData, buildWorkbook, PROPERTIES };
+// Build the fund-package "Schedule of Fees" model (Weaver layout) from buildData:
+// one block per fee category with a per-portfolio-company amount, a category total,
+// and a grand total — matching the issued Schedule of Fees Paid to the GP & Affiliates.
+function weaverSchedule(data) {
+  const CATS = [
+    { key: 'Management Fee', label: 'Management Fee', totalLabel: 'management fees', codes: ['63041'], dev: false },
+    { key: 'Comp Reimbursement', label: 'Employee Compensation Reimbursement', totalLabel: 'reimbursements', codes: ['63030', '63034', '63042'], dev: false },
+    { key: 'Development Fee', label: 'Development Fee', totalLabel: 'development fees', codes: [], dev: true },
+  ];
+  const categories = CATS.map((c) => {
+    const rows = (data.properties || []).map((p) => {
+      let amt = 0;
+      if (c.dev) amt = r2(p.dev_fee || 0);
+      else for (const code of c.codes) amt = r2(amt + ((p.fees && p.fees[code]) || 0));
+      return { portfolio: p.label, amount: amt };
+    });
+    const total = r2(rows.reduce((s, r) => s + r.amount, 0));
+    return { label: c.label, totalLabel: c.totalLabel, affiliate: AFFILIATE[c.key], description: DESCRIPTION[c.key], basis: BASIS[c.key], rows, total };
+  });
+  const grandTotal = r2(categories.reduce((s, c) => s + c.total, 0));
+  return { categories, grandTotal };
+}
+
+module.exports = { registerGpFeesRoutes, findWorkpaper, resolveQuarter, buildData, buildWorkbook, weaverSchedule, PROPERTIES };
