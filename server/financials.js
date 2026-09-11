@@ -3103,7 +3103,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     //                line across all columns. Defaults ON so every statement's
     //                subtotal/total underlines sit under each number separately,
     //                never as one long line running across the whole row.
-    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapBefore = 0, gapAfter = 0, dollarPrefix = false, valueInset = 0, colRules = true, keepWithNext = 0, labelLines = null } = {}) {
+    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapBefore = 0, gapAfter = 0, dollarPrefix = false, dollarCols = null, valueInset = 0, colRules = true, keepWithNext = 0, labelLines = null } = {}) {
       // keepWithNext reserves extra space so this row and the row(s) that follow
       // land on the SAME page — used to keep a section grand-total from being
       // orphaned alone at the top of a continuation page: the closest subtotal
@@ -3182,7 +3182,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
         const s = String(c);
         const w = font.widthOfTextAtSize(s, FS.row);
         page.drawText(s, { x: cols[i] - w - valueInset, y: yNum, size: FS.row, font });
-        if (dollarPrefix) {
+        if (dollarPrefix && (!dollarCols || dollarCols.indexOf(i) >= 0)) {
           // "$" anchored a fixed gap to the LEFT of this column's own number,
           // NOT at the column-box left edge. The old formula (cols[i] -
           // colWidth(i) + 2) put it at cols[i-1] + 2 -- 2pt off the PREVIOUS
@@ -5611,6 +5611,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
   const pdf = await PDFDocument.create();
   const reg = await pdf.embedFont(StandardFonts.TimesRoman);
   const bold = await pdf.embedFont(StandardFonts.TimesRomanBold);
+  const ital = await pdf.embedFont(StandardFonts.TimesRomanItalic);
   const fonts = { reg, bold };
   const money = v => acctW(v);                 // Weaver rounds the face statements to whole dollars
   const RIGHT = PAGE.w - PAGE.mR;
@@ -5644,25 +5645,40 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     const L = makeLayout(pdf, fonts, m, 'Schedule of Investments', { dateLine: m.longDate, plainHeader: true });
     track('Schedule of Investments');
     L.start();
-    const sCols = [RIGHT - 300, RIGHT - 180, RIGHT - 60, RIGHT];
-    L.setCols(sCols);
-    L.colHeaders(['Date of\nAcquisition', 'Cost', 'Fair Value', 'Fair Value\nPercentage of\n' + partnersCap], { bottomAlign: true, underline: true, colBox: true });
+    const sCols = [RIGHT - 300, RIGHT - 190, RIGHT - 70, RIGHT];
+    const PARENT_DATE = { 'CLRFI Midco I, LLC': '12/1/2025' };
+    const pctS = v => (Number(v) || 0).toFixed(2);
     const sch = s.schedule;
     if (!sch.hasData) {
+      L.setCols(sCols);
       L.row('No investment detail configured. Add underlyings in Fund Reporting settings.', [], { indent: 10 });
     } else {
-      const pct = v => (Number(v) || 0).toFixed(2);
+      const LH = 9;
+      // ── Table 1: parent holding-company summary ──
+      L.setCols(sCols);
+      const top1 = L.y;
+      L.colHeaders(['Date of\nAcquisition', 'Cost', 'Fair Value', 'Fair Value\nPercentage of\n' + partnersCap], { bottomAlign: true, underline: true, colBox: true });
+      L.page.drawText('Company', { x: PAGE.mL + 6, y: top1 - 2 * LH, size: 8, font: bold });
       for (const g of sch.groups) {
-        if (g.parent) L.row(g.parent, [], { indent: 6, boldRow: true });
-        const rowIndent = g.parent ? 16 : 10;
+        const date = PARENT_DATE[g.parent] || (g.rows[0] && g.rows[0].acquisition_date) || '';
+        L.row(g.parent, [date, money(g.subtotal.cost), money(g.subtotal.fair_value), pctS(g.subtotal.pctCapital)], { indent: 6, dollarPrefix: true, dollarCols: [1, 2] });
+      }
+      L.row('', ['', money(sch.total.cost), money(sch.total.fair_value), pctS(sch.total.pctCapital)], { indent: 6, ruleAbove: true });
+      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctS(sch.total.pctCapital) + ' %'], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], gapAfter: 8 });
+      L.page.drawText('* As of December 1, 2025, the Fund transferred its ownership interests in the following investments to CLRFI Midco I, LLC.', { x: PAGE.mL + 6, y: L.y, size: 8, font: ital }); L.y -= 24;
+      // ── Table 2: underlying investment breakdown ──
+      const top2 = L.y;
+      L.colHeaders(['Date of\nAcquisition', 'Proportional\nCost', 'Proportional\nFair Value', ''], { bottomAlign: true, underline: true, colBox: true });
+      L.page.drawText('CLRFI Midco I, LLC', { x: PAGE.mL + 6, y: top2 - 0 * LH, size: 8, font: bold });
+      L.page.drawText('Underlying Investment Description', { x: PAGE.mL + 6, y: top2 - 1 * LH, size: 8, font: bold });
+      for (const g of sch.groups) {
         for (const r of g.rows) {
-          L.row(r.name, [r.acquisition_date, money(r.cost), money(r.fair_value), pct(r.pctCapital)], { indent: rowIndent });
-        }
-        if (g.parent && g.rows.length > 1) {
-          L.row('Total ' + g.parent, ['', money(g.subtotal.cost), money(g.subtotal.fair_value), pct(g.subtotal.pctCapital)], { indent: 10, boldRow: true, ruleAbove: true });
+          L.row(r.name, [r.acquisition_date, money(r.cost), money(r.fair_value), pctS(r.pctCapital)], { indent: 6, dollarPrefix: false });
         }
       }
-      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pct(sch.total.pctCapital) + ' %'], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true });
+      L.row('', ['', money(sch.total.cost), money(sch.total.fair_value), pctS(sch.total.pctCapital)], { indent: 6, ruleAbove: true });
+      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctS(sch.total.pctCapital) + ' %'], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], gapAfter: 8 });
+      L.page.drawText('** Cost basis is cumulative equity contributions to investments less capital distributions.', { x: PAGE.mL + 6, y: L.y, size: 8, font: ital });
     }
   }
 
@@ -5689,6 +5705,10 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     L.start();
     const c1 = RIGHT - 258, c2 = RIGHT - 140, c3 = RIGHT;
     L.setCols([c1, c2, c3]);
+    // "Partners' Capital" spanning super-header over GP / LP / Total
+    { const stop = L.y; const spanL = c1 - 96, spanR = c3; const sw = bold.widthOfTextAtSize(partnersCap, 9);
+      L.page.drawText(partnersCap, { x: (spanL + spanR) / 2 - sw / 2, y: stop, size: 9, font: bold });
+      L.page.drawLine({ start: { x: spanL, y: stop - 3 }, end: { x: spanR, y: stop - 3 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) }); L.y = stop - 15; }
     L.colHeaders(['General Partners', 'Limited Partners', 'Total'], { bottomAlign: true, underline: true, colBox: true });
     const cc = s.changesInCapital, g = cc.groups, t = cc.totals;
     const yr = String(m.asOf).slice(0, 4);
@@ -5736,8 +5756,8 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
   if (supp.length) {
     const dp = pdf.addPage([PAGE.w, PAGE.h]);
     const dt = 'Supplementary Schedules';
-    const dw = bold.widthOfTextAtSize(dt, 12);
-    dp.drawText(dt, { x: (PAGE.w - dw) / 2, y: PAGE.h - PAGE.mT - 4, size: 12, font: bold });
+    const dw = bold.widthOfTextAtSize(dt, 36);
+    dp.drawText(dt, { x: (PAGE.w - dw) / 2, y: PAGE.h / 2 - 18, size: 36, font: bold });
     for (const sp of supp) {
       try {
         const ext = await PDFDocument.load(sp.bytes);
