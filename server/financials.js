@@ -5726,7 +5726,7 @@ function renderFeesSchedule(pdf, fonts, meta, data) {
   const cols = [AMT];
   L.setCols(cols);
   // Layout x anchors (landscape, ~684pt usable from mL=54 to LRIGHT).
-  const X = { feeType: PAGE.mL, desc: PAGE.mL + 118, basis: PAGE.mL + 300, affil: PAGE.mL + 470, port: PAGE.mL + 560 };
+  const X = { feeType: PAGE.mL, desc: PAGE.mL + 110, basis: PAGE.mL + 272, affil: PAGE.mL + 438, port: PAGE.mL + 548 };
   const wrap = (font, text, size, maxW) => {
     const words = String(text).split(' '); const lines = []; let cur = '';
     for (const w of words) { const t = cur ? cur + ' ' + w : w; if (font.widthOfTextAtSize(t, size) > maxW && cur) { lines.push(cur); cur = w; } else cur = t; }
@@ -5747,12 +5747,14 @@ function renderFeesSchedule(pdf, fonts, meta, data) {
   for (const cat of cfg.categories) {
     const blockTop = L.y;
     // wrapped text blocks
-    L.page.drawText(cat.label, { x: X.feeType, y: blockTop, size: FS_, font: ital.constructor ? ital : bold });
+    const labelLines = wrap(ital, cat.label, FS_, X.desc - X.feeType - 6);
+    labelLines.forEach((ln, i) => L.page.drawText(ln, { x: X.feeType, y: blockTop - i * 10, size: FS_, font: ital }));
     const descLines = wrap(reg, cat.description, FS_, X.basis - X.desc - 8);
     descLines.forEach((ln, i) => L.page.drawText(ln, { x: X.desc, y: blockTop - i * 10, size: FS_, font: reg }));
     const basisLines = wrap(reg, cat.basis, FS_, X.affil - X.basis - 8);
     basisLines.forEach((ln, i) => L.page.drawText(ln, { x: X.basis, y: blockTop - i * 10, size: FS_, font: reg }));
-    L.page.drawText(cat.affiliate, { x: X.affil, y: blockTop, size: FS_, font: reg });
+    const affilLines = wrap(reg, cat.affiliate, FS_, X.port - X.affil - 6);
+    affilLines.forEach((ln, i) => L.page.drawText(ln, { x: X.affil, y: blockTop - i * 10, size: FS_, font: reg }));
     // portfolio rows on the right
     let ry = blockTop;
     for (const r of cat.rows) {
@@ -5770,7 +5772,7 @@ function renderFeesSchedule(pdf, fonts, meta, data) {
     L.page.drawLine({ start: { x: X.port - 4, y: ry + 10 }, end: { x: AMT, y: ry + 10 }, thickness: 0.5, color: rgb(0.2, 0.2, 0.2) });
     grand = r2(grand + cat.total);
     // advance below the taller of the text block or the portfolio rows
-    const textH = Math.max(descLines.length, basisLines.length, cat.rows.length + 1) * 12 + 14;
+    const textH = Math.max(labelLines.length, descLines.length, basisLines.length, affilLines.length, cat.rows.length + 1) * 12 + 14;
     L.y = blockTop - textH;
   }
   // grand total
@@ -5847,19 +5849,19 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
       // ── Table 1: parent holding-company summary ──
       L.setCols(sCols);
       const top1 = L.y;
-      L.colHeaders(['Date of\nAcquisition', 'Cost', 'Fair Value', 'Fair Value\nPercentage of\n' + partnersCap], { bottomAlign: true, underline: true, colBox: true, noUnderlineCols: [0] });
+      L.colHeaders(['Date of\nAcquisition', 'Cost', 'Fair Value', 'Fair Value\nPercentage of\n' + partnersCap], { bottomAlign: true, underline: true, colBox: true });
       L.page.drawText('Company', { x: PAGE.mL + 6, y: top1 - 2 * LH, size: 8, font: bold });
       for (const g of sch.groups) {
         const date = PARENT_DATE[g.parent] || (g.rows[0] && g.rows[0].acquisition_date) || '';
         L.row(g.parent, [date, money(g.subtotal.cost), money(g.subtotal.fair_value), pctP(g.subtotal.pctCapital)], { indent: 6, dollarPrefix: true, dollarCols: [1, 2] });
       }
       L.space(11.5);
-      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctP(sch.total.pctCapital)], { indent: 6, boldRow: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], ruleCols: [1, 2, 3], gapAfter: 8 });
+      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctP(sch.total.pctCapital)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], ruleCols: [1, 2, 3], gapAfter: 8 });
       L.y -= 8;
       L.page.drawText('* As of December 1, 2025, the Fund transferred its ownership interests in the following investments to CLRFI Midco I, LLC.', { x: PAGE.mL + 6, y: L.y, size: 8, font: ital }); L.y -= 24;
       // ── Table 2: underlying investment breakdown ──
       const top2 = L.y;
-      L.colHeaders(['Date of\nAcquisition', 'Proportional\nCost', 'Proportional\nFair Value', ''], { bottomAlign: true, underline: true, colBox: true, noUnderlineCols: [0] });
+      L.colHeaders(['Date of\nAcquisition', 'Proportional\nCost', 'Proportional\nFair Value', ''], { bottomAlign: true, underline: true, colBox: true, noUnderlineCols: [0, 3] });
       L.page.drawText('CLRFI Midco I, LLC', { x: PAGE.mL + 6, y: top2 - 0 * LH, size: 8, font: bold });
       L.page.drawText('Underlying Investment Description', { x: PAGE.mL + 6, y: top2 - 1 * LH, size: 8, font: bold });
       for (const g of sch.groups) {
