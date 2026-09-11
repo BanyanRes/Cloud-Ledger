@@ -5125,7 +5125,8 @@ function monthLabel(dateStr) {
 //
 // Fund-specific GL mapping (CLRF entity 40), verified against the Q1-2026 CPA
 // statements:
-//   Portfolio investments at fair value = 1201xx + 1202xx + 1218xx (unrealized)
+//   Portfolio investments at fair value = 1201xx + 1202xx + 1210xx (Q2-2026
+//     per-portfolio-company purchase+mark) + 1218xx (aggregate unrealized)
 //   Operations expense buckets: Management fees = 5101xx; Professional fees =
 //     52xxxx; Broken deal costs = 5302xx; Other expenses = everything else in
 //     Expense that isn't one of the above and isn't the 6101xx unrealized G/L
@@ -5204,9 +5205,10 @@ async function buildFundStatements(opts) {
   // Investment accounts collapse into a single "Portfolio investments, at fair
   // value" line (cost + capitalized + unrealized), with the cost basis shown
   // parenthetically. Everything else lists individually by account.
-  const INVEST_PREFIXES = ['1201', '1202', '1218'];
+  const INVEST_PREFIXES = ['1201', '1202', '1210', '1218'];
   const isInvest = code => codeStarts(code, INVEST_PREFIXES);
-  const investCostCode = code => codeStarts(code, ['1201', '1202']); // cost (excl. unrealized mark)
+  const isInvestPurchase = code => /^1210\d1$/.test(String(code)); // Q2-2026 per-portfolio-company Investment Purchase (cost); the paired ...\d2 code is that company's Unrealized Appr/Depr mark
+  const investCostCode = code => codeStarts(code, ['1201', '1202']) || isInvestPurchase(code); // cost (excl. unrealized mark)
 
   function assetRows(map) {
     const rows = [];
@@ -5514,7 +5516,7 @@ async function buildFundStatements(opts) {
   // (credits) on the investment PURCHASE accounts (1201xx). The capitalized-
   // expense account (1202xx) moves only for the non-cash waived development fee,
   // so it is excluded from cash and shown as a supplemental non-cash disclosure.
-  const isInvestPurchaseCode = code => codeStarts(code, ['1201']);
+  const isInvestPurchaseCode = code => codeStarts(code, ['1201']) || isInvestPurchase(code);
   let purchases = 0, returns = 0;
   for (const r of isYtd) {
     if (r.type === 'Asset' && isInvestPurchaseCode(r.code)) {
