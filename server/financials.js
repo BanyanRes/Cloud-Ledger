@@ -5853,7 +5853,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     const L = makeLayout(pdf, fonts, m, 'Schedule of Investments', { dateLine: m.longDate, plainHeader: true });
     track('Schedule of Investments');
     L.start();
-    const sCols = [RIGHT - 300, RIGHT - 200, RIGHT - 100, RIGHT];
+    const sCols = [RIGHT - 255, RIGHT - 170, RIGHT - 85, RIGHT];
     const PARENT_DATE = { 'CLRFI Midco I, LLC': '12/1/2025' };
     const pctS = v => (Number(v) || 0).toFixed(2);
     const pctP = v => pctS(v) + ' %';
