@@ -5188,10 +5188,18 @@ async function buildFundStatements(opts) {
 
   // Snapshots. Current + beginning-of-period balance sheets (prior years closed
   // into RE so RE holds the opening balance); YTD P&L drives Operations + CF.
-  const [bsCur, bsBeg, isYtd] = await Promise.all([
+  // Quarter boundaries for the two-period (Current Period + Year-to-Date)
+  // presentation. Q1 collapses to a single period (quarter == year).
+  const [ay, am] = String(asOf).split('-').map(Number);
+  const qStart = ay + ({ 3: '-01-01', 6: '-04-01', 9: '-07-01', 12: '-10-01' }[am] || '-01-01');
+  const qBeg = ({ 3: (ay - 1) + '-12-31', 6: ay + '-03-31', 9: ay + '-06-30', 12: ay + '-09-30' }[am] || priorBsDate);
+  const twoPeriod = am !== 3 && qStart !== ys;
+  const [bsCur, bsBeg, isYtd, isQtr, bsQBeg] = await Promise.all([
     getBalances({ as_of: asOf, close_pl_before: ys }),
     getBalances({ as_of: priorBsDate, close_pl_before: yearStart(priorBsDate) }),
     getBalances({ from: ys, to: asOf }),
+    getBalances({ from: qStart, to: asOf }),
+    getBalances({ as_of: qBeg, close_pl_before: ys }),
   ]);
 
   const byCode = rows => { const m = new Map(); for (const r of rows) m.set(String(r.code), r); return m; };
@@ -5289,37 +5297,39 @@ async function buildFundStatements(opts) {
   // (populated after the changes-in-capital section.)
 
   // ── 3. Statement of Operations (investment-company format) ──────────────────
-  const invIncome = sumWhere(isYtd, r => r.type === 'Revenue');
-  const expRows = isYtd.filter(r => r.type === 'Expense');
   const isMgmtFee = code => codeStarts(code, ['5101']);
   const isProfFee = code => codeStarts(code, ['52']);
+  const isOrgCost = code => codeStarts(code, ['5401']);
   const isBrokenDeal = code => codeStarts(code, ['5302']);
   const isUnrealizedContra = code => codeStarts(code, ['6101']); // fair-value mark, not an operating expense
-  const mgmtFees = sumWhere(expRows, r => isMgmtFee(r.code));
-  const profFees = sumWhere(expRows, r => isProfFee(r.code));
-  const brokenDeal = sumWhere(expRows, r => isBrokenDeal(r.code));
-  const otherExp = sumWhere(expRows, r => !isMgmtFee(r.code) && !isProfFee(r.code) && !isBrokenDeal(r.code) && !isUnrealizedContra(r.code));
-  const totalExpenses = r2(mgmtFees + profFees + brokenDeal + otherExp);
-  const netInvestmentLoss = r2(invIncome - totalExpenses);
-  // Net change in unrealized appreciation flows to operations only if the fund
-  // presents it there; CLRF Q1 shows net investment loss = decrease in capital
-  // from operations, so we mirror that (unrealized handled within investments).
-  const netOpsResult = netInvestmentLoss;
-
+  function opsFor(rows) {
+    const inc = sumWhere(rows, r => r.type === 'Revenue');
+    const exp = rows.filter(r => r.type === 'Expense');
+    const mgmt = sumWhere(exp, r => isMgmtFee(r.code));
+    const prof = sumWhere(exp, r => isProfFee(r.code));
+    const org = sumWhere(exp, r => isOrgCost(r.code));
+    const broken = sumWhere(exp, r => isBrokenDeal(r.code));
+    const other = sumWhere(exp, r => !isMgmtFee(r.code) && !isProfFee(r.code) && !isOrgCost(r.code) && !isBrokenDeal(r.code) && !isUnrealizedContra(r.code));
+    const totalExp = r2(mgmt + prof + org + broken + other);
+    return { inc: r2(inc), mgmt, prof, org, broken, other, totalExp, net: r2(inc - totalExp) };
+  }
+  const oY = opsFor(isYtd);
+  const oQ = twoPeriod ? opsFor(isQtr) : oY;
+  const opLine = (name, cur, ytd) => ({ name, cur: r2(cur), ytd: r2(ytd) });
   const operations = {
-    investmentIncome: [
-      // No itemized investment income in the CLRF format when zero; the total line carries it.
-    ],
-    totalInvestmentIncome: r2(invIncome),
+    twoPeriod,
+    incomeLines: [opLine('Interest income', oQ.inc, oY.inc)].filter(r => !isZero(r.cur) || !isZero(r.ytd)),
+    totalInvestmentIncome: { cur: oQ.inc, ytd: oY.inc },
     expenses: [
-      { name: 'Management fees', amount: mgmtFees },
-      { name: 'Professional fees', amount: profFees },
-      { name: 'Broken deal costs', amount: brokenDeal },
-      { name: 'Other expenses', amount: otherExp },
-    ].filter(e => !isZero(e.amount)),
-    totalExpenses,
-    netInvestmentLoss,
-    netResult: netOpsResult,
+      opLine('Management fees', oQ.mgmt, oY.mgmt),
+      opLine('Professional fees', oQ.prof, oY.prof),
+      opLine('Organizational costs', oQ.org, oY.org),
+      opLine('Broken deal costs', oQ.broken, oY.broken),
+      opLine('Other expenses', oQ.other, oY.other),
+    ].filter(e => !isZero(e.cur) || !isZero(e.ytd)),
+    totalExpenses: { cur: oQ.totalExp, ytd: oY.totalExp },
+    netInvestmentLoss: { cur: oQ.net, ytd: oY.net },
+    netResult: { cur: oQ.net, ytd: oY.net },
   };
 
   // ── 4. Statement of Changes in Partners' Capital (GP / LP) ──────────────────
@@ -5608,6 +5618,7 @@ async function buildFundStatements(opts) {
       asOf,
       longDate: longDate(asOf),
       periodLabel: 'For the Quarter Ended ' + longDate(asOf),
+      periodLabelFace: twoPeriod ? ('For the One and Two Quarters Ended ' + longDate(asOf)) : ('For the Quarter Ended ' + longDate(asOf)),
       title: 'Financial Statements',
     },
     assetsLiabCapital: {
@@ -5908,20 +5919,26 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     }
   }
 
-  // 3. Statement of Operations
+  // 3. Statement(s) of Operations
   {
-    const L = makeLayout(pdf, fonts, m, 'Statement of Operations', { dateLine: periodLine, plainHeader: true });
-    track('Statement of Operations');
-    L.start(); L.setCols(oneCol);
     const o = s.operations;
+    const two = o.twoPeriod;
+    const faceLine = m.periodLabelFace || periodLine;
+    const title = (two ? 'Statements' : 'Statement') + ' of Operations';
+    const L = makeLayout(pdf, fonts, m, title, { dateLine: faceLine, plainHeader: true });
+    track(title);
+    L.start();
+    L.setCols(two ? [RIGHT - 150, RIGHT] : oneCol);
+    const vals = (o2) => two ? [money(o2.cur), money(o2.ytd)] : [money(o2.ytd)];
+    if (two) L.colHeaders(['Current Period', 'Year-to-Date'], { bottomAlign: true, underline: true, colBox: true });
     L.sectionTitle('Investment income:');
-    o.investmentIncome.forEach(r => L.row(r.name, [money(r.amount)], { indent: 16 }));
-    L.row('Total investment income', [money(o.totalInvestmentIncome)], { indent: 16, dollarPrefix: true, gapAfter: 6 });
+    o.incomeLines.forEach((r, i) => L.row(r.name, vals(r), { indent: 16, dollarPrefix: i === 0 }));
+    L.row('Total investment income', vals(o.totalInvestmentIncome), { indent: 16, ruleAbove: true, gapAfter: 6 });
     L.sectionTitle('Expenses:');
-    o.expenses.forEach(r => L.row(r.name, [money(r.amount)], { indent: 16 }));
-    L.row('Total expenses', [money(o.totalExpenses)], { indent: 16, ruleAbove: true, gapAfter: 6 });
-    L.row('Net investment loss', [money(o.netInvestmentLoss)], { indent: 6, ruleAbove: true, gapAfter: 10 });
-    L.row('Net decrease in partners' + APOS + ' capital resulting from operations', [money(o.netResult)], { indent: 6, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
+    o.expenses.forEach(r => L.row(r.name, vals(r), { indent: 16 }));
+    L.row('Total expenses', vals(o.totalExpenses), { indent: 16, ruleAbove: true, gapAfter: 6 });
+    L.row('Net investment loss', vals(o.netInvestmentLoss), { indent: 6, ruleAbove: true, gapAfter: 10 });
+    L.row('Net decrease in partners' + APOS + ' capital resulting from operations', vals(o.netResult), { indent: 6, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
   }
 
   // 4. Statement of Changes in Partners' Capital (portrait, GP / LP / Total)

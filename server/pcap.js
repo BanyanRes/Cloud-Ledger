@@ -61,6 +61,8 @@ function resolveQuarter(quarterEnd) {
   return {
     label: y + '-Q' + (m / 3), year: String(y), quarter: 'Q' + (m / 3), end: quarterEnd,
     year_start: y + '-01-01', prior_year_end: (y - 1) + '-12-31',
+    quarter_start: y + ({ 3: '-01-01', 6: '-04-01', 9: '-07-01', 12: '-10-01' }[m]),
+    quarter_begin: ({ 3: (y - 1) + '-12-31', 6: y + '-03-31', 9: y + '-06-30', 12: y + '-09-30' }[m]),
   };
 }
 
@@ -160,12 +162,17 @@ function buildData(ctx, quarter, opts = {}) {
   // Classify contribution activity once per period (all classes).
   const ytdContrib = classifyContributions(db, eid, quarter.year_start, quarter.end);
   const itdContrib = classifyContributions(db, eid, null, quarter.end);
+  // Current-quarter split (for the quarter-only PCAP schedule and the two-period
+  // Statement of Changes). For Q1 the quarter == the year, so reuse ytdContrib.
+  const isQ1 = quarter.quarter === 'Q1';
+  const qContrib = isQ1 ? ytdContrib : classifyContributions(db, eid, quarter.quarter_start, quarter.end);
 
   const investors = [];
   for (const c of classes) {
     const carry = (c.id in carryBy) ? carryBy[c.id] : 0;
     const ytd = periodColumn(ctx, eid, c.id, quarter.year_start, quarter.end, quarter.prior_year_end, carry, ytdContrib[c.id]);
     const itd = periodColumn(ctx, eid, c.id, null, quarter.end, null, carry, itdContrib[c.id]);
+    const q = isQ1 ? ytd : periodColumn(ctx, eid, c.id, quarter.quarter_start, quarter.end, quarter.quarter_begin, carry, qContrib[c.id]);
     const commitment = commitBy[c.id] || 0;
     // Skip classes with no economic presence (a stray tag, an emptied transfer).
     if (Math.abs(itd.ending) < 0.005 && Math.abs(itd.contributions) < 0.005 && commitment === 0) continue;
@@ -178,7 +185,7 @@ function buildData(ctx, quarter, opts = {}) {
       commitment, contributed, unfunded,
       pct_contributed: commitment ? contributed / commitment : 0,
       pct_unfunded: commitment ? unfunded / commitment : 0,
-      ytd, itd,
+      ytd, itd, q,
     });
   }
   investors.sort((a, b) => (a.partner_type === b.partner_type ? 0 : a.partner_type === 'LP' ? -1 : 1)
@@ -193,7 +200,7 @@ function buildData(ctx, quarter, opts = {}) {
     unrealized: sumCol(key, 'unrealized'), ending: sumCol(key, 'ending'),
   });
   const totals = {
-    count: investors.length, ytd: totCols('ytd'), itd: totCols('itd'),
+    count: investors.length, ytd: totCols('ytd'), itd: totCols('itd'), q: totCols('q'),
     commitment: r2(investors.reduce((s, i) => s + i.commitment, 0)),
     contributed: r2(investors.reduce((s, i) => s + i.contributed, 0)),
   };
