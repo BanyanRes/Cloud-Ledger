@@ -5715,7 +5715,6 @@ function FundReporting({entityId,entityName}){
   const[invs,setInvs]=useState(null);
   const[classes,setClasses]=useState(null);
   const[savingId,setSavingId]=useState(null);
-  const[classFilter,setClassFilter]=useState('');
   const blank={parent_name:'',name:'',acquisition_date:'',cost:'',fair_value:'',sort_order:''};
   const[draft,setDraft]=useState(blank);
   const[odysseyAmt,setOdysseyAmt]=useState('');
@@ -5736,7 +5735,7 @@ function FundReporting({entityId,entityName}){
     if(odysseyClass&&alloc&&alloc.gpDetail){const row=alloc.gpDetail.find(g=>g.class_id===odysseyClass.id);if(row&&odysseyAmt==='')setOdysseyAmt(String(row.commitment_amount||''));}
   },[alloc,odysseyClass]);
   const saveOdyssey=async()=>{
-    if(!odysseyClass){setErr('No investor class named "Odyssey" is tagged. Tag it as GP below first.');return;}
+    if(!odysseyClass){setErr('No investor class named "Odyssey" is tagged as GP for this entity.');return;}
     setSavingOdyssey(true);setErr('');
     try{await api.setClassCommitment(entityId,odysseyClass.id,Number(odysseyAmt)||0);loadAlloc();}
     catch(e){setErr(e.message);}finally{setSavingOdyssey(false);}
@@ -5756,12 +5755,6 @@ function FundReporting({entityId,entityName}){
   const delInv=async(id)=>{setErr('');try{await api.deleteFundInvestment(entityId,id);load();}catch(e){setErr(e.message);}};
   const setInvField=(id,f,v)=>setInvs(list=>list.map(r=>r.id===id?{...r,[f]:v}:r));
 
-  const toggleGP=async(cls)=>{
-    const next=(cls.partner_type==='GP')?'LP':'GP';
-    setClasses(list=>list.map(c=>c.id===cls.id?{...c,partner_type:next}:c));
-    try{await api.setClassPartnerType(entityId,cls.id,next);}catch(e){setErr(e.message);load();}
-  };
-
   const genPdf=async()=>{
     if(!/^\d{4}-\d{2}-\d{2}$/.test(asOf)){setErr('Pick a valid as-of date');return;}
     setBusy(true);setErr('');
@@ -5770,8 +5763,6 @@ function FundReporting({entityId,entityName}){
     catch(e){setErr(e.message);}finally{setBusy(false);}
   };
 
-  const gpList=(classes||[]).filter(c=>c.partner_type==='GP');
-  const shownClasses=(classes||[]).filter(c=>!classFilter||c.name.toLowerCase().includes(classFilter.toLowerCase()));
   const th={textAlign:'left',padding:'6px 8px',borderBottom:'2px solid '+T.border,color:T.textDim,fontSize:11,fontWeight:700};
   const td={padding:'4px 8px',borderBottom:'1px solid '+T.border,fontSize:12};
   const cellInput={width:'100%',background:'transparent',border:'1px solid '+T.border,borderRadius:4,padding:'3px 6px',color:T.text,fontSize:12};
@@ -5860,27 +5851,6 @@ function FundReporting({entityId,entityName}){
               <td style={{...td,textAlign:'right',width:60}}><input style={{...cellInput,textAlign:'right'}} value={draft.sort_order} placeholder='0' onChange={e=>setDraft({...draft,sort_order:e.target.value})}/></td>
               <td style={td}><button style={{...S.btnP,padding:'4px 10px',opacity:busy?0.6:1}} disabled={busy} onClick={addInv}>Add</button></td>
             </tr>
-          </tbody>
-        </table>
-      </div>}
-    </div>
-
-    {/* GP/LP tagging */}
-    <div style={{...S.card}}>
-      <div style={S.h2}>General Partner designation</div>
-      <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>Tag the investor classes that are General Partners. Everything else is treated as a Limited Partner for the GP/LP capital split. Currently {gpList.length} class{gpList.length===1?'':'es'} tagged GP.</div>
-      <input style={{...S.input,maxWidth:320,marginBottom:10}} placeholder='Filter classes…' value={classFilter} onChange={e=>setClassFilter(e.target.value)}/>
-      {classes===null?<div style={{color:T.textMuted,fontSize:12}}>Loading…</div>:
-      <div style={{maxHeight:340,overflowY:'auto',border:'1px solid '+T.border,borderRadius:6}}>
-        <table style={{borderCollapse:'collapse',width:'100%'}}>
-          <thead><tr><th style={th}>Investor class</th><th style={{...th,width:120,textAlign:'center'}}>Type</th></tr></thead>
-          <tbody>
-            {shownClasses.map(c=>(<tr key={c.id}>
-              <td style={td}>{c.name}</td>
-              <td style={{...td,textAlign:'center'}}>
-                <button onClick={()=>toggleGP(c)} style={{cursor:'pointer',fontSize:11,fontWeight:700,padding:'3px 10px',borderRadius:12,border:'1px solid '+(c.partner_type==='GP'?(T.green||'#2a9d5a'):T.border),background:c.partner_type==='GP'?(T.green||'#2a9d5a')+'22':'transparent',color:c.partner_type==='GP'?(T.green||'#2a9d5a'):T.textDim}}>{c.partner_type==='GP'?'General Partner':'Limited Partner'}</button>
-              </td>
-            </tr>))}
           </tbody>
         </table>
       </div>}
