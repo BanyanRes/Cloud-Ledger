@@ -3103,7 +3103,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     //                line across all columns. Defaults ON so every statement's
     //                subtotal/total underlines sit under each number separately,
     //                never as one long line running across the whole row.
-    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapBefore = 0, gapAfter = 0, dollarPrefix = false, dollarCols = null, valueInset = 0, colRules = true, keepWithNext = 0, labelLines = null } = {}) {
+    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapBefore = 0, gapAfter = 0, dollarPrefix = false, dollarCols = null, ruleCols = null, valueInset = 0, colRules = true, keepWithNext = 0, labelLines = null } = {}) {
       // keepWithNext reserves extra space so this row and the row(s) that follow
       // land on the SAME page — used to keep a section grand-total from being
       // orphaned alone at the top of a continuation page: the closest subtotal
@@ -3146,7 +3146,8 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       const ruleSpan = Math.max(RULE_MIN_W, ruleBoxW - GUTTER);
       const drawRule = (yy) => {
         if (colRules) {
-          cols.forEach((cx) => {
+          cols.forEach((cx, ci) => {
+            if (ruleCols && ruleCols.indexOf(ci) < 0) return;
             const x0 = cx - ruleSpan - valueInset;
             const x1 = cx;
             page.drawLine({ start: { x: x0, y: yy }, end: { x: x1, y: yy }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) });
@@ -5853,7 +5854,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
         L.row(g.parent, [date, money(g.subtotal.cost), money(g.subtotal.fair_value), pctP(g.subtotal.pctCapital)], { indent: 6, dollarPrefix: true, dollarCols: [1, 2] });
       }
       L.space(11.5);
-      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctP(sch.total.pctCapital)], { indent: 6, boldRow: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], gapAfter: 8 });
+      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctP(sch.total.pctCapital)], { indent: 6, boldRow: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], ruleCols: [1, 2, 3], gapAfter: 8 });
       L.y -= 8;
       L.page.drawText('* As of December 1, 2025, the Fund transferred its ownership interests in the following investments to CLRFI Midco I, LLC.', { x: PAGE.mL + 6, y: L.y, size: 8, font: ital }); L.y -= 24;
       // ── Table 2: underlying investment breakdown ──
@@ -5867,7 +5868,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
         }
       }
       L.space(11.5);
-      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctP(sch.total.pctCapital)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], gapAfter: 8 });
+      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctP(sch.total.pctCapital)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], ruleCols: [1, 2, 3], gapAfter: 8 });
       L.page.drawText('** Cost basis is cumulative equity contributions to investments less capital distributions.', { x: PAGE.mL + 6, y: L.y, size: 8, font: ital });
     }
   }
