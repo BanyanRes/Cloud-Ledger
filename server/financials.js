@@ -3111,7 +3111,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     //                line across all columns. Defaults ON so every statement's
     //                subtotal/total underlines sit under each number separately,
     //                never as one long line running across the whole row.
-    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapBefore = 0, gapAfter = 0, dollarPrefix = false, dollarCols = null, ruleCols = null, dollarFixed = false, valueInset = 0, colRules = true, keepWithNext = 0, labelLines = null } = {}) {
+    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapBefore = 0, gapAfter = 0, dollarPrefix = false, dollarCols = null, ruleCols = null, dollarFixed = false, centerCols = null, valueInset = 0, colRules = true, keepWithNext = 0, labelLines = null } = {}) {
       // keepWithNext reserves extra space so this row and the row(s) that follow
       // land on the SAME page — used to keep a section grand-total from being
       // orphaned alone at the top of a continuation page: the closest subtotal
@@ -3190,7 +3190,16 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
         if (c == null || c === '') return;
         const s = String(c);
         const w = font.widthOfTextAtSize(s, FS.row);
-        page.drawText(s, { x: cols[i] - w - valueInset, y: yNum, size: FS.row, font });
+        if (centerCols && centerCols.indexOf(i) >= 0) {
+          // center the value on the column's header box-center (cols[i] - boxW/2),
+          // so a centered heading/underline (e.g. Date of Acquisition) has its
+          // values centered under it too, not right-aligned to the edge.
+          const bw = Number.isFinite(pitch) ? Math.max(20, pitch - 14) : 0;
+          const ctr = cols[i] - bw / 2;
+          page.drawText(s, { x: ctr - w / 2, y: yNum, size: FS.row, font });
+        } else {
+          page.drawText(s, { x: cols[i] - w - valueInset, y: yNum, size: FS.row, font });
+        }
         if (dollarPrefix && (!dollarCols || dollarCols.indexOf(i) >= 0)) {
           // "$" anchored a fixed gap to the LEFT of this column's own number,
           // NOT at the column-box left edge. The old formula (cols[i] -
@@ -5861,7 +5870,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
       L.page.drawText('Company', { x: PAGE.mL + 6, y: top1 - 2 * LH, size: 8, font: bold });
       for (const g of sch.groups) {
         const date = PARENT_DATE[g.parent] || (g.rows[0] && g.rows[0].acquisition_date) || '';
-        L.row(g.parent, [date, money(g.subtotal.cost), money(g.subtotal.fair_value), pctP(g.subtotal.pctCapital)], { indent: 6, dollarPrefix: true, dollarCols: [1, 2] });
+        L.row(g.parent, [date, money(g.subtotal.cost), money(g.subtotal.fair_value), pctP(g.subtotal.pctCapital)], { indent: 6, dollarPrefix: true, dollarCols: [1, 2], centerCols: [0] });
       }
       L.space(11.5);
       L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctP(sch.total.pctCapital)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], ruleCols: [1, 2, 3], gapAfter: 8 });
@@ -5874,7 +5883,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
       L.page.drawText('Underlying Investment Description', { x: PAGE.mL + 6, y: top2 - 1 * LH, size: 8, font: bold });
       for (const g of sch.groups) {
         for (const r of g.rows) {
-          L.row(r.name, [r.acquisition_date, money(r.cost), money(r.fair_value), pctP(r.pctCapital)], { indent: 6, dollarPrefix: false });
+          L.row(r.name, [r.acquisition_date, money(r.cost), money(r.fair_value), pctP(r.pctCapital)], { indent: 6, dollarPrefix: false, centerCols: [0] });
         }
       }
       L.space(11.5);
