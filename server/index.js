@@ -12013,7 +12013,28 @@ app.get('/api/entities/:eid/fund-statements.pdf', auth, requireEntityAccess(), r
       const quarter = pcap.resolveQuarter(asOf);
       pcapData = pcap.buildData({ db, computeBalances: (e, o) => computeBalances(e, o) }, quarter, { entity_id: Number(eid) });
     } catch (e) { pcapData = null; }
-    const model = await financials.buildFundStatements({ asOf, entityName, getBalances, investments, partnerClasses, commitments, pcap: pcapData });
+    // Investment cash activity for the Statement of Cash Flows: investment-account
+    // debits (purchases) / credits (returns) in entries that also touch a cash
+    // account. The non-cash Q2 re-chart of the investment accounts is excluded.
+    let investCF = null;
+    try {
+      const [iy, im] = asOf.split('-').map(Number);
+      const ysR = iy + '-01-01';
+      const qStartR = iy + ({ 3: '-01-01', 6: '-04-01', 9: '-07-01', 12: '-10-01' }[im] || '-01-01');
+      const traceInv = (from, to) => {
+        const rows = db.prepare(
+          "SELECT jl.debit AS dr, jl.credit AS cr FROM journal_entries je JOIN journal_lines jl ON jl.entry_id = je.id "
+          + "WHERE je.entity_id = ? AND je.date >= ? AND je.date <= ? "
+          + "AND (jl.account_code LIKE '1201%' OR jl.account_code LIKE '1202%' OR jl.account_code LIKE '1210%' OR jl.account_code LIKE '1218%') "
+          + "AND EXISTS (SELECT 1 FROM journal_lines jc WHERE jc.entry_id = je.id AND (jc.account_code LIKE '1002%' OR jc.account_code LIKE '1003%' OR jc.account_code LIKE '1005%' OR jc.account_code LIKE '1072%'))"
+        ).all(eid, from, to);
+        let purch = 0, ret = 0;
+        for (const r of rows) { purch += Number(r.dr) || 0; ret += Number(r.cr) || 0; }
+        return { purchases: Math.round(purch * 100) / 100, returns: Math.round(ret * 100) / 100 };
+      };
+      investCF = { q: traceInv(qStartR, asOf), ytd: traceInv(ysR, asOf) };
+    } catch (e) { investCF = null; }
+    const model = await financials.buildFundStatements({ asOf, entityName, getBalances, investments, partnerClasses, commitments, pcap: pcapData, investCF });
 
     // Supplementary schedules: pass each schedule's DATA to the fund renderer,
     // which native-renders it in Weaver's format after a "Supplementary Schedules"
