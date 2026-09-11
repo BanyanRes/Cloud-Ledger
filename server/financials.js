@@ -3074,10 +3074,16 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
         if (hopts.underline && !(hopts.noUnderlineCols && hopts.noUnderlineCols.indexOf(i) >= 0)) {
           // colBox → fixed per-column span (with a gutter) so the rule reads as
           // one-per-column; otherwise hug just the widest line of this label.
-          const span = (hopts.underlineColSpans && hopts.underlineColSpans[i] != null)
-            ? hopts.underlineColSpans[i]
-            : ((hopts.colBox && boxW) ? boxW : maxW);
-          page.drawLine({ start: { x: cols[i] - span, y: uy }, end: { x: cols[i], y: uy }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
+          const ovSpan = (hopts.underlineColSpans && hopts.underlineColSpans[i] != null) ? hopts.underlineColSpans[i] : null;
+          if (ovSpan != null && hopts.colBox && boxW) {
+            // narrower underline, CENTERED under the header text (which is
+            // centered on the box center cols[i]-boxW/2), not edge-anchored.
+            const ctr = cols[i] - boxW / 2;
+            page.drawLine({ start: { x: ctr - ovSpan / 2, y: uy }, end: { x: ctr + ovSpan / 2, y: uy }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
+          } else {
+            const span = (hopts.colBox && boxW) ? boxW : maxW;
+            page.drawLine({ start: { x: cols[i] - span, y: uy }, end: { x: cols[i], y: uy }, thickness: 0.7, color: rgb(0.2, 0.2, 0.2) });
+          }
         }
       });
       // Advance the cursor below the underline, leaving TWO blank rows between
@@ -5851,7 +5857,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
       // ── Table 1: parent holding-company summary ──
       L.setCols(sCols);
       const top1 = L.y;
-      L.colHeaders(['Date of\nAcquisition', 'Cost', 'Fair Value', 'Fair Value\nPercentage of\n' + partnersCap], { bottomAlign: true, underline: true, colBox: true, underlineColSpans: { 0: 70 } });
+      L.colHeaders(['Date of\nAcquisition', 'Cost', 'Fair Value', 'Fair Value\nPercentage of\n' + partnersCap], { bottomAlign: true, underline: true, colBox: true, underlineColSpans: { 0: 60 } });
       L.page.drawText('Company', { x: PAGE.mL + 6, y: top1 - 2 * LH, size: 8, font: bold });
       for (const g of sch.groups) {
         const date = PARENT_DATE[g.parent] || (g.rows[0] && g.rows[0].acquisition_date) || '';
@@ -5863,7 +5869,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
       L.page.drawText('* As of December 1, 2025, the Fund transferred its ownership interests in the following investments to CLRFI Midco I, LLC.', { x: PAGE.mL + 6, y: L.y, size: 8, font: ital }); L.y -= 24;
       // ── Table 2: underlying investment breakdown ──
       const top2 = L.y;
-      L.colHeaders(['Date of\nAcquisition', 'Proportional\nCost', 'Proportional\nFair Value', ''], { bottomAlign: true, underline: true, colBox: true, noUnderlineCols: [3], underlineColSpans: { 0: 70 } });
+      L.colHeaders(['Date of\nAcquisition', 'Proportional\nCost', 'Proportional\nFair Value', ''], { bottomAlign: true, underline: true, colBox: true, noUnderlineCols: [3], underlineColSpans: { 0: 60 } });
       L.page.drawText('CLRFI Midco I, LLC', { x: PAGE.mL + 6, y: top2 - 0 * LH, size: 8, font: bold });
       L.page.drawText('Underlying Investment Description', { x: PAGE.mL + 6, y: top2 - 1 * LH, size: 8, font: bold });
       for (const g of sch.groups) {
