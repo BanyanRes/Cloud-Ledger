@@ -3103,7 +3103,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     //                line across all columns. Defaults ON so every statement's
     //                subtotal/total underlines sit under each number separately,
     //                never as one long line running across the whole row.
-    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapBefore = 0, gapAfter = 0, dollarPrefix = false, dollarCols = null, ruleCols = null, valueInset = 0, colRules = true, keepWithNext = 0, labelLines = null } = {}) {
+    row(label, cells, { indent = 12, boldRow = false, ruleAbove = false, ruleBelow = false, doubleBelow = false, gapBefore = 0, gapAfter = 0, dollarPrefix = false, dollarCols = null, ruleCols = null, dollarFixed = false, valueInset = 0, colRules = true, keepWithNext = 0, labelLines = null } = {}) {
       // keepWithNext reserves extra space so this row and the row(s) that follow
       // land on the SAME page — used to keep a section grand-total from being
       // orphaned alone at the top of a continuation page: the closest subtotal
@@ -3204,7 +3204,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
           const dollarW = font.widthOfTextAtSize('$', FS.row);
           const numLeft = cols[i] - w - valueInset;
           const anchorDx = cols[i] - dollarInset - valueInset;
-          const dx = Math.min(anchorDx, numLeft - DOLLAR_NUM_GAP - dollarW);
+          const dx = dollarFixed ? anchorDx : Math.min(anchorDx, numLeft - DOLLAR_NUM_GAP - dollarW);
           page.drawText('$', { x: dx, y: yNum, size: FS.row, font });
         }
       });
@@ -5627,7 +5627,7 @@ function renderCarrySchedule(pdf, fonts, meta, data) {
   const line = (marker, desc, amount, o = {}) => {
     const y0 = L.y;
     if (marker) L.page.drawText(marker, { x: SECT_X - ital.widthOfTextAtSize(marker, 9) / 2, y: y0, size: 9, font: ital });
-    L.row(desc, [amount === null ? null : money(amount)], { indent: DESC, dollarPrefix: true, boldRow: o.bold, ruleAbove: o.ruleAbove, doubleBelow: o.doubleBelow, labelLines: o.labelLines });
+    L.row(desc, [amount === null ? null : money(amount)], { indent: DESC, dollarPrefix: true, dollarFixed: true, boldRow: o.bold, ruleAbove: o.ruleAbove, doubleBelow: o.doubleBelow, labelLines: o.labelLines });
   };
   line(null, 'Carried interest build-up', null, { bold: true });
   line(null, '   Distributable assets as of quarter-end', f.distributable);
@@ -5836,7 +5836,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     const L = makeLayout(pdf, fonts, m, 'Schedule of Investments', { dateLine: m.longDate, plainHeader: true });
     track('Schedule of Investments');
     L.start();
-    const sCols = [RIGHT - 300, RIGHT - 190, RIGHT - 70, RIGHT];
+    const sCols = [RIGHT - 300, RIGHT - 200, RIGHT - 100, RIGHT];
     const PARENT_DATE = { 'CLRFI Midco I, LLC': '12/1/2025' };
     const pctS = v => (Number(v) || 0).toFixed(2);
     const pctP = v => pctS(v) + ' %';
@@ -5861,7 +5861,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
       L.page.drawText('* As of December 1, 2025, the Fund transferred its ownership interests in the following investments to CLRFI Midco I, LLC.', { x: PAGE.mL + 6, y: L.y, size: 8, font: ital }); L.y -= 24;
       // ── Table 2: underlying investment breakdown ──
       const top2 = L.y;
-      L.colHeaders(['Date of\nAcquisition', 'Proportional\nCost', 'Proportional\nFair Value', ''], { bottomAlign: true, underline: true, colBox: true, noUnderlineCols: [0, 3] });
+      L.colHeaders(['Date of\nAcquisition', 'Proportional\nCost', 'Proportional\nFair Value', ''], { bottomAlign: true, underline: true, colBox: true, noUnderlineCols: [3] });
       L.page.drawText('CLRFI Midco I, LLC', { x: PAGE.mL + 6, y: top2 - 0 * LH, size: 8, font: bold });
       L.page.drawText('Underlying Investment Description', { x: PAGE.mL + 6, y: top2 - 1 * LH, size: 8, font: bold });
       for (const g of sch.groups) {
