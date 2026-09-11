@@ -3071,7 +3071,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
           const lineY = baseY + (parts.length - 1 - pi) * LH;
           page.drawText(pl, { x: blockLeft + (maxW - w) / 2, y: lineY, size: FS.head, font: bold });
         });
-        if (hopts.underline) {
+        if (hopts.underline && !(hopts.noUnderlineCols && hopts.noUnderlineCols.indexOf(i) >= 0)) {
           // colBox → fixed per-column span (with a gutter) so the rule reads as
           // one-per-column; otherwise hug just the widest line of this label.
           const span = (hopts.colBox && boxW) ? boxW : maxW;
@@ -5686,6 +5686,11 @@ function renderPcapSchedule(pdf, fonts, meta, data) {
       money(y.contributions), money(y.returnOfCapital), money(y.syndication), money(y.waivedDevFees),
       money(netLoss), money(netLoss), money(y.transfers), money(y.ending),
     ];
+    // Reserve the row's height BEFORE stamping the Partner # gutter, so if the
+    // row would push to a new page the break happens first and the number lands
+    // on the same page as its data (Jimmy 9/11: LP # was orphaned on the prior
+    // page at the pg 10 / pg 11 breaks).
+    L.ensure(13);
     L.page.drawText(String(n), { x: LLEFT, y: L.y, size: 7.5, font: reg });
     L.row('', cells, { indent: 0, dollarPrefix: first, dollarCols: [0, 2, 3, 4, 5, 6, 7, 8, 9, 10], valueInset: 2 });
   };
@@ -5831,6 +5836,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     const sCols = [RIGHT - 300, RIGHT - 190, RIGHT - 70, RIGHT];
     const PARENT_DATE = { 'CLRFI Midco I, LLC': '12/1/2025' };
     const pctS = v => (Number(v) || 0).toFixed(2);
+    const pctP = v => pctS(v) + ' %';
     const sch = s.schedule;
     if (!sch.hasData) {
       L.setCols(sCols);
@@ -5840,27 +5846,28 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
       // ── Table 1: parent holding-company summary ──
       L.setCols(sCols);
       const top1 = L.y;
-      L.colHeaders(['Date of\nAcquisition', 'Cost', 'Fair Value', 'Fair Value\nPercentage of\n' + partnersCap], { bottomAlign: true, underline: true, colBox: true });
+      L.colHeaders(['Date of\nAcquisition', 'Cost', 'Fair Value', 'Fair Value\nPercentage of\n' + partnersCap], { bottomAlign: true, underline: true, colBox: true, noUnderlineCols: [0] });
       L.page.drawText('Company', { x: PAGE.mL + 6, y: top1 - 2 * LH, size: 8, font: bold });
       for (const g of sch.groups) {
         const date = PARENT_DATE[g.parent] || (g.rows[0] && g.rows[0].acquisition_date) || '';
-        L.row(g.parent, [date, money(g.subtotal.cost), money(g.subtotal.fair_value), pctS(g.subtotal.pctCapital)], { indent: 6, dollarPrefix: true, dollarCols: [1, 2] });
+        L.row(g.parent, [date, money(g.subtotal.cost), money(g.subtotal.fair_value), pctP(g.subtotal.pctCapital)], { indent: 6, dollarPrefix: true, dollarCols: [1, 2] });
       }
-      L.row('', ['', money(sch.total.cost), money(sch.total.fair_value), pctS(sch.total.pctCapital)], { indent: 6, ruleAbove: true });
-      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctS(sch.total.pctCapital) + ' %'], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], gapAfter: 8 });
+      L.space(11.5);
+      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctP(sch.total.pctCapital)], { indent: 6, boldRow: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], gapAfter: 8 });
+      L.y -= 8;
       L.page.drawText('* As of December 1, 2025, the Fund transferred its ownership interests in the following investments to CLRFI Midco I, LLC.', { x: PAGE.mL + 6, y: L.y, size: 8, font: ital }); L.y -= 24;
       // ── Table 2: underlying investment breakdown ──
       const top2 = L.y;
-      L.colHeaders(['Date of\nAcquisition', 'Proportional\nCost', 'Proportional\nFair Value', ''], { bottomAlign: true, underline: true, colBox: true });
+      L.colHeaders(['Date of\nAcquisition', 'Proportional\nCost', 'Proportional\nFair Value', ''], { bottomAlign: true, underline: true, colBox: true, noUnderlineCols: [0] });
       L.page.drawText('CLRFI Midco I, LLC', { x: PAGE.mL + 6, y: top2 - 0 * LH, size: 8, font: bold });
       L.page.drawText('Underlying Investment Description', { x: PAGE.mL + 6, y: top2 - 1 * LH, size: 8, font: bold });
       for (const g of sch.groups) {
         for (const r of g.rows) {
-          L.row(r.name, [r.acquisition_date, money(r.cost), money(r.fair_value), pctS(r.pctCapital)], { indent: 6, dollarPrefix: false });
+          L.row(r.name, [r.acquisition_date, money(r.cost), money(r.fair_value), pctP(r.pctCapital)], { indent: 6, dollarPrefix: false });
         }
       }
-      L.row('', ['', money(sch.total.cost), money(sch.total.fair_value), pctS(sch.total.pctCapital)], { indent: 6, ruleAbove: true });
-      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctS(sch.total.pctCapital) + ' %'], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], gapAfter: 8 });
+      L.space(11.5);
+      L.row('Total investments', ['', money(sch.total.cost), money(sch.total.fair_value), pctP(sch.total.pctCapital)], { indent: 6, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols: [1, 2], gapAfter: 8 });
       L.page.drawText('** Cost basis is cumulative equity contributions to investments less capital distributions.', { x: PAGE.mL + 6, y: L.y, size: 8, font: ital });
     }
   }
@@ -5877,7 +5884,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     L.sectionTitle('Expenses:');
     o.expenses.forEach(r => L.row(r.name, [money(r.amount)], { indent: 16 }));
     L.row('Total expenses', [money(o.totalExpenses)], { indent: 16, ruleAbove: true, gapAfter: 6 });
-    L.row('Net investment loss', [money(o.netInvestmentLoss)], { indent: 6, ruleAbove: true });
+    L.row('Net investment loss', [money(o.netInvestmentLoss)], { indent: 6, ruleAbove: true, gapAfter: 10 });
     L.row('Net decrease in partners' + APOS + ' capital resulting from operations', [money(o.netResult)], { indent: 6, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
   }
 
@@ -5888,8 +5895,12 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     L.start();
     const c1 = RIGHT - 258, c2 = RIGHT - 140, c3 = RIGHT;
     L.setCols([c1, c2, c3]);
-    // "Partners' Capital" spanning super-header over GP / LP / Total
-    { const stop = L.y; const spanL = c1 - 96, spanR = c3; const sw = bold.widthOfTextAtSize(partnersCap, 9);
+    // "Partners' Capital" spanning super-header over the General/Limited
+    // Partners heading boxes only (not the Total column). Each colBox heading is
+    // centered in a box of width (pitch-gutter) ending at its column edge; the
+    // GP box starts at c1-104 and the LP box ends at c2, so the super-header rule
+    // runs from the GP box's left edge to the LP column edge.
+    { const stop = L.y; const spanL = c1 - 104, spanR = c2; const sw = bold.widthOfTextAtSize(partnersCap, 9);
       L.page.drawText(partnersCap, { x: (spanL + spanR) / 2 - sw / 2, y: stop, size: 9, font: bold });
       L.page.drawLine({ start: { x: spanL, y: stop - 3 }, end: { x: spanR, y: stop - 3 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) }); L.y = stop - 15; }
     L.colHeaders(['General Partners', 'Limited Partners', 'Total'], { bottomAlign: true, underline: true, colBox: true });
@@ -5939,8 +5950,9 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
   if (supp.length) {
     const dp = pdf.addPage([PAGE.w, PAGE.h]);
     const dt = 'Supplementary Schedules';
-    const dw = bold.widthOfTextAtSize(dt, 36);
-    dp.drawText(dt, { x: (PAGE.w - dw) / 2, y: PAGE.h / 2 - 18, size: 36, font: bold });
+    const dsz = 27; // reduced 25% from 36 per Jimmy 9/11
+    const dw = bold.widthOfTextAtSize(dt, dsz);
+    dp.drawText(dt, { x: (PAGE.w - dw) / 2, y: PAGE.h / 2 - dsz / 2, size: dsz, font: bold });
     const supFonts = { reg, bold, ital };
     for (const sp of supp) {
       try {
