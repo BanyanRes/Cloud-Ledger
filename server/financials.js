@@ -5160,12 +5160,14 @@ function fundLiabLine(code) {
 // Non-investment, non-cash asset relabels → Weaver's presentation labels.
 function fundAssetLabel(code, name) {
   const c = String(code);
+  if (/^1002/.test(c) || /^1003/.test(c) || /^1005/.test(c) || /^1072/.test(c)) return 'Cash and cash equivalents'; // checking, sweep, restricted, clearing
   if (/^12001/.test(c)) return 'Interest receivable';           // 120010
-  if (/^1011/.test(c) || /^1012/.test(c)) return 'Due from portfolio investments'; // 101100
+  if (/^12002/.test(c)) return 'Capital contributions receivable'; // 120020
+  if (/^1011/.test(c) || /^1012/.test(c)) return 'Due from portfolio investment'; // 101100 (net of Due to portfolio investments)
   if (/^1502/.test(c)) return 'Prepaid advisory fees';          // 150200
   if (/^1503/.test(c)) return 'Prepaid insurance';              // 150300
   if (/^1801/.test(c) || /^1800/.test(c)) return 'Other assets';// 180100
-  return name;
+  return 'Other assets';
 }
 // Cash-flow line label for a working-capital account movement.
 function cfMoveLabel(assetOrLiab, label, delta) {
@@ -5230,16 +5232,27 @@ async function buildFundStatements(opts) {
   if (!isZero(curAssets.investFV) || !isZero(curAssets.investCost)) {
     assetLines.push({ name: 'Portfolio investments, at fair value (cost $' + acctW(curAssets.investCost) + ')', amount: curAssets.investFV, invest: true });
   }
-  const isCashCode0 = code => codeStarts(code, ['1002', '1005', '1072']);
-  const cashTotal = r2(curAssets.rows.filter(r => isCashCode0(r.code)).reduce((s, r) => s + r.amount, 0));
-  if (!isZero(cashTotal)) assetLines.push({ name: 'Cash and cash equivalents', amount: cashTotal });
-  const otherAssetsBS = curAssets.rows.filter(r => !isCashCode0(r.code));
   const assetByLabel = new Map();
-  for (const r of otherAssetsBS) {
+  for (const r of curAssets.rows) {
     const lab = fundAssetLabel(r.code, r.name);
     assetByLabel.set(lab, r2((assetByLabel.get(lab) || 0) + r.amount));
   }
-  for (const [name, amount] of assetByLabel) { if (!isZero(amount)) assetLines.push({ name, amount }); }
+  // Net 'Due to portfolio investments' (portco liability) against the 'Due from
+  // portfolio investment' asset, per Weaver's presentation.
+  let dueToPortfolioBS = 0;
+  for (const r of curMap.values()) {
+    if (r.type !== 'Liability' || isZero(bal(r))) continue;
+    const ll = fundLiabLine(r.code);
+    if (ll && ll.key === 'portco') dueToPortfolioBS = r2(dueToPortfolioBS + bal(r));
+  }
+  if (assetByLabel.has('Due from portfolio investment')) {
+    assetByLabel.set('Due from portfolio investment', r2(assetByLabel.get('Due from portfolio investment') - dueToPortfolioBS));
+  }
+  const FUND_ASSET_ORDER = ['Cash and cash equivalents', 'Interest receivable', 'Due from portfolio investment', 'Deferred development fees', 'Prepaid advisory fees', 'Prepaid insurance', 'Due from affiliates', 'Other assets', 'Capital contributions receivable'];
+  for (const nm of FUND_ASSET_ORDER) {
+    const amt = assetByLabel.get(nm);
+    if (amt != null && !isZero(amt)) assetLines.push({ name: nm, amount: amt });
+  }
   const totalAssets = r2(assetLines.reduce((s, l) => s + l.amount, 0));
 
   // Liabilities: collapse GL accounts into Weaver's presentation lines, in
@@ -5259,6 +5272,7 @@ async function buildFundStatements(opts) {
   }
   const liabLines = [];
   for (const l of FUND_LIAB_LINES) {
+    if (l.key === 'portco') continue; // netted into the 'Due from portfolio investment' asset
     const v = liabByKey.get(l.key);
     if (v && !isZero(v.amount)) liabLines.push({ name: v.label, amount: v.amount });
   }
