@@ -115,16 +115,20 @@ function classifyContributions(db, eid, from, to, gpSet) {
     const cr = Number(r.cr) || 0, dr = Number(r.dr) || 0;
     const net0 = Math.abs(entryNet.get(r.entry_id) || 0) < 1;
     const o = out[r.class_id] || (out[r.class_id] = { contributions: 0, returnOfCapital: 0, transfers: 0, waivedDevFees: 0 });
-    if (f.has_cash) { o.contributions += cr; o.returnOfCapital += -dr; }
+    // Net each investor's contribution-account movement WITHIN a journal entry:
+    // an offsetting call+refund booked together nets out (Weaver presents these
+    // net), while a pure call or pure refund is unaffected.
+    const addNet = (v) => { if (v >= 0) o.contributions += v; else o.returnOfCapital += v; };
+    if (f.has_cash) { addNet(cr - dr); }
     else if (net0 && f.n_classes >= 2 && f.n_classes <= TRANSFER_MAX_CLASSES) { o.transfers += (cr - dr); }
     else if (f.n_classes <= 1) {
       // A non-cash single-class contribution move is a WAIVED DEVELOPMENT FEE only
       // for a GP/promote class (ties to SRN entity 37 acct 34014). The same move on
       // an LP class is a non-cash capital contribution (contribution-in-kind).
       if (gpSet && gpSet.has(Number(r.class_id))) { o.waivedDevFees += (cr - dr); }
-      else { o.contributions += cr; o.returnOfCapital += -dr; }
+      else { addNet(cr - dr); }
     }
-    else { o.contributions += cr; o.returnOfCapital += -dr; }
+    else { addNet(cr - dr); }
   }
   for (const k of Object.keys(out)) {
     const o = out[k];
