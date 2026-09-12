@@ -212,7 +212,12 @@ function buildData(ctx, quarter, opts = {}) {
     contributed: r2(investors.reduce((s, i) => s + i.contributed, 0)),
   };
 
-  return { quarter, entity_id: eid, entity_name: ent ? ent.name : ('entity ' + eid), investors, totals };
+  // Fund investment income for the period (per-investor allocation happens in the
+  // PCAP render, pro-rata to each investor's net loss so the column foots).
+  const revSum = (from, to) => r2(computeBalances(eid, { from, to }).filter((r) => r.type === 'Revenue').reduce((s, r) => s + (Number(r.balance) || 0), 0));
+  const investmentIncome = { ytd: revSum(quarter.year_start, quarter.end), q: isQ1 ? null : revSum(quarter.quarter_start, quarter.end) };
+  if (investmentIncome.q === null) investmentIncome.q = investmentIncome.ytd;
+  return { quarter, entity_id: eid, entity_name: ent ? ent.name : ('entity ' + eid), investors, totals, investmentIncome };
 }
 
 // ─── Workbook ────────────────────────────────────────────────────────────────

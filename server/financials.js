@@ -5714,43 +5714,53 @@ function renderPcapSchedule(pdf, fonts, meta, data) {
   const money = v => acctW(v);       // Weaver shows the capital-accounts schedule in whole dollars
   const LRIGHT = PAGE.h - PAGE.mR;   // landscape right edge
   const LLEFT = PAGE.mL;
-  const yr = String(meta.asOf).slice(0, 4);
+  const [ay, am] = String(meta.asOf).split('-').map(Number);
+  const QSL = { 3: 'January 1', 6: 'April 1', 9: 'July 1', 12: 'October 1' };
+  const qStartLabel = (QSL[am] || 'January 1') + ',\n' + ay;
   const L = makeLayout(pdf, fonts, meta, 'Partners’ Capital Accounts', { landscape: true, dateLine: meta.periodLabel, plainHeader: true });
   L.start();
-  // Column geometry: a narrow Partner # label, then 11 numeric columns.
-  const N = 11;
-  const firstColLeft = LLEFT + 26;               // right edge of the "Partner #" gutter
+  const invs = data.investors || [];
+  const tq = (data.totals && data.totals.q) || null;
+  const showTransfers = tq && !isZero(tq.transfers);
+  // Column headers in Weaver's Q2 order (current quarter): commitments, %,
+  // beginning, contributions, refunds, syndication, waived, investment income,
+  // total expenses, net decrease, [transfers only if any], ending.
+  const headers = [
+    'Capital\nCommitments', '% of\nCommitments', 'Partners’ Capital\nat ' + qStartLabel,
+    'Contributions', 'Capital Call\nRefunds', 'Syndication\nCosts', 'Waived\nDevelopment Fees',
+    'Investment\nIncome', 'Total\nExpenses', 'Net Decrease in\nPartners’ Capital\nResulting from\nOperations',
+  ];
+  if (showTransfers) headers.push('Transfers of\nInterest');
+  headers.push('Partners’ Capital\nat ' + meta.longDate.replace(', ' + ay, ',\n' + ay));
+  const N = headers.length;
+  const firstColLeft = LLEFT + 26;
   const usable = LRIGHT - firstColLeft;
   const wCol = usable / N;
   const cols = []; for (let i = 1; i <= N; i++) cols.push(firstColLeft + i * wCol);
   L.setCols(cols);
-  L.colHeaders([
-    'Capital\nCommitments', '% of\nCommitments', 'Partners’ Capital\nat January 1,\n' + yr,
-    'Contributions', 'Capital Call\nRefunds', 'Syndication\nCosts', 'Waived\nDevelopment Fees',
-    'Total\nExpenses', 'Net Decrease in\nPartners’ Capital\nResulting from\nOperations',
-    'Transfers of\nInterest', 'Partners’ Capital\nat ' + meta.longDate.replace(', ' + yr, ',\n' + yr),
-  ], { bottomAlign: true, underline: true, colBox: true });
-  // "Partner #" header at the far left, aligned to the header baseline.
+  L.colHeaders(headers, { bottomAlign: true, underline: true, colBox: true });
   L.page.drawText('Partner #', { x: LLEFT, y: L.y + 12, size: 7.5, font: bold });
 
   const totalCommit = (data.totals && data.totals.commitment) || 0;
-  const invs = data.investors || [];
+  const fundInvIncome = (data.investmentIncome && data.investmentIncome.q) || 0;
+  const totalNetLoss = tq ? r2((tq.netInvestment || 0) + (tq.managementFee || 0) + (tq.unrealized || 0)) : 0;
+  const dollarCols = []; for (let i = 0; i < N; i++) if (i !== 1) dollarCols.push(i);
   const rowFor = (inv, n, first) => {
-    const y = inv.ytd;
+    const y = inv.q;
     const netLoss = r2((y.netInvestment || 0) + (y.managementFee || 0) + (y.unrealized || 0));
+    const income = totalNetLoss ? r2(fundInvIncome * (netLoss / totalNetLoss)) : 0;
+    const expenses = r2(netLoss - income);
     const pct = totalCommit ? (inv.commitment / totalCommit * 100) : 0;
     const cells = [
       money(inv.commitment), pct.toFixed(4) + '%', money(y.beginning),
       money(y.contributions), money(y.returnOfCapital), money(y.syndication), money(y.waivedDevFees),
-      money(netLoss), money(netLoss), money(y.transfers), money(y.ending),
+      money(income), money(expenses), money(netLoss),
     ];
-    // Reserve the row's height BEFORE stamping the Partner # gutter, so if the
-    // row would push to a new page the break happens first and the number lands
-    // on the same page as its data (Jimmy 9/11: LP # was orphaned on the prior
-    // page at the pg 10 / pg 11 breaks).
+    if (showTransfers) cells.push(money(y.transfers));
+    cells.push(money(y.ending));
     L.ensure(13);
     L.page.drawText(String(n), { x: LLEFT, y: L.y, size: 7.5, font: reg });
-    L.row('', cells, { indent: 0, dollarPrefix: first, dollarCols: [0, 2, 3, 4, 5, 6, 7, 8, 9, 10], valueInset: 2 });
+    L.row('', cells, { indent: 0, dollarPrefix: first, dollarCols, valueInset: 2 });
   };
   let n = 0;
   const lps = invs.filter(i => i.partner_type === 'LP');
@@ -5759,15 +5769,18 @@ function renderPcapSchedule(pdf, fonts, meta, data) {
   lps.forEach((inv, i) => rowFor(inv, ++n, i === 0));
   if (gps.length) { L.space(4); L.row('General Partners', [], { indent: 0, boldRow: true }); }
   gps.forEach((inv, i) => rowFor(inv, ++n, i === 0));
-  // Grand total
-  const t = data.totals && data.totals.ytd;
-  if (t) {
-    const netLoss = r2((t.netInvestment || 0) + (t.managementFee || 0) + (t.unrealized || 0));
-    L.row('Total', [
-      money(data.totals.commitment), '100.0000%', money(t.beginning),
-      money(t.contributions), money(t.returnOfCapital), money(t.syndication), money(t.waivedDevFees),
-      money(netLoss), money(netLoss), money(t.transfers), money(t.ending),
-    ], { indent: 0, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols: [0, 2, 3, 4, 5, 6, 7, 8, 9, 10], valueInset: 2 });
+  if (tq) {
+    const netLoss = totalNetLoss;
+    const income = fundInvIncome;
+    const expenses = r2(netLoss - income);
+    const cells = [
+      money(data.totals.commitment), '100.0000%', money(tq.beginning),
+      money(tq.contributions), money(tq.returnOfCapital), money(tq.syndication), money(tq.waivedDevFees),
+      money(income), money(expenses), money(netLoss),
+    ];
+    if (showTransfers) cells.push(money(tq.transfers));
+    cells.push(money(tq.ending));
+    L.row('Total', cells, { indent: 0, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols, valueInset: 2 });
   }
 }
 
