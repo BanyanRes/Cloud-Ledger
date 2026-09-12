@@ -75,7 +75,7 @@ const sumBal = (rows, set) => r2(rows.filter((r) => inSet(r.code, set)).reduce((
 // contributions / return of capital / transfers / waived development fees, by the
 // composition of each journal entry. Returns { [class_id]: {...} }. `from` null
 // means inception-to-`to`.
-function classifyContributions(db, eid, from, to) {
+function classifyContributions(db, eid, from, to, gpSet) {
   const dateWhere = from ? 'je.date >= ? AND je.date <= ?' : 'je.date <= ?';
   const dateArgs = from ? [from, to] : [to];
   // Entry-level flags for every entry (in the window) that touches a contribution
@@ -117,7 +117,13 @@ function classifyContributions(db, eid, from, to) {
     const o = out[r.class_id] || (out[r.class_id] = { contributions: 0, returnOfCapital: 0, transfers: 0, waivedDevFees: 0 });
     if (f.has_cash) { o.contributions += cr; o.returnOfCapital += -dr; }
     else if (net0 && f.n_classes >= 2 && f.n_classes <= TRANSFER_MAX_CLASSES) { o.transfers += (cr - dr); }
-    else if (f.n_classes <= 1) { o.waivedDevFees += (cr - dr); }
+    else if (f.n_classes <= 1) {
+      // A non-cash single-class contribution move is a WAIVED DEVELOPMENT FEE only
+      // for a GP/promote class (ties to SRN entity 37 acct 34014). The same move on
+      // an LP class is a non-cash capital contribution (contribution-in-kind).
+      if (gpSet && gpSet.has(Number(r.class_id))) { o.waivedDevFees += (cr - dr); }
+      else { o.contributions += cr; o.returnOfCapital += -dr; }
+    }
     else { o.contributions += cr; o.returnOfCapital += -dr; }
   }
   for (const k of Object.keys(out)) {
@@ -158,14 +164,15 @@ function buildData(ctx, quarter, opts = {}) {
   const commitRows = db.prepare('SELECT class_id, commitment_amount FROM investor_commitments WHERE entity_id = ?').all(eid);
   const commitBy = {}; commitRows.forEach((c) => { commitBy[c.class_id] = r2(c.commitment_amount); });
   const carryBy = opts.carryByClass || {};
+  const gpSet = new Set(classes.filter((c) => String(c.partner_type || '').toUpperCase() === 'GP').map((c) => Number(c.id)));
 
   // Classify contribution activity once per period (all classes).
-  const ytdContrib = classifyContributions(db, eid, quarter.year_start, quarter.end);
-  const itdContrib = classifyContributions(db, eid, null, quarter.end);
+  const ytdContrib = classifyContributions(db, eid, quarter.year_start, quarter.end, gpSet);
+  const itdContrib = classifyContributions(db, eid, null, quarter.end, gpSet);
   // Current-quarter split (for the quarter-only PCAP schedule and the two-period
   // Statement of Changes). For Q1 the quarter == the year, so reuse ytdContrib.
   const isQ1 = quarter.quarter === 'Q1';
-  const qContrib = isQ1 ? ytdContrib : classifyContributions(db, eid, quarter.quarter_start, quarter.end);
+  const qContrib = isQ1 ? ytdContrib : classifyContributions(db, eid, quarter.quarter_start, quarter.end, gpSet);
 
   const investors = [];
   for (const c of classes) {
