@@ -168,6 +168,18 @@ export const api = {
     const blob = await res.blob();
     return { blob, filename };
   },
+  getPcapStatementsPdf: async (eid, asOf) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/entities/' + eid + '/pcap-statements.pdf?as_of=' + asOf, { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) { let d = {}; try { d = await res.json(); } catch {} throw new Error(d.error || 'Generate failed'); }
+    const cd = res.headers.get('content-disposition') || '';
+    const mm = cd.match(/filename="?([^"]+)"?/);
+    const filename = mm ? mm[1] : 'CLRF_PCAP_Statements.pdf';
+    const blob = await res.blob();
+    return { blob, filename };
+  },
   getTtmPL: (eid, asOf) => request('/entities/' + eid + '/ttm-pl?as_of=' + asOf),
   analyzeTtmPL: async (eid, asOf) => {
     const token = getToken();

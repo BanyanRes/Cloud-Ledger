@@ -901,6 +901,7 @@ export default function App(){
       {id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
       ...(!isCLRF?[{id:'ttm',label:'Trailing 12 Months',icon:'📈',section:'reports'}]:[]),
       {id:'fundrep',label:'Fund Reporting',icon:'🏦',section:'reports'},
+      ...(isCLRF?[{id:'rep_pcapstmt',label:'PCAP Statements',icon:'📄',section:'reports'}]:[]),
       {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},
       ...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),
       {id:'commitments',label:'Commitments',icon:'🤝',section:'reports'},
@@ -1019,6 +1020,7 @@ export default function App(){
         {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
         {page==='fundrep'&&activeEntity&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
+        {page==='rep_pcapstmt'&&activeEntity&&isCLRF&&<PcapStatementsReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-ps-'+rk}/>}
       </>})()}</div></div>
     {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
@@ -5708,6 +5710,34 @@ function MgmtFeeWorkpaper({entityId,entityName,canEdit=true}){
 }
 
 // ═══ Fund Reporting — CLRF-style LP fund statement package (config + generate) ═══
+function PcapStatementsReport({entityId,entityName}){
+  const[asOf,setAsOf]=useState(today());
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const genPdf=async()=>{
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(asOf)){setErr('Pick a quarter-end date (e.g. 2026-06-30)');return;}
+    setBusy(true);setErr('');
+    try{const out=await api.getPcapStatementsPdf(entityId,asOf);if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);}
+    catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+  return(<div>
+    <div style={{marginBottom:8}}>
+      <div style={S.h1}>PCAP Statements</div>
+      <div style={S.sub}>Per-investor Statement of Changes in Capital (commitment summary plus year-to-date and inception-to-date roll-forward), one card per investor &middot; {entityName}</div>
+    </div>
+    {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
+    <div style={{...S.card}}>
+      <div style={S.h2}>Generate PCAP statements</div>
+      <div style={{display:'flex',gap:10,alignItems:'flex-end',marginTop:10,flexWrap:'wrap'}}>
+        <div><label style={S.label}>As of (quarter-end)</label><input type='date' value={asOf} onChange={e=>setAsOf(e.target.value)} style={{...S.input,width:170}}/></div>
+        <button style={{...S.btnP,opacity:busy?0.6:1}} disabled={busy} onClick={genPdf}>{busy?'Generating…':'Generate PDF'}</button>
+      </div>
+      <div style={{fontSize:12,color:T.textMuted,marginTop:8}}>One page per investor. Amounts come from the general ledger by investor class and tie to the fund Statement of Changes in Partners' Capital.</div>
+    </div>
+  </div>);
+}
+
 function FundReporting({entityId,entityName}){
   const[asOf,setAsOf]=useState(today());
   const[busy,setBusy]=useState(false);

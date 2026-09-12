@@ -405,6 +405,68 @@ function findWorkpaper(ctx, eid, quarterEnd) {
   return Object.assign({}, row, { quarter, abs_path: path.join(ctx.workpapersDir, String(eid), row.stored_filename) });
 }
 
+// ── Per-investor PCAP statements as a PDF (fund-administrator card format) ─────
+// One "Statement of Changes in Capital" card per investor (commitment summary +
+// year-to-date and inception-to-date roll-forward via STMT_LINES), matching the
+// administrator's per-investor package. Sourced entirely from buildData().
+async function renderStatementsPdf(data, opts = {}) {
+  const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+  const q = data.quarter;
+  const fundName = opts.fundName || data.entity_name || 'County Line Rail Fund';
+  const pdf = await PDFDocument.create();
+  const reg = await pdf.embedFont(StandardFonts.TimesRoman);
+  const bold = await pdf.embedFont(StandardFonts.TimesRomanBold);
+  const ital = await pdf.embedFont(StandardFonts.TimesRomanItalic);
+  const W = 612, PH = 792, mL = 72, mR = 72, RIGHT = W - mR;
+  const cYTD = RIGHT - 120, cITD = RIGHT;
+  const money = (v) => { const n = Math.round(Number(v) || 0); if (n === 0) return '-'; const s = Math.abs(n).toLocaleString('en-US'); return n < 0 ? '(' + s + ')' : s; };
+  const pctf = (f) => ((Number(f) || 0) * 100).toFixed(2) + '%';
+  const ctr = (page, txt, y, font, size) => { const w = font.widthOfTextAtSize(txt, size); page.drawText(txt, { x: (W - w) / 2, y, size, font }); };
+  const rt = (page, txt, xR, y, font, size) => { const w = font.widthOfTextAtSize(txt, size); page.drawText(txt, { x: xR - w, y, size, font }); };
+  const rule = (page, x0, x1, y) => page.drawLine({ start: { x: x0, y }, end: { x: x1, y }, thickness: 0.5, color: rgb(0.2, 0.2, 0.2) });
+  const invs = (data.investors || []).slice().sort((a, b) => (a.partner_type === b.partner_type ? 0 : a.partner_type === 'LP' ? -1 : 1) || String(a.name).localeCompare(String(b.name)));
+  for (const inv of invs) {
+    const page = pdf.addPage([W, PH]);
+    let y = PH - 70;
+    ctr(page, fundName, y, bold, 11); y -= 15;
+    ctr(page, 'STATEMENT OF CHANGES IN CAPITAL', y, bold, 11); y -= 15;
+    ctr(page, 'For the Quarter Ended ' + spellQuarterEnd(q.end), y, reg, 10); y -= 13;
+    ctr(page, 'These amounts are not to be used for income tax purposes', y, ital, 9); y -= 28;
+    page.drawText('Investor Name: ' + inv.name, { x: mL, y, size: 10, font: bold }); y -= 13;
+    page.drawText(inv.partner_type === 'GP' ? 'General Partner' : 'Limited Partner', { x: mL, y, size: 9, font: ital }); y -= 24;
+    page.drawText('Capital Commitment Summary', { x: mL, y, size: 10, font: bold });
+    rt(page, 'Amount', cITD, y, bold, 10); y -= 14;
+    const crows = [['Capital Commitment', 1, inv.commitment], ['Contributed capital', -(inv.pct_contributed || 0), -(inv.contributed || 0)], ['Unfunded commitment', inv.pct_unfunded || 0, inv.unfunded || 0]];
+    crows.forEach((rw, i) => {
+      page.drawText(rw[0], { x: mL + 10, y, size: 10, font: reg });
+      rt(page, pctf(rw[1]), cYTD, y, reg, 10);
+      rt(page, money(rw[2]), cITD, y, reg, 10);
+      if (i === 2) rule(page, mL, cITD, y - 3);
+      y -= 14;
+    });
+    y -= 12;
+    page.drawText('Capital Summary', { x: mL, y, size: 10, font: bold });
+    rt(page, 'Year-to-Date', cYTD, y, bold, 9);
+    rt(page, 'Inception-to-Date', cITD, y, bold, 9); y -= 14;
+    for (const line of STMT_LINES) {
+      const vy = inv.ytd[line.key], vi = inv.itd[line.key];
+      if (!line.always && !line.rule && Math.abs(vy || 0) < 0.005 && Math.abs(vi || 0) < 0.005) continue;
+      const f = line.bold ? bold : reg;
+      if (line.rule) rule(page, cYTD - 62, cITD, y + 11);
+      let ls = 9;
+      while (ls > 6.5 && (mL + 10 + f.widthOfTextAtSize(line.label, ls)) > (cYTD - 66)) ls -= 0.5;
+      page.drawText(line.label, { x: mL + 10, y, size: ls, font: f });
+      rt(page, money(vy), cYTD, y, f, 10);
+      rt(page, money(vi), cITD, y, f, 10);
+      if (line.key === 'ending') { rule(page, cYTD - 62, cITD, y - 3); rule(page, cYTD - 62, cITD, y - 5); }
+      y -= 14;
+    }
+    y -= 18;
+    page.drawText('No Assurance Provided.', { x: mL, y, size: 9, font: ital });
+  }
+  return await pdf.save();
+}
+
 function registerPcapRoutes(app, ctx) {
   const { auth, requireEntityAccess, requireRole } = ctx;
   app.post('/api/workpapers/pcap/:entity_id/generate', auth, requireEntityAccess('entity_id'),
@@ -430,7 +492,28 @@ function registerPcapRoutes(app, ctx) {
         res.status(400).json({ error: e.message });
       }
     });
+
+  // Per-investor PCAP statements as a PDF (Reports > PCAP Statements).
+  app.get('/api/entities/:eid/pcap-statements.pdf', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), async (req, res) => {
+    try {
+      const eid = Number(req.params.eid);
+      const asOf = req.query && req.query.as_of;
+      if (!asOf || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
+      const quarter = resolveQuarter(asOf);
+      const ent = ctx.db.prepare('SELECT name FROM entities WHERE id = ?').get(eid);
+      const legal = { 'County Line Rail Fund': 'County Line Rail Fund I, LP' };
+      const fundName = (ent && legal[ent.name]) || (ent && ent.name) || 'County Line Rail Fund I, LP';
+      const data = buildData(ctx, quarter, { entity_id: eid });
+      const bytes = await renderStatementsPdf(data, { fundName });
+      const fname = 'CLRF_PCAP_Statements_' + quarter.label + '.pdf';
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
+      res.send(Buffer.from(bytes));
+    } catch (e) {
+      res.status(400).json({ error: e.message });
+    }
+  });
 }
 
 module.exports = { resolveQuarter, buildData, buildWorkbook, periodColumn, classifyContributions,
-  saveToWorkpapers, findWorkpaper, registerPcapRoutes, FUND_EID, EQUITY_ACCTS };
+  saveToWorkpapers, findWorkpaper, registerPcapRoutes, renderStatementsPdf, FUND_EID, EQUITY_ACCTS };
