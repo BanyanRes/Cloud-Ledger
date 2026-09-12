@@ -424,7 +424,7 @@ function registerPcapRoutes(app, ctx) {
           quarter: quarter.label, saved_to: saved.folder_path + '/' + saved.original_name, replaced: saved.replaced,
           investors: data.totals.count, ytd_contributions: data.totals.ytd.contributions,
           ytd_ending: data.totals.ytd.ending, commitment: data.totals.commitment,
-        }).replace(/[\r\n]/g, ' '));
+        }).replace(/[^\x20-\x7E]/g, ' '));
         res.send(buf);
       } catch (e) {
         res.status(400).json({ error: e.message });
