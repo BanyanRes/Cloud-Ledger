@@ -460,13 +460,13 @@ async function renderStatementsPdf(data, opts = {}) {
       const vy = inv.ytd[line.key], vi = inv.itd[line.key];
       if (!line.always && !line.rule && Math.abs(vy || 0) < 0.005 && Math.abs(vi || 0) < 0.005) continue;
       const f = line.bold ? bold : reg;
-      if (line.rule) rule(page, cYTD - 62, cITD, y + 11);
+      if (line.rule) { rule(page, cYTD - 64, cYTD, y + 11); rule(page, cITD - 64, cITD, y + 11); }   // single rule above (two segments, per column)
       let ls = 9;
       while (ls > 6.5 && (mL + 10 + f.widthOfTextAtSize(line.label, ls)) > (cYTD - 66)) ls -= 0.5;
       page.drawText(line.label, { x: mL + 10, y, size: ls, font: f });
       rt(page, money(vy), cYTD, y, f, 10);
       rt(page, money(vi), cITD, y, f, 10);
-      if (line.key === 'ending') { rule(page, cYTD - 62, cITD, y - 3); rule(page, cYTD - 62, cITD, y - 5); }
+      if (line.key === 'ending') { rule(page, cYTD - 64, cYTD, y - 3); rule(page, cYTD - 64, cYTD, y - 5); rule(page, cITD - 64, cITD, y - 3); rule(page, cITD - 64, cITD, y - 5); }   // double rule below (two segments, per column)
       y -= 14;
     }
     // Contact information, bottom-left of the page
