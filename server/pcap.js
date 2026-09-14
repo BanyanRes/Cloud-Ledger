@@ -445,11 +445,11 @@ async function renderStatementsPdf(data, opts = {}) {
     rt(page, 'Amount', cITD, y, bold, 10); y -= 14;
     const crows = [['Capital Commitment', 1, inv.commitment], ['Contributed capital', -(inv.pct_contributed || 0), -(inv.contributed || 0)], ['Unfunded commitment', inv.pct_unfunded || 0, inv.unfunded || 0]];
     crows.forEach((rw, i) => {
-      if (i === 2) rule(page, cITD - 64, cITD, y + 11);            // single rule above the Unfunded commitment total
+      if (i === 2) { rule(page, cYTD - 48, cYTD, y + 11); rule(page, cITD - 64, cITD, y + 11); }   // single rule above the total (% and Amount)
       page.drawText(rw[0], { x: mL + 10, y, size: 10, font: reg });
       rt(page, pctf(rw[1]), cYTD, y, reg, 10);
       rt(page, money(rw[2]), cITD, y, reg, 10);
-      if (i === 2) { rule(page, cITD - 64, cITD, y - 3); rule(page, cITD - 64, cITD, y - 5); }  // double rule below the total
+      if (i === 2) { rule(page, cYTD - 48, cYTD, y - 3); rule(page, cYTD - 48, cYTD, y - 5); rule(page, cITD - 64, cITD, y - 3); rule(page, cITD - 64, cITD, y - 5); }  // double rule below the total (% and Amount)
       y -= 14;
     });
     y -= 12;
