@@ -420,7 +420,7 @@ async function renderStatementsPdf(data, opts = {}) {
   let logo = null;
   try { logo = await pdf.embedPng(fs.readFileSync(path.join(__dirname, 'assets', 'clr-logo.png'))); } catch (e) { logo = null; }
   const W = 612, PH = 792, mL = 72, mR = 72, RIGHT = W - mR;
-  const cYTD = RIGHT - 120, cITD = RIGHT;
+  const cYTD = RIGHT - 100, cITD = RIGHT;
   const money = (v) => { const n = Math.round(Number(v) || 0); if (n === 0) return '-'; const s = Math.abs(n).toLocaleString('en-US'); return n < 0 ? '(' + s + ')' : s; };
   const pctf = (f) => ((Number(f) || 0) * 100).toFixed(2) + '%';
   const ctr = (page, txt, y, font, size) => { const w = font.widthOfTextAtSize(txt, size); page.drawText(txt, { x: (W - w) / 2, y, size, font }); };
@@ -439,10 +439,10 @@ async function renderStatementsPdf(data, opts = {}) {
     ctr(page, fundName, y, bold, 13.75); y -= 24;
     ctr(page, 'STATEMENT OF CHANGES IN CAPITAL', y, bold, 11); y -= 15;
     ctr(page, 'For the Quarter Ended ' + spellQuarterEnd(q.end), y, reg, 10); y -= 13;
-    ctr(page, 'These amounts are not to be used for income tax purposes', y, ital, 9); y -= 28;
-    page.drawText('Investor Name: ' + inv.name, { x: mL, y, size: 10, font: bold }); y -= 22;
+    ctr(page, 'These amounts are not to be used for income tax purposes', y, ital, 9); y -= 34;
+    page.drawText('Investor Name: ' + inv.name, { x: mL, y, size: 10, font: bold }); y -= 28;
     page.drawText('Capital Commitment Summary', { x: mL, y, size: 10, font: bold });
-    rt(page, 'Amount', cITD, y, bold, 10); y -= 14;
+    rt(page, 'Amount', cITD, y, bold, 10); y -= 16;
     const crows = [['Capital Commitment', 1, inv.commitment], ['Contributed capital', -(inv.pct_contributed || 0), -(inv.contributed || 0)], ['Unfunded commitment', inv.pct_unfunded || 0, inv.unfunded || 0]];
     crows.forEach((rw, i) => {
       if (i === 2) { rule(page, cYTD - 48, cYTD, y + 11); rule(page, cITD - 64, cITD, y + 11); }   // single rule above the total (% and Amount)
@@ -450,12 +450,12 @@ async function renderStatementsPdf(data, opts = {}) {
       rt(page, pctf(rw[1]), cYTD, y, reg, 10);
       rt(page, money(rw[2]), cITD, y, reg, 10);
       if (i === 2) { rule(page, cYTD - 48, cYTD, y - 3); rule(page, cYTD - 48, cYTD, y - 5); rule(page, cITD - 64, cITD, y - 3); rule(page, cITD - 64, cITD, y - 5); }  // double rule below the total (% and Amount)
-      y -= 14;
+      y -= 16;
     });
-    y -= 12;
+    y -= 24;
     page.drawText('Capital Summary', { x: mL, y, size: 10, font: bold });
     rt(page, 'Year-to-Date', cYTD, y, bold, 9);
-    rt(page, 'Inception-to-Date', cITD, y, bold, 9); y -= 14;
+    rt(page, 'Inception-to-Date', cITD, y, bold, 9); y -= 16;
     for (const line of STMT_LINES) {
       const vy = inv.ytd[line.key], vi = inv.itd[line.key];
       if (!line.always && !line.rule && Math.abs(vy || 0) < 0.005 && Math.abs(vi || 0) < 0.005) continue;
@@ -467,7 +467,7 @@ async function renderStatementsPdf(data, opts = {}) {
       rt(page, money(vy), cYTD, y, f, 10);
       rt(page, money(vi), cITD, y, f, 10);
       if (line.key === 'ending') { rule(page, cYTD - 64, cYTD, y - 3); rule(page, cYTD - 64, cYTD, y - 5); rule(page, cITD - 64, cITD, y - 3); rule(page, cITD - 64, cITD, y - 5); }   // double rule below (two segments, per column)
-      y -= 14;
+      y -= 16;
     }
     // Contact information, bottom-left of the page
     const cy = 100;
