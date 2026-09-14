@@ -417,6 +417,8 @@ async function renderStatementsPdf(data, opts = {}) {
   const reg = await pdf.embedFont(StandardFonts.TimesRoman);
   const bold = await pdf.embedFont(StandardFonts.TimesRomanBold);
   const ital = await pdf.embedFont(StandardFonts.TimesRomanItalic);
+  let logo = null;
+  try { logo = await pdf.embedPng(fs.readFileSync(path.join(__dirname, 'assets', 'clr-logo.png'))); } catch (e) { logo = null; }
   const W = 612, PH = 792, mL = 72, mR = 72, RIGHT = W - mR;
   const cYTD = RIGHT - 120, cITD = RIGHT;
   const money = (v) => { const n = Math.round(Number(v) || 0); if (n === 0) return '-'; const s = Math.abs(n).toLocaleString('en-US'); return n < 0 ? '(' + s + ')' : s; };
@@ -428,6 +430,11 @@ async function renderStatementsPdf(data, opts = {}) {
   for (const inv of invs) {
     const page = pdf.addPage([W, PH]);
     let y = PH - 70;
+    if (logo) {
+      const lw = 160, lh = lw * (logo.height / logo.width);
+      page.drawImage(logo, { x: (W - lw) / 2, y: PH - 26 - lh, width: lw, height: lh });
+      y = PH - 26 - lh - 18;
+    }
     ctr(page, fundName, y, bold, 11); y -= 15;
     ctr(page, 'STATEMENT OF CHANGES IN CAPITAL', y, bold, 11); y -= 15;
     ctr(page, 'For the Quarter Ended ' + spellQuarterEnd(q.end), y, reg, 10); y -= 13;
