@@ -410,7 +410,7 @@ function findWorkpaper(ctx, eid, quarterEnd) {
 // year-to-date and inception-to-date roll-forward via STMT_LINES), matching the
 // administrator's per-investor package. Sourced entirely from buildData().
 async function renderStatementsPdf(data, opts = {}) {
-  const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+  const { PDFDocument, StandardFonts, rgb, PDFString } = require('pdf-lib');
   const q = data.quarter;
   const fundName = opts.fundName || data.entity_name || 'County Line Rail Fund';
   const pdf = await PDFDocument.create();
@@ -427,15 +427,16 @@ async function renderStatementsPdf(data, opts = {}) {
   const rt = (page, txt, xR, y, font, size) => { const w = font.widthOfTextAtSize(txt, size); page.drawText(txt, { x: xR - w, y, size, font }); };
   const rule = (page, x0, x1, y) => page.drawLine({ start: { x: x0, y }, end: { x: x1, y }, thickness: 0.5, color: rgb(0.2, 0.2, 0.2) });
   const invs = (data.investors || []).slice().sort((a, b) => (a.partner_type === b.partner_type ? 0 : a.partner_type === 'LP' ? -1 : 1) || String(a.name).localeCompare(String(b.name)));
-  for (const inv of invs) {
+  const invsRender = (opts.limit && opts.limit > 0) ? invs.slice(0, opts.limit) : invs;
+  for (const inv of invsRender) {
     const page = pdf.addPage([W, PH]);
-    let y = PH - 70;
+    let y = PH - 60;
     if (logo) {
-      const lw = 160, lh = lw * (logo.height / logo.width);
+      const lw = 80, lh = lw * (logo.height / logo.width);
       page.drawImage(logo, { x: (W - lw) / 2, y: PH - 26 - lh, width: lw, height: lh });
-      y = PH - 26 - lh - 18;
+      y = PH - 26 - lh - 20;
     }
-    ctr(page, fundName, y, bold, 11); y -= 15;
+    ctr(page, fundName, y, bold, 13.75); y -= 24;
     ctr(page, 'STATEMENT OF CHANGES IN CAPITAL', y, bold, 11); y -= 15;
     ctr(page, 'For the Quarter Ended ' + spellQuarterEnd(q.end), y, reg, 10); y -= 13;
     ctr(page, 'These amounts are not to be used for income tax purposes', y, ital, 9); y -= 28;
@@ -468,8 +469,24 @@ async function renderStatementsPdf(data, opts = {}) {
       if (line.key === 'ending') { rule(page, cYTD - 62, cITD, y - 3); rule(page, cYTD - 62, cITD, y - 5); }
       y -= 14;
     }
-    y -= 18;
-    page.drawText('No Assurance Provided.', { x: mL, y, size: 9, font: ital });
+    // Contact information, bottom-left of the page
+    const cy = 100;
+    page.drawText('Contact Information:', { x: mL, y: cy, size: 10, font: reg });
+    rule(page, mL, mL + reg.widthOfTextAtSize('Contact Information:', 10), cy - 2);
+    const eLbl = 'Email: ';
+    page.drawText(eLbl, { x: mL, y: cy - 16, size: 10, font: reg });
+    const eX = mL + reg.widthOfTextAtSize(eLbl, 10);
+    const email = 'countylinerail@Weaver.com';
+    const eW = reg.widthOfTextAtSize(email, 10);
+    page.drawText(email, { x: eX, y: cy - 16, size: 10, font: reg, color: rgb(0, 0, 0.8) });
+    page.drawLine({ start: { x: eX, y: cy - 18 }, end: { x: eX + eW, y: cy - 18 }, thickness: 0.5, color: rgb(0, 0, 0.8) });
+    try {
+      const linkAnnot = pdf.context.register(pdf.context.obj({
+        Type: 'Annot', Subtype: 'Link', Rect: [eX, cy - 18, eX + eW, cy - 5], Border: [0, 0, 0],
+        A: pdf.context.obj({ Type: 'Action', S: 'URI', URI: PDFString.of('mailto:countylinerail@Weaver.com') }),
+      }));
+      page.node.addAnnot(linkAnnot);
+    } catch (e) { /* link annotation optional */ }
   }
   return await pdf.save();
 }
@@ -511,7 +528,8 @@ function registerPcapRoutes(app, ctx) {
       const legal = { 'County Line Rail Fund': 'County Line Rail Fund I, LP' };
       const fundName = (ent && legal[ent.name]) || (ent && ent.name) || 'County Line Rail Fund I, LP';
       const data = buildData(ctx, quarter, { entity_id: eid });
-      const bytes = await renderStatementsPdf(data, { fundName });
+      const limit = (req.query && req.query.limit) ? Number(req.query.limit) : null;
+      const bytes = await renderStatementsPdf(data, { fundName, limit });
       const fname = 'CLRF_PCAP_Statements_' + quarter.label + '.pdf';
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
