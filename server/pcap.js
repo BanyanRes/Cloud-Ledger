@@ -195,6 +195,41 @@ function buildData(ctx, quarter, opts = {}) {
       ytd, itd, q,
     });
   }
+  // ── Roster corrections & transfer-of-interest presentation ──────────────────
+  // Merge renamed/stray classes into their surviving investor (source folded into
+  // target, source dropped), and present transfers of interest within
+  // Contributions (no separate 'Transfers of interest' line). Merging a transferor
+  // into its transferee nets that transfer to zero automatically, so the surviving
+  // investor shows the interest as ordinary contributions and totals still foot.
+  const MERGE = {
+    'James Bloomingdale': 'James and Natalie Bloomingdale',
+    'Terminal Refrigerating & Warehousing Corp.': 'Palmatum HR Illiquid, LLC',
+  };
+  const MCOLS = ['ytd', 'itd', 'q'];
+  const MFIELDS = ['beginning', 'contributions', 'returnOfCapital', 'transfers', 'waivedDevFees',
+    'syndication', 'netInvestment', 'managementFee', 'unrealized', 'endingBeforeCarry', 'carryRealloc', 'ending'];
+  const byName = new Map(investors.map((i) => [i.name, i]));
+  for (const [srcName, tgtName] of Object.entries(MERGE)) {
+    const src = byName.get(srcName); if (!src) continue;
+    const tgt = byName.get(tgtName);
+    if (tgt) {
+      for (const col of MCOLS) for (const f of MFIELDS) tgt[col][f] = r2((tgt[col][f] || 0) + (src[col][f] || 0));
+      tgt.commitment = r2(tgt.commitment + src.commitment);
+      tgt.contributed = r2(tgt.contributed + src.contributed);
+    }
+    const ix = investors.indexOf(src); if (ix >= 0) investors.splice(ix, 1);
+    byName.delete(srcName);
+  }
+  // Fold transfers of interest into Contributions everywhere (removes the line).
+  for (const i of investors) for (const col of MCOLS) {
+    if (i[col].transfers) { i[col].contributions = r2(i[col].contributions + i[col].transfers); i[col].transfers = 0; }
+  }
+  // Recompute unfunded / percentages for any merged target.
+  for (const i of investors) {
+    i.unfunded = r2(i.commitment - i.contributed);
+    i.pct_contributed = i.commitment ? i.contributed / i.commitment : 0;
+    i.pct_unfunded = i.commitment ? i.unfunded / i.commitment : 0;
+  }
   investors.sort((a, b) => (a.partner_type === b.partner_type ? 0 : a.partner_type === 'LP' ? -1 : 1)
     || String(a.name).localeCompare(String(b.name)));
 
