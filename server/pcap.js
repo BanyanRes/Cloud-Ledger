@@ -440,16 +440,16 @@ async function renderStatementsPdf(data, opts = {}) {
     ctr(page, 'STATEMENT OF CHANGES IN CAPITAL', y, bold, 11); y -= 15;
     ctr(page, 'For the Quarter Ended ' + spellQuarterEnd(q.end), y, reg, 10); y -= 13;
     ctr(page, 'These amounts are not to be used for income tax purposes', y, ital, 9); y -= 28;
-    page.drawText('Investor Name: ' + inv.name, { x: mL, y, size: 10, font: bold }); y -= 13;
-    page.drawText(inv.partner_type === 'GP' ? 'General Partner' : 'Limited Partner', { x: mL, y, size: 9, font: ital }); y -= 24;
+    page.drawText('Investor Name: ' + inv.name, { x: mL, y, size: 10, font: bold }); y -= 22;
     page.drawText('Capital Commitment Summary', { x: mL, y, size: 10, font: bold });
     rt(page, 'Amount', cITD, y, bold, 10); y -= 14;
     const crows = [['Capital Commitment', 1, inv.commitment], ['Contributed capital', -(inv.pct_contributed || 0), -(inv.contributed || 0)], ['Unfunded commitment', inv.pct_unfunded || 0, inv.unfunded || 0]];
     crows.forEach((rw, i) => {
+      if (i === 2) rule(page, cITD - 64, cITD, y + 11);            // single rule above the Unfunded commitment total
       page.drawText(rw[0], { x: mL + 10, y, size: 10, font: reg });
       rt(page, pctf(rw[1]), cYTD, y, reg, 10);
       rt(page, money(rw[2]), cITD, y, reg, 10);
-      if (i === 2) rule(page, mL, cITD, y - 3);
+      if (i === 2) { rule(page, cITD - 64, cITD, y - 3); rule(page, cITD - 64, cITD, y - 5); }  // double rule below the total
       y -= 14;
     });
     y -= 12;
