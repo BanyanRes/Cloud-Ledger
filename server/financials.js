@@ -5954,7 +5954,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     const L = makeLayout(pdf, fonts, m, title, { dateLine: faceLine, plainHeader: true });
     track(title);
     L.start();
-    L.setCols(two ? [RIGHT - 150, RIGHT] : oneCol);
+    L.setCols(two ? [RIGHT - 95, RIGHT] : oneCol);
     const vals = (o2) => two ? [money(o2.cur), money(o2.ytd)] : [money(o2.ytd)];
     if (two) L.colHeaders(['Current Period', 'Year-to-Date'], { bottomAlign: true, underline: true, colBox: true });
     L.sectionTitle('Investment income:');
@@ -5975,14 +5975,14 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     const L = makeLayout(pdf, fonts, m, changesTitle, { dateLine: faceLine, plainHeader: true });
     track(changesTitle);
     L.start();
-    const c1 = RIGHT - 258, c2 = RIGHT - 140, c3 = RIGHT;
+    const c1 = RIGHT - 190, c2 = RIGHT - 95, c3 = RIGHT;
     L.setCols([c1, c2, c3]);
     // "Partners' Capital" spanning super-header over the General/Limited
     // Partners heading boxes only (not the Total column). Each colBox heading is
     // centered in a box of width (pitch-gutter) ending at its column edge; the
     // GP box starts at c1-104 and the LP box ends at c2, so the super-header rule
     // runs from the GP box's left edge to the LP column edge.
-    { const stop = L.y; const spanL = c1 - 104, spanR = c2; const sw = bold.widthOfTextAtSize(partnersCap, 9);
+    { const stop = L.y; const spanL = c1 - 81, spanR = c2; const sw = bold.widthOfTextAtSize(partnersCap, 9);
       L.page.drawText(partnersCap, { x: (spanL + spanR) / 2 - sw / 2, y: stop, size: 9, font: bold });
       L.page.drawLine({ start: { x: spanL, y: stop - 3 }, end: { x: spanR, y: stop - 3 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) }); L.y = stop - 15; }
     L.colHeaders(['General Partners', 'Limited Partners', 'Total'], { bottomAlign: true, underline: true, colBox: true });
@@ -6018,7 +6018,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     const L = makeLayout(pdf, fonts, m, title, { dateLine: faceLine, plainHeader: true });
     track(title);
     L.start();
-    L.setCols(two ? [RIGHT - 150, RIGHT] : oneCol);
+    L.setCols(two ? [RIGHT - 95, RIGHT] : oneCol);
     const vv = (o2) => two ? [money(o2.cur), money(o2.ytd)] : [money(o2.ytd)];
     if (two) L.colHeaders(['Current Period', 'Year-to-Date'], { bottomAlign: true, underline: true, colBox: true });
     L.sectionTitle('Operating activities:');
