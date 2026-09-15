@@ -7327,38 +7327,59 @@ app.post('/api/billcom/attach-invoices/:entity_id', auth, requireEntityAccess('e
  }
 });
 
-// Un-sync: remove every CloudLedger journal entry that a Bill.com sync created
-// for this entity, and clear the entity's sync log so a subsequent (corrected)
-// sync re-pulls from scratch. Scoped STRICTLY to entries recorded in
-// billcom_sync_log with a cl_entry_id — GL-import entries and manual JEs are
-// never touched because they have no sync-log row. Use case: a sync ran with
-// the wrong cutoff and duplicated invoices already present from a GL import.
+// Un-sync: remove CloudLedger journal entries that a Bill.com sync created for
+// this entity, and clear the matching sync-log rows so a subsequent (corrected)
+// sync re-pulls. Scoped STRICTLY to entries recorded in billcom_sync_log with a
+// cl_entry_id — GL-import entries and manual JEs are never touched because they
+// have no sync-log row.
+//
+// Two modes, chosen by the optional `as_of` (YYYY-MM-DD) in the body:
+//   • No as_of  -> FULL RESET. Every sync-created JE is removed and the entire
+//     sync log for the entity is cleared, so a re-sync re-pulls from scratch.
+//     Use case: a sync ran with the wrong cutoff and duplicated invoices.
+//   • With as_of -> ROLL BACK to that date. Only sync-created JEs dated STRICTLY
+//     AFTER as_of are removed, and only their own sync-log rows are cleared.
+//     Everything dated on/before as_of stays synced and stays deduped, so a
+//     re-sync re-pulls only what came after as_of. Date compare is lexical,
+//     which is exact for 'YYYY-MM-DD' TEXT dates.
 app.post('/api/billcom/unsync/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
   const entityId = parseInt(req.params.entity_id);
   const dryRun = !!(req.body && req.body.dry_run);
+  const rawAsOf = req.body && typeof req.body.as_of === 'string' ? req.body.as_of.trim() : '';
+  const asOf = /^\d{4}-\d{2}-\d{2}$/.test(rawAsOf) ? rawAsOf : null;
   // Every JE this entity's sync created, via the authoritative link column.
   const linked = db.prepare(
     "SELECT DISTINCT cl_entry_id FROM billcom_sync_log WHERE entity_id = ? AND cl_entry_id IS NOT NULL"
   ).all(entityId).map(r => r.cl_entry_id);
   // Only those that still exist as JEs on THIS entity (defensive: never delete
-  // an id that isn't actually this entity's journal entry).
-  const existing = linked.filter(id => db.prepare('SELECT 1 FROM journal_entries WHERE id = ? AND entity_id = ?').get(id, entityId));
+  // an id that isn't actually this entity's journal entry), and — when a
+  // roll-back date is given — only those dated strictly after it.
+  const existing = linked.filter(id => {
+    const je = db.prepare('SELECT date FROM journal_entries WHERE id = ? AND entity_id = ?').get(id, entityId);
+    if (!je) return false;
+    if (asOf && !(String(je.date) > asOf)) return false;
+    return true;
+  });
   if (dryRun) {
-    return res.json({ dry_run: true, entity_id: entityId, would_delete_entries: existing.length, sync_log_rows: db.prepare('SELECT COUNT(*) c FROM billcom_sync_log WHERE entity_id = ?').get(entityId).c });
+    return res.json({ dry_run: true, entity_id: entityId, as_of: asOf, would_delete_entries: existing.length, sync_log_rows: db.prepare('SELECT COUNT(*) c FROM billcom_sync_log WHERE entity_id = ?').get(entityId).c });
   }
   let deleted = 0;
   const tx = db.transaction(() => {
+    const delLogRow = db.prepare('DELETE FROM billcom_sync_log WHERE entity_id = ? AND cl_entry_id = ?');
     for (const id of existing) {
       const atts = db.prepare('SELECT filename FROM journal_attachments WHERE entry_id = ?').all(id);
       atts.forEach(a => { try { fs.unlinkSync(path.join(UPLOAD_DIR, a.filename)); } catch {} });
       db.prepare('DELETE FROM journal_entries WHERE id = ? AND entity_id = ?').run(id, entityId);
+      // Roll-back mode clears only this JE's sync-log rows so entries on/before
+      // as_of stay deduped; full-reset mode clears the whole log below instead.
+      if (asOf) delLogRow.run(entityId, id);
       deleted++;
     }
-    // Clear the sync log so dedup doesn't block a corrected re-sync.
-    db.prepare('DELETE FROM billcom_sync_log WHERE entity_id = ?').run(entityId);
+    // Full reset only: clear the whole log so dedup doesn't block a corrected re-sync.
+    if (!asOf) db.prepare('DELETE FROM billcom_sync_log WHERE entity_id = ?').run(entityId);
   });
   tx();
-  res.json({ success: true, entity_id: entityId, deleted_entries: deleted, sync_log_cleared: true });
+  res.json({ success: true, entity_id: entityId, as_of: asOf, deleted_entries: deleted, sync_log_cleared: !asOf });
 });
 
 // posts the QBO-style clearing-account flow and returns a structured result.

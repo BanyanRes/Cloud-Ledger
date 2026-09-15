@@ -1347,6 +1347,7 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
   const[defaultClearingAcct,setDefaultClearingAcct]=useState('');
   const[syncCutoffDate,setSyncCutoffDate]=useState(''); // only sync invoices dated on/after this
   const[unsyncing,setUnsyncing]=useState(false);
+  const[unsyncAsOf,setUnsyncAsOf]=useState(''); // optional roll-back date: keep synced entries on/before this, remove only those dated after
   const[cfgIds,setCfgIds]=useState(null); // entity_ids that have Bill.com configured
   const[showAllEnts,setShowAllEnts]=useState(false);
   useEffect(()=>{api.getBillcomEntities().then(r=>setCfgIds(new Set(r.entity_ids||[]))).catch(()=>setCfgIds(new Set()));},[]);
@@ -1548,23 +1549,36 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
 
   const runUnsync=async()=>{
     if(!selectedEntity)return;
+    // Optional roll-back date. When set, only sync-created entries dated AFTER
+    // it are removed (and only their sync-log rows), leaving everything on/before
+    // as_of synced. Blank = full reset (remove all synced entries, clear log).
+    const asOf=(unsyncAsOf||'').trim()||null;
     let count=0;
-    try{ const dry=await api.unsyncBillcom(selectedEntity,true); count=dry.would_delete_entries||0; }
+    try{ const dry=await api.unsyncBillcom(selectedEntity,true,asOf); count=dry.would_delete_entries||0; }
     catch(e){ setSyncErr('Un-sync check failed: '+e.message); return; }
     if(count===0){
+      if(asOf){
+        setSyncMsg('Nothing to un-sync: no Bill.com journal entries dated after '+asOf+' on this entity.');
+        return;
+      }
       // No Bill.com-created journal entries to delete, but there may still be
       // sync-log rows (e.g. skipped-bill records) that must be cleared so a
       // re-sync re-evaluates every bill under the current rules. Clear the log.
       setUnsyncing(true);setSyncMsg('');setSyncErr('');
-      try{ const r=await api.unsyncBillcom(selectedEntity,false); setSyncMsg('No Bill.com journal entries to delete; cleared the sync log'+(r.sync_log_cleared?'':' (nothing to clear)')+' so a re-sync will re-evaluate every bill from scratch.'); loadSyncLogs(); }
+      try{ const r=await api.unsyncBillcom(selectedEntity,false,null); setSyncMsg('No Bill.com journal entries to delete; cleared the sync log'+(r.sync_log_cleared?'':' (nothing to clear)')+' so a re-sync will re-evaluate every bill from scratch.'); loadSyncLogs(); }
       catch(e){ setSyncErr('Un-sync (clear log) failed: '+e.message); }
       setUnsyncing(false); return;
     }
-    if(!window.confirm('Un-sync will DELETE '+count+' journal entr'+(count===1?'y':'ies')+' that Bill.com syncs created on this entity, and clear the sync log so a corrected sync can re-pull. It does NOT touch imported-GL or manual entries. Continue?')) return;
+    const confirmMsg=asOf
+      ? ('Un-sync will DELETE '+count+' Bill.com journal entr'+(count===1?'y':'ies')+' dated AFTER '+asOf+' on this entity, and clear just those rows from the sync log so they can be re-pulled. Entries dated on or before '+asOf+' stay synced. It does NOT touch imported-GL or manual entries. Continue?')
+      : ('Un-sync will DELETE all '+count+' journal entr'+(count===1?'y':'ies')+' that Bill.com syncs created on this entity, and clear the sync log so a corrected sync can re-pull. It does NOT touch imported-GL or manual entries. Continue?');
+    if(!window.confirm(confirmMsg)) return;
     setUnsyncing(true);setSyncMsg('');setSyncErr('');setSyncResult(null);
     try{
-      const r=await api.unsyncBillcom(selectedEntity,false);
-      setSyncMsg('Un-synced. Removed '+(r.deleted_entries||0)+' Bill.com journal entr'+((r.deleted_entries===1)?'y':'ies')+' and cleared the sync log. Set a cutoff date if needed, then Sync Now to re-pull correctly.');
+      const r=await api.unsyncBillcom(selectedEntity,false,asOf);
+      setSyncMsg(asOf
+        ? ('Rolled back. Removed '+(r.deleted_entries||0)+' Bill.com journal entr'+((r.deleted_entries===1)?'y':'ies')+' dated after '+asOf+'; entries on/before '+asOf+' stay synced. Sync Now to re-pull from '+asOf+' forward.')
+        : ('Un-synced. Removed '+(r.deleted_entries||0)+' Bill.com journal entr'+((r.deleted_entries===1)?'y':'ies')+' and cleared the sync log. Set a cutoff date if needed, then Sync Now to re-pull correctly.'));
       loadSyncLogs();
     }catch(e){setSyncErr('Un-sync failed: '+e.message);}
     setUnsyncing(false);
@@ -1804,7 +1818,8 @@ function BillcomSetup({entities,activeEntity,setActiveEntity,initialTab}) {
           </div>
           <div style={{display:'flex',gap:8}}>
             <button style={S.btnS} onClick={loadSyncLogs} disabled={syncLogsLoading||syncing}>{syncLogsLoading?'Loading...':'Refresh Log'}</button>
-            <button style={{...S.btnS,color:'#b91c1c',borderColor:'#fca5a5'}} onClick={runUnsync} disabled={syncing||unsyncing}>{unsyncing?'Un-syncing...':'Un-sync'}</button>
+            <input type="date" value={unsyncAsOf} onChange={e=>setUnsyncAsOf(e.target.value)} disabled={syncing||unsyncing} title="Un-sync as-of date (optional). Removes only Bill.com-synced entries dated AFTER this date; entries on/before it stay synced. Leave blank to remove ALL synced entries." style={{...S.inputSm,width:150}}/>
+            <button style={{...S.btnS,color:'#b91c1c',borderColor:'#fca5a5'}} onClick={runUnsync} disabled={syncing||unsyncing} title={unsyncAsOf?('Remove synced entries dated after '+unsyncAsOf):'Remove all Bill.com-synced entries and clear the sync log'}>{unsyncing?'Un-syncing...':(unsyncAsOf?'Un-sync after '+unsyncAsOf:'Un-sync')}</button>
             <button style={S.btnP} onClick={runSync} disabled={syncing||unsyncing}>{syncing?'Syncing...':'Sync Now'}</button>
             {attachMsg&&<span style={{fontSize:12,color:T.textMuted,marginLeft:4}}>{attachMsg}</span>}
           </div>
