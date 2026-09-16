@@ -586,7 +586,7 @@ export const api = {
   clrfWorkpaper: async (eid, quarterEnd, kind) => {
     const map = {
       carry: { path: 'carry-clawback', hdr: 'x-carry-summary', name: 'CLRF_Carried_Interest.xlsx' },
-      pcap: { path: 'pcap', hdr: 'x-pcap-summary', name: 'CLRF_PCAP.xlsx' },
+      pcap: { path: 'pcap', hdr: 'x-pcap-summary', name: 'CLRF_PCAP_Statements.pdf' },
       pcapSchedule: { path: 'pcap-schedule', hdr: 'x-pcap-schedule-summary', name: 'CLRF_Partners_Capital_Accounts.xlsx' },
       pref: { path: 'preferred-return', hdr: 'x-pref-summary', name: 'CLRF_Preferred_Return.xlsx' },
     };

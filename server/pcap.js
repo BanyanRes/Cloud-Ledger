@@ -418,12 +418,13 @@ function buildWorkbook(data) {
 
 // ── Persistence + routes (mirror gpfees.js / carryclawback.js). ───────────────
 const folderFor = (quarter) => 'Workpapers/Partners’ Capital Accounts/' + quarter.year + '/' + quarter.quarter;
-const fileNameFor = (quarter) => 'CLRF_PCAP_' + quarter.label + '.xlsx';
+const fileNameFor = (quarter) => 'CLRF_PCAP_Statements_' + quarter.label + '.pdf';
 
-function saveToWorkpapers(ctx, eid, quarter, buf, who) {
+function saveToWorkpapers(ctx, eid, quarter, buf, who, opts = {}) {
   const { db, workpapersDir } = ctx;
   const folder = folderFor(quarter);
-  const original = fileNameFor(quarter);
+  const original = opts.fileName || fileNameFor(quarter);
+  const mime = opts.mime || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   const parts = folder.split('/');
   const ins = db.prepare('INSERT OR IGNORE INTO entity_folders (entity_id, folder_path, created_by, created_at) '
     + "VALUES (?, ?, ?, datetime('now'))");
@@ -440,8 +441,7 @@ function saveToWorkpapers(ctx, eid, quarter, buf, who) {
   fs.writeFileSync(path.join(dir, stored), buf);
   db.prepare('INSERT INTO entity_files (entity_id, folder_path, stored_filename, original_name, size, mime_type, '
     + "uploaded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))")
-    .run(eid, folder, stored, original, buf.length,
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', who);
+    .run(eid, folder, stored, original, buf.length, mime, who);
   return { folder_path: folder, original_name: original, replaced: prior.length };
 }
 
@@ -549,10 +549,12 @@ function registerPcapRoutes(app, ctx) {
         const quarter = resolveQuarter(body.quarter_end || '');
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         const data = buildData(ctx, quarter, { entity_id: eid, carryByClass: body.carry_by_class || null });
-        const wb = buildWorkbook(data);
-        const buf = Buffer.from(await wb.xlsx.writeBuffer());
-        const saved = saveToWorkpapers(ctx, eid, quarter, buf, who);
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        const ent = ctx.db.prepare('SELECT name FROM entities WHERE id = ?').get(eid);
+        const legal = { 'County Line Rail Fund': 'County Line Rail Fund I, LP' };
+        const fundName = (ent && legal[ent.name]) || (ent && ent.name) || 'County Line Rail Fund I, LP';
+        const buf = Buffer.from(await renderStatementsPdf(data, { fundName }));
+        const saved = saveToWorkpapers(ctx, eid, quarter, buf, who, { mime: 'application/pdf' });
+        res.setHeader('Content-Type', 'application/pdf');
         res.setHeader('Content-Disposition', 'attachment; filename="' + saved.original_name + '"');
         res.setHeader('X-PCAP-Summary', JSON.stringify({
           quarter: quarter.label, saved_to: saved.folder_path + '/' + saved.original_name, replaced: saved.replaced,
