@@ -5591,17 +5591,38 @@ async function buildFundStatements(opts) {
     wcItems.push({ label, cur: curAmt, ytd: ytdAmt, base: ref.label });
   }
   wcItems.sort((a, b) => { const ia = CF_WC_ORDER.indexOf(a.base), ib = CF_WC_ORDER.indexOf(b.base); return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib); });
-  const icf = opts.investCF || null;
-  const invPurchQ = icf ? r2(-icf.q.purchases) : 0, invPurchY = icf ? r2(-icf.ytd.purchases) : 0;
-  const invRetQ = icf ? r2(icf.q.returns) : 0, invRetY = icf ? r2(icf.ytd.returns) : 0;
-  const operatingItems = [];
-  if (!isZero(invPurchQ) || !isZero(invPurchY)) operatingItems.push({ label: 'Purchases of investments in real estate', cur: invPurchQ, ytd: invPurchY });
-  if (!isZero(invRetQ) || !isZero(invRetY)) operatingItems.push({ label: 'Return of capital from investment', cur: invRetQ, ytd: invRetY });
+  // Financing lines and the non-cash capitalized (waived) development fees come
+  // from the PCAP roll-forward. Computed first because the investment cash flow
+  // below nets out the non-cash waived-fee portion of the cost movement.
   const finContribY = r2(capTotals.contributions), finRefundsY = r2(capTotals.refunds), finSyndY = r2(capTotals.syndication), noncashWaivedY = r2(capTotals.waived);
   const finContribQ = (twoPeriod && capTotalsQ) ? r2(capTotalsQ.contributions) : finContribY;
   const finRefundsQ = (twoPeriod && capTotalsQ) ? r2(capTotalsQ.refunds) : finRefundsY;
   const finSyndQ = (twoPeriod && capTotalsQ) ? r2(capTotalsQ.syndication) : finSyndY;
   const noncashWaivedQ = (twoPeriod && capTotalsQ) ? r2(capTotalsQ.waived) : noncashWaivedY;
+
+  // ── Investment cash flow — derived from the balance-sheet movement in the
+  // investment COST accounts (the "SOCF worksheet" method), NOT a transaction
+  // trace. The prior approach summed investment-account debits only in journal
+  // entries that ALSO touched a cash account, so any purchase booked without
+  // that exact cash-line pattern was silently dropped — understating "Purchases
+  // of investments" and breaking the cash-flow tie (the Q2-2026 $22,373 gap).
+  // The change in the cost accounts, net of the non-cash capitalized development
+  // fees, is the true investment cash movement and ties to the balance sheet by
+  // construction. Returns of capital (which a net cost movement cannot separate
+  // from purchases) still come from the GL trace and only control how that net
+  // is split between the two presentation lines.
+  const icf = opts.investCF || null;
+  const investCostOf = (rows) => sumWhere(rows, r => r.type === 'Asset' && investCostCode(r.code));
+  const invCostCur = investCostOf(bsCur);
+  const invCostChgY = r2(invCostCur - investCostOf(bsBeg));
+  const invCostChgQ = twoPeriod ? r2(invCostCur - investCostOf(bsQBeg)) : invCostChgY;
+  const invRetQ = icf ? r2(icf.q.returns) : 0, invRetY = icf ? r2(icf.ytd.returns) : 0;
+  // ΔCost = purchases − returns + non-cash  ⇒  purchases (cash out) = ΔCost − non-cash + returns.
+  const invPurchY = r2(-((invCostChgY - noncashWaivedY) + invRetY));
+  const invPurchQ = twoPeriod ? r2(-((invCostChgQ - noncashWaivedQ) + invRetQ)) : invPurchY;
+  const operatingItems = [];
+  if (!isZero(invPurchQ) || !isZero(invPurchY)) operatingItems.push({ label: 'Purchases of investments in real estate', cur: invPurchQ, ytd: invPurchY });
+  if (!isZero(invRetQ) || !isZero(invRetY)) operatingItems.push({ label: 'Return of capital from investment', cur: invRetQ, ytd: invRetY });
   const sumWC = (key) => wcItems.reduce((s, it) => r2(s + it[key]), 0);
   const netOpQ = r2(niQtr + invPurchQ + invRetQ + sumWC('cur'));
   const netOpY = r2(niYtd + invPurchY + invRetY + sumWC('ytd'));
@@ -5621,7 +5642,14 @@ async function buildFundStatements(opts) {
     cashBeg: { cur: r2(cashBegQ), ytd: r2(cashBegY) },
     cashEnd: { cur: r2(cashCur), ytd: r2(cashCur) },
     noncashWaived: { cur: noncashWaivedQ, ytd: noncashWaivedY },
+    // Tie-out: the statement must foot to the actual movement in cash. Now that
+    // the investment line is derived from the balance-sheet cost movement, this
+    // should be ~0; a non-zero value flags a still-unreconciled account.
+    tie: { cur: r2(r2(netOpQ + netFinQ) - r2(cashCur - cashBegQ)), ytd: r2(r2(netOpY + netFinY) - r2(cashCur - cashBegY)) },
   };
+  if (Math.abs(cashFlow.tie.cur) > 0.5 || Math.abs(cashFlow.tie.ytd) > 0.5) {
+    console.warn('[fund CF] statement of cash flows does not tie', { asOf, entity: opts.entityName, tie: cashFlow.tie });
+  }
 
   // Present the fund's full legal name on the face statements (matches Weaver).
   const FUND_LEGAL_NAMES = { 'County Line Rail Fund': 'County Line Rail Fund I, LP' };
