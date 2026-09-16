@@ -2801,6 +2801,41 @@ app.delete('/api/entities/:eid/classes/:id', auth, requireEntityAccess(), requir
   db.prepare('DELETE FROM dim_classes WHERE id = ? AND entity_id = ?').run(req.params.id, req.params.eid);
   res.json({ success: true });
 });
+// Merge one investor class into another (consolidate a duplicate). Re-tags the
+// source class's journal lines to the target (dimension tag only — no dollar
+// amounts, dates or debit/credit change), moves the source's commitment to the
+// target if the target has none, and deletes the now-empty source class. Admin
+// only, requires body { confirm: true }. Reversible by merging back.
+app.post('/api/entities/:eid/classes/:id/merge-into/:targetId', auth, requireEntityAccess(), requireRole('Admin'), (req, res) => {
+  const eid = Number(req.params.eid), src = Number(req.params.id), tgt = Number(req.params.targetId);
+  if (!(req.body && req.body.confirm === true)) return res.status(400).json({ error: 'confirm:true required' });
+  if (src === tgt) return res.status(400).json({ error: 'source and target must differ' });
+  const s = db.prepare('SELECT * FROM dim_classes WHERE id=? AND entity_id=?').get(src, eid);
+  const t = db.prepare('SELECT * FROM dim_classes WHERE id=? AND entity_id=?').get(tgt, eid);
+  if (!s || !t) return res.status(404).json({ error: 'source or target class not found in this entity' });
+  try {
+    const tx = db.transaction(() => {
+      const moved = db.prepare('UPDATE journal_lines SET class_id=? WHERE class_id=? AND entry_id IN (SELECT id FROM journal_entries WHERE entity_id=?)').run(tgt, src, eid).changes;
+      const tc = db.prepare('SELECT id FROM investor_commitments WHERE entity_id=? AND class_id=?').get(eid, tgt);
+      const sc = db.prepare('SELECT id, commitment_amount FROM investor_commitments WHERE entity_id=? AND class_id=?').get(eid, src);
+      let commitmentMoved = 0;
+      if (sc) {
+        if (!tc) { db.prepare('UPDATE investor_commitments SET class_id=? WHERE id=?').run(tgt, sc.id); commitmentMoved = sc.commitment_amount; }
+        else { db.prepare('DELETE FROM investor_commitments WHERE id=?').run(sc.id); }
+      }
+      const remaining = db.prepare('SELECT COUNT(*) AS n FROM journal_lines WHERE class_id=?').get(src).n;
+      let deletedSource = false;
+      if (remaining === 0) {
+        db.prepare('DELETE FROM investor_commitments WHERE entity_id=? AND class_id=?').run(eid, src);
+        db.prepare('DELETE FROM dim_classes WHERE id=? AND entity_id=?').run(src, eid);
+        deletedSource = true;
+      }
+      return { moved, commitmentMoved, deletedSource, remainingLines: remaining };
+    });
+    const r = tx();
+    res.json({ success: true, source: s.name, target: t.name, ...r });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
 
 // ── Investor commitments (informational; never posts to GL). Linked to dim_classes
 //    (kind='investor'). Uncalled = commitment - called; pct_called and ownership_pct

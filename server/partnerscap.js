@@ -60,6 +60,7 @@ const FS_PARTNER_NO = {
   "crptf-gcm middle-market re partnership, l.p. (2025-01 investment series)": 76,
   "clip sponsor llc": 77, "clr silsbee sponsor llc": 78, "odyssey holdings, llc": 79,
   "palmatum hr illiquid, llc": 80, "james bloomingdale": 81,
+  "james and natalie bloomingdale": 81, // consolidated class (formerly split w/ "James Bloomingdale")
 };
 // CL class name -> FS roster name, for name variants.
 const NAME_ALIAS = {
