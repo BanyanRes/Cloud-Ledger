@@ -194,7 +194,7 @@ function registerPcapScheduleRoutes(app, ctx) {
           quarter: quarter.label, saved_to: saved.folder_path + '/' + saved.original_name, replaced: saved.replaced,
           rows: data.totals.count, lp_rows: lps.length, gp_rows: data.totals.count - lps.length,
           commitment: data.totals.commitment, ending: data.totals.ytd.ending,
-        }).replace(/[\r\n]/g, ' '));
+        }).replace(/[^\x20-\x7E]/g, ' '));
         res.send(buf);
       } catch (e) {
         res.status(400).json({ error: e.message });
