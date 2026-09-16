@@ -10165,7 +10165,7 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
     // client can show their detail on the success card. Header-safe: strip CR/LF.
     try {
       const failed = ((verification.finalResult && verification.finalResult.checks) || []).filter(c => !c.pass);
-      res.setHeader('X-Reconcile-Failed', JSON.stringify(failed).replace(/[\r\n]/g, ' '));
+      res.setHeader('X-Reconcile-Failed', JSON.stringify(failed).replace(/[\r\n]/g, ' ').replace(/[\u0080-\uFFFF]/g,function(c){return '\\u'+('0000'+c.charCodeAt(0).toString(16)).slice(-4);}));
     } catch {}
     // Tell the client this download bypassed a failed required check, so it can
     // flag the file as needing manual correction rather than presenting it as clean.
@@ -10185,7 +10185,7 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
           prior: d.prior || null,              // { base, fee } observed in prior period
           validated: d.validation ? !!d.validation.ok : null,
         };
-        res.setHeader('X-Dev-Fee', JSON.stringify(devFeeHeader).replace(/[\r\n]/g, ' '));
+        res.setHeader('X-Dev-Fee', JSON.stringify(devFeeHeader).replace(/[\r\n]/g, ' ').replace(/[\u0080-\uFFFF]/g,function(c){return '\\u'+('0000'+c.charCodeAt(0).toString(16)).slice(-4);}));
       }
     } catch {}
     res.send(Buffer.from(outBuf));
@@ -10901,7 +10901,7 @@ app.post('/api/workpapers/mgmt-fee/:entity_id/generate', auth, requireEntityAcce
       const fname = 'CLRF_Mgmt_Fee_Calc_' + label.replace(/\s+/g, '_') + '.xlsx';
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
-      res.setHeader('X-Mgmt-Fee-Summary', JSON.stringify({ quarter: label, new_tab: newTab, investors }).replace(/[\r\n]/g, ' '));
+      res.setHeader('X-Mgmt-Fee-Summary', JSON.stringify({ quarter: label, new_tab: newTab, investors }).replace(/[\r\n]/g, ' ').replace(/[\u0080-\uFFFF]/g,function(c){return '\\u'+('0000'+c.charCodeAt(0).toString(16)).slice(-4);}));
       res.send(outBuf);
     } catch (e) {
       res.status(500).json({ error: 'Generate error: ' + e.message });
@@ -11867,7 +11867,7 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
         balanceSheetTies: info.balanceSheetTies, cashFlowTies: info.cashFlowTies, cashFlowDiff: info.cashFlowDiff,
         execSummarySource: info.execSummarySource,
         checks: statements.checks,
-      }).replace(/[\r\n]/g, ' '));
+      }).replace(/[\r\n]/g, ' ').replace(/[\u0080-\uFFFF]/g,function(c){return '\\u'+('0000'+c.charCodeAt(0).toString(16)).slice(-4);}));
       res.send(Buffer.from(bytes));
     } catch (e) {
       res.status(500).json({ error: 'Generate error: ' + e.message });
@@ -11915,7 +11915,7 @@ app.get('/api/workpapers/financial-statements/:entity_id/excel', auth, requireEn
     const fname = safeName + '_Financial_Statements_' + mm + '_' + yyyy + '.xlsx';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
-    res.setHeader('X-Financials-Summary', JSON.stringify({ checks: statements.checks }).replace(/[\r\n]/g, ' '));
+    res.setHeader('X-Financials-Summary', JSON.stringify({ checks: statements.checks }).replace(/[\r\n]/g, ' ').replace(/[\u0080-\uFFFF]/g,function(c){return '\\u'+('0000'+c.charCodeAt(0).toString(16)).slice(-4);}));
     res.send(Buffer.from(buf));
   } catch (e) {
     res.status(500).json({ error: 'Excel export error: ' + e.message });
@@ -12087,7 +12087,7 @@ app.get('/api/entities/:eid/fund-statements.pdf', auth, requireEntityAccess(), r
     const fname = safeName + '_Fund_Financial_Statements_' + mm + '_' + yyyy + '.pdf';
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'attachment; filename="' + fname + '"');
-    res.setHeader('X-Fund-Tie', JSON.stringify(model._tie).replace(/[\r\n]/g, ' '));
+    res.setHeader('X-Fund-Tie', JSON.stringify(model._tie).replace(/[\r\n]/g, ' ').replace(/[\u0080-\uFFFF]/g,function(c){return '\\u'+('0000'+c.charCodeAt(0).toString(16)).slice(-4);}));
     res.send(Buffer.from(bytes));
   } catch (e) {
     res.status(500).json({ error: 'Fund statements error: ' + e.message });
