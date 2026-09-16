@@ -10951,6 +10951,19 @@ require('./pcap').registerPcapRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ CLRF workpaper: Subsequent-Closing (Sub Close) workpaper ═══
+// The Legacy Knight subsequent-closing rebalance + subscriber calls, reproduced
+// from the GL as an .xlsx. Ties to the PCAP statements (ending capital = PCAP
+// contributed). See server/subclose.js.
+require('./subclose').registerSubcloseRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLRF workpaper: Partners' Capital Accounts schedule (80-line) ═══
 // Quarterly. One row per investor (LP then GP) with subtotals and grand total,
 // matching the FS supplementary schedule. Reuses the PCAP engine; ties to the
