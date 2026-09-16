@@ -80,6 +80,20 @@ function partnerNo(name) {
 function buildData(ctx, quarter, opts = {}) {
   const eid = opts.entity_id || FUND_EID;
   const data = pcap.buildData(ctx, quarter, { entity_id: eid, noMerge: true });
+  // "James Bloomingdale" (FS #81) and "James and Natalie Bloomingdale" are the same
+  // partner split across two CL classes — the capital activity sits on one, the
+  // capital commitment on the other. Combine them onto the #81 roster row so the
+  // schedule ties to the disclosure (both the commitment and the roll-forward).
+  const jb = data.investors.find((i) => norm(i.name) === 'james bloomingdale');
+  const jn = data.investors.find((i) => norm(i.name) === 'james and natalie bloomingdale');
+  if (jb && jn) {
+    jb.commitment = r2((jb.commitment || 0) + (jn.commitment || 0));
+    for (const f of ['beginning', 'contributions', 'returnOfCapital', 'transfers', 'waivedDevFees',
+      'syndication', 'netInvestment', 'managementFee', 'unrealized', 'ending']) {
+      jb.q[f] = r2((jb.q[f] || 0) + (jn.q[f] || 0));
+    }
+    const ix = data.investors.indexOf(jn); if (ix >= 0) data.investors.splice(ix, 1);
+  }
   const totalCommit = data.totals.commitment || 0;
   const fundIncomeQ = (data.investmentIncome && data.investmentIncome.q) || 0;
   // Operations = net investment income + management fee (excludes syndication and
