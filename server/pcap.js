@@ -91,13 +91,16 @@ function classifyContributions(db, eid, from, to, gpSet) {
     + "HAVING SUM(CASE WHEN jl.account_code IN (" + CONTRIB_SQL + ") THEN 1 ELSE 0 END) > 0"
   ).all(eid, ...dateArgs);
   const flagBy = new Map(flags.map((f) => [f.id, f]));
-  // Per entry + class contribution credit/debit.
+  // Per entry + class + transaction (line description) contribution credit/debit.
+  // Netting at the transaction level lets a reclassification/true-up that posts
+  // both a debit and a credit under one description collapse to its net effect,
+  // instead of grossing up both the Contributions and Return-of-Capital lines.
   const rows = db.prepare(
-    "SELECT jl.entry_id AS entry_id, jl.class_id AS class_id, "
+    "SELECT jl.entry_id AS entry_id, jl.class_id AS class_id, jl.description AS descr, "
     + "SUM(jl.credit) AS cr, SUM(jl.debit) AS dr "
     + "FROM journal_entries je JOIN journal_lines jl ON jl.entry_id = je.id "
     + "WHERE je.entity_id = ? AND " + dateWhere + " AND jl.account_code IN (" + CONTRIB_SQL + ") "
-    + "GROUP BY jl.entry_id, jl.class_id"
+    + "GROUP BY jl.entry_id, jl.class_id, jl.description"
   ).all(eid, ...dateArgs);
   // Net contribution-account movement per entry (across all classes), to tell an
   // inter-investor transfer (nets to zero) from a broad opening allocation.
@@ -113,18 +116,23 @@ function classifyContributions(db, eid, from, to, gpSet) {
   for (const r of rows) {
     const f = flagBy.get(r.entry_id) || { has_cash: 0, n_classes: 0 };
     const cr = Number(r.cr) || 0, dr = Number(r.dr) || 0;
+    // Net the transaction (one line description within an entry) before splitting:
+    // a reclassification/true-up posts both a debit and a credit under one
+    // description; its net effect is a single contribution or return, not both.
+    // Matches the fund administrator's net presentation (vs. grossing both lines).
+    const net = cr - dr;
     const net0 = Math.abs(entryNet.get(r.entry_id) || 0) < 1;
     const o = out[r.class_id] || (out[r.class_id] = { contributions: 0, returnOfCapital: 0, transfers: 0, waivedDevFees: 0 });
-    if (f.has_cash) { o.contributions += cr; o.returnOfCapital += -dr; }
-    else if (net0 && f.n_classes >= 2 && f.n_classes <= TRANSFER_MAX_CLASSES) { o.transfers += (cr - dr); }
+    if (f.has_cash) { if (net >= 0) o.contributions += net; else o.returnOfCapital += net; }
+    else if (net0 && f.n_classes >= 2 && f.n_classes <= TRANSFER_MAX_CLASSES) { o.transfers += net; }
     else if (f.n_classes <= 1) {
       // A non-cash single-class contribution move is a WAIVED DEVELOPMENT FEE only
       // for a GP/promote class (ties to SRN entity 37 acct 34014). The same move on
       // an LP class is a non-cash capital contribution (contribution-in-kind).
-      if (gpSet && gpSet.has(Number(r.class_id))) { o.waivedDevFees += (cr - dr); }
-      else { o.contributions += cr; o.returnOfCapital += -dr; }
+      if (gpSet && gpSet.has(Number(r.class_id))) { o.waivedDevFees += net; }
+      else if (net >= 0) o.contributions += net; else o.returnOfCapital += net;
     }
-    else { o.contributions += cr; o.returnOfCapital += -dr; }
+    else if (net >= 0) o.contributions += net; else o.returnOfCapital += net;
   }
   for (const k of Object.keys(out)) {
     const o = out[k];
