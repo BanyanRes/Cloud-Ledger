@@ -1,11 +1,11 @@
 // ─── CLRF workpaper: Statement of Cash Flows worksheet ───────────────────────
 //
-// A standalone Statement of Cash Flows (indirect method, year-to-date) for the
-// fund, rendered as an .xlsx workpaper. It reuses the exact same model the fund
-// financial-statements package builds (financials.buildFundStatements) and
-// renders ONLY the Cash Flows sheet (financials_xlsx cashFlowOnly), so this
-// worksheet ties to the fund statements by construction. Every subtotal is a
-// live SUM formula. Filed under Workpapers > Cash Flow > <year> > <quarter>.
+// A standalone Statement of Cash Flows (indirect method, year-to-date) rendered
+// as an .xlsx workpaper. It builds the same statements model the Financial
+// Statements Excel export uses (financials.buildStatements) and renders ONLY the
+// Cash Flows sheet (financials_xlsx cashFlowOnly), so it is identical to the Cash
+// Flows tab of the full financial-statements workbook. Every subtotal is a live
+// SUM formula. Filed under Workpapers > Cash Flow > <year> > <quarter>.
 const path = require('path');
 const fs = require('fs');
 const pcap = require('./pcap');
@@ -40,44 +40,16 @@ function saveToWorkpapers(ctx, eid, quarter, buf, who) {
   return { folder_path: folder, original_name: original, replaced: prior.length };
 }
 
-// Investment cash activity for the Statement of Cash Flows (mirrors the fund
-// statements route): investment-account debits (purchases) / credits (returns)
-// in entries that also touch a cash account.
-function traceInvestCF(db, eid, asOf) {
-  const [iy, im] = String(asOf).split('-').map(Number);
-  const ysR = iy + '-01-01';
-  const qStartR = iy + ({ 3: '-01-01', 6: '-04-01', 9: '-07-01', 12: '-10-01' }[im] || '-01-01');
-  const traceInv = (from, to) => {
-    const rows = db.prepare(
-      "SELECT jl.debit AS dr, jl.credit AS cr FROM journal_entries je JOIN journal_lines jl ON jl.entry_id = je.id "
-      + "WHERE je.entity_id = ? AND je.date >= ? AND je.date <= ? "
-      + "AND (jl.account_code LIKE '1201%' OR jl.account_code LIKE '1202%' OR jl.account_code LIKE '1210%' OR jl.account_code LIKE '1218%') "
-      + "AND EXISTS (SELECT 1 FROM journal_lines jc WHERE jc.entry_id = je.id AND (jc.account_code LIKE '1002%' OR jc.account_code LIKE '1003%' OR jc.account_code LIKE '1005%' OR jc.account_code LIKE '1072%'))"
-    ).all(eid, from, to);
-    let purch = 0, ret = 0;
-    for (const r of rows) { purch += Number(r.dr) || 0; ret += Number(r.cr) || 0; }
-    return { purchases: Math.round(purch * 100) / 100, returns: Math.round(ret * 100) / 100 };
-  };
-  return { q: traceInv(qStartR, asOf), ytd: traceInv(ysR, asOf) };
-}
-
-async function buildModel(ctx, eid, asOf) {
+async function buildModel(ctx, eid, asOf, period) {
   const { db } = ctx;
-  const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
+  const ent = db.prepare('SELECT name, code, entity_type FROM entities WHERE id=?').get(eid);
   const entityName = ent ? ent.name : ('Entity ' + eid);
-  const investments = db.prepare('SELECT id, parent_name, name, acquisition_date, cost, fair_value, sort_order '
-    + 'FROM fund_investments WHERE entity_id = ? ORDER BY sort_order, id').all(eid);
-  const partnerClasses = db.prepare('SELECT id, name, partner_type FROM dim_classes WHERE entity_id = ?').all(eid);
-  const commitments = db.prepare('SELECT class_id, commitment_amount FROM investor_commitments WHERE entity_id = ?').all(eid);
   const getBalances = (o) => Promise.resolve(ctx.computeBalances(eid, o));
-  let pcapData = null;
-  try {
-    const quarter = pcap.resolveQuarter(asOf);
-    pcapData = pcap.buildData({ db, computeBalances: (e, o) => ctx.computeBalances(e, o) }, quarter, { entity_id: Number(eid) });
-  } catch (e) { pcapData = null; }
-  let investCF = null;
-  try { investCF = traceInvestCF(db, eid, asOf); } catch (e) { investCF = null; }
-  return financials.buildFundStatements({ asOf, entityName, getBalances, investments, partnerClasses, commitments, pcap: pcapData, investCF });
+  return financials.buildStatements(getBalances, {
+    asOf, period: period || 'quarterly', entityName,
+    entityCode: ent ? ent.code : '', entityType: ent ? ent.entity_type : '',
+    isConsolidated: false, nci: null,
+  });
 }
 
 function registerCashFlowRoutes(app, ctx) {
@@ -91,16 +63,17 @@ function registerCashFlowRoutes(app, ctx) {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(asOf)) throw new Error('quarter_end (YYYY-MM-DD) is required');
         const quarter = pcap.resolveQuarter(asOf);
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
-        const model = await buildModel(ctx, eid, asOf);
+        const model = await buildModel(ctx, eid, asOf, body.period);
         const buf = Buffer.from(await financials_xlsx.buildStatementsWorkbook(model, { cashFlowOnly: true }));
         const saved = saveToWorkpapers(ctx, eid, quarter, buf, who);
         const cf = (model && model.cashFlow) || {};
+        const n = (v) => (typeof v === 'number' ? v : null);
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', 'attachment; filename="' + saved.original_name + '"');
         res.setHeader('X-CashFlow-Summary', JSON.stringify({
           quarter: quarter.label, saved_to: saved.folder_path + '/' + saved.original_name, replaced: saved.replaced,
-          net_operating: cf.netOperating, net_investing: cf.netInvesting, net_financing: cf.netFinancing,
-          net_change: cf.netChange, cash_end: cf.cashEnd,
+          net_operating: n(cf.netOperating), net_investing: n(cf.netInvesting), net_financing: n(cf.netFinancing),
+          net_change: n(cf.netChange), cash_end: n(cf.cashEnd),
         }).replace(/[^\x20-\x7E]/g, ' '));
         res.send(buf);
       } catch (e) {
