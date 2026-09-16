@@ -10977,6 +10977,19 @@ require('./pcapschedule').registerPcapScheduleRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ CLRF workpaper: Partners' Capital Accounts (FS supplemental disclosure) ═══
+// Full un-merged roster, one row per partner, quarterly roll-forward. Partner #
+// ties to the FS supplemental disclosure via an embedded roster. See
+// server/partnerscap.js.
+require('./partnerscap').registerPartnersCapRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLRF workpaper: Preferred Return (fund-level 8% XIRR) ═══
 // Quarterly. Reproduces Weaver's fund-level preferred-return calculation: the
 // dated equalized LP net cash-flow schedule, Return of Capital, and the Preferred

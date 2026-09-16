@@ -216,21 +216,26 @@ function buildData(ctx, quarter, opts = {}) {
   const MCOLS = ['ytd', 'itd', 'q'];
   const MFIELDS = ['beginning', 'contributions', 'returnOfCapital', 'transfers', 'waivedDevFees',
     'syndication', 'netInvestment', 'managementFee', 'unrealized', 'endingBeforeCarry', 'carryRealloc', 'ending'];
-  const byName = new Map(investors.map((i) => [i.name, i]));
-  for (const [srcName, tgtName] of Object.entries(MERGE)) {
-    const src = byName.get(srcName); if (!src) continue;
-    const tgt = byName.get(tgtName);
-    if (tgt) {
-      for (const col of MCOLS) for (const f of MFIELDS) tgt[col][f] = r2((tgt[col][f] || 0) + (src[col][f] || 0));
-      tgt.commitment = r2(tgt.commitment + src.commitment);
-      tgt.contributed = r2(tgt.contributed + src.contributed);
+  // opts.noMerge keeps every investor class as its own row and preserves the
+  // Transfers-of-interest line (for the FS Partners' Capital Accounts schedule,
+  // which lists the full un-merged roster). The PCAP statements merge/fold.
+  if (!opts.noMerge) {
+    const byName = new Map(investors.map((i) => [i.name, i]));
+    for (const [srcName, tgtName] of Object.entries(MERGE)) {
+      const src = byName.get(srcName); if (!src) continue;
+      const tgt = byName.get(tgtName);
+      if (tgt) {
+        for (const col of MCOLS) for (const f of MFIELDS) tgt[col][f] = r2((tgt[col][f] || 0) + (src[col][f] || 0));
+        tgt.commitment = r2(tgt.commitment + src.commitment);
+        tgt.contributed = r2(tgt.contributed + src.contributed);
+      }
+      const ix = investors.indexOf(src); if (ix >= 0) investors.splice(ix, 1);
+      byName.delete(srcName);
     }
-    const ix = investors.indexOf(src); if (ix >= 0) investors.splice(ix, 1);
-    byName.delete(srcName);
-  }
-  // Fold transfers of interest into Contributions everywhere (removes the line).
-  for (const i of investors) for (const col of MCOLS) {
-    if (i[col].transfers) { i[col].contributions = r2(i[col].contributions + i[col].transfers); i[col].transfers = 0; }
+    // Fold transfers of interest into Contributions everywhere (removes the line).
+    for (const i of investors) for (const col of MCOLS) {
+      if (i[col].transfers) { i[col].contributions = r2(i[col].contributions + i[col].transfers); i[col].transfers = 0; }
+    }
   }
   // Recompute unfunded / percentages for any merged target.
   for (const i of investors) {
