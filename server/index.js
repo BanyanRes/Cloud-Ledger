@@ -10986,6 +10986,30 @@ require('./pcap').registerPcapRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ CLRF workpaper: ILPA Fee Reporting Template (GCM Grosvenor investors) ═══
+// One tab per GCM sleeve, reproducing the vendor ILPA template exactly and
+// filling only the blue input cells from the GL. See server/ilpafee.js.
+require('./ilpafee').registerIlpaFeeRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
+// ═══ CLRF workpaper: Statement of Cash Flows worksheet ═══
+// Standalone Statement of Cash Flows (.xlsx), reusing the fund-statements model
+// and rendering only the Cash Flows sheet. See server/cashflow.js.
+require('./cashflow').registerCashFlowRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLRF workpaper: Subsequent-Closing (Sub Close) workpaper ═══
 // The Legacy Knight subsequent-closing rebalance + subscriber calls, reproduced
 // from the GL as an .xlsx. Ties to the PCAP statements (ending capital = PCAP

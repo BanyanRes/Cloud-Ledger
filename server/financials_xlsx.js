@@ -971,11 +971,17 @@ async function buildStatementsWorkbook(s, opts) {
   }
 
   // Sheet order matches CLA: face statements, consolidating schedules, NCI tab.
-  const built = [buildBalanceSheet(s), buildOperations(s)];
-  if (!o.lenderMode) { built.push(buildCashFlow(s), buildEquity(s)); }
-  if (consolBs) built.push(consolBs);
-  if (consolIncome) built.push(consolIncome);
-  if (nciBuilt) built.push(nciBuilt);
+  // cashFlowOnly renders just the Statement of Cash Flows (standalone workpaper).
+  let built;
+  if (o.cashFlowOnly) {
+    built = [buildCashFlow(s)];
+  } else {
+    built = [buildBalanceSheet(s), buildOperations(s)];
+    if (!o.lenderMode) { built.push(buildCashFlow(s), buildEquity(s)); }
+    if (consolBs) built.push(consolBs);
+    if (consolIncome) built.push(consolIncome);
+    if (nciBuilt) built.push(nciBuilt);
+  }
 
   for (const b of built) {
     let name = String(b.sheetName).split('').map(function(ch){ return ('[]:*?/' + String.fromCharCode(92)).indexOf(ch) >= 0 ? ' ' : ch; }).join('').slice(0, 31).trim();

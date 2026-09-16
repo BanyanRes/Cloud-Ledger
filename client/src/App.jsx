@@ -917,6 +917,8 @@ export default function App(){
       ...(isCLRF?[{id:'wp_carry',label:'Carried Interest',icon:'📊',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_pcap',label:'PCAP Statements',icon:'📄',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_pcapsched',label:'Partners’ Capital Accounts',icon:'📋',section:'workpapers'}]:[]),
+      ...(isCLRF?[{id:'wp_ilpafee',label:'ILPA Fee',icon:'📄',section:'workpapers'}]:[]),
+      ...(isCLRF?[{id:'wp_cashflow',label:'Cash Flow',icon:'💵',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
@@ -1015,6 +1017,8 @@ export default function App(){
         {page==='wp_carry'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="carry" title="Carried Interest / Clawback" description="Side letter §17(c) build-up: distributable assets, return of capital, preferred return, and the per-LP waterfall (return of capital → 8% preferred return → 80/20 catch-up → 80/20 residual), carried interest to date, and the hypothetical clawback. The preferred-return line is pending the fund's preferred-return workpaper. A copy is filed under Workpapers › Carried Interest & Clawback by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_pcap'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="pcap" title="PCAP Statements" description="A PDF with one Statement of Changes in Capital per investor (commitment summary plus year-to-date and inception-to-date roll-forward), on the County Line Rail letterhead. Sourced entirely from the general ledger by investor class; ties to the fund Statement of Changes in Partners' Capital. A copy is filed under Workpapers › Partners' Capital Accounts by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_pcapsched'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="pcapSchedule" title="Partners’ Capital Accounts Schedule" description="The 80-line supplementary schedule: one row per investor (Limited Partners then General Partners) with subtotals and a grand total, matching the fund administrator's schedule column-for-column. Reuses the PCAP engine, so it ties to the PCAP statements. A copy is filed under Workpapers › Partners' Capital Accounts Schedule by year and quarter." key={activeEntity+'-'+rk}/>}
+        {page==='wp_ilpafee'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="ilpafee" title="ILPA Fee" description="The ILPA Fee Reporting Template for each GCM Grosvenor investor sleeve — one tab per investor, reproducing the vendor template exactly (notes, fonts, blue input cells and formulas). Contributions are shown gross and returns of capital as positive Distributions; every subtotal is a formula and ties to the general ledger. A copy is filed under Workpapers › ILPA Fee by year and quarter." key={activeEntity+'-'+rk}/>}
+        {page==='wp_cashflow'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="cashflow" title="Cash Flow" description="A standalone Statement of Cash Flows (indirect method, year-to-date) built from the general ledger. Reuses the fund financial-statements model and ties to it; every subtotal is a live SUM formula. A copy is filed under Workpapers › Cash Flow by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&!isCLRF&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
@@ -5503,6 +5507,20 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
           {s.schedule_loaded&&<tr><td style={S.td}>Return of capital ties (−Σ cash flows)</td><td style={S.tdR}>{s.roc_ties?'✓':'review'}</td></tr>}
           <tr style={S.grandTotalRow}><td style={S.tdBold}>Total return threshold</td>
             <td style={{...S.tdBold,textAlign:'right'}}>{s.total==null?'—':fmt(s.total)}</td></tr>
+        </>}
+        {kind==='ilpafee'&&<>
+          <tr><td style={S.td}>Investor sleeves</td><td style={S.tdR}>{s.investors}</td></tr>
+          <tr><td style={S.td}>YTD contributions</td><td style={S.tdR}>{fmt(s.ytd_contributions)}</td></tr>
+          <tr style={S.grandTotalRow}><td style={S.tdBold}>Ending NAV (all sleeves)</td>
+            <td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.ending)}</td></tr>
+        </>}
+        {kind==='cashflow'&&<>
+          <tr><td style={S.td}>Net cash — operating</td><td style={S.tdR}>{fmt(s.net_operating)}</td></tr>
+          <tr><td style={S.td}>Net cash — investing</td><td style={S.tdR}>{fmt(s.net_investing)}</td></tr>
+          <tr><td style={S.td}>Net cash — financing</td><td style={S.tdR}>{fmt(s.net_financing)}</td></tr>
+          <tr><td style={S.td}>Net increase/(decrease) in cash</td><td style={S.tdR}>{fmt(s.net_change)}</td></tr>
+          <tr style={S.grandTotalRow}><td style={S.tdBold}>Cash, end of period</td>
+            <td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.cash_end)}</td></tr>
         </>}
       </tbody></table>
       {s.saved_to&&<div style={{fontSize:12,color:T.textMuted}}>Filed at <strong>{s.saved_to}</strong></div>}

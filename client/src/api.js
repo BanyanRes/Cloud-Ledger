@@ -589,6 +589,8 @@ export const api = {
       pcap: { path: 'pcap', hdr: 'x-pcap-summary', name: 'CLRF_PCAP_Statements.pdf' },
       pcapSchedule: { path: 'pcap-schedule', hdr: 'x-pcap-schedule-summary', name: 'CLRF_Partners_Capital_Accounts.xlsx' },
       pref: { path: 'preferred-return', hdr: 'x-pref-summary', name: 'CLRF_Preferred_Return.xlsx' },
+      ilpafee: { path: 'ilpa-fee', hdr: 'x-ilpa-summary', name: 'CLRF_ILPA_Fee.xlsx' },
+      cashflow: { path: 'cash-flow', hdr: 'x-cashflow-summary', name: 'CLRF_Cash_Flow.xlsx' },
     };
     const cfg = map[kind];
     if (!cfg) throw new Error('Unknown workpaper kind: ' + kind);
