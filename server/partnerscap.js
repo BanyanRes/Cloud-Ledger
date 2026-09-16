@@ -65,6 +65,10 @@ const FS_PARTNER_NO = {
 const NAME_ALIAS = {
   "stewart sevier tate revocable trust dated october 4, 2013": "stewart tate",
 };
+// Display-name overrides (keyed by normalized CL class name).
+const DISPLAY_NAME = {
+  "james bloomingdale": "James and Natalie Bloomingdale",
+};
 function partnerNo(name) {
   const n = norm(name);
   if (FS_PARTNER_NO[n] != null) return FS_PARTNER_NO[n];
@@ -93,7 +97,7 @@ function buildData(ctx, quarter, opts = {}) {
     const investmentIncome = totalCommit ? r2(fundIncomeQ * (inv.commitment / totalCommit)) : 0;
     const totalExpenses = r2(opsNet - investmentIncome);
     rows.push({
-      no, name: inv.name, partner_type: inv.partner_type,
+      no, name: DISPLAY_NAME[norm(inv.name)] || inv.name, partner_type: inv.partner_type,
       commitment: inv.commitment,
       pct: totalCommit ? inv.commitment / totalCommit : 0,
       beginning: y.beginning, contributions: y.contributions, refunds: y.returnOfCapital,
