@@ -180,6 +180,15 @@ const normName = (s) => String(s == null ? '' : s)
   .replace(/&/g, ' and ')
   .replace(/[^a-z0-9]+/g, '');
 
+// Admin-file investor names that differ from the CloudLedger class name (short
+// form vs. full trust name). Map: normalized template name -> normalized CL name.
+// (The admin's "James and Natelie Bloomingdale" row is intentionally NOT mapped —
+// it is a subclose-entangled row the admin zeroes, with the funding shown on the
+// James Bloomingdale subscriber row, so it stays pinned to the admin file.)
+const NAME_ALIASES = {
+  stewarttate: 'stewartseviertaterevocabletrustdatedoctober42013',
+};
+
 // Effective numeric value of a cell (formula result or literal).
 function numOf(cell) {
   const v = cell && cell.value;
@@ -226,7 +235,7 @@ async function buildWorkbook(data) {
     if (SPECIAL_ROWS.has(r)) continue;
     const nameCell = ws.getCell('A' + r).value;
     const key = normName(typeof nameCell === 'object' && nameCell ? (nameCell.result || nameCell.text) : nameCell);
-    const inv = key && byName.get(key);
+    const inv = key && (byName.get(key) || (NAME_ALIASES[key] && byName.get(NAME_ALIASES[key])));
     if (!inv) continue; // leave the administrator's values for any unmatched row
     matched++;
 
