@@ -121,9 +121,19 @@ function buildData(ctx, quarter, opts = {}) {
   let storedPref = null;
   if (!prefByClass && opts.prefTotal == null) {
     try {
-      storedPref = db.prepare('SELECT roc, pref, note FROM fund_preferred_return WHERE entity_id = ? AND quarter_end = ?')
-        .get(eid, quarter.end) || null;
-    } catch (e) { storedPref = null; }
+      // Route through the preferred-return workpaper so the §17(c) build-up uses
+      // the same figure that workpaper presents: the Weaver pin at 6/30/26, and
+      // the CL true-up (frozen dated seed + GL-dated LP flows, solved to 8%) for
+      // every later quarter.
+      const prwp = require('./preferredreturn');
+      const prData = prwp.buildData({ db }, quarter, { entity_id: eid });
+      if (prData && prData.fund) storedPref = { roc: prData.fund.roc, pref: prData.fund.pref, note: prData.fund.note };
+    } catch (e) {
+      try {
+        storedPref = db.prepare('SELECT roc, pref, note FROM fund_preferred_return WHERE entity_id = ? AND quarter_end = ?')
+          .get(eid, quarter.end) || null;
+      } catch (e2) { storedPref = null; }
+    }
   }
   const sumAcct = (rows, codes) => r2(rows
     .filter((b) => codes.includes(String(b.code)))

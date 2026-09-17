@@ -5435,13 +5435,15 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
   const[prefNote,setPrefNote]=useState('');
   const[prefMsg,setPrefMsg]=useState('');
   const[savingPref,setSavingPref]=useState(false);
+  const[prefComputed,setPrefComputed]=useState(false);
   useEffect(()=>{ if(!showPrefInputs||!isQuarterEnd(qe))return; let live=true;
     (async()=>{ const row=await api.preferredReturnGet(entityId,qe);
       if(!live)return;
       setPrefIn(row&&row.pref!=null?String(row.pref):'');
       setRocIn(row&&row.roc!=null?String(row.roc):'');
       setPrefNote(row&&row.note?row.note:'');
-      setPrefMsg(row?('Loaded stored values for '+qe+(row.has_cashflows?' (dated cash-flow schedule on file).':'.')):('No stored values for '+qe+' yet — enter them to compute the build-up.'));
+      setPrefComputed(!!(row&&row.computed));
+      setPrefMsg(row?(row.computed?('CL true-up for '+qe+': Return of Capital and Preferred Return are computed from the Weaver dated schedule frozen through 6/30/26 plus '+(row.cf_count||0)+' GL-dated LP flow(s) since, solved to exactly 8%'+(row.overridden?' — currently overridden by a saved value':'')+'. Edit and save only to pin a specific figure.'):('Loaded stored values for '+qe+(row.has_cashflows?' (dated cash-flow schedule on file).':'.'))):('No stored values for '+qe+' yet — enter them to compute the build-up.'));
     })();
     return()=>{live=false;};
   },[qe,showPrefInputs,entityId]);
@@ -5467,7 +5469,7 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
       Enter a quarter end date: March 31, June 30, September 30 or December 31.</div>}
     {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
     {showPrefInputs&&<div style={{...S.card,marginTop:14,padding:14,background:'#fbfbfd'}}>
-      <div style={{fontWeight:700,color:T.textBright,marginBottom:6}}>Preferred-return inputs ({qe})</div>
+      <div style={{fontWeight:700,color:T.textBright,marginBottom:6}}>Preferred-return inputs ({qe}){prefComputed&&<span style={{marginLeft:8,fontSize:11,fontWeight:600,color:T.green,border:'1px solid '+T.green+'55',borderRadius:4,padding:'1px 6px'}}>CL true-up — computed from GL</span>}</div>
       <div style={{fontSize:12,color:T.textMuted,marginBottom:10,maxWidth:720,lineHeight:1.5}}>From the fund&rsquo;s preferred-return workpaper (8% XIRR on equalized LP cash flows). Enter Return of Capital and Preferred Return here; {isPref?'the Preferred Return workpaper presents and (when a dated schedule is on file) reproduces the 8% solve, and':'the §17(c) build-up ties to these figures, and'} the same figures feed {isPref?'the Carried Interest §17(c) build-up':'the Preferred Return workpaper'}. Saved per quarter.</div>
       <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
         <div><label style={S.label}>Return of Capital</label><input style={S.inputSm} type="number" value={rocIn} onChange={e=>setRocIn(e.target.value)} placeholder="137875481.49"/></div>

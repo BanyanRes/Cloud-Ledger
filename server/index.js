@@ -2922,8 +2922,25 @@ app.put('/api/entities/:eid/commitments/by-class/:classId', auth, requireEntityA
 app.get('/api/entities/:eid/preferred-return', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), (req, res) => {
   const eid = req.params.eid;
   if (req.query && req.query.quarter_end) {
-    const row = db.prepare('SELECT * FROM fund_preferred_return WHERE entity_id=? AND quarter_end=?').get(eid, req.query.quarter_end);
-    return res.json(row || null);
+    const qe = req.query.quarter_end;
+    const stored = db.prepare('SELECT * FROM fund_preferred_return WHERE entity_id=? AND quarter_end=?').get(eid, qe);
+    // CLRF quarters after the Weaver pin (6/30/26) are computed by the CL true-up
+    // (frozen dated seed + GL-dated LP flows, solved to 8%); surface those values
+    // so the page shows the derived figures instead of a blank/typed input.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(qe) && Number(eid) === 40 && qe > '2026-06-30') {
+      try {
+        const prwp = require('./preferredreturn');
+        const d = prwp.buildData({ db }, prwp.resolveQuarter(qe), { entity_id: Number(eid) });
+        return res.json(Object.assign({}, stored || {}, {
+          entity_id: Number(eid), quarter_end: qe,
+          roc: d.fund.roc, pref: d.fund.pref, note: d.fund.note,
+          computed: true, overridden: !!(stored && (stored.roc != null || stored.pref != null)),
+          solved_pref: (d.calc && d.calc.solved_pref != null) ? d.calc.solved_pref : null,
+          cf_count: (d.calc && d.calc.cf_count) || 0,
+        }));
+      } catch (e) { /* fall through to stored/null */ }
+    }
+    return res.json(stored || null);
   }
   res.json(db.prepare('SELECT * FROM fund_preferred_return WHERE entity_id=? ORDER BY quarter_end DESC').all(eid));
 });

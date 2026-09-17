@@ -106,39 +106,96 @@ function solvePref(flows, roc, end, rate = PREF_RATE) {
   return (lo + hi) / 2;
 }
 
+// Weaver-verified pin: the historical dated LP call schedule was flattened to a
+// 12/31/25 opening balance on the CloudLedger import, so the pre-2026 call DATES
+// (which the 8% XIRR depends on) are not in the GL. We therefore freeze Weaver's
+// dated schedule at this date and, for every later quarter, append the LP
+// contribution / distribution flows the GL HAS recorded with real dates since.
+const PIN_DATE = '2026-06-30';
+
+function getPrefRow(db, eid, quarterEnd) {
+  try {
+    return db.prepare('SELECT roc, pref, note, cashflows FROM fund_preferred_return WHERE entity_id = ? AND quarter_end = ?')
+      .get(eid, quarterEnd) || null;
+  } catch (e) { return null; }
+}
+
+// Parse a stored cashflows JSON blob into a sorted [{date, amount}] array (or null).
+function parseFlows(cashflows) {
+  if (!cashflows) return null;
+  try {
+    const parsed = typeof cashflows === 'string' ? JSON.parse(cashflows) : cashflows;
+    if (Array.isArray(parsed) && parsed.length) {
+      const flows = parsed
+        .map((x) => ({ date: String(x.date).slice(0, 10), amount: Number(x.amount) }))
+        .filter((x) => isDate(x.date) && isFinite(x.amount))
+        .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+      return flows.length ? flows : null;
+    }
+  } catch (e) { /* fall through */ }
+  return null;
+}
+
+// LP net cash flows from the GL by date, in (afterDate, toDate], for the fund's
+// LP classes only (GP classes excluded). Contribution accounts carry both capital
+// calls and returns; the per-date net credit is the LP's cash OUTflow (a call, so
+// negative) and a net debit is an INflow (distribution / return of capital,
+// positive). Only meaningful for post-import dates, where the GL carries the real
+// entry date — hence the pin above.
+function glLpFlows(db, eid, afterDate, toDate) {
+  let rows = [];
+  try {
+    rows = db.prepare(
+      'SELECT je.date AS date, SUM(jl.credit - jl.debit) AS net '
+      + 'FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id '
+      + 'LEFT JOIN dim_classes dc ON dc.id = jl.class_id '
+      + 'WHERE je.entity_id = ? AND je.date > ? AND je.date <= ? '
+      + "AND jl.account_code IN ('30100','301100','301200','301300','301800') "
+      + "AND (dc.partner_type IS NULL OR UPPER(dc.partner_type) <> 'GP') "
+      + 'GROUP BY je.date HAVING ABS(SUM(jl.credit - jl.debit)) > 0.005 ORDER BY je.date'
+    ).all(eid, afterDate, toDate);
+  } catch (e) { rows = []; }
+  return rows.map((r) => ({ date: String(r.date).slice(0, 10), amount: r2(-(Number(r.net) || 0)) }));
+}
+
 // ── Gather everything the workbook needs from fund_preferred_return. ───────────
 function buildData(ctx, quarter, opts = {}) {
   const { db } = ctx;
   const eid = opts.entity_id || FUND_EID;
   const ent = db.prepare('SELECT id, name FROM entities WHERE id = ?').get(eid);
-  let row = null;
-  try {
-    row = db.prepare('SELECT roc, pref, note, cashflows FROM fund_preferred_return WHERE entity_id = ? AND quarter_end = ?')
-      .get(eid, quarter.end) || null;
-  } catch (e) { row = null; }
-  if (!row) {
-    throw new Error('No preferred-return figures stored for ' + (ent ? ent.name : ('entity ' + eid))
-      + ' as of ' + quarter.end + '. Enter Return of Capital and Preferred Return (and optionally the'
-      + ' dated cash-flow schedule) first.');
-  }
-  const roc = row.roc == null ? null : r2(row.roc);
-  const pref = row.pref == null ? null : r2(row.pref);
-  const total = (roc != null && pref != null) ? r2(roc + pref) : null;
+  const isTrueUp = (eid === FUND_EID) && (quarter.end > PIN_DATE);
+  const row = getPrefRow(db, eid, quarter.end);
 
-  // Optional dated schedule → XIRR reproduction.
-  let flows = null;
-  if (row.cashflows) {
-    try {
-      const parsed = JSON.parse(row.cashflows);
-      if (Array.isArray(parsed) && parsed.length) {
-        flows = parsed
-          .map((x) => ({ date: String(x.date).slice(0, 10), amount: Number(x.amount) }))
-          .filter((x) => isDate(x.date) && isFinite(x.amount))
-          .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-        if (!flows.length) flows = null;
-      }
-    } catch (e) { flows = null; }
+  let roc; let pref; let flows = null; let noteBase = null;
+  if (isTrueUp) {
+    // CL true-up: freeze Weaver's dated schedule at the pin, append the GL's
+    // dated LP flows since, then solve the preferred return to exactly 8%. A
+    // manually saved figure for this quarter still overrides the solve.
+    const seedFlows = parseFlows((getPrefRow(db, eid, PIN_DATE) || {}).cashflows);
+    if (!seedFlows) {
+      throw new Error('Cannot true up ' + quarter.end + ' from the GL: no frozen dated schedule is on file for the '
+        + PIN_DATE + ' pin. Store the ' + PIN_DATE + ' cash-flow schedule first.');
+    }
+    const newFlows = glLpFlows(db, eid, PIN_DATE, quarter.end);
+    flows = [...seedFlows, ...newFlows].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    const glRoc = r2(-flows.reduce((s, f) => s + f.amount, 0));
+    const solved = solvePref(flows, glRoc, quarter.end, PREF_RATE);
+    roc = (row && row.roc != null) ? r2(row.roc) : glRoc;
+    pref = (row && row.pref != null) ? r2(row.pref) : (solved == null ? null : r2(solved));
+    noteBase = (row && row.note) || ('CL true-up — Weaver dated schedule frozen through ' + PIN_DATE + ' + '
+      + newFlows.length + ' GL-dated LP flow(s) since; preferred return solved to 8.0000%.');
+  } else {
+    if (!row) {
+      throw new Error('No preferred-return figures stored for ' + (ent ? ent.name : ('entity ' + eid))
+        + ' as of ' + quarter.end + '. Enter Return of Capital and Preferred Return (and optionally the'
+        + ' dated cash-flow schedule) first.');
+    }
+    roc = row.roc == null ? null : r2(row.roc);
+    pref = row.pref == null ? null : r2(row.pref);
+    noteBase = row.note || null;
+    flows = parseFlows(row.cashflows);
   }
+  const total = (roc != null && pref != null) ? r2(roc + pref) : null;
 
   const calc = { schedule_loaded: !!flows };
   if (flows) {
@@ -172,7 +229,7 @@ function buildData(ctx, quarter, opts = {}) {
     fund: {
       entity_id: eid, entity_name: ent ? ent.name : ('entity ' + eid),
       roc, pref, total, rate: PREF_RATE,
-      note: row.note || null,
+      note: noteBase,
     },
     calc,
   };
