@@ -21,7 +21,29 @@
 const path = require('path');
 const fs = require('fs');
 const ExcelJS = require('exceljs');
+const JSZip = require('jszip');
 const pcap = require('./pcap');
+
+// ExcelJS serializes <sheetPr> children as <pageSetUpPr/><outlinePr/>, but the
+// OOXML CT_SheetPr schema requires <outlinePr/> BEFORE <pageSetUpPr/>. Excel's
+// strict loader rejects the reversed order and "repairs" the file on open
+// (Repaired Records: worksheet — "Load error. Line 2, column 0."). Swap them back
+// in every worksheet part so the workbook opens clean. LibreOffice/openpyxl are
+// lenient about the order, which is why it renders fine everywhere except Excel.
+async function fixSheetPrOrder(buf) {
+  try {
+    const zip = await JSZip.loadAsync(buf);
+    const names = Object.keys(zip.files).filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n));
+    let changed = false;
+    for (const name of names) {
+      const xml = await zip.file(name).async('string');
+      const fixed = xml.replace(/(<pageSetUpPr\b[^>]*\/>)\s*(<outlinePr\b[^>]*\/>)/g, '$2$1');
+      if (fixed !== xml) { zip.file(name, fixed); changed = true; }
+    }
+    if (!changed) return buf;
+    return await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  } catch (e) { return buf; }
+}
 
 const FUND_EID = 40;
 const TEMPLATE = path.join(__dirname, 'assets', 'ilpa_fee_template.xlsx');
@@ -159,7 +181,7 @@ function registerIlpaFeeRoutes(app, ctx) {
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         const data = buildData(ctx, quarter);
         const wb = await buildWorkbook(data);
-        const buf = Buffer.from(await wb.xlsx.writeBuffer());
+        const buf = await fixSheetPrOrder(Buffer.from(await wb.xlsx.writeBuffer()));
         const saved = saveToWorkpapers(ctx, eid, quarter, buf, who);
         const totContrib = Object.values(data.sleeves).reduce((s, x) => s + r0(x.YTD.contrib), 0);
         const totEnd = Object.values(data.sleeves).reduce((s, x) => s + r0(x.ending), 0);
