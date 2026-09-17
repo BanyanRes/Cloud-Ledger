@@ -5783,21 +5783,16 @@ function FundReporting({entityId,entityName}){
   const[asOf,setAsOf]=useState(today());
   const[busy,setBusy]=useState(false);
   const[err,setErr]=useState('');
-  const[invs,setInvs]=useState(null);
   const[classes,setClasses]=useState(null);
-  const[savingId,setSavingId]=useState(null);
-  const blank={parent_name:'',name:'',acquisition_date:'',cost:'',fair_value:'',sort_order:''};
-  const[draft,setDraft]=useState(blank);
   const[odysseyAmt,setOdysseyAmt]=useState('');
   const[savingOdyssey,setSavingOdyssey]=useState(false);
   const[alloc,setAlloc]=useState(null);
 
   const load=()=>{
     setErr('');
-    api.getFundInvestments(entityId).then(setInvs).catch(e=>setErr(e.message));
     api.getClasses(entityId).then(setClasses).catch(e=>setErr(e.message));
   };
-  useEffect(()=>{setInvs(null);setClasses(null);load();},[entityId]);
+  useEffect(()=>{setClasses(null);load();},[entityId]);
 
   const odysseyClass=(classes||[]).find(c=>/odyssey/i.test(c.name||''));
   const loadAlloc=()=>{api.getFundAllocation(entityId,asOf).then(a=>{setAlloc(a);}).catch(e=>setErr(e.message));};
@@ -5811,20 +5806,6 @@ function FundReporting({entityId,entityName}){
     try{await api.setClassCommitment(entityId,odysseyClass.id,Number(odysseyAmt)||0);loadAlloc();}
     catch(e){setErr(e.message);}finally{setSavingOdyssey(false);}
   };
-
-  const addInv=async()=>{
-    if(!draft.name.trim()){setErr('Investment name is required');return;}
-    setBusy(true);setErr('');
-    try{await api.createFundInvestment(entityId,{...draft,cost:Number(draft.cost)||0,fair_value:Number(draft.fair_value)||0,sort_order:Number(draft.sort_order)||0});setDraft(blank);load();}
-    catch(e){setErr(e.message);}finally{setBusy(false);}
-  };
-  const saveInv=async(row)=>{
-    setSavingId(row.id);setErr('');
-    try{await api.updateFundInvestment(entityId,row.id,{parent_name:row.parent_name,name:row.name,acquisition_date:row.acquisition_date,cost:Number(row.cost)||0,fair_value:Number(row.fair_value)||0,sort_order:Number(row.sort_order)||0});}
-    catch(e){setErr(e.message);}finally{setSavingId(null);}
-  };
-  const delInv=async(id)=>{setErr('');try{await api.deleteFundInvestment(entityId,id);load();}catch(e){setErr(e.message);}};
-  const setInvField=(id,f,v)=>setInvs(list=>list.map(r=>r.id===id?{...r,[f]:v}:r));
 
   const genPdf=async()=>{
     if(!/^\d{4}-\d{2}-\d{2}$/.test(asOf)){setErr('Pick a valid as-of date');return;}
@@ -5887,45 +5868,9 @@ function FundReporting({entityId,entityName}){
       {alloc&&!alloc.hasCommitments&&<div style={{marginTop:12,fontSize:12,color:T.orange||'#d08a2a'}}>No commitments loaded yet, so net loss falls entirely to LP. Once commitments are loaded, the split activates automatically.</div>}
     </div>
 
-    {/* Schedule of Investments editor */}
-    <div style={{...S.card,marginBottom:16}}>
-      <div style={S.h2}>Schedule of Investments</div>
-      <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>Per-underlying look-through detail (not in the GL). Group underlyings under a holding company via “Parent”. Percentages of partners' capital are computed at generation.</div>
-      {invs===null?<div style={{color:T.textMuted,fontSize:12}}>Loading…</div>:
-      <div style={{overflowX:'auto'}}>
-        <table style={{borderCollapse:'collapse',width:'100%',minWidth:720}}>
-          <thead><tr>
-            <th style={th}>Parent (holding co.)</th><th style={th}>Investment</th><th style={th}>Acq. date</th>
-            <th style={{...th,textAlign:'right'}}>Cost</th><th style={{...th,textAlign:'right'}}>Fair value</th>
-            <th style={{...th,textAlign:'right'}}>Order</th><th style={th}></th>
-          </tr></thead>
-          <tbody>
-            {invs.map(r=>(<tr key={r.id}>
-              <td style={td}><input style={cellInput} value={r.parent_name||''} onChange={e=>setInvField(r.id,'parent_name',e.target.value)}/></td>
-              <td style={td}><input style={cellInput} value={r.name||''} onChange={e=>setInvField(r.id,'name',e.target.value)}/></td>
-              <td style={td}><input style={{...cellInput,width:90}} value={r.acquisition_date||''} placeholder='m/d/yyyy' onChange={e=>setInvField(r.id,'acquisition_date',e.target.value)}/></td>
-              <td style={{...td,textAlign:'right'}}><input style={{...cellInput,textAlign:'right'}} value={r.cost} onChange={e=>setInvField(r.id,'cost',e.target.value)}/></td>
-              <td style={{...td,textAlign:'right'}}><input style={{...cellInput,textAlign:'right'}} value={r.fair_value} onChange={e=>setInvField(r.id,'fair_value',e.target.value)}/></td>
-              <td style={{...td,textAlign:'right',width:60}}><input style={{...cellInput,textAlign:'right'}} value={r.sort_order} onChange={e=>setInvField(r.id,'sort_order',e.target.value)}/></td>
-              <td style={{...td,whiteSpace:'nowrap'}}>
-                <button style={{...S.btnGhost,color:T.green,fontSize:11,marginRight:6,opacity:savingId===r.id?0.6:1}} disabled={savingId===r.id} onClick={()=>saveInv(r)}>{savingId===r.id?'…':'Save'}</button>
-                <button style={{...S.btnGhost,color:T.red,fontSize:11}} onClick={()=>delInv(r.id)}>Delete</button>
-              </td>
-            </tr>))}
-            {/* add-new row */}
-            <tr>
-              <td style={td}><input style={cellInput} value={draft.parent_name} placeholder='CLRFI Midco I, LLC' onChange={e=>setDraft({...draft,parent_name:e.target.value})}/></td>
-              <td style={td}><input style={cellInput} value={draft.name} placeholder='New investment' onChange={e=>setDraft({...draft,name:e.target.value})}/></td>
-              <td style={td}><input style={{...cellInput,width:90}} value={draft.acquisition_date} placeholder='m/d/yyyy' onChange={e=>setDraft({...draft,acquisition_date:e.target.value})}/></td>
-              <td style={{...td,textAlign:'right'}}><input style={{...cellInput,textAlign:'right'}} value={draft.cost} placeholder='0' onChange={e=>setDraft({...draft,cost:e.target.value})}/></td>
-              <td style={{...td,textAlign:'right'}}><input style={{...cellInput,textAlign:'right'}} value={draft.fair_value} placeholder='0' onChange={e=>setDraft({...draft,fair_value:e.target.value})}/></td>
-              <td style={{...td,textAlign:'right',width:60}}><input style={{...cellInput,textAlign:'right'}} value={draft.sort_order} placeholder='0' onChange={e=>setDraft({...draft,sort_order:e.target.value})}/></td>
-              <td style={td}><button style={{...S.btnP,padding:'4px 10px',opacity:busy?0.6:1}} disabled={busy} onClick={addInv}>Add</button></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>}
-    </div>
+    {/* Schedule of Investments is no longer edited here — the fund Schedule of
+        Investments is derived at generation from the GL (cost) plus the Investment
+        & Valuation workpaper's unrealized marks (fair value). */}
   </div>);
 }
 

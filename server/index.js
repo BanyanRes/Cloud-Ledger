@@ -12120,8 +12120,31 @@ app.get('/api/entities/:eid/fund-statements.pdf', auth, requireEntityAccess(), r
     const ent = db.prepare('SELECT name FROM entities WHERE id=?').get(eid);
     const entityName = ent ? ent.name : ('Entity ' + eid);
 
-    const investments = db.prepare(`SELECT id, parent_name, name, acquisition_date, cost, fair_value, sort_order
-      FROM fund_investments WHERE entity_id = ? ORDER BY sort_order, id`).all(eid);
+    // Schedule of Investments per-underlying detail. For CLRF (entity 40) this is
+    // derived LIVE from the general ledger + the Investment & Valuation workpaper's
+    // accounts (cost = the 1210x1 purchase account, fair value = cost + the 1210x2
+    // unrealized mark), so there is nothing to maintain by hand. Only the
+    // presentation attributes (holding company, display name, acquisition date,
+    // order) are fixed config. Other entities keep the legacy fund_investments table.
+    const CLRF_SOI = [
+      { name: 'County Line SRN LLC',         parent_name: 'CLRFI Midco I, LLC', acquisition_date: '1/17/2025', cost_code: '121031', unreal_code: '121032', sort_order: 1 },
+      { name: 'CLIP',                        parent_name: 'CLRFI Midco I, LLC', acquisition_date: '8/1/2025',  cost_code: '121011', unreal_code: '121012', sort_order: 2 },
+      { name: 'Silsbee',                     parent_name: 'CLRFI Midco I, LLC', acquisition_date: '8/1/2025',  cost_code: '121041', unreal_code: '121042', sort_order: 3 },
+      { name: 'CLR Buna Property Owner LLC', parent_name: 'CLRFI Midco I, LLC', acquisition_date: '8/19/2025', cost_code: '121021', unreal_code: '121022', sort_order: 4 },
+    ];
+    let investments;
+    if (Number(eid) === 40) {
+      const bsRows = computeBalances(eid, { as_of: asOf });
+      const balByCode = {}; for (const r of bsRows) balByCode[String(r.code)] = Number(r.balance) || 0;
+      investments = CLRF_SOI.map((c, i) => {
+        const cost = Math.round(balByCode[c.cost_code] || 0);
+        const unreal = Math.round(balByCode[c.unreal_code] || 0);
+        return { id: i + 1, parent_name: c.parent_name, name: c.name, acquisition_date: c.acquisition_date, cost, fair_value: cost + unreal, sort_order: c.sort_order };
+      }).filter((r) => r.cost !== 0 || r.fair_value !== 0);
+    } else {
+      investments = db.prepare(`SELECT id, parent_name, name, acquisition_date, cost, fair_value, sort_order
+        FROM fund_investments WHERE entity_id = ? ORDER BY sort_order, id`).all(eid);
+    }
     const partnerClasses = db.prepare(`SELECT id, name, partner_type FROM dim_classes WHERE entity_id = ?`).all(eid);
     const commitments = db.prepare(`SELECT class_id, commitment_amount FROM investor_commitments WHERE entity_id = ?`).all(eid);
 
