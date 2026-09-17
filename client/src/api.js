@@ -591,6 +591,7 @@ export const api = {
       pref: { path: 'preferred-return', hdr: 'x-pref-summary', name: 'CLRF_Preferred_Return.xlsx' },
       ilpafee: { path: 'ilpa-fee', hdr: 'x-ilpa-summary', name: 'CLRF_ILPA_Fee.xlsx' },
       cashflow: { path: 'cash-flow', hdr: 'x-cashflow-summary', name: 'CLRF_Cash_Flow.xlsx' },
+      subclose: { path: 'subclose', hdr: 'x-subclose-summary', name: 'CLRF_SubClose.xlsx' },
     };
     const cfg = map[kind];
     if (!cfg) throw new Error('Unknown workpaper kind: ' + kind);

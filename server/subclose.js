@@ -266,7 +266,7 @@ function registerSubcloseRoutes(app, ctx) {
     requireRole('Admin', 'Accountant'), async (req, res) => {
       try {
         const eid = Number(req.params.entity_id);
-        const asOf = (req.body && req.body.as_of) || '';
+        const asOf = (req.body && (req.body.as_of || req.body.quarter_end)) || '';
         if (!isDate(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         const data = buildData(ctx, asOf, { entity_id: eid });
