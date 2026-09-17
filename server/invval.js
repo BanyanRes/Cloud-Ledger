@@ -676,17 +676,20 @@ function registerInvValRoutes(app, ctx) {
         // amount. Source it from the manually-prepared year-end (Q4 prior-year)
         // Investment workpaper when one is on file; otherwise fall back to the CLRF
         // GL unrealized sub-accounts (pre-2027 behavior).
-        const glFvAdj = { clip: Math.round(costOf('121012')), silsbee: Math.round(costOf('121042')), buna: Math.round(costOf('121022')), srn: Math.round(costOf('121032')) };
-        let fvAdj = glFvAdj;
-        let fvAdjSource = 'the prior year-end amounts per CLRF GL (acct 121012 for CLIP; others 0) -- no manual year-end workpaper on file';
+        // Fallback (no manual year-end file): only CLIP carries a frozen gain, from
+        // the CLRF GL unrealized sub-account -- identical to the pre-2027 behavior,
+        // where Silsbee/Buna/SRN follow the keep-prior/raise logic (unrealized 0).
+        const glClipFrozen = Math.round(costOf('121012'));
+        let fvAdj = { clip: glClipFrozen, silsbee: 0, buna: 0, srn: 0 };
+        let fvAdjSource = 'the prior year-end amount per CLRF GL (acct 121012 for CLIP; others 0) -- no manual year-end workpaper on file';
         const yeInv = findYearEndInvestment(ctx, eid, qtr);
         if (yeInv && fs.existsSync(yeInv.abs_path)) {
           const ye = await readYearEndFrozen(fs.readFileSync(yeInv.abs_path));
           fvAdj = {
-            clip: ye.clip !== null ? ye.clip : glFvAdj.clip,
-            silsbee: ye.silsbee !== null ? ye.silsbee : glFvAdj.silsbee,
-            buna: ye.buna !== null ? ye.buna : glFvAdj.buna,
-            srn: ye.srn !== null ? ye.srn : glFvAdj.srn,
+            clip: ye.clip !== null ? ye.clip : glClipFrozen,
+            silsbee: ye.silsbee !== null ? ye.silsbee : 0,
+            buna: ye.buna !== null ? ye.buna : 0,
+            srn: ye.srn !== null ? ye.srn : 0,
           };
           fvAdjSource = 'the ' + yeInv.folder_path.split('/').pop() + ' year-end workpaper (manually prepared)';
         }
