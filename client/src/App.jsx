@@ -904,7 +904,6 @@ export default function App(){
       ...(isCLRF?[{id:'rep_pcapstmt',label:'PCAP Statements',icon:'📄',section:'reports'}]:[]),
       {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},
       ...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),
-      {id:'commitments',label:'Commitments',icon:'🤝',section:'reports'},
       ...(isTurnkeyEntity?[{id:'wip',label:'WIP Schedule',icon:NI.wip,section:'reports'}]:[]),
       {id:'memorized',label:'Memorized Reports',icon:'★',section:'reports'},
     ]},
@@ -915,7 +914,6 @@ export default function App(){
       ...(isCLRF?[{id:'wp_valuation',label:'Investment & Valuation',icon:'🏦',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_pref',label:'Preferred Return',icon:'📈',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_carry',label:'Carried Interest',icon:'📊',section:'workpapers'}]:[]),
-      ...(isCLRF?[{id:'wp_pcap',label:'PCAP Statements',icon:'📄',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_pcapsched',label:'Partners’ Capital Accounts',icon:'📋',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_subclose',label:'Subclose',icon:'🧾',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_ilpafee',label:'ILPA Fee',icon:'📄',section:'workpapers'}]:[]),
@@ -1002,7 +1000,6 @@ export default function App(){
         {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
-        {page==='commitments'&&activeEntity&&<CommitmentsPage entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='memorized'&&activeEntity&&<MemorizedReportsPage entityId={activeEntity} entityName={entityName} canEdit={canEdit} onOpen={(r)=>{const c=r.config||{};if(r.report_type==='trial'&&c.asOf)setTbAsOf(c.asOf);else if(r.report_type==='bs'&&c.asOf)setBsAsOf(c.asOf);else if(r.report_type==='is'){if(c.from)setIsFrom(c.from);if(c.to)setIsTo(c.to);}else setPendingReportConfig({type:r.report_type,config:c});setPage(r.report_type==='drilldown'?'coa':r.report_type);}} key={activeEntity+'-'+rk}/>}
         {page==='wip'&&activeEntity&&<WipSchedule entityName={entityName} asOf={wipAsOf} setAsOf={setWipAsOf}/>}
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
@@ -1016,7 +1013,6 @@ export default function App(){
         {page==='wp_valuation'&&activeEntity&&isCLRF&&<ValuationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_pref'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="pref" title="Preferred Return" description="The fund-level 8% preferred return (annually compounded, IRR-based): the equalized Limited-Partner net cash-flow schedule, Return of Capital, and the Preferred Return solved so the LP-stream IRR reaches 8%. Enter Return of Capital and Preferred Return from the fund's preferred-return workpaper below; when a dated cash-flow schedule is loaded, this workpaper recomputes and verifies the 8% result. Feeds the Carried Interest §17(c) build-up. A copy is filed under Workpapers › Preferred Return by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_carry'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="carry" title="Carried Interest / Clawback" description="Side letter §17(c) build-up: distributable assets, return of capital, preferred return, and the per-LP waterfall (return of capital → 8% preferred return → 80/20 catch-up → 80/20 residual), carried interest to date, and the hypothetical clawback. The preferred-return line is pending the fund's preferred-return workpaper. A copy is filed under Workpapers › Carried Interest & Clawback by year and quarter." key={activeEntity+'-'+rk}/>}
-        {page==='wp_pcap'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="pcap" title="PCAP Statements" description="A PDF with one Statement of Changes in Capital per investor (commitment summary plus year-to-date and inception-to-date roll-forward), on the County Line Rail letterhead. Sourced entirely from the general ledger by investor class; ties to the fund Statement of Changes in Partners' Capital. A copy is filed under Workpapers › Partners' Capital Accounts by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_pcapsched'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="pcapSchedule" title="Partners’ Capital Accounts Schedule" description="The 80-line supplementary schedule: one row per investor (Limited Partners then General Partners) with subtotals and a grand total, matching the fund administrator's schedule column-for-column. Reuses the PCAP engine, so it ties to the PCAP statements. A copy is filed under Workpapers › Partners' Capital Accounts Schedule by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_subclose'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="subclose" title="Subclose Calculation" description="The subsequent-closing (Legacy Knight) rebalance for the fund, reproduced from the general ledger: a per-investor rebalance (GCM equalization, the Odyssey overstatement true-up, the Legacy Knight equalization and the May 2026 capital call) plus the subscriber calls and posted journal entries. Ending capital ties to the PCAP statements. A copy is filed under Workpapers › Subsequent Closings by year." key={activeEntity+'-'+rk}/>}
         {page==='wp_ilpafee'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="ilpafee" title="ILPA Fee" description="The ILPA Fee Reporting Template for each GCM Grosvenor investor sleeve — one tab per investor, reproducing the vendor template exactly (notes, fonts, blue input cells and formulas). Contributions are shown gross and returns of capital as positive Distributions; every subtotal is a formula and ties to the general ledger. A copy is filed under Workpapers › ILPA Fee by year and quarter." key={activeEntity+'-'+rk}/>}
@@ -5824,10 +5820,12 @@ function FundReporting({entityId,entityName}){
   useEffect(()=>{
     if(odysseyClass&&alloc&&alloc.gpDetail){const row=alloc.gpDetail.find(g=>g.class_id===odysseyClass.id);if(row&&odysseyAmt==='')setOdysseyAmt(String(row.commitment_amount||''));}
   },[alloc,odysseyClass]);
-  const saveOdyssey=async()=>{
-    if(!odysseyClass){setErr('No investor class named "Odyssey" is tagged as GP for this entity.');return;}
+  const commitOdyssey=async()=>{
+    if(!odysseyClass)return; // no Odyssey GP class tagged yet
+    const v=String(odysseyAmt).trim();
+    if(v===''||isNaN(Number(v)))return; // nothing valid entered
     setSavingOdyssey(true);setErr('');
-    try{await api.setClassCommitment(entityId,odysseyClass.id,Number(odysseyAmt)||0);loadAlloc();}
+    try{await api.setClassCommitment(entityId,odysseyClass.id,Number(v)||0);loadAlloc();}
     catch(e){setErr(e.message);}finally{setSavingOdyssey(false);}
   };
 
@@ -5863,13 +5861,13 @@ function FundReporting({entityId,entityName}){
     {/* Odyssey commitment + GP/LP allocation */}
     <div style={{...S.card,marginBottom:16}}>
       <div style={S.h2}>Odyssey commitment &amp; net-loss allocation</div>
-      <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>Odyssey's commitment changes monthly. Enter the current amount; the GP ownership % and the GP/LP net-loss split update from it (GP net loss = fund net loss × GP commitment ÷ total commitment).</div>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>Odyssey's commitment changes monthly. Enter the current amount — it saves automatically when you leave the box (or press Enter). The GP ownership % and the GP/LP net-loss split update from it (GP net loss = fund net loss × GP commitment ÷ total commitment).</div>
       <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
         <div>
           <label style={S.label}>Odyssey Holdings commitment ($)</label>
-          <input type='number' value={odysseyAmt} onChange={e=>setOdysseyAmt(e.target.value)} placeholder='e.g. 369577' style={{...S.input,width:200}}/>
+          <input type='number' value={odysseyAmt} onChange={e=>setOdysseyAmt(e.target.value)} onBlur={commitOdyssey} onKeyDown={e=>{if(e.key==='Enter')e.currentTarget.blur();}} placeholder='e.g. 369577' style={{...S.input,width:200}}/>
         </div>
-        <button style={{...S.btnP,opacity:savingOdyssey?0.6:1}} disabled={savingOdyssey} onClick={saveOdyssey}>{savingOdyssey?'Saving…':'Save Odyssey commitment'}</button>
+        {savingOdyssey&&<div style={{fontSize:12,color:T.textMuted,alignSelf:'center'}}>Saving…</div>}
         {!odysseyClass&&<div style={{fontSize:12,color:T.orange||'#d08a2a',alignSelf:'center'}}>Tag an “Odyssey” class as GP below to enable this.</div>}
       </div>
       {alloc&&<div style={{marginTop:14,display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:12}}>
