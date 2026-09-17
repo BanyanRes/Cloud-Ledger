@@ -21,6 +21,7 @@
 const path = require('path');
 const fs = require('fs');
 const ExcelJS = require('exceljs');
+const JSZip = require('jszip');
 
 const FUND_EID = 40;
 const CONTRIB_ACCTS = ['30100', '301100', '301200', '301300', '301800'];
@@ -149,86 +150,141 @@ function buildData(ctx, asOf, opts = {}) {
   };
 }
 
-// ─── Workbook ────────────────────────────────────────────────────────────────
-const NAVY = 'FF1F3864';
-const HDR = { name: 'Arial', size: 9, bold: true, color: { argb: 'FFFFFFFF' } };
-const F = (o = {}) => Object.assign({ name: 'Arial', size: 10 }, o);
-const MONEY = '#,##0.00;(#,##0.00);-';
-const THIN = { style: 'thin' };
+// ─── Workbook (fund-administrator template population) ───────────────────────
+//
+// The output reproduces the fund administrator's (Weaver) subclose workbook
+// exactly — same two tabs, fonts, number formats, borders, section notes and
+// column layout — by loading their file as a template and populating CloudLedger's
+// GL-derived figures into it. Only the per-investor rebalance INPUT columns are
+// overwritten (B commitment, C GCM eq., D Odyssey correcting, E Legacy Knight eq.,
+// F James & Natalie eq., G May-26 call, K ending capital per WB); every derived
+// column is rewired as a live formula so the sheet foots to CloudLedger's numbers.
+//
+// The subsequent-closing-specific rows (Odyssey true-up + the two subscriber rows
+// Legacy Knight and James Bloomingdale) carry bespoke distribution formulas in the
+// admin file and are left exactly as delivered — the same "pin to the administrator"
+// treatment used elsewhere (preferred return @ 6/30/26). The "Sub Close Summary"
+// tab is preserved verbatim.
+const TEMPLATE_PATH = path.join(__dirname, 'assets', 'subclose_template.xlsx');
+const CALC_SHEET = 'Sub Close Calcu';
+const FIRST_ROW = 4;
+const LAST_ROW = 85;
+// Interest factor the admin file applies to the investment distribution (col Q).
+const INT_FACTOR = 0.06847168947158275;
+// Rows whose distribution columns are bespoke in the admin file (Odyssey true-up,
+// Legacy Knight and James Bloomingdale subscriber rows) — left untouched.
+const SPECIAL_ROWS = new Set([57, 82, 85]);
 
-function hdrRow(ws, rowNum, labels, widths) {
-  const row = ws.getRow(rowNum);
-  labels.forEach((t, i) => {
-    const c = row.getCell(i + 1);
-    c.value = t; c.font = HDR;
-    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: NAVY } };
-    c.alignment = { horizontal: 'center', wrapText: true, vertical: 'bottom' };
-  });
-  if (widths) widths.forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+const normName = (s) => String(s == null ? '' : s)
+  .toLowerCase()
+  .replace(/&/g, ' and ')
+  .replace(/[^a-z0-9]+/g, '');
+
+// Effective numeric value of a cell (formula result or literal).
+function numOf(cell) {
+  const v = cell && cell.value;
+  if (v == null || v === '') return 0;
+  if (typeof v === 'object') return ('result' in v) ? (Number(v.result) || 0) : 0;
+  return Number(v) || 0;
 }
 
-function buildWorkbook(data) {
-  const wb = new ExcelJS.Workbook();
-  wb.creator = 'CloudLedger'; wb.created = new Date();
-  const dateStr = data.as_of;
-
-  // ── Tab 1: Sub Close Calcu — per-investor rebalance ──────────────────────────
-  const ws = wb.addWorksheet('Sub Close Calcu', { views: [{ state: 'frozen', xSplit: 1, ySplit: 4, showGridLines: false }] });
-  ws.getCell('A1').value = data.entity_name + ' — Subsequent-Closing Rebalance (Legacy Knight)';
-  ws.getCell('A1').font = F({ size: 12, bold: true });
-  ws.getCell('A2').value = 'As of ' + dateStr + '. GL-derived; ties to the PCAP statements. Not for income tax purposes.';
-  ws.getCell('A2').font = F({ size: 9, italic: true });
-  const cols = ['Investor Name', 'Commitment', 'Distribution — GCM Equalization',
-    'Correcting Distribution (Odyssey overstatement)', 'Distribution — Legacy Knight Equalization',
-    'Distribution — James & Natalie Bloomingdale', 'May 2026 — Capital Call', 'Ending Capital (Contributed)',
-    'Unfunded', 'Equalization Cash to/(from) Investor', 'Recalc Check', 'Diff'];
-  hdrRow(ws, 4, cols, [40, 15, 18, 18, 18, 16, 15, 16, 14, 16, 15, 10]);
-  const keys = ['commitment', 'gcmEqualization', 'odysseyCorrecting', 'lkEqualization', 'jnbEqualization',
-    'capitalCall', 'endingCapital', 'unfunded', 'equalizationCash', 'recalc', 'recalcDiff'];
-  let r = 5;
-  for (const inv of data.investors) {
-    ws.getCell('A' + r).value = inv.name; ws.getCell('A' + r).font = F();
-    keys.forEach((k, i) => { const c = ws.getCell(r, i + 2); c.value = inv[k]; c.numFmt = MONEY; c.font = F(); });
-    r++;
-  }
-  const t = data.totals; const tr = ws.getRow(r);
-  tr.getCell(1).value = 'Total — ' + t.count + ' investors'; tr.getCell(1).font = F({ bold: true });
-  const tvals = [t.commitment, t.gcmEqualization, t.odysseyCorrecting, t.lkEqualization, t.jnbEqualization,
-    t.capitalCall, t.endingCapital, t.unfunded, t.equalizationCash, null, null];
-  tvals.forEach((v, i) => { if (v === null) return; const c = tr.getCell(i + 2); c.value = v; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN, bottom: { style: 'double' } }; });
-
-  // ── Tab 2: Sub Close Summary — subscriber calls, equalization JE, distribution ─
-  const sm = wb.addWorksheet('Sub Close Summary', { views: [{ showGridLines: false }] });
-  sm.getColumn(1).width = 44; sm.getColumn(2).width = 18; sm.getColumn(3).width = 18; sm.getColumn(4).width = 40;
-  let R = 1;
-  const put = (col, v, o = {}, fmt) => { const c = sm.getCell(col + R); c.value = v; c.font = F(o); if (fmt) c.numFmt = fmt; return c; };
-  const callBlock = (title, call) => {
-    put('A', title, { bold: true, size: 11 }); R++;
-    if (!call) { put('A', '(entry not found in GL)', { italic: true }); R += 2; return; }
-    put('A', 'JE' + call.id + '  ' + String(call.date).slice(0, 10)); R++;
-    put('A', 'Account', { bold: true }); put('B', 'Debit', { bold: true }); put('C', 'Credit', { bold: true }); R++;
-    for (const l of call.lines) { put('A', l.code + ' ' + (l.name || '')); put('B', l.debit || null, {}, MONEY); put('C', l.credit || null, {}, MONEY); R++; }
-    put('A', 'Total call', { bold: true }); put('B', call.total, { bold: true }, MONEY); R += 2;
-  };
-  put('A', data.entity_name + ' — Subsequent-Closing Summary (Legacy Knight)', { bold: true, size: 12 }); R += 2;
-  callBlock('Legacy Knight — Capital Call (LC05282601)', data.legacyKnightCall);
-  callBlock('James Bloomingdale — Capital Call (LC05282602)', data.jamesCall);
-
-  if (data.equalization) {
-    put('A', 'Equalization / true-up entry — JE' + data.equalization.id + '  ' + String(data.equalization.date).slice(0, 10), { bold: true, size: 11 }); R++;
-    put('A', 'Account', { bold: true }); put('B', 'Debit', { bold: true }); put('C', 'Credit', { bold: true }); R++;
-    for (const l of data.equalization.acct) { put('A', l.code + ' ' + (l.name || '')); put('B', l.debit || null, {}, MONEY); put('C', l.credit || null, {}, MONEY); R++; }
-    put('A', 'Total', { bold: true }); put('B', data.equalization.totalD, { bold: true }, MONEY); put('C', data.equalization.totalC, { bold: true }, MONEY); R += 2;
-
-    put('A', 'Equalization distribution — cash to/(from) each investor', { bold: true, size: 11 }); R++;
-    put('A', 'Investor', { bold: true }); put('B', 'Cash', { bold: true }); R++;
-    let dt = 0;
-    for (const inv of data.investors) {
-      if (!inv.equalizationCash) continue;
-      put('A', inv.name); put('B', inv.equalizationCash, {}, MONEY); R++; dt = r2(dt + inv.equalizationCash);
+// ExcelJS emits <pageSetUpPr> before <outlinePr> inside <sheetPr>, which Excel
+// rejects ("Repaired Records ... Load error"). Restore schema order post-write.
+async function fixSheetPrOrder(buf) {
+  try {
+    const zip = await JSZip.loadAsync(buf);
+    const names = Object.keys(zip.files).filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n));
+    let changed = false;
+    for (const name of names) {
+      const xml = await zip.file(name).async('string');
+      const fixed = xml.replace(/(<pageSetUpPr\b[^>]*\/>)\s*(<outlinePr\b[^>]*\/>)/g, '$2$1');
+      if (fixed !== xml) { zip.file(name, fixed); changed = true; }
     }
-    put('A', 'Total distribution', { bold: true }); put('B', dt, { bold: true }, MONEY); R += 1;
+    if (!changed) return buf;
+    return await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  } catch (e) { return buf; }
+}
+
+async function buildWorkbook(data) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(TEMPLATE_PATH);
+  const ws = wb.getWorksheet(CALC_SHEET);
+  if (!ws) throw new Error('subclose template missing "' + CALC_SHEET + '" sheet');
+
+  // Index CloudLedger investors by normalized name.
+  const byName = new Map();
+  for (const inv of data.investors) {
+    const key = normName(inv.name);
+    if (key && !byName.has(key)) byName.set(key, inv);
   }
+
+  const setVal = (addr, v) => { ws.getCell(addr).value = v; };
+  const setFormula = (addr, formula, result) => { ws.getCell(addr).value = { formula: formula, result: result }; };
+
+  let matched = 0;
+  for (let r = FIRST_ROW; r <= LAST_ROW; r++) {
+    if (SPECIAL_ROWS.has(r)) continue;
+    const nameCell = ws.getCell('A' + r).value;
+    const key = normName(typeof nameCell === 'object' && nameCell ? (nameCell.result || nameCell.text) : nameCell);
+    const inv = key && byName.get(key);
+    if (!inv) continue; // leave the administrator's values for any unmatched row
+    matched++;
+
+    const b = r2(inv.commitment);
+    const c = r2(inv.gcmEqualization);
+    const d = r2(inv.odysseyCorrecting);
+    const e = r2(inv.lkEqualization);
+    const f = r2(inv.jnbEqualization);
+    const g = r2(inv.capitalCall);
+    const k = r2(-inv.endingCapital);
+
+    // Input columns (overwrite; existing number formats are preserved).
+    setVal('B' + r, b); setVal('C' + r, c); setVal('D' + r, d);
+    setVal('E' + r, e); setVal('F' + r, f); setVal('G' + r, g); setVal('K' + r, k);
+
+    // Derived columns — live formulas with cached results (S/T blank on normal rows).
+    const S = numOf(ws.getCell('S' + r));
+    const T = numOf(ws.getCell('T' + r));
+    const Y = numOf(ws.getCell('Y' + r));
+    const H = b + c + d + e + f + g;
+    const I = b - H;
+    const L = H + k - g;
+    const O = d;
+    const P = e;
+    const Q = e * INT_FACTOR;
+    const R = O + P + Q;
+    const U = R + S + T;
+    const X = g;
+    const Z = X + Y;
+    const AB = Z + U;
+
+    setFormula('H' + r, '+B' + r + '+C' + r + '+D' + r + '+E' + r + '+F' + r + '+G' + r, H);
+    setFormula('I' + r, '+B' + r + '-H' + r, I);
+    setFormula('L' + r, '+H' + r + '+K' + r + '-G' + r, L);
+    setFormula('O' + r, '+D' + r, O);
+    setFormula('P' + r, '+E' + r, P);
+    setFormula('Q' + r, '+P' + r + '*' + INT_FACTOR, Q);
+    setFormula('R' + r, '+O' + r + '+P' + r + '+Q' + r, R);
+    setFormula('U' + r, '+R' + r + '+S' + r + '+T' + r, U);
+    setFormula('V' + r, '+P' + r, P);
+    setFormula('X' + r, '+G' + r, X);
+    setFormula('Z' + r, '+X' + r + '+Y' + r, Z);
+    setFormula('AB' + r, '+Z' + r + '+U' + r, AB);
+  }
+
+  // Refoot the header/footer totals over the (now CloudLedger-populated) rows,
+  // so the workbook foots regardless of which rows were matched.
+  const refoot = (addr, col) => {
+    const cell = ws.getCell(addr);
+    if (cell.value == null || cell.value === '') return;
+    let s = 0;
+    for (let r = FIRST_ROW; r <= LAST_ROW; r++) s += numOf(ws.getCell(col + r));
+    cell.value = { formula: 'SUM(' + col + FIRST_ROW + ':' + col + LAST_ROW + ')', result: r2(s) };
+  };
+  ['B', 'C', 'D', 'E', 'H', 'K'].forEach((col) => refoot(col + '1', col));
+  ['N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'X', 'Y', 'Z', 'AB'].forEach((col) => refoot(col + '86', col));
+
+  wb._clMatched = matched; // for logging
   return wb;
 }
 
@@ -270,8 +326,8 @@ function registerSubcloseRoutes(app, ctx) {
         if (!isDate(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         const data = buildData(ctx, asOf, { entity_id: eid });
-        const wb = buildWorkbook(data);
-        const buf = Buffer.from(await wb.xlsx.writeBuffer());
+        const wb = await buildWorkbook(data);
+        const buf = await fixSheetPrOrder(Buffer.from(await wb.xlsx.writeBuffer()));
         const saved = saveToWorkpapers(ctx, eid, asOf, buf, who);
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', 'attachment; filename="' + saved.original_name + '"');
@@ -293,8 +349,8 @@ function registerSubcloseRoutes(app, ctx) {
       const asOf = req.query && req.query.as_of;
       if (!isDate(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
       const data = buildData(ctx, asOf, { entity_id: eid });
-      const wb = buildWorkbook(data);
-      const buf = Buffer.from(await wb.xlsx.writeBuffer());
+      const wb = await buildWorkbook(data);
+      const buf = await fixSheetPrOrder(Buffer.from(await wb.xlsx.writeBuffer()));
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename="' + fileNameFor(asOf) + '"');
       res.send(buf);
