@@ -5425,35 +5425,10 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
     }catch(e){ setErr(e.message||String(e)); }
     finally{ setBusy(false); }
   };
-  // Carry & Preferred-Return workpapers: maintained preferred return + return of
-  // capital per quarter (both read/write the same fund_preferred_return store).
-  const isCarry=kind==='carry';
-  const isPref=kind==='pref';
-  const showPrefInputs=isCarry||isPref;
-  const[prefIn,setPrefIn]=useState('');
-  const[rocIn,setRocIn]=useState('');
-  const[prefNote,setPrefNote]=useState('');
-  const[prefMsg,setPrefMsg]=useState('');
-  const[savingPref,setSavingPref]=useState(false);
-  const[prefComputed,setPrefComputed]=useState(false);
-  useEffect(()=>{ if(!showPrefInputs||!isQuarterEnd(qe))return; let live=true;
-    (async()=>{ const row=await api.preferredReturnGet(entityId,qe);
-      if(!live)return;
-      setPrefIn(row&&row.pref!=null?String(row.pref):'');
-      setRocIn(row&&row.roc!=null?String(row.roc):'');
-      setPrefNote(row&&row.note?row.note:'');
-      setPrefComputed(!!(row&&row.computed));
-      setPrefMsg(row?(row.computed?('CL true-up for '+qe+': Return of Capital and Preferred Return are computed from the Weaver dated schedule frozen through 6/30/26 plus '+(row.cf_count||0)+' GL-dated LP flow(s) since, solved to exactly 8%'+(row.overridden?' — currently overridden by a saved value':'')+'. Edit and save only to pin a specific figure.'):('Loaded stored values for '+qe+(row.has_cashflows?' (dated cash-flow schedule on file).':'.'))):('No stored values for '+qe+' yet — enter them to compute the build-up.'));
-    })();
-    return()=>{live=false;};
-  },[qe,showPrefInputs,entityId]);
-  const savePref=async()=>{
-    setSavingPref(true);setPrefMsg('');
-    try{ await api.preferredReturnSave(entityId,{quarter_end:qe,pref:prefIn===''?null:Number(prefIn),roc:rocIn===''?null:Number(rocIn),note:prefNote||null});
-      setPrefMsg('Saved. Run the report to use these figures.');
-    }catch(e){ setPrefMsg('Save failed: '+(e.message||e)); }
-    finally{ setSavingPref(false); }
-  };
+  // Preferred-return inputs were retired from the UI: 6/30/26 is the stored Weaver
+  // pin and every later quarter is computed from the GL (the CL true-up), so there
+  // is nothing to enter by hand. The stored fund_preferred_return values still
+  // drive the Preferred Return and Carried Interest §17(c) workpapers.
   const s=result||{};
   return(<div><div style={S.card}>
     {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
@@ -5468,17 +5443,6 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
     {!valid&&qe&&<div style={{fontSize:12,color:T.orange,marginTop:10}}>
       Enter a quarter end date: March 31, June 30, September 30 or December 31.</div>}
     {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
-    {showPrefInputs&&<div style={{...S.card,marginTop:14,padding:14,background:'#fbfbfd'}}>
-      <div style={{fontWeight:700,color:T.textBright,marginBottom:6}}>Preferred-return inputs ({qe}){prefComputed&&<span style={{marginLeft:8,fontSize:11,fontWeight:600,color:T.green,border:'1px solid '+T.green+'55',borderRadius:4,padding:'1px 6px'}}>CL true-up — computed from GL</span>}</div>
-      <div style={{fontSize:12,color:T.textMuted,marginBottom:10,maxWidth:720,lineHeight:1.5}}>From the fund&rsquo;s preferred-return workpaper (8% XIRR on equalized LP cash flows). Enter Return of Capital and Preferred Return here; {isPref?'the Preferred Return workpaper presents and (when a dated schedule is on file) reproduces the 8% solve, and':'the §17(c) build-up ties to these figures, and'} the same figures feed {isPref?'the Carried Interest §17(c) build-up':'the Preferred Return workpaper'}. Saved per quarter.</div>
-      <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
-        <div><label style={S.label}>Return of Capital</label><input style={S.inputSm} type="number" value={rocIn} onChange={e=>setRocIn(e.target.value)} placeholder="137875481.49"/></div>
-        <div><label style={S.label}>Preferred Return</label><input style={S.inputSm} type="number" value={prefIn} onChange={e=>setPrefIn(e.target.value)} placeholder="9206565.12"/></div>
-        <div style={{flex:'1 1 180px'}}><label style={S.label}>Note (optional)</label><input style={S.inputSm} value={prefNote} onChange={e=>setPrefNote(e.target.value)} placeholder="Weaver PR wp"/></div>
-        <button style={{...S.btnP,opacity:(savingPref||!canEdit||!valid)?0.5:1}} disabled={savingPref||!canEdit||!valid} onClick={savePref}>{savingPref?'Saving…':'Save inputs'}</button>
-      </div>
-      {prefMsg&&<div style={{fontSize:12,color:T.textMuted,marginTop:8}}>{prefMsg}</div>}
-    </div>}
     {result&&<div style={{...S.card,marginTop:18,padding:14,background:'#f3faf5'}}>
       <div style={{fontWeight:700,color:T.green,marginBottom:8}}>
         {s.quarter} workpaper downloaded{s.replaced>0?' · replaced the previous copy':''}</div>
