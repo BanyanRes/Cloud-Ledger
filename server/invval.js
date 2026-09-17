@@ -37,6 +37,8 @@
 const path = require('path');
 const fs = require('fs');
 const JSZip = require('jszip');
+const multer = require('multer');
+const memUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 64 * 1024 * 1024 } });
 
 const CLRF = 40;
 const PORTFOLIO = { clip: 54, silsbee: 39, buna: 38, srn: 37 };
@@ -166,6 +168,20 @@ async function parseModelParams(zip, P) {
   };
 }
 
+// Read the frozen unrealized gain/(loss) per investment from a manually-prepared
+// year-end Investment Balance workbook -- its "Investment Balance" tab, column L,
+// rows 5-8 = CLIP / Silsbee / Buna / SRN. Returns rounded integers (null per key
+// when a cell can't be read). These are the amounts held constant through the
+// interim quarters of the following year.
+async function readYearEndFrozen(buf) {
+  const zip = await JSZip.loadAsync(buf);
+  const P = await sheetMap(zip);
+  if (!P['Investment Balance']) throw new Error('year-end workpaper has no "Investment Balance" sheet');
+  const xml = await zip.file(P['Investment Balance']).async('string');
+  const rd = (ref) => { const v = cellCache(xml, ref); return v === null ? null : Math.round(v); };
+  return { clip: rd('L5'), silsbee: rd('L6'), buna: rd('L7'), srn: rd('L8') };
+}
+
 // -- Waterfall model ------------------------------------------------------------
 function makeModel(params, liqSerial) {
   const FV = (r, n, pv) => -pv * Math.pow(1 + r, n);
@@ -222,7 +238,16 @@ function solveValuations(model, port, books, fvAdj, priorVals) {
   };
   for (const k of ['silsbee', 'buna', 'srn']) {
     const prior = priorVals[k];
-    if (prior !== null && evalP[k](prior) > books[k]) {
+    const frozenGain = fvAdj ? Math.round(fvAdj[k] || 0) : 0;
+    if (Math.abs(frozenGain) >= 1) {
+      // Hold this investment's unrealized gain/(loss) at the frozen (year-end)
+      // amount: solve so proceeds = book carrying value + frozen gain, exactly.
+      const target = books[k] + frozenGain;
+      const v = (k === 'silsbee')
+        ? r2(bisect(evalP.silsbee, target, 5e5, 500e6))
+        : r2(target - port[k].loanBal - port[k].nwc); // buna/srn: proceeds = V + loan + nwc
+      out[k] = { valuation: v, changed: true, frozen: true, target_proceeds: target };
+    } else if (prior !== null && evalP[k](prior) > books[k]) {
       out[k] = { valuation: prior, changed: false };
     } else {
       const minV = (k === 'silsbee')
@@ -392,7 +417,7 @@ async function stripSheetDrawings(zip, sheetPath, sheetXml) {
 
 // -- Investment workbook builder ---------------------------------------------------
 async function buildInvestmentWorkbook(templateBuf, data) {
-  const { qtr, port, books, fvAdj, booksExact, solve, devTotal, params } = data;
+  const { qtr, port, books, fvAdj, booksExact, solve, devTotal, params, fvAdjSource } = data;
   const zip = await JSZip.loadAsync(templateBuf);
   const P = await sheetMap(zip);
   const need = ['Investment Balance', 'Valuations', 'Carrying Value', 'CLIP TB', 'SRN TB', 'Buna TB', 'Silsbee TB',
@@ -401,7 +426,11 @@ async function buildInvestmentWorkbook(templateBuf, data) {
   const V = { clip: solve.clip.valuation, silsbee: solve.silsbee.valuation, buna: solve.buna.valuation, srn: solve.srn.valuation };
   const nwc = { clip: port.clip.nwc, silsbee: port.silsbee.nwc, buna: port.buna.nwc, srn: port.srn.nwc };
   const I = { clip: Math.round(solve.clip.proceeds), silsbee: Math.round(solve.silsbee.proceeds), buna: Math.round(solve.buna.proceeds), srn: Math.round(solve.srn.proceeds) };
-  const K = { clip: I.clip, silsbee: Math.min(I.silsbee, books.silsbee), buna: Math.min(I.buna, books.buna), srn: Math.min(I.srn, books.srn) };
+  // Carrying value: CLIP always marks to proceeds; Silsbee/Buna/SRN are held at
+  // the frozen year-end unrealized when one is set (proceeds solved to book+frozen),
+  // otherwise capped at book (lower-of-cost-or-market, mark down only).
+  const kOf = (k) => (solve[k] && solve[k].frozen) ? I[k] : Math.min(I[k], books[k]);
+  const K = { clip: I.clip, silsbee: kOf('silsbee'), buna: kOf('buna'), srn: kOf('srn') };
   const L = { clip: K.clip - books.clip, silsbee: K.silsbee - books.silsbee, buna: K.buna - books.buna, srn: K.srn - books.srn };
 
   // TB tabs
@@ -458,9 +487,13 @@ async function buildInvestmentWorkbook(templateBuf, data) {
     for (const [ref, v] of Object.entries(params.propInfo)) {
       if (v !== null) x = replaceCell(x, ref, numCell(ref, styleOf(x, ref), v));
     }
-    const note = 'Interim convention: unrealized gain/(loss) held at prior year-end amounts (CLIP = CLRF acct 121012 balance; others 0). '
+    const frozenSrc = fvAdjSource || 'prior year-end amounts (CLIP = CLRF acct 121012 balance; others 0)';
+    const anyFrozenOther = ['silsbee', 'buna', 'srn'].some((k) => solve[k] && solve[k].frozen);
+    const note = 'Interim convention: unrealized gain/(loss) held at ' + frozenSrc + '. '
       + 'Valuations solved from ' + mdyy(qtr.end) + ' net assets and loan balances per CloudLedger: CLIP exactly (dev component per CLIP GL, sales-comparison component is the plug); '
-      + 'Silsbee/Buna/SRN kept at prior valuation when proceeds clear book carrying value, otherwise cost and sales approach figures raised so proceeds exceed book by at least $' + BUFFER.toLocaleString() + '. '
+      + (anyFrozenOther
+        ? 'Silsbee/Buna/SRN solved so proceeds equal book carrying value plus the frozen year-end gain/(loss). '
+        : 'Silsbee/Buna/SRN kept at prior valuation when proceeds clear book carrying value, otherwise cost and sales approach figures raised so proceeds exceed book by at least $' + BUFFER.toLocaleString() + '. ')
       + 'Book carrying values per CLRF GL investment accounts at ' + mdyy(qtr.end) + '.';
     if (/<row r="27">/.test(x)) x = x.replace(/<row r="27">[\s\S]*?<\/row>/, '<row r="27">' + strCell('B27', null, note) + '</row>');
     else x = x.replace('</sheetData>', '<row r="27">' + strCell('B27', null, note) + '</row></sheetData>');
@@ -510,10 +543,14 @@ async function buildInvestmentWorkbook(templateBuf, data) {
     x = replaceCell(x, 'J6', fCell('J6', styleOf(x, 'J6'), "'Carrying Value'!J11", books.silsbee));
     x = replaceCell(x, 'J7', fCell('J7', styleOf(x, 'J7'), "'Carrying Value'!J13", books.buna));
     x = replaceCell(x, 'J8', fCell('J8', styleOf(x, 'J8'), "'Carrying Value'!J7", books.srn));
+    // When an investment's unrealized is frozen at the year-end amount its
+    // carrying value marks straight to proceeds (=I); otherwise it is capped at
+    // book carrying value (mark down only).
+    const kF = (row, k) => (solve[k] && solve[k].frozen) ? ('I' + row) : ('IF(I' + row + '>J' + row + ',J' + row + ',I' + row + ')');
     x = replaceCell(x, 'K5', fCell('K5', styleOf(x, 'K5'), 'I5', K.clip));
-    x = replaceCell(x, 'K6', fCell('K6', styleOf(x, 'K6'), 'IF(I6>J6,J6,I6)', K.silsbee));
-    x = replaceCell(x, 'K7', fCell('K7', styleOf(x, 'K7'), 'IF(I7>J7,J7,I7)', K.buna));
-    x = replaceCell(x, 'K8', fCell('K8', styleOf(x, 'K8'), 'IF(I8>J8,J8,I8)', K.srn));
+    x = replaceCell(x, 'K6', fCell('K6', styleOf(x, 'K6'), kF(6, 'silsbee'), K.silsbee));
+    x = replaceCell(x, 'K7', fCell('K7', styleOf(x, 'K7'), kF(7, 'buna'), K.buna));
+    x = replaceCell(x, 'K8', fCell('K8', styleOf(x, 'K8'), kF(8, 'srn'), K.srn));
     x = replaceCell(x, 'L5', fCell('L5', styleOf(x, 'L5'), 'K5-J5', L.clip));
     x = replaceCell(x, 'L6', fCell('L6', styleOf(x, 'L6'), 'K6-J6', L.silsbee));
     x = replaceCell(x, 'L7', fCell('L7', styleOf(x, 'L7'), 'K7-J7', L.buna));
@@ -570,6 +607,13 @@ function findLatestLike(ctx, eid, folderLike, likeName) {
   if (!row) return null;
   return Object.assign({}, row, { abs_path: path.join(workpapersDir, String(eid), row.stored_filename) });
 }
+// The year-end (Q4 of the PRIOR year) investment workpaper that governs the
+// frozen unrealized gain/(loss) for an interim quarter -- e.g. Q1/Q2/Q3 2027 all
+// take their frozen amounts from Q4 2026.
+const yearEndFolderFor = (qtr) => 'Workpapers/Investment & Valuation/Q4 ' + (Number(qtr.year) - 1);
+function findYearEndInvestment(ctx, eid, qtr) {
+  return findFileIn(ctx, eid, yearEndFolderFor(qtr), 'CLRF Investment Balance%.xlsx');
+}
 function saveFile(ctx, eid, folder, original, buf, who) {
   const { db, workpapersDir } = ctx;
   const parts = folder.split('/');
@@ -601,6 +645,13 @@ function registerInvValRoutes(app, ctx) {
         if (eid !== CLRF) return res.status(400).json({ error: 'Investment & Valuation is a CLRF (entity 40) workpaper.' });
         const qtr = val.resolveQuarter((req.body && req.body.quarter_end) || '');
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
+        // Year-end (12/31) workpapers are prepared manually -- upload them; interim
+        // quarters are generated and hold their unrealized gain/(loss) at these amounts.
+        if (qtr.q === 4) {
+          return res.status(400).json({ error: 'The year-end (12/31) Investment & Valuation workpapers are prepared manually. '
+            + 'Upload the ' + slashDate(qtr.end) + ' Investment and Valuation workbooks with the "Upload year-end workpaper" card; '
+            + 'Q1-Q3 of ' + (Number(qtr.year) + 1) + ' will then be generated with their unrealized gain/(loss) held at these year-end amounts.' });
+        }
         const prior = qtr.q === 1 ? { quarter: 'Q4', year: String(Number(qtr.year) - 1) }
           : { quarter: 'Q' + (qtr.q - 1), year: qtr.year };
         const priorIV = 'Workpapers/Investment & Valuation/' + prior.quarter + ' ' + prior.year;
@@ -621,7 +672,24 @@ function registerInvValRoutes(app, ctx) {
         const costOf = (code) => { const rw = clrfBy[code]; return rw ? r2(dpOf(rw)) : 0; };
         const booksExact = { clip: costOf('121011'), silsbee: costOf('121041'), buna: costOf('121021'), srn: costOf('121031') };
         const books = { clip: Math.round(booksExact.clip), silsbee: Math.round(booksExact.silsbee), buna: Math.round(booksExact.buna), srn: Math.round(booksExact.srn) };
-        const fvAdj = { clip: Math.round(costOf('121012')), silsbee: Math.round(costOf('121042')), buna: Math.round(costOf('121022')), srn: Math.round(costOf('121032')) };
+        // Frozen unrealized gain/(loss): hold each investment at the prior year-end
+        // amount. Source it from the manually-prepared year-end (Q4 prior-year)
+        // Investment workpaper when one is on file; otherwise fall back to the CLRF
+        // GL unrealized sub-accounts (pre-2027 behavior).
+        const glFvAdj = { clip: Math.round(costOf('121012')), silsbee: Math.round(costOf('121042')), buna: Math.round(costOf('121022')), srn: Math.round(costOf('121032')) };
+        let fvAdj = glFvAdj;
+        let fvAdjSource = 'the prior year-end amounts per CLRF GL (acct 121012 for CLIP; others 0) -- no manual year-end workpaper on file';
+        const yeInv = findYearEndInvestment(ctx, eid, qtr);
+        if (yeInv && fs.existsSync(yeInv.abs_path)) {
+          const ye = await readYearEndFrozen(fs.readFileSync(yeInv.abs_path));
+          fvAdj = {
+            clip: ye.clip !== null ? ye.clip : glFvAdj.clip,
+            silsbee: ye.silsbee !== null ? ye.silsbee : glFvAdj.silsbee,
+            buna: ye.buna !== null ? ye.buna : glFvAdj.buna,
+            srn: ye.srn !== null ? ye.srn : glFvAdj.srn,
+          };
+          fvAdjSource = 'the ' + yeInv.folder_path.split('/').pop() + ' year-end workpaper (manually prepared)';
+        }
         const glVal = val.gatherGl(ctx, qtr); // CLRF TB tab + CLIP dev costs for the valuation workbook
         const devTotal = r2(glVal.dev.ltiTotal + glVal.dev.oaTotal);
 
@@ -633,7 +701,7 @@ function registerInvValRoutes(app, ctx) {
         const solve = solveValuations(model, port, books, fvAdj, params.priorVals);
 
         // 4) build + save the investment workbook
-        const inv = await buildInvestmentWorkbook(invTplBuf, { qtr, port, books, booksExact, fvAdj, solve, devTotal, params });
+        const inv = await buildInvestmentWorkbook(invTplBuf, { qtr, port, books, booksExact, fvAdj, solve, devTotal, params, fvAdjSource });
         const folder = IV_FOLDER(qtr);
         const invName = 'CLRF Investment Balance ' + shortDate(qtr.end) + '.xlsx';
         const savedInv = saveFile(ctx, eid, folder, invName, inv.buf, who);
@@ -663,16 +731,73 @@ function registerInvValRoutes(app, ctx) {
           valuation: Object.assign({ template_from: valTpl.source_folder + '/' + valTpl.original_name }, savedVal, valResult.summary),
           solve: {
             clip: { valuation: solve.clip.valuation, proceeds: solve.clip.proceeds, promote: solve.clip.promote, frozen_gain: fvAdj.clip },
-            silsbee: { valuation: solve.silsbee.valuation, proceeds: solve.silsbee.proceeds, changed: solve.silsbee.changed },
-            buna: { valuation: solve.buna.valuation, proceeds: solve.buna.proceeds, changed: solve.buna.changed },
-            srn: { valuation: solve.srn.valuation, proceeds: solve.srn.proceeds, changed: solve.srn.changed },
+            silsbee: { valuation: solve.silsbee.valuation, proceeds: solve.silsbee.proceeds, changed: solve.silsbee.changed, frozen: !!solve.silsbee.frozen },
+            buna: { valuation: solve.buna.valuation, proceeds: solve.buna.proceeds, changed: solve.buna.changed, frozen: !!solve.buna.frozen },
+            srn: { valuation: solve.srn.valuation, proceeds: solve.srn.proceeds, changed: solve.srn.changed, frozen: !!solve.srn.frozen },
           },
+          frozen_gain: fvAdj,
+          frozen_source: fvAdjSource,
           nwc: { clip: port.clip.nwc, silsbee: port.silsbee.nwc, buna: port.buna.nwc, srn: port.srn.nwc },
           loans: { clip: port.clip.loanBal, silsbee: port.silsbee.loanBal, buna: port.buna.loanBal, srn: port.srn.loanBal },
           unrealized: inv.invBalance.L,
         });
       } catch (e) {
         console.error('investment-valuation failed:', e);
+        res.status(400).json({ error: e.message });
+      }
+    });
+
+  // Upload the manually-prepared year-end (12/31) Investment and Valuation
+  // workbooks. Filed under Workpapers/Investment & Valuation/Q4 <year> with the
+  // standard names, so the following year's Q1-Q3 generation picks them up and
+  // holds each investment's unrealized gain/(loss) at these year-end amounts.
+  app.post('/api/workpapers/investment-valuation/:entity_id/upload-year-end', auth,
+    requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'),
+    memUpload.fields([{ name: 'investment', maxCount: 1 }, { name: 'valuation', maxCount: 1 }]),
+    async (req, res) => {
+      try {
+        const eid = Number(req.params.entity_id);
+        if (eid !== CLRF) return res.status(400).json({ error: 'Investment & Valuation is a CLRF (entity 40) workpaper.' });
+        const yearEnd = (req.body && (req.body.year_end || req.body.quarter_end)) || '';
+        const qtr = val.resolveQuarter(yearEnd);
+        if (qtr.q !== 4) return res.status(400).json({ error: 'year_end must be a December 31 date (e.g. ' + qtr.year + '-12-31).' });
+        const who = (req.user && (req.user.email || req.user.name)) || 'system';
+        const invFile = req.files && req.files.investment && req.files.investment[0];
+        const valFile = req.files && req.files.valuation && req.files.valuation[0];
+        if (!invFile) return res.status(400).json({ error: 'The year-end Investment Balance workbook (field "investment") is required.' });
+
+        // Validate the investment workbook and read the frozen unrealized it carries.
+        let frozen;
+        try {
+          const z = await JSZip.loadAsync(invFile.buffer);
+          const zP = await sheetMap(z);
+          for (const n of ['Investment Balance', 'Valuations']) {
+            if (!zP[n]) throw new Error('missing the "' + n + '" sheet');
+          }
+          frozen = await readYearEndFrozen(invFile.buffer);
+        } catch (e) {
+          return res.status(400).json({ error: 'That does not look like a CLRF Investment Balance workbook: ' + e.message });
+        }
+
+        const folder = IV_FOLDER(qtr); // Workpapers/Investment & Valuation/Q4 <year>
+        const invName = 'CLRF Investment Balance ' + shortDate(qtr.end) + '.xlsx';
+        const savedInv = saveFile(ctx, eid, folder, invName, invFile.buffer, who);
+        let savedVal = null;
+        if (valFile) {
+          savedVal = saveFile(ctx, eid, folder, val.valFileName(qtr), valFile.buffer, who);
+        }
+
+        res.json({
+          year_end: qtr.end,
+          folder: folder,
+          applies_to: 'Q1-Q3 ' + (Number(qtr.year) + 1),
+          investment: savedInv,
+          valuation: savedVal,
+          valuation_uploaded: !!valFile,
+          frozen_unrealized: frozen,
+        });
+      } catch (e) {
+        console.error('investment-valuation upload-year-end failed:', e);
         res.status(400).json({ error: e.message });
       }
     });

@@ -651,6 +651,21 @@ export const api = {
     if (!res.ok) throw new Error(data.error || 'Report failed');
     return data;
   },
+  // Upload the manually-prepared year-end (12/31) Investment + Valuation workbooks.
+  investmentValuationUploadYearEnd: async (eid, yearEnd, investmentFile, valuationFile) => {
+    const fd = new FormData();
+    fd.append('year_end', yearEnd);
+    if (investmentFile) fd.append('investment', investmentFile);
+    if (valuationFile) fd.append('valuation', valuationFile);
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/investment-valuation/' + eid + '/upload-year-end', {
+      method: 'POST', headers: token ? { Authorization: 'Bearer ' + token } : {}, body: fd,
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    let data = {}; try { data = await res.json(); } catch {}
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    return data;
+  },
 
   // Workpapers › Financial Statements: preview tie-outs, then generate the
   // merged PDF package (cover + exec summary + GL statements + requisition).

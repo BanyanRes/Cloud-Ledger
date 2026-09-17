@@ -5581,6 +5581,26 @@ function ValuationWorkpaper({entityId,entityName,canEdit=true}){
   const[err,setErr]=useState('');
   const[result,setResult]=useState(null);
   const valid=isQuarterEnd(qe);
+  const isYearEnd=(d)=>isQuarterEnd(d)&&String(d).slice(5)==='12-31';
+  // Year-end (manual) upload card state.
+  const defaultYe=()=>{const t=today();const y=Number(t.slice(0,4));return [y+'-12-31',(y-1)+'-12-31'].filter(d=>d<=t)[0]||(y-1)+'-12-31';};
+  const[yeDate,setYeDate]=useState(defaultYe());
+  const[yeInv,setYeInv]=useState(null);
+  const[yeVal,setYeVal]=useState(null);
+  const[yeBusy,setYeBusy]=useState(false);
+  const[yeErr,setYeErr]=useState('');
+  const[yeResult,setYeResult]=useState(null);
+  const uploadYe=async()=>{
+    if(!isYearEnd(yeDate)){setYeErr('Pick a December 31 (year-end) date.');return;}
+    if(!yeInv){setYeErr('Choose the year-end Investment Balance workbook.');return;}
+    setYeBusy(true);setYeErr('');setYeResult(null);
+    try{
+      const r=await api.investmentValuationUploadYearEnd(entityId,yeDate,yeInv,yeVal);
+      if(!r)return;
+      setYeResult(r);
+    }catch(e){ setYeErr(e.message||String(e)); }
+    finally{ setYeBusy(false); }
+  };
   const run=async()=>{
     if(!valid)return;
     setBusy(true);setErr('');setResult(null);
@@ -5602,7 +5622,10 @@ function ValuationWorkpaper({entityId,entityName,canEdit=true}){
     {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
     <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Investment &amp; Valuation</div>
     <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:760,lineHeight:1.5}}>
-      Run Report will generate two separate workpapers &mdash; Investment and Valuation.
+      Run Report generates the two interim-quarter workpapers &mdash; Investment and Valuation &mdash; for a Q1, Q2 or Q3 date.
+      The <strong>year-end (December 31) valuation and investment workpaper is prepared manually</strong>; upload it below.
+      Once uploaded, Q1&ndash;Q3 of the following year are generated from the live GL (cost basis, NWC and loan balances roll each
+      quarter) while each investment&rsquo;s unrealized gain/(loss) is held at the year-end amount. Repeat the upload each new year.
     </div>
     <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
       <div><label style={S.label}>Quarter End Date</label>
@@ -5628,6 +5651,41 @@ function ValuationWorkpaper({entityId,entityName,canEdit=true}){
       </tbody></table>}
       {inv&&<div style={{fontSize:12,color:T.textMuted}}>Investment workpaper: <strong>{inv.folder_path}/{inv.original_name}</strong>{inv.replaced>0?' (replaced prior copy)':''}</div>}
       {val&&<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Valuation workbook: <strong>{val.folder_path}/{val.original_name}</strong>{val.replaced>0?' (replaced prior copy)':''}</div>}
+    </div>}
+  </div>
+  <div style={{...S.card,marginTop:16}}>
+    <div style={{fontSize:16,fontWeight:700,color:T.textBright,marginBottom:4}}>Upload year-end workpaper</div>
+    <div style={{fontSize:13,color:T.textMuted,marginBottom:14,maxWidth:760,lineHeight:1.5}}>
+      The year-end (December 31) Investment and Valuation workbooks are prepared manually. Upload them here to file them under
+      Workpapers &rsaquo; Investment &amp; Valuation &rsaquo; Q4 &lt;year&gt;. The following year&rsquo;s Q1&ndash;Q3 reports then hold
+      each investment&rsquo;s unrealized gain/(loss) at this file&rsquo;s amounts &mdash; repeat the upload for each new year.
+    </div>
+    <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap',marginBottom:12}}>
+      <div><label style={S.label}>Year-End Date (12/31)</label>
+        <input style={S.inputSm} type="date" value={yeDate} onChange={e=>{setYeDate(e.target.value);setYeErr('');setYeResult(null);}}/></div>
+    </div>
+    <div style={{display:'flex',flexDirection:'column',gap:6,marginBottom:12}}>
+      <div style={{fontSize:12,color:T.textMuted}}>Investment Balance workbook <span style={{color:T.orange}}>(required)</span></div>
+      <input type="file" accept=".xlsx" disabled={yeBusy||!canEdit} onChange={e=>{setYeInv((e.target.files&&e.target.files[0])||null);setYeErr('');setYeResult(null);}} style={{fontSize:13}}/>
+      {yeInv&&<span style={{color:T.textMuted,fontSize:12}}>{yeInv.name}</span>}
+      <div style={{fontSize:12,color:T.textMuted,marginTop:6}}>Valuation workbook <span style={{color:T.textDim}}>(recommended)</span></div>
+      <input type="file" accept=".xlsx" disabled={yeBusy||!canEdit} onChange={e=>{setYeVal((e.target.files&&e.target.files[0])||null);setYeErr('');setYeResult(null);}} style={{fontSize:13}}/>
+      {yeVal&&<span style={{color:T.textMuted,fontSize:12}}>{yeVal.name}</span>}
+    </div>
+    <button style={{...S.btnP,opacity:(yeBusy||!canEdit||!yeInv||!isYearEnd(yeDate))?0.5:1}} disabled={yeBusy||!canEdit||!yeInv||!isYearEnd(yeDate)} onClick={uploadYe}>
+      {yeBusy?'Uploading…':'Upload year-end workpaper'}</button>
+    {!isYearEnd(yeDate)&&yeDate&&<div style={{fontSize:12,color:T.orange,marginTop:10}}>Pick a December 31 date.</div>}
+    {yeErr&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{yeErr}</div>}
+    {yeResult&&<div style={{...S.card,marginTop:16,padding:14,background:'#f3faf5'}}>
+      <div style={{fontWeight:700,color:T.green,marginBottom:8}}>Year-end workpaper saved &middot; held for {yeResult.applies_to}</div>
+      {yeResult.frozen_unrealized&&<table style={{...S.table,minWidth:360,marginBottom:10}}><tbody>
+        <tr><td style={S.tdBold}>Investment</td><td style={{...S.tdBold,textAlign:'right'}}>Frozen Unrealized G/(L)</td></tr>
+        {[['CLIP','clip'],['Silsbee','silsbee'],['Buna','buna'],['SRN','srn']].map(([lbl,k])=>(
+          <tr key={k}><td style={S.td}>{lbl}</td><td style={S.tdR}>{yeResult.frozen_unrealized[k]==null?'—':fmt(yeResult.frozen_unrealized[k])}</td></tr>))}
+      </tbody></table>}
+      {yeResult.investment&&<div style={{fontSize:12,color:T.textMuted}}>Investment workpaper: <strong>{yeResult.investment.folder_path}/{yeResult.investment.original_name}</strong>{yeResult.investment.replaced>0?' (replaced prior copy)':''}</div>}
+      {yeResult.valuation&&<div style={{fontSize:12,color:T.textMuted,marginTop:2}}>Valuation workbook: <strong>{yeResult.valuation.folder_path}/{yeResult.valuation.original_name}</strong>{yeResult.valuation.replaced>0?' (replaced prior copy)':''}</div>}
+      {!yeResult.valuation_uploaded&&<div style={{fontSize:12,color:T.orange,marginTop:6}}>No valuation workbook uploaded &mdash; add it so Q1 valuation generation has a template.</div>}
     </div>}
   </div></div>);
 }
