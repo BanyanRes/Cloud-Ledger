@@ -1266,7 +1266,15 @@ function isClearingAccount(r) {
   return /clearing/i.test(r.name || '') && /^10\d{3}$/.test(String(r.code || ''));
 }
 function isCashAccount(r) {
-  return r.type === 'Asset' && (isCashCode(r.code) || isClearingAccount(r) || /cash|checking|savings|money market|operating acct|bank/i.test(r.name || '') || r.bank_acct);
+  if (r.type !== 'Asset') return false;
+  // A receivable named "due from" / "receivable" is never cash, even when its
+  // account code falls in the cash code range (e.g. CLRF 101100 "Due From Port
+  // Co", code 101100, which the code-range test would otherwise sweep into cash).
+  // This aligns the generic statements model with the fund model's narrower cash
+  // definition. Only an explicit bank-account flag overrides it, since a swept
+  // bank sub-account can legitimately carry such a name.
+  if (!r.bank_acct && /\bdue from\b|receivable/i.test(r.name || '')) return false;
+  return isCashCode(r.code) || isClearingAccount(r) || /cash|checking|savings|money market|operating acct|bank/i.test(r.name || '') || r.bank_acct;
 }
 
 // ── Balance-sheet classification ───────────────────────────────────────────
