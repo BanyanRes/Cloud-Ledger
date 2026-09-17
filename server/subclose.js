@@ -335,6 +335,7 @@ function registerSubcloseRoutes(app, ctx) {
           as_of: asOf, saved_to: saved.folder_path + '/' + saved.original_name, replaced: saved.replaced,
           investors: data.totals.count, ending_capital: data.totals.endingCapital,
           equalization_cash: data.totals.equalizationCash,
+          template_rows_matched: wb._clMatched,
         }).replace(/[^\x20-\x7E]/g, ' '));
         res.send(buf);
       } catch (e) {
