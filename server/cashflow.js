@@ -164,7 +164,17 @@ function buildData(ctx, eid, asOf) {
     };
   } catch (e) { /* leave financing at zero if PCAP is unavailable */ }
 
-  return { eid, entityName, asOf, quarter, bsDetail, plDetail, fin };
+  // Summary subtotals for the UI card (the worksheet folds investing into the
+  // operating section, so investing is reported as 0). Cash change = ending - beg;
+  // financing = contributions + refunds + syndication (waived dev fees are non-cash
+  // and net to zero in the cash column); operating = the balancing remainder.
+  const cashBeg = r2(bsDetail.filter((d) => d.line === 'Cash and cash equivalents').reduce((s, d) => s + d.beg, 0));
+  const cashEnd = r2(bsDetail.filter((d) => d.line === 'Cash and cash equivalents').reduce((s, d) => s + d.end, 0));
+  const netFinancing = r2(fin.contributions + fin.refunds + fin.syndication);
+  const netChange = r2(cashEnd - cashBeg);
+  const summary = { netOperating: r2(netChange - netFinancing), netInvesting: 0, netFinancing, netChange, cashEnd };
+
+  return { eid, entityName, asOf, quarter, bsDetail, plDetail, fin, summary };
 }
 
 // ─── Workbook ────────────────────────────────────────────────────────────────
@@ -175,6 +185,10 @@ function buildWorkbook(data) {
   const fillOf = (rgb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb: rgb } });
   const thin = { style: 'thin' };
   const dbl = { style: 'double' };
+
+  // Create the SOCF Worksheet FIRST so it is the leftmost/opening tab; it is
+  // populated further below (after the supporting tabs' row layout is known).
+  const ws = wb.addWorksheet('SOCF Worksheet', { views: [{ showGridLines: false }] });
 
   // ── Supporting tab: BS Data ────────────────────────────────────────────────
   const bs = wb.addWorksheet('BS Data');
@@ -280,8 +294,7 @@ function buildWorkbook(data) {
   setCA('A8', 'Syndication costs'); setCA('B8', data.fin.syndication, { num: true });
   setCA('A9', 'Waived development fees'); setCA('B9', data.fin.waived, { num: true });
 
-  // ── Main tab: SOCF Worksheet ───────────────────────────────────────────────
-  const ws = wb.addWorksheet('SOCF Worksheet', { views: [{ showGridLines: false }] });
+  // ── Main tab: SOCF Worksheet (created above; populated here) ────────────────
   const WIDTHS = { A: 65.7, B: 1.0, C: 1.5, D: 12.8, E: 14.5, F: 12.7, G: 10.5, H: 12.8, I: 9.2, J: 10.2, K: 12.7, L: 11.5, M: 12.8, N: 11.5, O: 10.2, P: 12.3, Q: 12.8, R: 9.3, S: 13.0, T: 9.5, U: 9.0, V: 12.3, W: 12.5, X: 13.5, Y: 19.5, Z: 15.7 };
   Object.entries(WIDTHS).forEach(([c, w]) => { ws.getColumn(c).width = w; });
   const cell = (addr) => ws.getCell(addr);
@@ -504,8 +517,11 @@ function registerCashFlowRoutes(app, ctx) {
         const saved = saveToWorkpapers(ctx, eid, quarter, buf, who);
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', 'attachment; filename="' + saved.original_name + '"');
+        const s = data.summary || {};
         res.setHeader('X-CashFlow-Summary', JSON.stringify({
           quarter: quarter.label, saved_to: saved.folder_path + '/' + saved.original_name, replaced: saved.replaced,
+          net_operating: s.netOperating, net_investing: s.netInvesting, net_financing: s.netFinancing,
+          net_change: s.netChange, cash_end: s.cashEnd,
           contributions: data.fin.contributions, refunds: data.fin.refunds,
           syndication: data.fin.syndication, waived: data.fin.waived,
           bs_accounts: data.bsDetail.length, pl_accounts: data.plDetail.length,
