@@ -257,34 +257,62 @@ function buildWorkbook(data) {
     else { c.value = v; c.numFmt = SUM_MONEY; c.font = SF(o); }
   };
   const label = (ref, v, o = {}) => { const c = ci.getCell(ref); c.value = v; c.font = SF(o); };
+  // Every figure on this client-facing tab is a live formula that points at its
+  // supporting tab (Waterfall Detail total row) or at the lines above it, so a
+  // reader can trace where each number comes from. Falls back to PENDING text
+  // when the underlying figure is not yet known.
+  const wtRow = 6 + data.lps.length;      // 'Total — Limited Partners' row on Waterfall Detail
+  const WD = "'Waterfall Detail'!";
+  const linkMoney = (ref, formula, cached, o = {}) => {
+    const c = ci.getCell(ref);
+    if (cached === null || cached === undefined) { c.value = PENDING; c.font = SF({ italic: true, color: { argb: 'FFC00000' } }); }
+    else { c.value = { formula: formula, result: cached }; c.numFmt = SUM_MONEY; c.font = SF(o); }
+  };
   let R = 5;
   const secHdr = (t) => { ci.getCell('B' + R).value = t; ci.getCell('B' + R).font = SF({ bold: true }); R++; };
   secHdr('Carried interest build-up');
-  label('B' + R, '   Distributable assets as of quarter-end', { indent: 1 }); money('C' + R, fund.distributable); R++;
-  label('B' + R, '      Return of Capital'); money('C' + R, fund.roc === null ? null : -fund.roc); R++;
-  label('B' + R, '      Preferred Return'); money('C' + R, fund.pref === null ? null : -fund.pref); R++;
-  label('B' + R, 'Excess/(Shortfall)', { bold: true }); money('C' + R, fund.excess, { bold: true });
+  const distRow = R;
+  label('B' + R, '   Distributable assets as of quarter-end', { indent: 1 });
+  linkMoney('C' + R, WD + 'D' + wtRow, fund.distributable); R++;
+  const rocRow = R;
+  label('B' + R, '      Return of Capital');
+  linkMoney('C' + R, '-' + WD + 'E' + wtRow, fund.roc === null ? null : -fund.roc); R++;
+  const prefRow = R;
+  label('B' + R, '      Preferred Return');
+  linkMoney('C' + R, '-' + WD + 'F' + wtRow, fund.pref === null ? null : -fund.pref); R++;
+  const excessRow = R;
+  label('B' + R, 'Excess/(Shortfall)', { bold: true });
+  linkMoney('C' + R, 'C' + distRow + '+C' + rocRow + '+C' + prefRow, fund.excess, { bold: true });
   ['B', 'C'].forEach((col) => { ci.getCell(col + R).border = { top: THIN, bottom: THIN }; }); R += 2;
 
   label('B' + R, 'Current distributable assets subject to carried interest', { bold: true });
-  money('C' + R, fund.pref_known ? Math.max(0, fund.excess || 0) : null); R += 2;
+  linkMoney('C' + R, 'MAX(0,C' + excessRow + ')', fund.pref_known ? Math.max(0, fund.excess || 0) : null); R += 2;
 
   label('B' + R, '§17(c)(i)', { italic: true, bold: true }); R++;
-  label('B' + R, '   Catch-Up to GP (80%)'); money('C' + R, fund.pref_known ? fund.catchupGP : null); R++;
-  label('B' + R, '   Catch-Up to LP (20%)'); money('C' + R, fund.pref_known ? fund.catchupLP : null); R++;
-  label('B' + R, '   Residual Split – LP (80%)'); money('C' + R, fund.pref_known ? fund.residualLP : null); R++;
-  label('B' + R, '   Residual Split – GP (20%)'); money('C' + R, fund.pref_known ? fund.residualGP : null); R += 2;
+  label('B' + R, '   Catch-Up to GP (80%)'); linkMoney('C' + R, WD + 'H' + wtRow, fund.pref_known ? fund.catchupGP : null); R++;
+  label('B' + R, '   Catch-Up to LP (20%)'); linkMoney('C' + R, WD + 'I' + wtRow, fund.pref_known ? fund.catchupLP : null); R++;
+  label('B' + R, '   Residual Split – LP (80%)'); linkMoney('C' + R, WD + 'J' + wtRow, fund.pref_known ? fund.residualLP : null); R++;
+  label('B' + R, '   Residual Split – GP (20%)'); linkMoney('C' + R, WD + 'K' + wtRow, fund.pref_known ? fund.residualGP : null); R += 2;
+  const accumBeginRow = R;
   label('B' + R, '   Accumulated carried interest as of beginning of quarter'); money('C' + R, fund.accum_carry); R++;
-  label('B' + R, '   Accumulated carried interest as of end of quarter'); money('C' + R, fund.pref_known ? r2(fund.accum_carry + (fund.carry_quarter || 0)) : null); R++;
-  label('B' + R, '   Total carried interest in quarter'); money('C' + R, fund.carry_quarter); R += 2;
+  const carryQtrRow = R + 1;
+  label('B' + R, '   Accumulated carried interest as of end of quarter');
+  linkMoney('C' + R, 'C' + accumBeginRow + '+C' + carryQtrRow, fund.pref_known ? r2(fund.accum_carry + (fund.carry_quarter || 0)) : null); R++;
+  label('B' + R, '   Total carried interest in quarter');
+  linkMoney('C' + R, WD + 'L' + wtRow, fund.carry_quarter); R += 2;
 
   label('B' + R, '§17(c)(ii)', { italic: true, bold: true });
-  label('B' + (R + 1), '   Carried interest earned to date (cumulative)'); money('C' + (R + 1), fund.carry_to_date); R += 3;
+  label('B' + (R + 1), '   Carried interest earned to date (cumulative)');
+  linkMoney('C' + (R + 1), 'C' + accumBeginRow, fund.carry_to_date); R += 3;
   label('B' + R, '§17(c)(iii)', { italic: true, bold: true });
   label('B' + (R + 1), '   Clawback that the GP would have to pay if the Partnership were dissolved & liquidated today');
   ci.getCell('B' + (R + 1)).alignment = { wrapText: true };
-  money('C' + (R + 1), fund.clawback); R += 3;
+  linkMoney('C' + (R + 1), 'MAX(0,C' + accumBeginRow + '-C' + carryQtrRow + ')', fund.clawback); R += 3;
   label('B' + R, 'No Assurance Provided.', { italic: true, size: 9 });
+  R += 2;
+  label('B' + R, 'Every figure above is a formula linked to its source: Distributable, Return of Capital, Preferred Return and the §17(c)(i) tiers pull from the Waterfall Detail total row; Excess and the clawback are computed from the lines above. Click any amount to see its formula.', { italic: true, size: 9, color: { argb: 'FF808080' } });
+  ci.getCell('B' + R).alignment = { wrapText: true };
+  ci.mergeCells('B' + R + ':C' + (R + 2));
 
   // ── Waterfall Detail (per-LP) ────────────────────────────────────────────────
   wf.getCell('A1').value = 'PER-LIMITED-PARTNER WATERFALL — ' + fund.entity_name;
@@ -310,9 +338,13 @@ function buildWorkbook(data) {
   }
   // Total row
   const tot = wf.getRow(wr); tot.getCell(1).value = 'Total — Limited Partners'; tot.getCell(1).font = F({ bold: true });
-  const sums = { C: 'commitment', D: 'distributable', E: 'roc', H: 'catchupGP', I: 'catchupLP', J: 'residualLP', K: 'residualGP', L: 'carryGP' };
+  const sums = { C: 'commitment', D: 'distributable', H: 'catchupGP', I: 'catchupLP', J: 'residualLP', K: 'residualGP', L: 'carryGP' };
   const s = (k) => r2(data.lps.reduce((a, x) => a + (Number(x[k]) || 0), 0));
   Object.entries(sums).forEach(([col, k]) => { const c = tot.getCell(col); c.value = s(k); c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; });
+  // Total-row Return of Capital / Preferred Return / Excess are the §17(c) build-up
+  // figures per the preferred-return workpaper (D − E − F = G), so the client-facing
+  // Carried Interest tab links to these totals rather than to the CL column sums.
+  { const c = tot.getCell('E'); c.value = fund.roc === null ? '—' : fund.roc; if (fund.roc !== null) c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
   { const c = tot.getCell('F'); c.value = fund.pref === null ? '—' : fund.pref; if (fund.pref !== null) c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
   { const c = tot.getCell('G'); c.value = fund.excess === null ? '—' : fund.excess; if (fund.excess !== null) c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
 
