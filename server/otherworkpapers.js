@@ -805,9 +805,13 @@ function buildWorkbook(data) {
     for (const f of fl) {
       su.getCell('A' + er).value = (f.severity === 'exception' ? '✖ ' : '△ ') + f.wp;
       su.getCell('A' + er).font = F({ bold: true, color: { argb: f.severity === 'exception' ? 'FFC00000' : 'FFB8860B' } });
-      su.getCell('B' + er).value = f.message; su.getCell('B' + er).font = F(); su.getCell('B' + er).alignment = { wrapText: true };
-      su.mergeCells('B' + er + ':D' + er);
       er++;
+      const _m = String(f.message || '');
+      su.getCell('A' + er).value = _m; su.getCell('A' + er).font = F({ color: { argb: 'FF333333' } });
+      su.getCell('A' + er).alignment = { wrapText: true, vertical: 'top' };
+      su.mergeCells('A' + er + ':D' + er);
+      su.getRow(er).height = Math.min(220, 14 * Math.max(1, Math.ceil(_m.length / 108)) + 4);
+      er += 2;
     }
   }
 
