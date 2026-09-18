@@ -862,7 +862,7 @@ export default function App(){
   // flyout to its right listing that category's pages. Entity-conditional pages
   // live inside a permanent category so switching entities never reshuffles the
   // rail, and a category with nothing visible to this user is dropped entirely.
-  const hasWorkpapers = isReqEntity || isCLRF || isBanyanRes;
+  const hasWorkpapers = isReqEntity || isCLRF || isBanyanRes || isOdyssey;
   const navTree=[
     {key:'ACCOUNTING',label:'Accounting',icon:'📘',items:[
       {id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
