@@ -123,6 +123,7 @@ const sumWhere = (bmap, match) => { let s = 0; for (const [c, v] of bmap) if (ma
 function buildData(ctx, quarter, opts = {}) {
   const { db, computeBalances } = ctx;
   const eid = opts.entity_id || FUND_EID;
+  const flags = []; // exceptions/reviews surfaced on the Summary tab
   const ent = db.prepare('SELECT id, name FROM entities WHERE id = ?').get(eid);
   const bEnd = balanceMap(computeBalances, eid, quarter.end);
   const bBeg = balanceMap(computeBalances, eid, quarter.prior_ye);
@@ -156,10 +157,13 @@ function buildData(ctx, quarter, opts = {}) {
   for (const r of dto) addJE(r, -1);
   const dueEnd = {}; PROPS.forEach((p) => (dueEnd[p] = r2(dueBeg[p] + Object.values(dueJEs).reduce((a, j) => a + (j[p] || 0), 0))));
   const dueData = { PROPS, beg: dueBeg, jes: Object.values(dueJEs).filter((j) => PROPS.some((p) => Math.abs(j[p]) >= 0.005)), end: dueEnd };
+  if (eid === FUND_EID) { dueData.recon = buildDueRecon(ctx, quarter, dueData); for (const f of dueData.recon.flags) flags.push(f); }
 
   // 2. Interest Receivable — detail.
   const intRows = glDetail(db, eid, { from: quarter.ys, to: quarter.end, match: ACCT.intRecv });
   const intBal = sumWhere(bEnd, ACCT.intRecv);
+  const interestTie = { gl: intBal, tied: Math.abs(intBal) < 0.005 };
+  if (!interestTie.tied) flags.push({ severity: 'review', wp: 'Interest Receivable', message: 'Interest receivable ' + fmt(intBal) + ' — confirm it agrees to the portfolio company book (Silsbee).' });
 
   // 3. Prepaid Expenses — roll-forward (advisory + insurance).
   const prepaid = {
@@ -196,7 +200,8 @@ function buildData(ctx, quarter, opts = {}) {
   return {
     quarter, entity_name: ent ? ent.name : ('entity ' + eid),
     due: dueData,
-    interest: { rows: intRows, balance: intBal },
+    flags,
+    interest: { rows: intRows, balance: intBal, tie: interestTie },
     prepaid,
     otherAssets: { groups: oaGroups, total: oaTotal },
     ap: apRecon,
@@ -419,6 +424,104 @@ function buildApRecon(db, eid, q, apGlBal) {
   };
 }
 
+// ─── Cross-entity intercompany recon + exception flags ───────────────────────
+// A workpaper's job is to prove the GL balance is CORRECT against an independent
+// source, not just reprint the GL. For the intercompany balances that source is
+// the counterparty's own ledger (CLRF's portfolio companies are entities here),
+// so we compute both sides and flag any leg that does not mirror.
+
+// Portfolio-property token -> the CL entity that carries the mirror balance.
+const PORT_ENTITY = [
+  { token: 'Silsbee', re: /silsbee property owner/i },
+  { token: 'Buna', re: /buna property owner/i },
+  { token: 'SRN', re: /sabine river|northern railroad/i },
+  { token: 'CLIP', re: /clip property owner/i },
+];
+function resolvePortfolioEntities(db) {
+  const ents = db.prepare('SELECT id, name FROM entities').all();
+  const map = {};
+  for (const pe of PORT_ENTITY) {
+    const hit = ents.find((e) => pe.re.test(String(e.name)));
+    if (hit) map[pe.token] = { id: hit.id, name: hit.name };
+  }
+  return map;
+}
+
+// A counterparty's net position owed TO the fund, from its CLRF-facing loan/due
+// accounts: a payable-to-fund liability counts positive, a due-from-fund asset
+// negative. Contributed capital / equity is excluded — that is the investment
+// recon, not the due-from/(to) recon.
+function counterpartyOwedToFund(computeBalances, cpEid, asOf) {
+  const rows = computeBalances(cpEid, { as_of: asOf }) || [];
+  let net = 0; const legs = [];
+  for (const r of rows) {
+    if (!/county line rail fund|clrf/i.test(String(r.name))) continue;
+    const ty = String(r.type || '');
+    if (ty === 'Liability') { net = r2(net + (r.balance || 0)); legs.push({ code: String(r.code), name: r.name, amt: r2(r.balance) }); }
+    else if (ty === 'Asset') { net = r2(net - (r.balance || 0)); legs.push({ code: String(r.code), name: r.name, amt: r2(-(r.balance || 0)) }); }
+  }
+  return { net: r2(net), legs };
+}
+
+// When a leg does not mirror, look INTO the counterparty's GL and list the
+// fund-side transaction(s) that have no matching entry on the other ledger.
+function traceDueMismatch(ctx, quarter, prop, cpEnt, cpLegCodes) {
+  const { db } = ctx;
+  const fundRows = glDetail(db, FUND_EID, { from: quarter.qs, to: quarter.end, match: (c) => ACCT.dueFrom(c) || ACCT.dueToPort(c) })
+    .filter((r) => matchProp(r.location_name, [prop]) === prop);
+  let cpAmts = [];
+  if (cpEnt && cpLegCodes && cpLegCodes.size) {
+    cpAmts = glDetail(db, cpEnt.id, { from: quarter.qs, to: quarter.end, match: (c) => cpLegCodes.has(String(c)) })
+      .map((r) => Math.round(Math.abs(r.signed) * 100));
+  }
+  const out = [];
+  for (const r of fundRows) {
+    if (Math.abs(r.signed) < 0.005) continue;
+    const key = Math.round(Math.abs(r.signed) * 100);
+    const i = cpAmts.indexOf(key);
+    if (i >= 0) { cpAmts[i] = -1; continue; } // has a mirror on the other side
+    out.push({
+      date: r.date, num: r.entry_num || r.doc_number, amount: r.signed, memo: r.memo || r.description || '',
+      note: (r.entry_num || r.doc_number || '') + ' ' + fmt(Math.abs(r.signed)) + ' "' + String(r.memo || r.description || '').slice(0, 44)
+        + '" recorded on CLRF with no matching entry on ' + (cpEnt ? cpEnt.name : 'the counterparty') + ' as of ' + short(quarter.end)
+        + ' — likely timing (cash cleared in the subsequent period)',
+    });
+  }
+  return out;
+}
+
+// Build the two-sided due-from/(to) reconciliation by property, with flags.
+function buildDueRecon(ctx, quarter, dueData) {
+  const { db, computeBalances } = ctx;
+  const portMap = resolvePortfolioEntities(db);
+  const rows = [], flags = [];
+  for (const prop of dueData.PROPS) {
+    const fundDue = r2(dueData.end[prop] || 0);
+    const cpEnt = portMap[prop] || null;
+    const cp = cpEnt ? counterpartyOwedToFund(computeBalances, cpEnt.id, quarter.end) : { net: 0, legs: [] };
+    if (Math.abs(fundDue) < 0.005 && Math.abs(cp.net) < 0.005) continue;
+    const diff = r2(fundDue - cp.net);
+    let status;
+    if (Math.abs(diff) < 0.005) status = 'matched';
+    else if (!cpEnt || Math.abs(cp.net) < 0.005) status = 'one_sided';
+    else status = 'mismatch';
+    let trace = [];
+    if (status !== 'matched') {
+      const codes = new Set((cp.legs || []).map((l) => String(l.code)));
+      trace = traceDueMismatch(ctx, quarter, prop, cpEnt, codes);
+    }
+    rows.push({ prop, cpName: cpEnt ? cpEnt.name : '(no CL entity)', cpId: cpEnt ? cpEnt.id : null, fundDue, cpNet: cp.net, diff, status, legs: cp.legs, trace });
+    if (status !== 'matched') {
+      flags.push({
+        severity: 'exception', wp: 'Due From/To Port Co',
+        message: prop + ': CLRF records ' + fmt(fundDue) + ' but ' + (cpEnt ? cpEnt.name : 'the counterparty') + ' shows ' + fmt(cp.net)
+          + ' (off by ' + fmt(diff) + ')' + (trace[0] ? ' — ' + trace[0].note : ''),
+      });
+    }
+  }
+  return { rows, portMap, flags };
+}
+
 // ─── Workbook ────────────────────────────────────────────────────────────────
 const MONEY = '$#,##0.00;($#,##0.00);-';
 const NAVY = 'FF1F3864';
@@ -457,6 +560,7 @@ function buildWorkbook(data) {
   su.getColumn(1).width = 34; su.getColumn(2).width = 40; su.getColumn(3).width = 16; su.getColumn(4).width = 18;
   titleBlock(su, en, 'Other Workpapers — Balance Sheet Account Support', 'As of ' + spellDate(q.end));
   hdrRow(su, 5, ['Workpaper', 'Balance Sheet line', 'GL account(s)', 'CL balance'], [34, 40, 16, 18]);
+  { const fl0 = data.flags || []; su.getCell('A4').value = fl0.length ? ('⚠ ' + fl0.length + ' item(s) require attention — see Exceptions below') : '✓ All balances tie'; su.getCell('A4').font = F({ bold: true, color: { argb: fl0.length ? 'FFC00000' : 'FF008000' } }); su.mergeCells('A4:D4'); }
   const idx = [
     ['Due Fr (To) Port Co', 'Due from (to) portfolio investments (net)', '101100 / 211100', data.ties.due_net],
     ['Interest Receivable', 'Interest receivable', '120010', data.ties.interest_receivable],
@@ -477,6 +581,21 @@ function buildWorkbook(data) {
   // tab's total cell, after those tabs are built (see end of buildWorkbook).
   su.getCell('A' + (sr + 1)).value = 'Each Summary balance is a live formula linked to the total on its supporting tab; every tab is GL-derived and ties to the Statement of Assets, Liabilities and Partners’ Capital.';
   su.getCell('A' + (sr + 1)).font = SMALLI; su.mergeCells('A' + (sr + 1) + ':D' + (sr + 1));
+  {
+    const fl = data.flags || [];
+    let exRow = sr + 3;
+    su.getCell('A' + exRow).value = fl.length ? ('⚠ Exceptions — Review Required (' + fl.length + ')') : '✓ No exceptions — all balances tie and mirror the counterparty ledgers.';
+    su.getCell('A' + exRow).font = F({ bold: true, color: { argb: fl.length ? 'FFC00000' : 'FF008000' } });
+    su.mergeCells('A' + exRow + ':D' + exRow);
+    let er = exRow + 1;
+    for (const f of fl) {
+      su.getCell('A' + er).value = (f.severity === 'exception' ? '✖ ' : '△ ') + f.wp;
+      su.getCell('A' + er).font = F({ bold: true, color: { argb: f.severity === 'exception' ? 'FFC00000' : 'FFB8860B' } });
+      su.getCell('B' + er).value = f.message; su.getCell('B' + er).font = F(); su.getCell('B' + er).alignment = { wrapText: true };
+      su.mergeCells('B' + er + ':D' + er);
+      er++;
+    }
+  }
 
   // ── 1. Due Fr (To) Port Co ────────────────────────────────────────────────
   const du = wb.addWorksheet('Due Fr (To) Port Co', { views: [{ showGridLines: false }] });
@@ -500,6 +619,28 @@ function buildWorkbook(data) {
   const dueEndRow = R; // ending row — Summary links to -SUM(E:K) here
   du.getCell('B' + (R + 2)).value = 'Net Due From (To) Portfolio Company ties to the Balance Sheet: due-from asset (101100) less due-to liability (211100).';
   du.getCell('B' + (R + 2)).font = SMALLI; du.mergeCells('B' + (R + 2) + ':K' + (R + 2));
+  {
+    const rec = data.due.recon;
+    if (rec && rec.rows && rec.rows.length) {
+      let rr = R + 4;
+      du.getCell('B' + rr).value = 'Intercompany reconciliation to portfolio company ledgers'; du.getCell('B' + rr).font = F({ bold: true }); rr += 1;
+      du.getCell('B' + rr).value = 'Property / Counterparty'; du.getCell('B' + rr).font = F({ bold: true });
+      du.getCell('E' + rr).value = 'CLRF'; du.getCell('E' + rr).font = F({ bold: true }); du.getCell('E' + rr).alignment = { horizontal: 'right' };
+      du.getCell('G' + rr).value = 'Per counterparty'; du.getCell('G' + rr).font = F({ bold: true }); du.getCell('G' + rr).alignment = { horizontal: 'right' };
+      du.getCell('I' + rr).value = 'Difference'; du.getCell('I' + rr).font = F({ bold: true }); du.getCell('I' + rr).alignment = { horizontal: 'right' };
+      du.getCell('K' + rr).value = 'Status'; du.getCell('K' + rr).font = F({ bold: true }); rr += 1;
+      for (const row of rec.rows) {
+        du.getCell('B' + rr).value = row.prop + ' — ' + row.cpName; du.getCell('B' + rr).font = F();
+        setMoney(du, 'E' + rr, row.fundDue); setMoney(du, 'G' + rr, row.cpNet); setMoney(du, 'I' + rr, row.diff);
+        const st = row.status === 'matched' ? 'Tied' : (row.status === 'one_sided' ? 'One-sided' : 'Mismatch');
+        const cc = du.getCell('K' + rr); cc.value = st; cc.font = F({ bold: row.status !== 'matched', color: { argb: row.status === 'matched' ? 'FF008000' : 'FFC00000' } });
+        rr += 1;
+        for (const tr of (row.trace || [])) { du.getCell('C' + rr).value = '↳ ' + tr.note; du.getCell('C' + rr).font = SMALLI; du.mergeCells('C' + rr + ':K' + rr); rr += 1; }
+      }
+      du.getCell('B' + (rr + 1)).value = 'Each property CLRF balance is agreed to the portfolio company own ledger (its loan payable to / due from CLRF). A difference is a real exception — most often a timing item where one side has posted and the other has not.';
+      du.getCell('B' + (rr + 1)).font = SMALLI; du.mergeCells('B' + (rr + 1) + ':K' + (rr + 1));
+    }
+  }
 
   // ── 2. Interest Receivable ────────────────────────────────────────────────
   const intTotalRow = detailSheet(wb, 'Interest Receivable', en, 'Interest Receivable (120010)', q, data.interest.rows, data.interest.balance);
@@ -784,7 +925,7 @@ function registerOtherWorkpapersRoutes(app, ctx) {
         res.setHeader('Content-Disposition', 'attachment; filename="' + saved.original_name + '"');
         res.setHeader('X-Other-Summary', JSON.stringify({
           quarter: q.label, saved_to: saved.folder_path + '/' + saved.original_name, replaced: saved.replaced,
-          ties: data.ties,
+          ties: data.ties, exceptions: (data.flags || []).length, flags: (data.flags || []),
         }).replace(/[\r\n]/g, ' '));
         res.send(buf);
       } catch (e) {
