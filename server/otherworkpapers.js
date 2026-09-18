@@ -63,7 +63,7 @@ function resolveQuarter(quarterEnd) {
 // the account's natural side. Optional `from` (inclusive); always up to `to`.
 function glDetail(db, eid, { from, to, match }) {
   const rows = db.prepare(`
-    SELECT je.date AS date, je.entry_num AS entry_num, je.doc_number AS doc_number,
+    SELECT je.id AS entry_id, je.date AS date, je.entry_num AS entry_num, je.doc_number AS doc_number,
            je.vendor AS vendor, je.memo AS memo,
            jl.account_code AS account_code, a.name AS account_name, a.type AS account_type,
            jl.debit AS debit, jl.credit AS credit, jl.description AS description,
@@ -101,7 +101,7 @@ function glDetail(db, eid, { from, to, match }) {
     const bal = r2((run.has(r.account_code) ? run.get(r.account_code) : (opening.get(r.account_code) || 0)) + delta);
     run.set(r.account_code, bal);
     out.push({
-      date: r.date, entry_num: r.entry_num || '', doc_number: r.doc_number || '',
+      date: r.date, entry_id: r.entry_id, entry_num: r.entry_num || '', doc_number: r.doc_number || '',
       vendor: r.vendor || '', memo: r.memo || '', description: r.description || '',
       account_code: r.account_code, account_name: r.account_name || '',
       debit: r2(r.debit || 0), credit: r2(r.credit || 0),
@@ -120,7 +120,7 @@ function balanceMap(computeBalances, eid, asOf) {
 }
 const sumWhere = (bmap, match) => { let s = 0; for (const [c, v] of bmap) if (match(c)) s = r2(s + (v.balance || 0)); return s; };
 
-function buildData(ctx, quarter, opts = {}) {
+async function buildData(ctx, quarter, opts = {}) {
   const { db, computeBalances } = ctx;
   const eid = opts.entity_id || FUND_EID;
   const flags = []; // exceptions/reviews surfaced on the Summary tab
@@ -172,6 +172,7 @@ function buildData(ctx, quarter, opts = {}) {
   };
   prepaid.advAmort = r2(prepaid.advEnd - prepaid.advBeg);
   prepaid.insAmort = r2(prepaid.insEnd - prepaid.insBeg);
+  const _pp = await buildPrepaidSchedule(ctx, quarter, prepaid); prepaid.schedule = _pp.policies; for (const f of _pp.flags) flags.push(f);
 
   // 4. Other Assets — inception-to-date detail, grouped by location (falls back to
   // one "Other Assets" group for untagged lines).
@@ -188,14 +189,23 @@ function buildData(ctx, quarter, opts = {}) {
 
   // 6. Accrual & Subsequent Cash Disbursement — JEs that credited the accrual
   // accounts (mgmt-fee payable, accrued expenses) during the period.
-  const accrRows = glDetail(db, eid, { from: quarter.ys, to: quarter.end, match: (c) => ACCT.mgmtPay(c) || ACCT.accrued(c) })
+  const accrRows = glDetail(db, eid, { from: quarter.ys, to: quarter.end, match: (c) => ACCT.mgmtPay(c) || ACCT.accrued(c) || /^2110/.test(c) })
     .filter((r) => r.credit > 0);
   const mgmtPayBal = sumWhere(bEnd, ACCT.mgmtPay);
   const accruedBal = sumWhere(bEnd, ACCT.accrued);
+  const affiliatesBal = sumWhere(bEnd, (c) => /^2110/.test(c));
+  const mgmtItd = buildMgmtItd(db, quarter);
+  const subDisb = buildSubsequentDisb(db, quarter);
+  const flux = buildFlux(db, quarter);
+  for (const f of flux.flags) flags.push(f);
+  if (!subDisb.posted) flags.push({ severity: 'review', wp: 'Accrual & Sub Cash Disb', message: 'No subsequent-period cash disbursements are posted yet (' + subDisb.from + ' to ' + subDisb.to + ') — the subsequent-payment support is incomplete until the next month is booked.' });
 
   // 7. Distributions Payable — detail for 230x.
   const distRows = glDetail(db, eid, { to: quarter.end, match: ACCT.distPay });
   const distBal = sumWhere(bEnd, ACCT.distPay);
+  const contrib = buildContribRecv(db, quarter, bEnd);
+  const dueMgmtBal = sumWhere(bEnd, (c) => /^2108/.test(c));
+  const distSplit = buildDistributions(db, quarter, bEnd);
 
   return {
     quarter, entity_name: ent ? ent.name : ('entity ' + eid),
@@ -205,7 +215,9 @@ function buildData(ctx, quarter, opts = {}) {
     prepaid,
     otherAssets: { groups: oaGroups, total: oaTotal },
     ap: apRecon,
-    accrual: { rows: accrRows, mgmtPay: mgmtPayBal, accrued: accruedBal },
+    accrual: { rows: accrRows, mgmtPay: mgmtPayBal, accrued: accruedBal, affiliates: affiliatesBal, mgmtItd, subDisb, flux },
+    contrib,
+    distSplit,
     dist: { rows: distRows, balance: distBal },
     ties: {
       due_to_portfolio: sumWhere(bEnd, ACCT.dueToPort), due_from_portfolio: sumWhere(bEnd, ACCT.dueFrom),
@@ -213,6 +225,7 @@ function buildData(ctx, quarter, opts = {}) {
       interest_receivable: intBal, prepaid_advisory: prepaid.advEnd, prepaid_insurance: prepaid.insEnd,
       other_assets: oaTotal, accounts_payable: apGl, accrued_expenses: accruedBal,
       management_fees_payable: mgmtPayBal, distributions_payable: distBal,
+      contribution_receivable: contrib.balance, due_to_mgmt: dueMgmtBal, due_to_affiliates: affiliatesBal,
     },
   };
 }
@@ -522,6 +535,167 @@ function buildDueRecon(ctx, quarter, dueData) {
   return { rows, portMap, flags };
 }
 
+// ═══ Phase 2-4 substantive-support helpers (inserted into otherworkpapers.js) ═══
+function addMonths(dateStr, n) { const [y, m, d] = String(dateStr).split('-').map(Number); const dt = new Date(Date.UTC(y, m - 1 + n, d)); return dt.toISOString().slice(0, 10); }
+function nextDay(dateStr) { const [y, m, d] = String(dateStr).split('-').map(Number); const dt = new Date(Date.UTC(y, m - 1, d + 1)); return dt.toISOString().slice(0, 10); }
+
+// ── Prepaid: verify amortization against the booking memo formula + invoice ──
+function parseAmortMemo(memo) {
+  const m = String(memo || '').match(/\[\s*\$?([\d,]+(?:\.\d+)?)\s*\/\s*(\d+)\s*\*\s*(\d+)\s*\]/);
+  if (!m) return null;
+  return { premium: Number(m[1].replace(/,/g, '')), basis: Number(m[2]), days: Number(m[3]) };
+}
+function normDate(s) { const m = String(s).match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/); if (!m) return null; let y = m[3]; if (y.length === 2) y = '20' + y; return y + '-' + String(m[1]).padStart(2, '0') + '-' + String(m[2]).padStart(2, '0'); }
+function extractCoverage(text) {
+  const t = String(text || '').replace(/\s+/g, ' ');
+  const dr = t.match(/(?:policy period|coverage period|policy term|effective(?:\s*date)?)\D{0,20}(\d{1,2}\/\d{1,2}\/\d{2,4})\s*(?:to|through|-|–|—)\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i)
+    || t.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})\s*(?:to|through|–|—)\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/);
+  const pr = t.match(/(?:total premium|premium|invoice total|total due|amount due|total)\D{0,10}\$?\s*([\d,]+\.\d{2})/i);
+  if (!dr && !pr) return null;
+  return { start: dr ? normDate(dr[1]) : null, end: dr ? normDate(dr[2]) : null, premium: pr ? Number(pr[1].replace(/,/g, '')) : null };
+}
+async function llmExtractCoverage(text) {
+  const body = { model: 'claude-3-5-haiku-latest', max_tokens: 200, messages: [{ role: 'user', content: 'From this insurance invoice text, reply with ONLY compact JSON {"start":"YYYY-MM-DD","end":"YYYY-MM-DD","premium":number} for the policy coverage period and total premium. Text:\n' + String(text).slice(0, 6000) }] };
+  const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) return null;
+  const j = await r.json(); const txt = (j.content && j.content[0] && j.content[0].text) || ''; const m = txt.match(/\{[\s\S]*\}/); if (!m) return null;
+  const o = JSON.parse(m[0]); if (!o.start || !o.end) return null; return o;
+}
+async function readInvoiceCoverage(uploadDir, db, entryId) {
+  if (!uploadDir || !entryId) return null;
+  let text = '';
+  try {
+    const atts = db.prepare('SELECT filename, mime_type, original_name FROM journal_attachments WHERE entry_id = ? ORDER BY id').all(entryId);
+    const pdf = atts.find((a) => /pdf/i.test(a.mime_type || '') || /\.pdf$/i.test(a.original_name || ''));
+    if (!pdf) return null;
+    const fp = path.resolve(uploadDir, pdf.filename);
+    if (!fs.existsSync(fp)) return null;
+    const pdfParse = require('pdf-parse');
+    const parsed = await pdfParse(fs.readFileSync(fp));
+    text = String(parsed.text || '');
+  } catch (e) { return null; }
+  const cov = extractCoverage(text);
+  if (cov) return Object.assign({ source: 'invoice' }, cov);
+  if (process.env.ANTHROPIC_API_KEY) { try { const llm = await llmExtractCoverage(text); if (llm) return Object.assign({ source: 'invoice+llm' }, llm); } catch (e) { /* ignore */ } }
+  return { unparsed: true, source: 'invoice' };
+}
+async function buildPrepaidSchedule(ctx, quarter, prepaid) {
+  const { db, uploadDir } = ctx;
+  const flags = [];
+  const accts = [
+    { code: '150300', label: 'Prepaid Insurance', match: ACCT.prepaidIns, endBal: prepaid.insEnd },
+    { code: '150200', label: 'Prepaid Advisory', match: ACCT.prepaidAdv, endBal: prepaid.advEnd },
+  ];
+  const policies = [];
+  for (const a of accts) {
+    const rows = glDetail(db, FUND_EID, { to: quarter.end, match: a.match });
+    if (!rows.length && Math.abs(a.endBal) < 0.005) continue;
+    const amorts = rows.filter((r) => r.credit > 0).map((r) => Object.assign({}, r, { f: parseAmortMemo(r.memo || r.description) }));
+    const additions = rows.filter((r) => r.debit > 0);
+    const withF = amorts.find((x) => x.f);
+    const premium = withF ? withF.f.premium : null;
+    const checkRows = [];
+    for (const r of amorts) {
+      const booked = r2(r.credit);
+      const expected = r.f ? r2(r.f.premium / r.f.basis * r.f.days) : null;
+      const ok = expected == null ? null : Math.abs(expected - booked) < 0.01;
+      checkRows.push({ date: r.date, num: r.entry_num || r.doc_number, memo: r.memo || r.description, booked, expected, days: r.f ? r.f.days : null, ok });
+      if (r.date >= quarter.qs && r.date <= quarter.end && expected != null && !ok) {
+        flags.push({ severity: 'exception', wp: 'Prepaid Expenses', message: a.label + ': quarter amortization booked ' + fmt(booked) + ' but the memo formula computes ' + fmt(expected) });
+      }
+    }
+    let invoice = null;
+    for (const add of additions.filter((r) => r.date >= quarter.qs && r.date <= quarter.end)) {
+      invoice = await readInvoiceCoverage(uploadDir, db, add.entry_id);
+      if (invoice && !invoice.unparsed) {
+        if (premium != null && invoice.premium != null && Math.abs(invoice.premium - premium) >= 0.01) flags.push({ severity: 'exception', wp: 'Prepaid Expenses', message: a.label + ': invoice premium ' + fmt(invoice.premium) + ' does not match the amount being amortized ' + fmt(premium) });
+      } else if (invoice && invoice.unparsed) {
+        flags.push({ severity: 'review', wp: 'Prepaid Expenses', message: a.label + ': invoice attached to ' + (add.entry_num || add.entry_id) + ' but the policy period/premium could not be read — confirm manually' });
+      } else {
+        flags.push({ severity: 'review', wp: 'Prepaid Expenses', message: a.label + ': new prepaid ' + fmt(add.signed) + ' (' + (add.entry_num || '') + ') has no invoice attached — attach the policy invoice to support the amortization' });
+      }
+    }
+    policies.push({ code: a.code, label: a.label, premium, checkRows, endBal: r2(a.endBal), invoice });
+  }
+  return { policies, flags };
+}
+
+// ── Accrual: mgmt-fee ITD roll, subsequent cash disbursement, flux analysis ──
+function buildMgmtItd(db, quarter) {
+  const rows = glDetail(db, FUND_EID, { to: quarter.end, match: ACCT.mgmtPay });
+  return { rows, end: rows.length ? rows[rows.length - 1].balance : 0 };
+}
+function buildSubsequentDisb(db, quarter) {
+  const from = nextDay(quarter.end), to = addMonths(quarter.end, 3);
+  const rows = glDetail(db, FUND_EID, { from, to, match: (c) => ACCT.accrued(c) || ACCT.mgmtPay(c) || /^2110/.test(c) }).filter((r) => r.debit > 0);
+  return { from, to, rows, posted: rows.length > 0 };
+}
+function pnlByAccount(db, eid, from, to) {
+  const rows = db.prepare(
+    'SELECT jl.account_code code, a.name name, a.type type, COALESCE(SUM(jl.debit),0) td, COALESCE(SUM(jl.credit),0) tc '
+    + 'FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id '
+    + 'LEFT JOIN accounts a ON a.entity_id = je.entity_id AND a.code = jl.account_code '
+    + "WHERE je.entity_id = ? AND je.date >= ? AND je.date <= ? "
+    + "AND a.type IN ('Revenue','Income','Other Income','Expense','Other Expense','Cost of Goods Sold') "
+    + 'GROUP BY jl.account_code'
+  ).all(eid, from, to);
+  const m = new Map();
+  for (const r of rows) {
+    const rev = /Revenue|Income/i.test(String(r.type));
+    const amt = rev ? r2((r.tc || 0) - (r.td || 0)) : r2((r.td || 0) - (r.tc || 0));
+    m.set(String(r.code), { code: String(r.code), name: r.name || '', type: r.type || '', amt });
+  }
+  return m;
+}
+function buildFlux(db, quarter) {
+  const curFrom = quarter.qs, curTo = quarter.end;
+  const priFrom = addMonths(quarter.qs, -3), priTo = nextDay(addMonths(quarter.qs, 0));
+  const priEnd = (function () { const d = new Date(Date.UTC(...quarter.qs.split('-').map((x, i) => i === 2 ? Number(x) - 1 : Number(x) - (i === 1 ? 1 : 0)))); return d.toISOString().slice(0, 10); })();
+  const cur = pnlByAccount(db, FUND_EID, curFrom, curTo);
+  const pri = pnlByAccount(db, FUND_EID, priFrom, priEnd);
+  const codes = new Set([...cur.keys(), ...pri.keys()]);
+  const rows = [], flags = [];
+  for (const c of codes) {
+    const cv = cur.get(c) || { name: (pri.get(c) || {}).name || '', amt: 0, type: (pri.get(c) || {}).type || '' };
+    const pv = pri.get(c) || { amt: 0 };
+    const diff = r2(cv.amt - pv.amt);
+    const pct = Math.abs(pv.amt) > 0.005 ? diff / Math.abs(pv.amt) : null;
+    if (Math.abs(cv.amt) < 0.005 && Math.abs(pv.amt) < 0.005) continue;
+    rows.push({ code: c, name: cv.name, prior: r2(pv.amt), cur: r2(cv.amt), diff, pct });
+    if (Math.abs(diff) >= 50000) flags.push({ severity: 'review', wp: 'Flux Analysis', message: 'Large quarter-over-quarter change in ' + (cv.name || c) + ': ' + fmt(pv.amt) + ' → ' + fmt(cv.amt) + ' (' + fmt(diff) + ') — confirm the driver' });
+  }
+  rows.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+  return { priFrom, priTo: priEnd, curFrom, curTo, rows, flags };
+}
+
+// ── Contribution receivable (120020) — by investor ──
+function buildContribRecv(db, quarter, bEnd) {
+  const rows = glDetail(db, FUND_EID, { to: quarter.end, match: (c) => /^12002/.test(c) });
+  const balance = sumWhere(bEnd, (c) => /^12002/.test(c));
+  const byInv = new Map();
+  for (const r of rows) { const k = r.class_name || '(untagged)'; byInv.set(k, r2((byInv.get(k) || 0) + r.signed)); }
+  const investors = [...byInv.entries()].map(([name, amt]) => ({ name, amt: r2(amt) })).filter((x) => Math.abs(x.amt) >= 0.005).sort((a, b) => Math.abs(b.amt) - Math.abs(a.amt));
+  return { rows, balance, investors };
+}
+
+// ── Distributions payable / due to management company (by investor) ──
+function buildDistributions(db, quarter, bEnd) {
+  const groups = [
+    { code: '230100', label: 'Distributions Payable (Due to Members)', match: (c) => /^2301/.test(c) },
+    { code: '210800', label: 'Due to Management Company', match: (c) => /^2108/.test(c) },
+  ];
+  const out = [];
+  for (const g of groups) {
+    const rows = glDetail(db, FUND_EID, { to: quarter.end, match: g.match });
+    const balance = sumWhere(bEnd, g.match);
+    const byInv = new Map();
+    for (const r of rows) { const k = r.class_name || '(untagged)'; byInv.set(k, r2((byInv.get(k) || 0) + r.signed)); }
+    const investors = [...byInv.entries()].map(([name, amt]) => ({ name, amt: r2(amt) })).filter((x) => Math.abs(x.amt) >= 0.005).sort((a, b) => Math.abs(b.amt) - Math.abs(a.amt));
+    out.push({ code: g.code, label: g.label, rows, balance: r2(balance), investors });
+  }
+  return out;
+}
+
 // ─── Workbook ────────────────────────────────────────────────────────────────
 const MONEY = '$#,##0.00;($#,##0.00);-';
 const NAVY = 'FF1F3864';
@@ -569,6 +743,9 @@ function buildWorkbook(data) {
     ['AP Recon', 'Accounts payable and accrued expenses', '202000 + 210000', r2(data.ties.accounts_payable + data.ties.accrued_expenses)],
     ['Accrual & Sub Cash Disbursement', 'Management fees payable', '210600', data.ties.management_fees_payable],
     ['Distributions Payable', 'Due to members', '230100', data.ties.distributions_payable],
+    ['Contribution Receivable', 'Capital contributions receivable', '120020', data.ties.contribution_receivable],
+    ['Distributions Payable', 'Due to management company', '210800', data.ties.due_to_mgmt],
+    ['Accrual & Sub Cash Disbursement', 'Due to affiliates', '211000', data.ties.due_to_affiliates],
   ];
   let sr = 6;
   for (const [wpn, bsl, acc] of idx) {
@@ -832,6 +1009,122 @@ function buildWorkbook(data) {
   // ── 7. Distributions Payable ──────────────────────────────────────────────
   const distTotalRow = detailSheet(wb, 'Distributions Payable', en, 'Distributions Payable (230100)', q, data.dist.rows, data.dist.balance, true);
 
+  // ═══ Phase 2-4 supporting schedules ═══════════════════════════════════════
+
+  // Prepaid amortization schedule (appended to the Prepaid tab).
+  {
+    let pr = 12;
+    for (const pol of (data.prepaid.schedule || [])) {
+      pp.getCell('A' + pr).value = pol.label + (pol.premium != null ? ('  —  amortizing ' + fmt(pol.premium)) : ''); pp.getCell('A' + pr).font = F({ bold: true }); pr += 1;
+      if (pol.invoice && pol.invoice.start) { pp.getCell('A' + pr).value = 'Policy period per invoice: ' + pol.invoice.start + ' to ' + pol.invoice.end + ' (' + pol.invoice.source + ')'; pp.getCell('A' + pr).font = SMALLI; pr += 1; }
+      hdrRow(pp, pr, ['Period', 'Days', 'Amortization booked', 'Per formula', 'Check'], null); pr += 1;
+      for (const c of pol.checkRows) {
+        pp.getCell('A' + pr).value = c.date + '  ' + (c.num || ''); pp.getCell('A' + pr).font = F();
+        pp.getCell('B' + pr).value = c.days; pp.getCell('B' + pr).font = F();
+        setMoney(pp, 'C' + pr, c.booked); if (c.expected != null) setMoney(pp, 'D' + pr, c.expected);
+        const cc = pp.getCell('E' + pr); cc.value = c.ok == null ? 'n/a' : (c.ok ? 'OK' : 'DIFF'); cc.font = F({ bold: c.ok === false, color: { argb: c.ok === false ? 'FFC00000' : 'FF008000' } });
+        pr += 1;
+      }
+      pr += 1;
+    }
+    if ((data.prepaid.schedule || []).length) { pp.getCell('A' + pr).value = 'Each period amortization is checked against the booking-memo formula (premium / basis × days). A DIFF is flagged on the Summary tab.'; pp.getCell('A' + pr).font = SMALLI; pp.mergeCells('A' + pr + ':E' + pr); }
+  }
+
+  // Mgmt Fee Accrual — inception-to-date roll-forward.
+  {
+    const mi = data.accrual.mgmtItd;
+    const ws = wb.addWorksheet('Mgmt Fee Accrual', { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
+    titleBlock(ws, en, 'Management Fees Payable (210600) — inception-to-date roll-forward', 'As of ' + short(q.end));
+    hdrRow(ws, 5, ['Date', 'JE#', 'Description', 'Accrual (+)', 'Payment (-)', 'Balance'], [12, 10, 46, 16, 16, 16]);
+    let r = 6;
+    for (const x of mi.rows) {
+      ws.getCell('A' + r).value = x.date; ws.getCell('A' + r).font = F();
+      ws.getCell('B' + r).value = x.entry_num || x.doc_number; ws.getCell('B' + r).font = F();
+      ws.getCell('C' + r).value = x.memo || x.description; ws.getCell('C' + r).font = F();
+      if (x.credit) setMoney(ws, 'D' + r, x.credit); if (x.debit) setMoney(ws, 'E' + r, x.debit);
+      setMoney(ws, 'F' + r, x.balance); r += 1;
+    }
+    ws.getCell('C' + r).value = 'Ending management fees payable'; ws.getCell('C' + r).font = F({ bold: true });
+    setMoney(ws, 'F' + r, mi.end, { bold: true }).border = { top: THIN };
+    ws.getCell('A' + (r + 2)).value = 'Ties to the Balance Sheet management fees payable line.'; ws.getCell('A' + (r + 2)).font = SMALLI;
+  }
+
+  // Subsequent Cash Disbursement — accruals paid in the following period.
+  {
+    const sd = data.accrual.subDisb;
+    const ws = wb.addWorksheet('Subsequent Cash Disb', { views: [{ showGridLines: false }] });
+    titleBlock(ws, en, 'Subsequent Cash Disbursement — accruals paid after quarter end', sd.from + ' to ' + sd.to);
+    hdrRow(ws, 5, ['Date', 'JE#', 'Vendor', 'Description', 'Accrual account', 'Amount'], [12, 10, 22, 40, 24, 16]);
+    let r = 6;
+    if (!sd.rows.length) { ws.getCell('A' + r).value = 'No subsequent-period disbursements are posted yet for this window — subsequent-payment support is incomplete until the next month is booked.'; ws.getCell('A' + r).font = SMALLI; ws.mergeCells('A' + r + ':F' + r); r += 1; }
+    for (const x of sd.rows) {
+      ws.getCell('A' + r).value = x.date; ws.getCell('A' + r).font = F();
+      ws.getCell('B' + r).value = x.entry_num || x.doc_number; ws.getCell('B' + r).font = F();
+      ws.getCell('C' + r).value = x.vendor; ws.getCell('C' + r).font = F();
+      ws.getCell('D' + r).value = x.memo || x.description; ws.getCell('D' + r).font = F();
+      ws.getCell('E' + r).value = x.account_code + ' ' + x.account_name; ws.getCell('E' + r).font = F();
+      setMoney(ws, 'F' + r, x.debit); r += 1;
+    }
+    if (sd.rows.length) { ws.getCell('E' + r).value = 'Total subsequent disbursements'; ws.getCell('E' + r).font = F({ bold: true }); setMoney(ws, 'F' + r, r2(sd.rows.reduce((a, x) => a + x.debit, 0)), { bold: true }).border = { top: THIN }; }
+    ws.getCell('A' + (r + 2)).value = 'Confirms the period-end accruals (accrued expenses, management fees payable, due to affiliates) were relieved by actual payments in the following period.'; ws.getCell('A' + (r + 2)).font = SMALLI; ws.mergeCells('A' + (r + 2) + ':F' + (r + 2));
+  }
+
+  // Flux Analysis — quarter-over-quarter income statement variance.
+  {
+    const fx = data.accrual.flux;
+    const ws = wb.addWorksheet('Flux Analysis', { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
+    titleBlock(ws, en, 'Flux Analysis — quarter-over-quarter income statement', 'Prior ' + fx.priFrom + ' to ' + fx.priTo + '   vs   current ' + fx.curFrom + ' to ' + fx.curTo);
+    hdrRow(ws, 5, ['Account', 'Prior quarter', 'Current quarter', 'Difference', '% change'], [40, 16, 16, 16, 12]);
+    let r = 6;
+    for (const x of fx.rows) {
+      ws.getCell('A' + r).value = x.name || x.code; ws.getCell('A' + r).font = F();
+      setMoney(ws, 'B' + r, x.prior); setMoney(ws, 'C' + r, x.cur); setMoney(ws, 'D' + r, x.diff);
+      const pc = ws.getCell('E' + r); pc.value = x.pct == null ? '' : (Math.round(x.pct * 1000) / 10 + '%'); pc.font = F({ bold: Math.abs(x.diff) >= 50000, color: { argb: Math.abs(x.diff) >= 50000 ? 'FFC00000' : 'FF000000' } });
+      r += 1;
+    }
+    ws.getCell('A' + (r + 1)).value = 'Large quarter-over-quarter movements (>= $50,000) are flagged for review on the Summary tab.'; ws.getCell('A' + (r + 1)).font = SMALLI; ws.mergeCells('A' + (r + 1) + ':E' + (r + 1));
+  }
+
+  // Contribution Receivable (120020) — by investor.
+  {
+    const cr = data.contrib;
+    const ws = wb.addWorksheet('Contribution Receivable', { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
+    titleBlock(ws, en, 'Contribution Receivable (120020)', 'As of ' + short(q.end));
+    hdrRow(ws, 5, ['Date', 'JE#', 'Investor', 'Description', 'Amount', 'Balance'], [12, 10, 26, 40, 16, 16]);
+    let r = 6;
+    for (const x of cr.rows) {
+      ws.getCell('A' + r).value = x.date; ws.getCell('A' + r).font = F();
+      ws.getCell('B' + r).value = x.entry_num || x.doc_number; ws.getCell('B' + r).font = F();
+      ws.getCell('C' + r).value = x.class_name || ''; ws.getCell('C' + r).font = F();
+      ws.getCell('D' + r).value = x.memo || x.description; ws.getCell('D' + r).font = F();
+      setMoney(ws, 'E' + r, x.signed); setMoney(ws, 'F' + r, x.balance); r += 1;
+    }
+    ws.getCell('D' + r).value = 'TOTAL'; ws.getCell('D' + r).font = F({ bold: true });
+    setMoney(ws, 'F' + r, cr.balance, { bold: true }).border = { top: THIN }; r += 2;
+    if (cr.investors.length) {
+      ws.getCell('A' + r).value = 'Open receivable by investor'; ws.getCell('A' + r).font = F({ bold: true }); r += 1;
+      for (const inv of cr.investors) { ws.getCell('A' + r).value = inv.name; ws.getCell('A' + r).font = F(); setMoney(ws, 'E' + r, inv.amt); r += 1; }
+      r += 1;
+    }
+    ws.getCell('A' + r).value = 'Ties to the Balance Sheet capital contributions receivable line.'; ws.getCell('A' + r).font = SMALLI;
+  }
+
+  // Distributions: by-investor breakdown + Due to Management Company (appended).
+  {
+    const dws = wb.getWorksheet('Distributions Payable');
+    if (dws) {
+      let r = (dws.rowCount || 14) + 3;
+      for (const grp of (data.distSplit || [])) {
+        dws.getCell('A' + r).value = grp.label + ' (' + grp.code + ')  —  ' + fmt(grp.balance); dws.getCell('A' + r).font = F({ bold: true }); r += 1;
+        if (grp.investors.length) {
+          for (const inv of grp.investors) { dws.getCell('A' + r).value = '   ' + inv.name; dws.getCell('A' + r).font = F(); setMoney(dws, 'F' + r, inv.amt); r += 1; }
+        } else { dws.getCell('A' + r).value = '   (GL lines carry no investor/class tag; total ties to the account)'; dws.getCell('A' + r).font = SMALLI; r += 1; }
+        r += 1;
+      }
+      dws.getCell('A' + r).value = 'Due to Affiliates (211000) ' + fmt(data.ties.due_to_affiliates) + ' is supported on the Accrual & Sub Cash Disb tab.'; dws.getCell('A' + r).font = SMALLI;
+    }
+  }
+
   // ── Link each Summary balance to the total cell on its supporting schedule ──
   const sq = (t) => "'" + t + "'!";
   const sumRefs = [
@@ -846,8 +1139,11 @@ function buildWorkbook(data) {
     { f: sq('AP Recon') + 'C' + apTotalRow + '+' + sq('Accrual & Sub Cash Disb') + 'F' + accEnd2, v: r2(data.ties.accounts_payable + data.ties.accrued_expenses) },
     { f: sq('Accrual & Sub Cash Disb') + 'F' + accEnd1, v: data.ties.management_fees_payable },
     { f: sq('Distributions Payable') + 'G' + distTotalRow, v: data.ties.distributions_payable },
+    { v: data.ties.contribution_receivable },
+    { v: data.ties.due_to_mgmt },
+    { v: data.ties.due_to_affiliates },
   ];
-  sumRefs.forEach((x, i) => { const c = su.getCell('D' + (6 + i)); c.value = { formula: x.f, result: x.v }; c.numFmt = MONEY; c.font = F(); });
+  sumRefs.forEach((x, i) => { const c = su.getCell('D' + (6 + i)); c.value = x.f ? { formula: x.f, result: x.v } : x.v; c.numFmt = MONEY; c.font = F(); });
 
   return wb;
 }
@@ -917,7 +1213,7 @@ function registerOtherWorkpapersRoutes(app, ctx) {
         const eid = Number(req.params.entity_id);
         const q = resolveQuarter((req.body && req.body.quarter_end) || '');
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
-        const data = buildData(ctx, q, { entity_id: eid });
+        const data = await buildData(ctx, q, { entity_id: eid });
         const wb = buildWorkbook(data);
         const buf = Buffer.from(await wb.xlsx.writeBuffer());
         const saved = saveToWorkpapers(ctx, eid, q, buf, who);

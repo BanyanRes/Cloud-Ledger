@@ -11094,6 +11094,7 @@ require('./otherworkpapers').registerOtherWorkpapersRoutes(app, {
   requireEntityAccess,
   requireRole,
   workpapersDir: WORKPAPERS_DIR,
+  uploadDir: UPLOAD_DIR,
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
