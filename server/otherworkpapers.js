@@ -926,7 +926,7 @@ function registerOtherWorkpapersRoutes(app, ctx) {
         res.setHeader('X-Other-Summary', JSON.stringify({
           quarter: q.label, saved_to: saved.folder_path + '/' + saved.original_name, replaced: saved.replaced,
           ties: data.ties, exceptions: (data.flags || []).length, flags: (data.flags || []),
-        }).replace(/[\r\n]/g, ' '));
+        }).replace(/[^\x20-\x7E]/g, ' '));
         res.send(buf);
       } catch (e) {
         res.status(400).json({ error: e.message });
