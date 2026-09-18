@@ -590,7 +590,7 @@ async function buildPrepaidSchedule(ctx, quarter, prepaid) {
   for (const a of accts) {
     const rows = glDetail(db, FUND_EID, { to: quarter.end, match: a.match });
     if (!rows.length && Math.abs(a.endBal) < 0.005) continue;
-    const amorts = rows.filter((r) => r.credit > 0).map((r) => Object.assign({}, r, { f: parseAmortMemo(r.memo || r.description) }));
+    const amorts = rows.filter((r) => r.credit > 0).map((r) => Object.assign({}, r, { f: parseAmortMemo(r.memo) || parseAmortMemo(r.description) }));
     const additions = rows.filter((r) => r.debit > 0);
     const withF = amorts.find((x) => x.f);
     const premium = withF ? withF.f.premium : null;
