@@ -37,6 +37,7 @@ const ACCT = {
   prepaidIns: (c) => /^1503/.test(c),                       // 150300 Prepaid Insurance
   otherAsset: (c) => /^1801/.test(c) || /^1800/.test(c),    // 180100 Other Assets
   ap:         (c) => /^(2020|2100|2101|2102|2103|2104|2105|2107|2109|211[2-9])/.test(c),
+  tradeAP:    (c) => /^2020/.test(c),                       // 202000 Accounts Payable (Bill.com trade AP)
   accrued:    (c) => /^2100/.test(c),                        // 210000 Accrued Expenses
   mgmtPay:    (c) => /^2106/.test(c),                        // 210600 Payable - Management Fees
   distPay:    (c) => /^230/.test(c),                         // 230100 Distributions Payable / Due to members
@@ -176,7 +177,7 @@ function buildData(ctx, quarter, opts = {}) {
   // 5. AP Recon — account 202000 balance vs Bill.com. CL GL carries no per-vendor
   // tag on these lines, so the recon is presented at the ledger level with the
   // Bill.com open-bill total (when available) alongside.
-  const apGl = sumWhere(bEnd, ACCT.ap);
+  const apGl = sumWhere(bEnd, ACCT.tradeAP);
   let apBillcom = null, apByVendor = [];
   try {
     const rows = db.prepare(`
