@@ -5487,12 +5487,13 @@ function ClrfApDetailCard({ entityId, qe, canEdit }) {
 
 function MonthWorkpaper({entityId,entityName,canEdit=true}){
   // Default to the most recently completed month.
-  const defaultMonth=()=>{const t=today();const [y,m]=t.split('-').map(Number);const pm=m===1?12:m-1;const py=m===1?y-1:y;return py+'-'+String(pm).padStart(2,'0');};
-  const[mon,setMon]=useState(defaultMonth());
+  // Default to the end of the most recently completed month, as a full date.
+  const defaultDate=()=>{const t=today();const [y,m]=t.split('-').map(Number);return new Date(Date.UTC(y,m-1,0)).toISOString().slice(0,10);};
+  const[mon,setMon]=useState(defaultDate());
   const[busy,setBusy]=useState(false);
   const[err,setErr]=useState('');
   const[result,setResult]=useState(null);
-  const valid=/^\d{4}-\d{2}$/.test(mon);
+  const valid=/^\d{4}-\d{2}-\d{2}$/.test(mon);
   const run=async()=>{
     if(!valid)return;
     setBusy(true);setErr('');setResult(null);
@@ -5517,8 +5518,8 @@ function MonthWorkpaper({entityId,entityName,canEdit=true}){
       One workbook supporting every balance-sheet account for the month: a Lead Sheet that links by formula to per-category supporting schedules — Cash (with a bank-rec line), Intercompany (tied to each related entity&rsquo;s own ledger), Investments, Loans &amp; Notes Payable, Members&rsquo; Equity, and Other — each rolling the beginning balance forward with the month&rsquo;s general-ledger activity. Every subtotal and the Assets = Liabilities + Equity check is a live formula; there are no hard-coded amounts. Discrepancies (an out-of-balance sheet, a roll-forward that doesn&rsquo;t tie, or an intercompany account that doesn&rsquo;t mirror the counterparty) are flagged on the Summary tab. A copy is filed under Workpapers › Monthly Closing by year and month.
     </div>
     <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
-      <div><label style={S.label}>Month</label>
-        <input style={S.inputSm} type="month" value={mon} onChange={e=>{setMon(e.target.value);setErr('');setResult(null);}}/></div>
+      <div><label style={S.label}>Month End Date</label>
+        <input style={S.inputSm} type="date" value={mon} onChange={e=>{setMon(e.target.value);setErr('');setResult(null);}}/></div>
       <button style={{...S.btnP,opacity:(!valid||busy||!canEdit)?0.5:1}} disabled={!valid||busy||!canEdit} onClick={run}>
         {busy?'Running…':'Run Report'}</button>
     </div>
