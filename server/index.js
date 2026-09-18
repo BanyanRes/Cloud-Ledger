@@ -11126,9 +11126,15 @@ require('./otherworkpapers').registerOtherWorkpapersRoutes(app, {
         const bps = p.billPayments || p.billPays || [];
         for (const bp of bps) { const bid = String(bp.billId || bp.bill_id || ''); if (!bid) continue; paid.set(bid, (paid.get(bid) || 0) + (Number(bp.amount) || 0)); }
       }
+      // Banyan runs ONE shared Bill.com org, so scope to the bills that belong to
+      // this entity via the per-entity sync log; without it we cannot isolate the
+      // entity and must not report the whole org's A/P.
+      const synced = new Set(db.prepare('SELECT DISTINCT billcom_id FROM billcom_sync_log WHERE entity_id = ? AND billcom_id IS NOT NULL').all(eid).map((r) => String(r.billcom_id)));
+      if (!synced.size) return null;
       const out = [];
       for (const b of bills) {
         const bid = String(pick(b, 'id') || ''); if (!bid) continue;
+        if (!synced.has(bid)) continue;
         const appr = String(pick(b, 'approvalStatus', 'status') || '').toUpperCase();
         if (appr === 'DENIED') continue;
         if (String(pick(b, 'isActive') || '') === '2') continue; // inactive/deleted
