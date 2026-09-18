@@ -470,7 +470,12 @@ function buildWorkbook(data) {
     }
     const last = lr - 1;
     ls.getCell('B' + lr).value = 'Total ' + label.replace(/’/g, "'"); ls.getCell('B' + lr).font = F({ bold: true });
-    for (const col of ['D', 'E', 'F']) setFormula(ls, col + lr, 'SUM(' + col + first + ':' + col + last + ')', { bold: true }).border = { top: THIN, bottom: DBL };
+    // Guard empty groups: SUM(col{first}:col{first-1}) is a self-including range
+    // Excel reads as a circular reference. Write 0 when the group has no rows.
+    for (const col of ['D', 'E', 'F']) {
+      if (last >= first) setFormula(ls, col + lr, 'SUM(' + col + first + ':' + col + last + ')', { bold: true }).border = { top: THIN, bottom: DBL };
+      else setMoney(ls, col + lr, 0, { bold: true }).border = { top: THIN, bottom: DBL };
+    }
     totalRefs[ty] = lr;
     lr++; lr++;
   }
