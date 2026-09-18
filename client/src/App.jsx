@@ -846,6 +846,9 @@ export default function App(){
   // monthly Insurance Allocation workpaper. Not a development entity, so it has
   // no Requisitions; the allocation is its only workpaper.
   const isBanyanRes = !!(_activeEnt && (_activeEnt.code==='BANYANRE1' || /^banyan\s*residential$/i.test((_activeEnt.name||'').trim())));
+  // Odyssey Holdings — the holding company that gets a monthly closing workpaper
+  // supporting every balance-sheet account. The generator itself is generic.
+  const isOdyssey = !!(_activeEnt && /odyssey/i.test(_activeEnt.name||''));
   const isShellEntity = !!(_activeEnt && _activeEnt.entity_type==='shell');
   const dimsEnabled = !!_activeEnt && !isShellEntity && !_activeEnt.hide_dims;// dimensions on every entity EXCEPT shell, unless the entity is flagged hide_dims (e.g. SRN, CLR Silsbee)
   // AR module scope is per-entity by code. Full AR (customers/invoices/recurring
@@ -920,6 +923,7 @@ export default function App(){
       ...(isCLRF?[{id:'wp_cashflow',label:'Cash Flow Worksheet',icon:'💵',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_other',label:'Other Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
+      ...(isOdyssey?[{id:'wp_monthclose',label:'Monthly Closing Workpaper',icon:'🗓️',section:'workpapers'}]:[]),
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
@@ -1020,6 +1024,7 @@ export default function App(){
         {page==='wp_cashflow'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="cashflow" title="Cash Flow Worksheet" description="A standalone Statement of Cash Flows (indirect method, year-to-date) built from the general ledger. Reuses the fund financial-statements model and ties to it; every subtotal is a live SUM formula. A copy is filed under Workpapers › Cash Flow by year and quarter." key={activeEntity+'-'+rk}/>}
       {page==='wp_other'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="other" title="Other Workpapers" description="Balance-sheet account support in one workbook — Due From/To Port Co, Interest Receivable, Prepaid Expenses, Other Assets, AP Recon, Accrual & Subsequent Cash Disbursement, and Distributions Payable — each on its own tab, GL-derived and tying to the Statement of Assets, Liabilities and Partners' Capital. A copy is filed under Workpapers › Other Workpapers by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='wp_monthclose'&&activeEntity&&isOdyssey&&<MonthWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&!isCLRF&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
@@ -5410,19 +5415,20 @@ function ClrfApDetailCard({ entityId, qe, canEdit }) {
   const toNum = (v) => { if (typeof v === 'number') return v; const n = parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')); return isNaN(n) ? null : n; };
   const normDate = (v) => { const s = norm(v); let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/); if (m) { let y = m[3]; if (y.length === 2) y = '20' + y; return y + '-' + String(m[1]).padStart(2, '0') + '-' + String(m[2]).padStart(2, '0'); } m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); if (m) return s.slice(0, 10); return s ? s.slice(0, 10) : null; };
   const parse = (rows) => {
-    const isHdr = (r) => r.some((c) => /vendor|payee/i.test(String(c))) && r.some((c) => /amount|balance|open|due/i.test(String(c)));
+    const isHdr = (r) => r.some((c) => /vendor|payee/i.test(String(c))) && r.some((c) => /amount|balance|open|due|total|current|past.?due/i.test(String(c)));
     let h = -1; for (let i = 0; i < rows.length; i++) { if (isHdr(rows[i])) { h = i; break; } }
     if (h < 0) return { error: 'Could not find a header row with a Vendor column and an amount / open-balance column. Make sure this is the Bill.com A/P Detail (Open Items) report.' };
     const H = rows[h].map((c) => String(c).toLowerCase());
     const find = (re) => H.findIndex((c) => re.test(c));
     const vC = find(/vendor|payee/);
-    let aC = find(/open.*(balance|amount)|amount.*due|balance/); if (aC < 0) aC = find(/open/); if (aC < 0) aC = find(/amount|total/);
+    let aC = find(/open.*(balance|amount)|amount.*due|balance/); if (aC < 0) aC = find(/open/); if (aC < 0) aC = find(/^total$|amount/); if (aC < 0) aC = find(/total/);
     const iC = find(/invoice|bill.*#|bill.*no|document|ref|number/);
     const dC = find(/bill.*date|invoice.*date|^date|due.*date/);
     const lines = []; let lastV = '';
     for (let i = h + 1; i < rows.length; i++) {
       const r = rows[i]; if (!r || !r.length) continue;
       const vRaw = vC >= 0 ? norm(r[vC]) : ''; if (vRaw) lastV = vRaw;
+      if (/grand\s*total|^totals?$/i.test(vRaw)) continue;
       const amt = aC >= 0 ? toNum(r[aC]) : null;
       if (amt == null || Math.abs(amt) < 0.005) continue;
       const rowText = r.map((c) => String(c == null ? '' : c)).join(' ').toLowerCase();
@@ -5474,6 +5480,66 @@ function ClrfApDetailCard({ entityId, qe, canEdit }) {
     {preview && preview.error && <div style={{ fontSize: 12, color: T.red, marginTop: 8 }}>{preview.error}</div>}
     {msg && <div style={{ fontSize: 12, color: msg.startsWith('Error') ? T.red : T.green, marginTop: 10, fontWeight: 600 }}>{msg}</div>}
   </div>);
+}
+
+function MonthWorkpaper({entityId,entityName,canEdit=true}){
+  // Default to the most recently completed month.
+  const defaultMonth=()=>{const t=today();const [y,m]=t.split('-').map(Number);const pm=m===1?12:m-1;const py=m===1?y-1:y;return py+'-'+String(pm).padStart(2,'0');};
+  const[mon,setMon]=useState(defaultMonth());
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const[result,setResult]=useState(null);
+  const valid=/^\d{4}-\d{2}$/.test(mon);
+  const run=async()=>{
+    if(!valid)return;
+    setBusy(true);setErr('');setResult(null);
+    try{
+      const r=await api.monthlyClose(entityId,mon);
+      if(!r)return;
+      const url=URL.createObjectURL(r.blob);
+      const a=document.createElement('a');a.href=url;a.download=r.filename;
+      document.body.appendChild(a);a.click();document.body.removeChild(a);
+      setTimeout(()=>URL.revokeObjectURL(url),4000);
+      setResult(r.summary||{});
+    }catch(e){ setErr(e.message||String(e)); }
+    finally{ setBusy(false); }
+  };
+  const s=result||{};
+  const flags=(s.flags||[]);
+  const ties=s.ties||{};
+  return(<div><div style={S.card}>
+    {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
+    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Monthly Closing Workpaper</div>
+    <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:760,lineHeight:1.5}}>
+      One workbook supporting every balance-sheet account for the month: a Lead Sheet that links by formula to per-category supporting schedules — Cash (with a bank-rec line), Intercompany (tied to each related entity&rsquo;s own ledger), Investments, Loans &amp; Notes Payable, Members&rsquo; Equity, and Other — each rolling the beginning balance forward with the month&rsquo;s general-ledger activity. Every subtotal and the Assets = Liabilities + Equity check is a live formula; there are no hard-coded amounts. Discrepancies (an out-of-balance sheet, a roll-forward that doesn&rsquo;t tie, or an intercompany account that doesn&rsquo;t mirror the counterparty) are flagged on the Summary tab. A copy is filed under Workpapers › Monthly Closing by year and month.
+    </div>
+    <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
+      <div><label style={S.label}>Month</label>
+        <input style={S.inputSm} type="month" value={mon} onChange={e=>{setMon(e.target.value);setErr('');setResult(null);}}/></div>
+      <button style={{...S.btnP,opacity:(!valid||busy||!canEdit)?0.5:1}} disabled={!valid||busy||!canEdit} onClick={run}>
+        {busy?'Running…':'Run Report'}</button>
+    </div>
+    {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
+    {result&&<div style={{...S.card,marginTop:18,padding:14,background:flags.length?'#fff8f0':'#f3faf5'}}>
+      <div style={{fontWeight:700,color:flags.length?(T.orange||'#d08a2a'):T.green,marginBottom:8}}>
+        {s.month_name||s.month} workpaper downloaded{s.replaced>0?' · replaced the previous copy':''}
+        {flags.length?(' · '+flags.length+' item'+(flags.length>1?'s':'')+' to review'):' · all checks passed'}</div>
+      <table style={{...S.table,minWidth:360,marginBottom:flags.length?12:0}}><tbody>
+        <tr><td style={S.td}>Balance-sheet accounts supported</td><td style={S.tdR}>{s.accounts}</td></tr>
+        <tr><td style={S.td}>Total assets</td><td style={S.tdR}>{fmt(ties.total_assets)}</td></tr>
+        <tr><td style={S.td}>Total liabilities</td><td style={S.tdR}>{fmt(ties.total_liabilities)}</td></tr>
+        <tr><td style={S.td}>Total members’ equity</td><td style={S.tdR}>{fmt(ties.total_equity)}</td></tr>
+        <tr><td style={S.td}>Net income (loss) — fiscal YTD</td><td style={S.tdR}>{fmt(ties.net_income)}</td></tr>
+        <tr style={S.grandTotalRow}><td style={S.tdBold}>Assets − (Liabilities + Equity)</td>
+          <td style={{...S.tdBold,textAlign:'right',color:Math.abs(ties.imbalance||0)<0.01?T.green:T.red}}>{fmt(ties.imbalance)}</td></tr>
+      </tbody></table>
+      {flags.length>0&&<div style={{display:'flex',flexDirection:'column',gap:6}}>
+        {flags.map((f,i)=>(<div key={i} style={{fontSize:12,lineHeight:1.5,color:f.severity==='exception'?T.red:(T.orange||'#d08a2a'),display:'flex',gap:6}}>
+          <span>{f.severity==='exception'?'✖':'⚠'}</span><span>{f.message}</span></div>))}
+      </div>}
+      {s.saved_to&&<div style={{fontSize:12,color:T.textMuted,marginTop:10}}>Filed at <strong>{s.saved_to}</strong></div>}
+    </div>}
+  </div></div>);
 }
 
 function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,description}){

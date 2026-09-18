@@ -11153,6 +11153,22 @@ require('./otherworkpapers').registerOtherWorkpapersRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ Monthly Closing Workpaper (generic balance-sheet support) ═══
+// A monthly workbook supporting EVERY balance-sheet account of an entity: a Lead
+// Sheet that links by formula to per-category supporting roll-forward schedules
+// (Cash, Intercompany, Investments, Debt, Equity, Other), with intercompany
+// mirror ties to the counterparty's own GL and an Assets = Liab + Equity check.
+// No hard-coded amounts — every derived figure is a live formula. Filed under
+// Workpapers › Monthly Closing by year and month.
+require('./monthlyclose').registerMonthlyCloseRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLRF workpaper: Preferred Return (fund-level 8% XIRR) ═══
 // Quarterly. Reproduces Weaver's fund-level preferred-return calculation: the
 // dated equalized LP net cash-flow schedule, Return of Capital, and the Preferred
