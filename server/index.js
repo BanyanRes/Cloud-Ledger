@@ -11082,6 +11082,21 @@ require('./partnerscap').registerPartnersCapRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ CLRF workpaper: Other Workpapers (balance-sheet account support) ═══
+// One quarterly workbook with a tab per Weaver BS-support workpaper (Due From/To
+// Port Co, Interest Receivable, Prepaid Expenses, Other Assets, AP Recon, Accrual
+// & Subsequent Cash Disbursement, Distributions Payable), all GL-derived from the
+// CL ledger and tying to the Statement of Assets, Liabilities and Partners'
+// Capital by construction. See server/otherworkpapers.js.
+require('./otherworkpapers').registerOtherWorkpapersRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLRF workpaper: Preferred Return (fund-level 8% XIRR) ═══
 // Quarterly. Reproduces Weaver's fund-level preferred-return calculation: the
 // dated equalized LP net cash-flow schedule, Return of Capital, and the Preferred
