@@ -185,7 +185,8 @@ async function buildData(ctx, quarter, opts = {}) {
   // remaining unmatched bills are the open invoices), the Bill.com A/P detail, and
   // a CL A/P detail, all reconciling to the 202000 balance.
   const apGl = sumWhere(bEnd, ACCT.tradeAP);
-  const apRecon = buildApRecon(db, eid, quarter, apGl);
+  const apRecon = await buildApRecon(ctx, eid, quarter, apGl);
+  for (const f of (apRecon.flags || [])) flags.push(f);
 
   // 6. Accrual & Subsequent Cash Disbursement — JEs that credited the accrual
   // accounts (mgmt-fee payable, accrued expenses) during the period.
@@ -205,7 +206,7 @@ async function buildData(ctx, quarter, opts = {}) {
   const distBal = sumWhere(bEnd, ACCT.distPay);
   const contrib = buildContribRecv(db, quarter, bEnd);
   const dueMgmtBal = sumWhere(bEnd, (c) => /^2108/.test(c));
-  const distSplit = buildDistributions(db, quarter, bEnd);
+  const distSplit = buildDistributions(db, quarter, bEnd, bBeg);
 
   return {
     quarter, entity_name: ent ? ent.name : ('entity ' + eid),
@@ -213,7 +214,7 @@ async function buildData(ctx, quarter, opts = {}) {
     flags,
     interest: { rows: intRows, balance: intBal, tie: interestTie },
     prepaid,
-    otherAssets: { groups: oaGroups, total: oaTotal },
+    otherAssets: { groups: oaGroups, total: oaTotal, begin: sumWhere(bBeg, ACCT.otherAsset) },
     ap: apRecon,
     accrual: { rows: accrRows, mgmtPay: mgmtPayBal, accrued: accruedBal, affiliates: affiliatesBal, mgmtItd, subDisb, flux },
     contrib,
@@ -281,7 +282,8 @@ function groupSum(rows, keyFn) {
   return m;
 }
 
-function buildApRecon(db, eid, q, apGlBal) {
+async function buildApRecon(ctx, eid, q, apGlBal) {
+  const db = ctx.db;
   const r2c = (n) => Math.round((Number(n) || 0) * 100);
 
   // Beginning balance (signed liability) before the quarter start.
@@ -399,23 +401,39 @@ function buildApRecon(db, eid, q, apGlBal) {
   openBills.sort((a, b) => b.amount - a.amount);
   const openTotal = r2(openBills.reduce((a, x) => a + x.amount, 0));
 
-  // Bill.com A/P aging when uploaded; otherwise the open GL bills ARE the Bill.com
-  // open invoices (CLRF A/P is synced from Bill.com).
-  let billcom = null, billcomSource = 'gl';
+  // Independent Bill.com A/P detail. The whole point of this recon is to agree
+  // the GL A/P to Bill.com's OWN open-invoice report, so the Bill.com side must
+  // come from Bill.com — live from the API as of the date, or an uploaded
+  // Bill.com A/P aging. It is NEVER sourced from the GL (that would be GL vs GL).
+  const apFlags = [];
+  let billcom = null, billcomSource = 'none';
   try {
-    const cfg = db.prepare('SELECT ap_aging_lines_json, ap_aging_as_of FROM billcom_config WHERE entity_id = ?').get(eid);
-    if (cfg && cfg.ap_aging_lines_json) {
-      const arr = JSON.parse(cfg.ap_aging_lines_json) || [];
-      const norm = arr.map((x) => ({
-        vendor: x.vendor || '', invoice: x.invoice_number || parseInv(x) || '',
-        date: x.bill_date || '', amount: r2(x.amount || 0),
-      })).filter((x) => Math.abs(x.amount) >= 0.005);
-      if (norm.length) { billcom = { asOf: cfg.ap_aging_as_of || '', lines: norm, total: r2(norm.reduce((a, x) => a + x.amount, 0)) }; billcomSource = 'aging'; }
+    if (typeof ctx.billcomOpenAsOf === 'function') {
+      const live = await ctx.billcomOpenAsOf(eid, q.end);
+      if (Array.isArray(live) && live.length) {
+        const norm = live.map((x) => ({ vendor: x.vendor || '', invoice: x.invoice_number || x.invoice || '', date: String(x.bill_date || x.date || '').slice(0, 10), amount: r2(x.amount || 0) })).filter((x) => Math.abs(x.amount) >= 0.005);
+        if (norm.length) { billcom = { asOf: q.end, lines: norm, total: r2(norm.reduce((a, x) => a + x.amount, 0)) }; billcomSource = 'live'; }
+      }
     }
   } catch (e) { billcom = null; }
-  const billcomLines = billcom ? billcom.lines : openBills.map((b) => ({ vendor: b.vendor, invoice: b.invoice, date: b.date, amount: b.amount }));
-  const billcomTotal = billcom ? billcom.total : openTotal;
+  if (!billcom) {
+    try {
+      const cfg = db.prepare('SELECT ap_aging_lines_json, ap_aging_as_of FROM billcom_config WHERE entity_id = ?').get(eid);
+      if (cfg && cfg.ap_aging_lines_json) {
+        const arr = JSON.parse(cfg.ap_aging_lines_json) || [];
+        const norm = arr.map((x) => ({ vendor: x.vendor || '', invoice: x.invoice_number || parseInv(x) || '', date: x.bill_date || '', amount: r2(x.amount || 0) })).filter((x) => Math.abs(x.amount) >= 0.005);
+        if (norm.length) { billcom = { asOf: cfg.ap_aging_as_of || '', lines: norm, total: r2(norm.reduce((a, x) => a + x.amount, 0)) }; billcomSource = 'aging'; }
+      }
+    } catch (e) { billcom = null; }
+  }
+  const billcomLines = billcom ? billcom.lines : [];
+  const billcomTotal = billcom ? billcom.total : null;
   const billcomAsOf = billcom ? billcom.asOf : q.end;
+  if (!billcom) {
+    apFlags.push({ severity: 'exception', wp: 'AP Recon', message: 'Bill.com A/P detail is unavailable (no live Bill.com pull and no uploaded A/P aging), so the GL A/P of ' + fmt(apGlBal) + ' could not be independently verified against Bill.com — connect Bill.com or upload the Bill.com A/P Detail report.' });
+  } else if (Math.abs((billcomTotal || 0) - openTotal) >= 0.01) {
+    apFlags.push({ severity: 'exception', wp: 'AP Recon', message: 'Bill.com open A/P ' + fmt(billcomTotal) + ' (per ' + billcomSource + ') does not agree to GL open A/P ' + fmt(openTotal) + ' (off by ' + fmt((billcomTotal || 0) - openTotal) + ')' });
+  }
 
   // Reconciliation by vendor: Bill.com open vs GL open.
   const glByV = groupSum(openBills, (x) => String(x.vendor || '').trim());
@@ -425,9 +443,10 @@ function buildApRecon(db, eid, q, apGlBal) {
     const gl = glByV.get(k) || 0, bc = bcByV.get(k) || 0;
     return { vendor: k, gl, billcom: bc, diff: r2(bc - gl) };
   }).sort((a, b) => b.gl - a.gl);
+  if (billcom) for (const v of byVendor) { if (Math.abs(v.diff) >= 0.01) apFlags.push({ severity: 'exception', wp: 'AP Recon', message: v.vendor + ': Bill.com ' + fmt(v.billcom) + ' vs GL ' + fmt(v.gl) + ' (off by ' + fmt(v.diff) + ')' }); }
 
   return {
-    gl: apGlBal, begin,
+    gl: apGlBal, begin, flags: apFlags,
     ending: r2(begin + glRows.reduce((a, r) => a + r.credit - r.debit, 0)),
     totalDebit: r2(glRows.reduce((a, r) => a + r.debit, 0)),
     totalCredit: r2(glRows.reduce((a, r) => a + r.credit, 0)),
@@ -487,18 +506,34 @@ function traceDueMismatch(ctx, quarter, prop, cpEnt, cpLegCodes) {
     cpAmts = glDetail(db, cpEnt.id, { from: quarter.qs, to: quarter.end, match: (c) => cpLegCodes.has(String(c)) })
       .map((r) => Math.round(Math.abs(r.signed) * 100));
   }
+  // The counterparty's SUBSEQUENT-period CLRF-facing activity, to tell a genuine
+  // timing difference (it posts on the other ledger next period) from a real
+  // exception (it never does).
+  let cpSub = [];
+  if (cpEnt) {
+    const subTo = addMonths(quarter.end, 3);
+    try {
+      cpSub = db.prepare(
+        'SELECT je.date date, je.entry_num num, jl.debit debit, jl.credit credit '
+        + 'FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id '
+        + 'LEFT JOIN accounts a ON a.entity_id = je.entity_id AND a.code = jl.account_code '
+        + "WHERE je.entity_id = ? AND je.date > ? AND je.date <= ? "
+        + "AND (a.name LIKE '%County Line Rail Fund%' OR a.name LIKE '%CLRF%')"
+      ).all(cpEnt.id, quarter.end, subTo);
+    } catch (e) { cpSub = []; }
+  }
   const out = [];
   for (const r of fundRows) {
     if (Math.abs(r.signed) < 0.005) continue;
     const key = Math.round(Math.abs(r.signed) * 100);
     const i = cpAmts.indexOf(key);
-    if (i >= 0) { cpAmts[i] = -1; continue; } // has a mirror on the other side
-    out.push({
-      date: r.date, num: r.entry_num || r.doc_number, amount: r.signed, memo: r.memo || r.description || '',
-      note: (r.entry_num || r.doc_number || '') + ' ' + fmt(Math.abs(r.signed)) + ' "' + String(r.memo || r.description || '').slice(0, 44)
-        + '" recorded on CLRF with no matching entry on ' + (cpEnt ? cpEnt.name : 'the counterparty') + ' as of ' + short(quarter.end)
-        + ' — likely timing (cash cleared in the subsequent period)',
-    });
+    if (i >= 0) { cpAmts[i] = -1; continue; } // already mirrored in-period
+    const head = (r.entry_num || r.doc_number || '') + ' ' + fmt(Math.abs(r.signed)) + ' "' + String(r.memo || r.description || '').slice(0, 40) + '"';
+    const sub = cpSub.find((x) => Math.round((x.debit || 0) * 100) === key || Math.round((x.credit || 0) * 100) === key);
+    let tail;
+    if (sub) tail = ' recorded on CLRF at ' + short(quarter.end) + '; CONFIRMED TIMING — posts on ' + cpEnt.name + ' ' + sub.date + ' (' + (sub.num || '') + ').';
+    else tail = ' recorded on CLRF at ' + short(quarter.end) + ' with NO matching entry on ' + (cpEnt ? cpEnt.name : 'the counterparty') + ' through ' + addMonths(quarter.end, 3) + ' — REAL EXCEPTION, investigate.';
+    out.push({ date: r.date, num: r.entry_num || r.doc_number, amount: r.signed, memo: r.memo || r.description || '', confirmed: !!sub, note: head + tail });
   }
   return out;
 }
@@ -525,8 +560,9 @@ function buildDueRecon(ctx, quarter, dueData) {
     }
     rows.push({ prop, cpName: cpEnt ? cpEnt.name : '(no CL entity)', cpId: cpEnt ? cpEnt.id : null, fundDue, cpNet: cp.net, diff, status, legs: cp.legs, trace });
     if (status !== 'matched') {
+      const allTiming = trace.length > 0 && trace.every((t) => t.confirmed);
       flags.push({
-        severity: 'exception', wp: 'Due From/To Port Co',
+        severity: allTiming ? 'review' : 'exception', wp: 'Due From/To Port Co',
         message: prop + ': CLRF records ' + fmt(fundDue) + ' but ' + (cpEnt ? cpEnt.name : 'the counterparty') + ' shows ' + fmt(cp.net)
           + ' (off by ' + fmt(diff) + ')' + (trace[0] ? ' — ' + trace[0].note : ''),
       });
@@ -599,7 +635,7 @@ async function buildPrepaidSchedule(ctx, quarter, prepaid) {
       const booked = r2(r.credit);
       const expected = r.f ? r2(r.f.premium / r.f.basis * r.f.days) : null;
       const ok = expected == null ? null : Math.abs(expected - booked) < 0.01;
-      checkRows.push({ date: r.date, num: r.entry_num || r.doc_number, memo: r.memo || r.description, booked, expected, days: r.f ? r.f.days : null, ok });
+      checkRows.push({ date: r.date, num: r.entry_num || r.doc_number, memo: r.memo || r.description, booked, expected, days: r.f ? r.f.days : null, premium: r.f ? r.f.premium : null, basis: r.f ? r.f.basis : null, ok });
       if (r.date >= quarter.qs && r.date <= quarter.end && expected != null && !ok) {
         flags.push({ severity: 'exception', wp: 'Prepaid Expenses', message: a.label + ': quarter amortization booked ' + fmt(booked) + ' but the memo formula computes ' + fmt(expected) });
       }
@@ -679,7 +715,7 @@ function buildContribRecv(db, quarter, bEnd) {
 }
 
 // ── Distributions payable / due to management company (by investor) ──
-function buildDistributions(db, quarter, bEnd) {
+function buildDistributions(db, quarter, bEnd, bBeg) {
   const groups = [
     { code: '230100', label: 'Distributions Payable (Due to Members)', match: (c) => /^2301/.test(c) },
     { code: '210800', label: 'Due to Management Company', match: (c) => /^2108/.test(c) },
@@ -691,7 +727,8 @@ function buildDistributions(db, quarter, bEnd) {
     const byInv = new Map();
     for (const r of rows) { const k = r.class_name || '(untagged)'; byInv.set(k, r2((byInv.get(k) || 0) + r.signed)); }
     const investors = [...byInv.entries()].map(([name, amt]) => ({ name, amt: r2(amt) })).filter((x) => Math.abs(x.amt) >= 0.005).sort((a, b) => Math.abs(b.amt) - Math.abs(a.amt));
-    out.push({ code: g.code, label: g.label, rows, balance: r2(balance), investors });
+    const begin = bBeg ? sumWhere(bBeg, g.match) : 0;
+    out.push({ code: g.code, label: g.label, rows, balance: r2(balance), begin: r2(begin), investors });
   }
   return out;
 }
@@ -858,6 +895,11 @@ function buildWorkbook(data) {
   oa.getCell('E' + orow).value = 'TOTAL Other Assets'; oa.getCell('E' + orow).font = F({ bold: true });
   const oc = setMoney(oa, 'F' + orow, data.otherAssets.total, { bold: true }); oc.border = { top: THIN, bottom: THIN };
   const oaTotalRow = orow; // Summary links to F here
+  orow += 2;
+  oa.getCell('D' + orow).value = 'Beginning balance at ' + short(q.prior_ye); oa.getCell('D' + orow).font = F(); setMoney(oa, 'F' + orow, data.otherAssets.begin); orow += 1;
+  oa.getCell('D' + orow).value = 'Net activity in ' + q.label; oa.getCell('D' + orow).font = F(); setMoney(oa, 'F' + orow, r2(data.otherAssets.total - data.otherAssets.begin)); orow += 1;
+  oa.getCell('D' + orow).value = 'Ending balance at ' + short(q.end); oa.getCell('D' + orow).font = F({ bold: true }); setMoney(oa, 'F' + orow, data.otherAssets.total, { bold: true }).border = { top: THIN }; orow += 2;
+  oa.getCell('A' + orow).value = 'Ending balance agrees to the Balance Sheet other assets line (180100).'; oa.getCell('A' + orow).font = SMALLI; oa.mergeCells('A' + orow + ':G' + orow);
 
   // ── 5. AP Recon (summary + supporting schedules) ──────────────────────────
   // Purpose: show that the open-invoice report per Bill.com ties to the GL A/P
@@ -875,17 +917,17 @@ function buildWorkbook(data) {
   const apFirst = ar;
   for (const v of (AP.byVendor || [])) {
     ap.getCell('A' + ar).value = v.vendor; ap.getCell('A' + ar).font = F();
-    setMoney(ap, 'B' + ar, v.billcom);
+    if (AP.billcomSource !== 'none') setMoney(ap, 'B' + ar, v.billcom);
     setMoney(ap, 'C' + ar, v.gl);
-    { const c = ap.getCell('D' + ar); c.value = { formula: 'B' + ar + '-C' + ar, result: v.diff }; c.numFmt = MONEY; c.font = F(); }
+    if (AP.billcomSource !== 'none') { const c = ap.getCell('D' + ar); c.value = { formula: 'B' + ar + '-C' + ar, result: v.diff }; c.numFmt = MONEY; c.font = F(); }
     ar++;
   }
   const apLast = ar - 1;
   ap.getCell('A' + ar).value = 'Total accounts payable'; ap.getCell('A' + ar).font = F({ bold: true });
   const sumOrVal = (col, tot) => (apLast >= apFirst ? { formula: 'SUM(' + col + apFirst + ':' + col + apLast + ')', result: tot } : tot);
-  { const c = ap.getCell('B' + ar); c.value = sumOrVal('B', AP.billcomTotal); c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  { const c = ap.getCell('B' + ar); if (AP.billcomSource !== 'none') c.value = sumOrVal('B', AP.billcomTotal); c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
   { const c = ap.getCell('C' + ar); c.value = sumOrVal('C', AP.openTotal); c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
-  { const c = ap.getCell('D' + ar); c.value = { formula: 'B' + ar + '-C' + ar, result: r2(AP.billcomTotal - AP.openTotal) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  { const c = ap.getCell('D' + ar); if (AP.billcomSource !== 'none') c.value = { formula: 'B' + ar + '-C' + ar, result: r2((AP.billcomTotal || 0) - AP.openTotal) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
   const apTotalRow = ar; // Summary links to C here (Per GL open invoices = 202000)
   ar += 2;
   ap.getCell('A' + ar).value = 'Accounts payable per general ledger (202000)'; ap.getCell('A' + ar).font = F();
@@ -895,9 +937,11 @@ function buildWorkbook(data) {
   ap.getCell('A' + ar).value = 'Difference'; ap.getCell('A' + ar).font = F({ bold: true });
   { const c = ap.getCell('C' + ar); c.value = { formula: 'C' + apGlRow + '-C' + apOpenRow, result: r2(AP.gl - AP.openTotal) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
   ar += 2;
-  ap.getCell('A' + ar).value = AP.billcomSource === 'aging'
-    ? ('Per Bill.com = uploaded Bill.com A/P aging as of ' + (AP.billcomAsOf || short(q.end)) + '. Per GL = open invoices remaining on account 202000 after offsets, which ties to the Balance Sheet.')
-    : ('Per Bill.com = open invoices per the Bill.com A/P sync (no A/P aging file uploaded for this entity; CLRF A/P is synced from Bill.com, so the open GL bills are the Bill.com open invoices). Per GL = open invoices remaining on account 202000 after offsets, which ties to the Balance Sheet.');
+  ap.getCell('A' + ar).value = AP.billcomSource === 'live'
+    ? ('Per Bill.com = the Bill.com open-invoice report pulled live from the Bill.com API as of ' + (AP.billcomAsOf || short(q.end)) + ' (bills less payments applied by that date). Per GL = open invoices remaining on account 202000 after offsets, which ties to the Balance Sheet.')
+    : AP.billcomSource === 'aging'
+    ? ('Per Bill.com = the uploaded Bill.com A/P aging as of ' + (AP.billcomAsOf || short(q.end)) + '. Per GL = open invoices remaining on account 202000 after offsets, which ties to the Balance Sheet.')
+    : ('Bill.com A/P detail is UNAVAILABLE (no live Bill.com connection and no uploaded A/P aging), so the Per Bill.com column is blank and the GL A/P is NOT independently verified — connect Bill.com or upload the Bill.com A/P Detail report. See the Exceptions block on the Summary tab.');
   ap.getCell('A' + ar).font = SMALLI; ap.mergeCells('A' + ar + ':D' + ar);
 
   // 5a. Bill.com A/P Detail — open invoices.
@@ -913,12 +957,16 @@ function buildWorkbook(data) {
     setMoney(bc, 'D' + bcr, b.amount); bcr++;
   }
   const bcLast = bcr - 1;
-  bc.getCell('A' + bcr).value = 'Total open invoices per Bill.com'; bc.getCell('A' + bcr).font = F({ bold: true });
-  { const c = bc.getCell('D' + bcr); c.value = bcLast >= bcFirst ? { formula: 'SUM(D' + bcFirst + ':D' + bcLast + ')', result: AP.billcomTotal } : AP.billcomTotal; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
-  bc.getCell('A' + (bcr + 2)).value = AP.billcomSource === 'aging'
-    ? 'Source: uploaded Bill.com A/P aging detail. Ties to account 202000 and to the CL AP Detail tab.'
-    : 'Source: open bills per the Bill.com sync into CL (no A/P aging file uploaded). Ties to account 202000 and to the CL AP Detail tab.';
-  bc.getCell('A' + (bcr + 2)).font = SMALLI; bc.mergeCells('A' + (bcr + 2) + ':D' + (bcr + 2));
+  if (AP.billcomSource === 'none') {
+    bc.getCell('A' + bcr).value = 'No Bill.com A/P detail available — connect Bill.com or upload the Bill.com A/P Detail report.'; bc.getCell('A' + bcr).font = SMALLI; bc.mergeCells('A' + bcr + ':D' + bcr);
+  } else {
+    bc.getCell('A' + bcr).value = 'Total open invoices per Bill.com'; bc.getCell('A' + bcr).font = F({ bold: true });
+    { const c = bc.getCell('D' + bcr); c.value = bcLast >= bcFirst ? { formula: 'SUM(D' + bcFirst + ':D' + bcLast + ')', result: AP.billcomTotal } : AP.billcomTotal; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+    bc.getCell('A' + (bcr + 2)).value = AP.billcomSource === 'live'
+      ? ('Source: pulled live from the Bill.com API as of ' + short(AP.billcomAsOf || q.end) + ' (bills less payments applied by that date). Ties to account 202000 and to the CL AP Detail tab.')
+      : 'Source: uploaded Bill.com A/P aging detail. Ties to account 202000 and to the CL AP Detail tab.';
+    bc.getCell('A' + (bcr + 2)).font = SMALLI; bc.mergeCells('A' + (bcr + 2) + ':D' + (bcr + 2));
+  }
 
   // 5b. CL A/P Detail — open invoices per GL.
   const cld = wb.addWorksheet('CL AP Detail', { views: [{ state: 'frozen', ySplit: 6, showGridLines: false }] });
@@ -985,6 +1033,8 @@ function buildWorkbook(data) {
   const ac = wb.addWorksheet('Accrual & Sub Cash Disb', { views: [{ showGridLines: false }] });
   titleBlock(ac, en, 'Accrual & Subsequent Cash Disbursement', 'As of ' + short(q.end));
   hdrRow(ac, 6, ['Date', 'Vendor', 'JE#', 'Description', 'Accrual Account', 'Amount'], [12, 22, 16, 46, 26, 16]);
+  ac.getColumn(7).width = 42;
+  ac.getCell('A4').value = 'Substantiates the fund’s accrued liabilities: the accruals booked this quarter (below), then each account’s ending balance tied to its own Balance Sheet line. Supporting detail is on the Mgmt Fee Accrual, Subsequent Cash Disb, and Flux Analysis tabs.'; ac.getCell('A4').font = SMALLI; ac.mergeCells('A4:G4');
   let cr = 7;
   for (const r of data.accrual.rows) {
     ac.getCell('A' + cr).value = r.date; ac.getCell('A' + cr).font = F();
@@ -996,18 +1046,49 @@ function buildWorkbook(data) {
   }
   ac.getCell('D' + cr).value = 'Total accruals booked in period'; ac.getCell('D' + cr).font = F({ bold: true });
   setMoney(ac, 'F' + cr, r2(data.accrual.rows.reduce((a, x) => a + x.credit, 0)), { bold: true }).border = { top: THIN };
-  // Ending balances (the Summary tab links to the total of these two cells).
-  const accEnd1 = cr + 2, accEnd2 = cr + 3, accEndTot = cr + 4;
-  ac.getCell('D' + accEnd1).value = 'Management fees payable, end of quarter (210600)'; ac.getCell('D' + accEnd1).font = F();
+  // Ending balances. Each agrees to its OWN Balance Sheet line — they are not
+  // summed (management fees payable and due to affiliates are their own lines;
+  // accrued expenses is part of the AP & accrued line). The Summary tab links to
+  // the mgmt-fee cell (accEnd1) and the accrued cell (accEnd2).
+  ac.getCell('D' + (cr + 1)).value = 'Ending balances — each agrees to its own Balance Sheet line:'; ac.getCell('D' + (cr + 1)).font = F({ bold: true });
+  const accEnd1 = cr + 2, accEnd2 = cr + 3, accEnd3 = cr + 4;
+  ac.getCell('D' + accEnd1).value = 'Management fees payable (210600)'; ac.getCell('D' + accEnd1).font = F();
   setMoney(ac, 'F' + accEnd1, data.accrual.mgmtPay);
-  ac.getCell('D' + accEnd2).value = 'Accrued expenses, end of quarter (210000)'; ac.getCell('D' + accEnd2).font = F();
+  ac.getCell('G' + accEnd1).value = 'agrees to BS: Management fees payable'; ac.getCell('G' + accEnd1).font = SMALLI;
+  ac.getCell('D' + accEnd2).value = 'Accrued expenses (210000)'; ac.getCell('D' + accEnd2).font = F();
   setMoney(ac, 'F' + accEnd2, data.accrual.accrued);
-  ac.getCell('D' + accEndTot).value = 'Total per Balance Sheet'; ac.getCell('D' + accEndTot).font = F({ bold: true });
-  { const c = ac.getCell('F' + accEndTot); c.value = { formula: 'F' + accEnd1 + '+F' + accEnd2, result: r2(data.accrual.mgmtPay + data.accrual.accrued) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
-  ac.getCell('A' + (accEndTot + 2)).value = 'Both ending balances tie to the Balance Sheet.'; ac.getCell('A' + (accEndTot + 2)).font = SMALLI;
+  ac.getCell('G' + accEnd2).value = 'agrees to BS: within Accounts payable & accrued expenses'; ac.getCell('G' + accEnd2).font = SMALLI;
+  ac.getCell('D' + accEnd3).value = 'Due to affiliates (211000)'; ac.getCell('D' + accEnd3).font = F();
+  setMoney(ac, 'F' + accEnd3, data.accrual.affiliates);
+  ac.getCell('G' + accEnd3).value = 'agrees to BS: Due to affiliates'; ac.getCell('G' + accEnd3).font = SMALLI;
 
   // ── 7. Distributions Payable ──────────────────────────────────────────────
-  const distTotalRow = detailSheet(wb, 'Distributions Payable', en, 'Distributions Payable (230100)', q, data.dist.rows, data.dist.balance, true);
+  // ── 7. Distributions Payable & Due to Management Company ──────────────────
+  // Clear roll-forward by account (beginning -> activity -> ending) with the open
+  // balance by investor. Each ending balance agrees to the Balance Sheet.
+  let distTotalRow;
+  {
+    const dd = wb.addWorksheet('Distributions Payable', { views: [{ showGridLines: false }] });
+    dd.getColumn(1).width = 48; [2, 3, 4, 5, 6].forEach((c) => (dd.getColumn(c).width = 15)); dd.getColumn(7).width = 16;
+    titleBlock(dd, en, 'Distributions Payable & Due to Management Company', 'As of ' + short(q.end));
+    dd.getCell('A4').value = 'Amounts payable to members (230100) and to the management company (210800), rolled forward from the prior year-end with the open balance shown by investor. Each ending balance agrees to the Balance Sheet.'; dd.getCell('A4').font = SMALLI; dd.mergeCells('A4:G4');
+    let r = 6;
+    for (const grp of (data.distSplit || [])) {
+      dd.getCell('A' + r).value = grp.label + ' (' + grp.code + ')'; dd.getCell('A' + r).font = F({ bold: true }); r += 1;
+      dd.getCell('A' + r).value = 'Beginning balance at ' + short(q.prior_ye); dd.getCell('A' + r).font = F(); setMoney(dd, 'G' + r, grp.begin); r += 1;
+      dd.getCell('A' + r).value = 'Net activity in ' + q.label; dd.getCell('A' + r).font = F(); setMoney(dd, 'G' + r, r2(grp.balance - grp.begin)); r += 1;
+      dd.getCell('A' + r).value = 'Ending balance at ' + short(q.end); dd.getCell('A' + r).font = F({ bold: true }); setMoney(dd, 'G' + r, grp.balance, { bold: true }).border = { top: THIN };
+      if (grp.code === '230100') distTotalRow = r;
+      r += 1;
+      dd.getCell('A' + r).value = 'Open balance by investor:'; dd.getCell('A' + r).font = F({ italic: true }); r += 1;
+      if (grp.investors.length) { for (const inv of grp.investors) { dd.getCell('A' + r).value = '   ' + inv.name; dd.getCell('A' + r).font = F(); setMoney(dd, 'G' + r, inv.amt); r += 1; } }
+      else { dd.getCell('A' + r).value = '   (GL lines carry no investor/class tag; the ending balance still ties to the account)'; dd.getCell('A' + r).font = SMALLI; r += 1; }
+      r += 1;
+    }
+    dd.getCell('A' + r).value = 'Due to Affiliates (211000) ' + fmt(data.ties.due_to_affiliates) + ' is a separate Balance Sheet line, supported on the Accrual & Sub Cash Disb tab.'; dd.getCell('A' + r).font = SMALLI; dd.mergeCells('A' + r + ':G' + r); r += 1;
+    dd.getCell('A' + r).value = 'Each ending balance above agrees to the Balance Sheet.'; dd.getCell('A' + r).font = SMALLI;
+    if (distTotalRow == null) distTotalRow = 6;
+  }
 
   // ═══ Phase 2-4 supporting schedules ═══════════════════════════════════════
 
@@ -1021,7 +1102,8 @@ function buildWorkbook(data) {
       for (const c of pol.checkRows) {
         pp.getCell('A' + pr).value = c.date + '  ' + (c.num || ''); pp.getCell('A' + pr).font = F();
         pp.getCell('B' + pr).value = c.days; pp.getCell('B' + pr).font = F();
-        setMoney(pp, 'C' + pr, c.booked); if (c.expected != null) setMoney(pp, 'D' + pr, c.expected);
+        setMoney(pp, 'C' + pr, c.booked);
+        if (c.premium != null && c.basis && c.days) { const dc = pp.getCell('D' + pr); dc.value = { formula: c.premium + '/' + c.basis + '*' + c.days, result: c.expected }; dc.numFmt = MONEY; dc.font = F(); } else if (c.expected != null) setMoney(pp, 'D' + pr, c.expected);
         const cc = pp.getCell('E' + pr); cc.value = c.ok == null ? 'n/a' : (c.ok ? 'OK' : 'DIFF'); cc.font = F({ bold: c.ok === false, color: { argb: c.ok === false ? 'FFC00000' : 'FF008000' } });
         pr += 1;
       }
@@ -1109,21 +1191,6 @@ function buildWorkbook(data) {
     ws.getCell('A' + r).value = 'Ties to the Balance Sheet capital contributions receivable line.'; ws.getCell('A' + r).font = SMALLI;
   }
 
-  // Distributions: by-investor breakdown + Due to Management Company (appended).
-  {
-    const dws = wb.getWorksheet('Distributions Payable');
-    if (dws) {
-      let r = (dws.rowCount || 14) + 3;
-      for (const grp of (data.distSplit || [])) {
-        dws.getCell('A' + r).value = grp.label + ' (' + grp.code + ')  —  ' + fmt(grp.balance); dws.getCell('A' + r).font = F({ bold: true }); r += 1;
-        if (grp.investors.length) {
-          for (const inv of grp.investors) { dws.getCell('A' + r).value = '   ' + inv.name; dws.getCell('A' + r).font = F(); setMoney(dws, 'F' + r, inv.amt); r += 1; }
-        } else { dws.getCell('A' + r).value = '   (GL lines carry no investor/class tag; total ties to the account)'; dws.getCell('A' + r).font = SMALLI; r += 1; }
-        r += 1;
-      }
-      dws.getCell('A' + r).value = 'Due to Affiliates (211000) ' + fmt(data.ties.due_to_affiliates) + ' is supported on the Accrual & Sub Cash Disb tab.'; dws.getCell('A' + r).font = SMALLI;
-    }
-  }
 
   // ── Link each Summary balance to the total cell on its supporting schedule ──
   const sq = (t) => "'" + t + "'!";

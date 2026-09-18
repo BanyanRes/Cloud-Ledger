@@ -11095,6 +11095,55 @@ require('./otherworkpapers').registerOtherWorkpapersRoutes(app, {
   requireRole,
   workpapersDir: WORKPAPERS_DIR,
   uploadDir: UPLOAD_DIR,
+  // Live Bill.com open-A/P as of a date, reconstructed from the Bill.com API
+  // (bills less payments applied on/before the date) — the independent source
+  // the AP Recon workpaper agrees the GL to. Returns null on any failure so the
+  // workpaper falls back to an uploaded aging and flags if neither is available.
+  billcomOpenAsOf: async (eid, asOf) => {
+    try {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(asOf || ''))) return null;
+      const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(eid);
+      if (!cfg || !cfg.username || !cfg.password_enc || !cfg.dev_key_enc) return null;
+      const pick = (o, ...ks) => { for (const k of ks) if (o && o[k] != null) return o[k]; return null; };
+      const addMonths = (d, n) => { const [Y, M] = d.split('-').map(Number); let yy = Y, mm = M + n; while (mm > 12) { mm -= 12; yy++; } while (mm < 1) { mm += 12; yy--; } return yy + '-' + String(mm).padStart(2, '0') + '-01'; };
+      const password = billcomDecrypt(cfg.password_enc);
+      const devKey = billcomDecrypt(cfg.dev_key_enc);
+      const session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+      const listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+      const bills = await billcomListBillsWindowed({ ...listArgs, fromDate: '2024-01-01', toDate: addMonths(asOf, 6) });
+      const pays = await billcomListPaymentsWindowed({ ...listArgs, fromDate: '2024-01-01', toDate: asOf });
+      const vById = new Map();
+      try { const vs = await billcomListVendors({ ...listArgs, maxItems: 5000 }); for (const v of vs) { const id = String(pick(v, 'id') || ''); const n = pick(v, 'name', 'vendorName', 'companyName'); if (id && n) vById.set(id, n); } } catch (e) { /* names optional */ }
+      // Paid on/before asOf, per bill (PAID, not voided/cancelled).
+      const paid = new Map();
+      for (const p of pays) {
+        const st = String(pick(p, 'status', 'paymentStatus') || '').toUpperCase();
+        if (st !== 'PAID') continue;
+        if (Array.isArray(p.voidInfo) && p.voidInfo.length) continue;
+        if (p.cancelRequestSubmitted) continue;
+        const pd = String(pick(p, 'processDate', 'process_date', 'paymentDate') || '');
+        if (!pd || pd.slice(0, 10) > asOf) continue;
+        const bps = p.billPayments || p.billPays || [];
+        for (const bp of bps) { const bid = String(bp.billId || bp.bill_id || ''); if (!bid) continue; paid.set(bid, (paid.get(bid) || 0) + (Number(bp.amount) || 0)); }
+      }
+      const out = [];
+      for (const b of bills) {
+        const bid = String(pick(b, 'id') || ''); if (!bid) continue;
+        const appr = String(pick(b, 'approvalStatus', 'status') || '').toUpperCase();
+        if (appr === 'DENIED') continue;
+        if (String(pick(b, 'isActive') || '') === '2') continue; // inactive/deleted
+        const inv = pick(b, 'invoiceDate', 'invoice_date') || pick(pick(b, 'invoice') || {}, 'invoiceDate', 'invoice_date');
+        if (inv && String(inv).slice(0, 10) > asOf) continue;
+        const amt = Number(pick(b, 'amount', 'amountDue', 'invoiceAmount') || 0);
+        const openAmt = Math.round((amt - (paid.get(bid) || 0)) * 100) / 100;
+        if (openAmt <= 0.005) continue;
+        const num = pick(b, 'invoiceNumber', 'invoice_number') || pick(pick(b, 'invoice') || {}, 'invoiceNumber', 'invoice_number') || bid;
+        const vname = vById.get(String(pick(b, 'vendorId', 'vendor_id') || '')) || '';
+        out.push({ vendor: vname, invoice_number: String(num), bill_date: inv ? String(inv).slice(0, 10) : '', amount: openAmt });
+      }
+      return out;
+    } catch (e) { console.error('[billcomOpenAsOf]', e && e.message); return null; }
+  },
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
