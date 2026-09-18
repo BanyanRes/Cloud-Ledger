@@ -282,13 +282,15 @@ function buildWorkbook(data) {
     ['Distributions Payable', 'Due to members', '230100', data.ties.distributions_payable],
   ];
   let sr = 6;
-  for (const [wpn, bsl, acc, bal] of idx) {
+  for (const [wpn, bsl, acc] of idx) {
     su.getCell('A' + sr).value = wpn; su.getCell('A' + sr).font = F();
     su.getCell('B' + sr).value = bsl; su.getCell('B' + sr).font = F();
     su.getCell('C' + sr).value = acc; su.getCell('C' + sr).font = F();
-    setMoney(su, 'D' + sr, bal); sr++;
+    sr++;
   }
-  su.getCell('A' + (sr + 1)).value = 'Each tab is GL-derived from the CL ledger and ties to the Statement of Assets, Liabilities and Partners’ Capital by construction.';
+  // The D-column balances are written as live formulas linking to each supporting
+  // tab's total cell, after those tabs are built (see end of buildWorkbook).
+  su.getCell('A' + (sr + 1)).value = 'Each Summary balance is a live formula linked to the total on its supporting tab; every tab is GL-derived and ties to the Statement of Assets, Liabilities and Partners’ Capital.';
   su.getCell('A' + (sr + 1)).font = SMALLI; su.mergeCells('A' + (sr + 1) + ':D' + (sr + 1));
 
   // ── 1. Due Fr (To) Port Co ────────────────────────────────────────────────
@@ -310,11 +312,12 @@ function buildWorkbook(data) {
   }
   du.getCell('B' + R).value = 'Due From (To) Port Co at ' + short(q.end); du.getCell('B' + R).font = F({ bold: true });
   P.forEach((p, i) => { const c = setMoney(du, propCol(i) + R, data.due.end[p], { bold: true }); c.border = { top: THIN }; });
+  const dueEndRow = R; // ending row — Summary links to -SUM(E:K) here
   du.getCell('B' + (R + 2)).value = 'Net Due From (To) Portfolio Company ties to the Balance Sheet: due-from asset (101100) less due-to liability (211100).';
   du.getCell('B' + (R + 2)).font = SMALLI; du.mergeCells('B' + (R + 2) + ':K' + (R + 2));
 
   // ── 2. Interest Receivable ────────────────────────────────────────────────
-  detailSheet(wb, 'Interest Receivable', en, 'Interest Receivable (120010)', q, data.interest.rows, data.interest.balance);
+  const intTotalRow = detailSheet(wb, 'Interest Receivable', en, 'Interest Receivable (120010)', q, data.interest.rows, data.interest.balance);
 
   // ── 3. Prepaid Expenses ───────────────────────────────────────────────────
   const pp = wb.addWorksheet('Prepaid Expenses', { views: [{ showGridLines: false }] });
@@ -351,6 +354,7 @@ function buildWorkbook(data) {
   }
   oa.getCell('E' + orow).value = 'TOTAL Other Assets'; oa.getCell('E' + orow).font = F({ bold: true });
   const oc = setMoney(oa, 'F' + orow, data.otherAssets.total, { bold: true }); oc.border = { top: THIN, bottom: THIN };
+  const oaTotalRow = orow; // Summary links to F here
 
   // ── 5. AP Recon ───────────────────────────────────────────────────────────
   const ap = wb.addWorksheet('AP Recon', { views: [{ showGridLines: false }] });
@@ -375,6 +379,7 @@ function buildWorkbook(data) {
   setMoney(ap, 'D' + ar, data.ap.billcom == null ? 0 : r2(data.ap.billcom - data.ap.gl), { bold: true }).border = { top: THIN };
   ap.getCell('A' + (ar + 2)).value = 'Per GL = Accounts Payable account 202000, which ties to the Balance Sheet. CL carries no per-vendor tag on GL AP lines; the Bill.com column shows open bills by vendor when available.';
   ap.getCell('A' + (ar + 2)).font = SMALLI; ap.mergeCells('A' + (ar + 2) + ':D' + (ar + 2));
+  const apTotalRow = ar; // Summary links to C here (Per GL)
 
   // ── 6. Accrual & Subsequent Cash Disbursement ─────────────────────────────
   const ac = wb.addWorksheet('Accrual & Sub Cash Disb', { views: [{ showGridLines: false }] });
@@ -389,13 +394,33 @@ function buildWorkbook(data) {
     ac.getCell('E' + cr).value = r.account_code + ' ' + r.account_name; ac.getCell('E' + cr).font = F();
     setMoney(ac, 'F' + cr, r.credit); cr++;
   }
-  ac.getCell('D' + cr).value = 'Total accruals'; ac.getCell('D' + cr).font = F({ bold: true });
+  ac.getCell('D' + cr).value = 'Total accruals booked in period'; ac.getCell('D' + cr).font = F({ bold: true });
   setMoney(ac, 'F' + cr, r2(data.accrual.rows.reduce((a, x) => a + x.credit, 0)), { bold: true }).border = { top: THIN };
-  ac.getCell('A' + (cr + 2)).value = 'Ending balances: Management fees payable (210600) ' + fmt(data.accrual.mgmtPay) + '; Accrued expenses (210000) ' + fmt(data.accrual.accrued) + '. Both tie to the Balance Sheet.';
-  ac.getCell('A' + (cr + 2)).font = SMALLI; ac.mergeCells('A' + (cr + 2) + ':F' + (cr + 2));
+  // Ending balances (the Summary tab links to the total of these two cells).
+  const accEnd1 = cr + 2, accEnd2 = cr + 3, accEndTot = cr + 4;
+  ac.getCell('D' + accEnd1).value = 'Management fees payable, end of quarter (210600)'; ac.getCell('D' + accEnd1).font = F();
+  setMoney(ac, 'F' + accEnd1, data.accrual.mgmtPay);
+  ac.getCell('D' + accEnd2).value = 'Accrued expenses, end of quarter (210000)'; ac.getCell('D' + accEnd2).font = F();
+  setMoney(ac, 'F' + accEnd2, data.accrual.accrued);
+  ac.getCell('D' + accEndTot).value = 'Total per Balance Sheet'; ac.getCell('D' + accEndTot).font = F({ bold: true });
+  { const c = ac.getCell('F' + accEndTot); c.value = { formula: 'F' + accEnd1 + '+F' + accEnd2, result: r2(data.accrual.mgmtPay + data.accrual.accrued) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  ac.getCell('A' + (accEndTot + 2)).value = 'Both ending balances tie to the Balance Sheet.'; ac.getCell('A' + (accEndTot + 2)).font = SMALLI;
 
   // ── 7. Distributions Payable ──────────────────────────────────────────────
-  detailSheet(wb, 'Distributions Payable', en, 'Distributions Payable (230100)', q, data.dist.rows, data.dist.balance, true);
+  const distTotalRow = detailSheet(wb, 'Distributions Payable', en, 'Distributions Payable (230100)', q, data.dist.rows, data.dist.balance, true);
+
+  // ── Link each Summary balance to the total cell on its supporting schedule ──
+  const sq = (t) => "'" + t + "'!";
+  const sumRefs = [
+    { f: '-SUM(' + sq('Due Fr (To) Port Co') + 'E' + dueEndRow + ':K' + dueEndRow + ')', v: data.ties.due_to_portfolio },
+    { f: sq('Interest Receivable') + 'G' + intTotalRow, v: data.ties.interest_receivable },
+    { f: sq('Prepaid Expenses') + 'D8', v: r2(data.ties.prepaid_insurance + data.ties.prepaid_advisory) },
+    { f: sq('Other Assets') + 'F' + oaTotalRow, v: data.ties.other_assets },
+    { f: sq('AP Recon') + 'C' + apTotalRow, v: data.ties.accounts_payable },
+    { f: sq('Accrual & Sub Cash Disb') + 'F' + accEnd1 + '+' + sq('Accrual & Sub Cash Disb') + 'F' + accEnd2, v: r2(data.ties.management_fees_payable + data.ties.accrued_expenses) },
+    { f: sq('Distributions Payable') + 'G' + distTotalRow, v: data.ties.distributions_payable },
+  ];
+  sumRefs.forEach((x, i) => { const c = su.getCell('D' + (6 + i)); c.value = { formula: x.f, result: x.v }; c.numFmt = MONEY; c.font = F(); });
 
   return wb;
 }
@@ -421,6 +446,7 @@ function detailSheet(wb, tabName, en, subtitle, q, rows, balance, itd) {
   setMoney(ws, 'F' + r, r2(rows.reduce((a, x) => a + x.signed, 0)), { bold: true }).border = { top: THIN };
   setMoney(ws, 'G' + r, balance, { bold: true }).border = { top: THIN };
   ws.getCell('E' + (r + 2)).value = 'Ties to the Balance Sheet.'; ws.getCell('E' + (r + 2)).font = SMALLI;
+  return r; // TOTAL row — Summary links to G here
 }
 
 // ── Persistence (same shape as the other CLRF workpapers). ────────────────────
