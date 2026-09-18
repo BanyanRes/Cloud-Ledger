@@ -408,7 +408,7 @@ async function buildApRecon(ctx, eid, q, apGlBal) {
   const apFlags = [];
   let billcom = null, billcomSource = 'none';
   try {
-    if (typeof ctx.billcomOpenAsOf === 'function') {
+    if (false && typeof ctx.billcomOpenAsOf === 'function') { // live org-wide reconstruction is not reliable enough for the recon; the uploaded Bill.com A/P Detail report is the source
       const live = await ctx.billcomOpenAsOf(eid, q.end);
       if (Array.isArray(live) && live.length) {
         const norm = live.map((x) => ({ vendor: x.vendor || '', invoice: x.invoice_number || x.invoice || '', date: String(x.bill_date || x.date || '').slice(0, 10), amount: r2(x.amount || 0) })).filter((x) => Math.abs(x.amount) >= 0.005);
@@ -430,7 +430,7 @@ async function buildApRecon(ctx, eid, q, apGlBal) {
   const billcomTotal = billcom ? billcom.total : null;
   const billcomAsOf = billcom ? billcom.asOf : q.end;
   if (!billcom) {
-    apFlags.push({ severity: 'exception', wp: 'AP Recon', message: 'Bill.com A/P detail is unavailable (no live Bill.com pull and no uploaded A/P aging), so the GL A/P of ' + fmt(apGlBal) + ' could not be independently verified against Bill.com — connect Bill.com or upload the Bill.com A/P Detail report.' });
+    apFlags.push({ severity: 'exception', wp: 'AP Recon', message: 'No Bill.com A/P Detail report has been uploaded, so the GL A/P of ' + fmt(apGlBal) + ' is not yet independently verified against Bill.com. Export the Bill.com A/P Detail (Open Items) report as of ' + short(q.end) + ' and upload it (Bill.com settings → A/P aging), then regenerate.' });
   } else if (Math.abs((billcomTotal || 0) - openTotal) >= 0.01) {
     apFlags.push({ severity: 'exception', wp: 'AP Recon', message: 'Bill.com open A/P ' + fmt(billcomTotal) + ' (per ' + billcomSource + ') does not agree to GL open A/P ' + fmt(openTotal) + ' (off by ' + fmt((billcomTotal || 0) - openTotal) + ')' });
   }
@@ -941,7 +941,7 @@ function buildWorkbook(data) {
     ? ('Per Bill.com = the Bill.com open-invoice report pulled live from the Bill.com API as of ' + (AP.billcomAsOf || short(q.end)) + ' (bills less payments applied by that date). Per GL = open invoices remaining on account 202000 after offsets, which ties to the Balance Sheet.')
     : AP.billcomSource === 'aging'
     ? ('Per Bill.com = the uploaded Bill.com A/P aging as of ' + (AP.billcomAsOf || short(q.end)) + '. Per GL = open invoices remaining on account 202000 after offsets, which ties to the Balance Sheet.')
-    : ('Bill.com A/P detail is UNAVAILABLE (no live Bill.com connection and no uploaded A/P aging), so the Per Bill.com column is blank and the GL A/P is NOT independently verified — connect Bill.com or upload the Bill.com A/P Detail report. See the Exceptions block on the Summary tab.');
+    : ('Per Bill.com is blank because no Bill.com A/P Detail report has been uploaded, so the GL A/P is NOT yet independently verified. Export the Bill.com A/P Detail (Open Items) report as of ' + short(q.end) + ' and upload it, then regenerate. See the Exceptions block on the Summary tab.');
   ap.getCell('A' + ar).font = SMALLI; ap.mergeCells('A' + ar + ':D' + ar);
 
   // 5a. Bill.com A/P Detail — open invoices.
@@ -958,7 +958,7 @@ function buildWorkbook(data) {
   }
   const bcLast = bcr - 1;
   if (AP.billcomSource === 'none') {
-    bc.getCell('A' + bcr).value = 'No Bill.com A/P detail available — connect Bill.com or upload the Bill.com A/P Detail report.'; bc.getCell('A' + bcr).font = SMALLI; bc.mergeCells('A' + bcr + ':D' + bcr);
+    bc.getCell('A' + bcr).value = 'No Bill.com A/P Detail report uploaded. Export the Bill.com A/P Detail (Open Items) report as of ' + short(AP.billcomAsOf || q.end) + ' and upload it (Bill.com settings → A/P aging) to complete this reconciliation.'; bc.getCell('A' + bcr).font = SMALLI; bc.mergeCells('A' + bcr + ':D' + bcr);
   } else {
     bc.getCell('A' + bcr).value = 'Total open invoices per Bill.com'; bc.getCell('A' + bcr).font = F({ bold: true });
     { const c = bc.getCell('D' + bcr); c.value = bcLast >= bcFirst ? { formula: 'SUM(D' + bcFirst + ':D' + bcLast + ')', result: AP.billcomTotal } : AP.billcomTotal; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
