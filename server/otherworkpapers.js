@@ -54,7 +54,8 @@ function resolveQuarter(quarterEnd) {
   const q = m / 3;
   return {
     label: y + '-Q' + q, year: String(y), quarter: 'Q' + q,
-    ys: y + '-01-01', end: quarterEnd, prior_ye: (y - 1) + '-12-31',
+    ys: y + '-01-01', qs: y + '-' + String(m - 2).padStart(2, '0') + '-01',
+    end: quarterEnd, prior_ye: (y - 1) + '-12-31',
   };
 }
 
@@ -174,18 +175,12 @@ function buildData(ctx, quarter, opts = {}) {
   const oaGroups = groupByLocation(oaRows);
   const oaTotal = sumWhere(bEnd, ACCT.otherAsset);
 
-  // 5. AP Recon — account 202000 balance vs Bill.com. CL GL carries no per-vendor
-  // tag on these lines, so the recon is presented at the ledger level with the
-  // Bill.com open-bill total (when available) alongside.
+  // 5. AP Recon — full supporting schedules: the 202000 GL detail for the quarter
+  // with debit/credit offset tagging (each paid bill and its payment cancel; the
+  // remaining unmatched bills are the open invoices), the Bill.com A/P detail, and
+  // a CL A/P detail, all reconciling to the 202000 balance.
   const apGl = sumWhere(bEnd, ACCT.tradeAP);
-  let apBillcom = null, apByVendor = [];
-  try {
-    const rows = db.prepare(`
-      SELECT vendor_name AS vendor, SUM(amount_due) AS amt FROM billcom_bills
-      WHERE entity_id = ? AND status != 'paid' AND due_date IS NOT NULL
-      GROUP BY vendor_name`).all(eid);
-    if (rows && rows.length) { apByVendor = rows.map((x) => ({ vendor: x.vendor, amt: r2(x.amt) })); apBillcom = r2(apByVendor.reduce((a, x) => a + x.amt, 0)); }
-  } catch (e) { apBillcom = null; }
+  const apRecon = buildApRecon(db, eid, quarter, apGl);
 
   // 6. Accrual & Subsequent Cash Disbursement — JEs that credited the accrual
   // accounts (mgmt-fee payable, accrued expenses) during the period.
@@ -204,7 +199,7 @@ function buildData(ctx, quarter, opts = {}) {
     interest: { rows: intRows, balance: intBal },
     prepaid,
     otherAssets: { groups: oaGroups, total: oaTotal },
-    ap: { gl: apGl, billcom: apBillcom, byVendor: apByVendor },
+    ap: apRecon,
     accrual: { rows: accrRows, mgmtPay: mgmtPayBal, accrued: accruedBal },
     dist: { rows: distRows, balance: distBal },
     ties: {
@@ -233,6 +228,195 @@ function groupByLocation(rows) {
   for (const [name, rs] of g) out.push({ name, rows: rs, total: r2(rs.reduce((a, x) => a + x.signed, 0)) });
   out.sort((a, b) => Math.abs(b.total) - Math.abs(a.total));
   return out;
+}
+
+// ─── AP Recon offset engine ──────────────────────────────────────────────────
+// Weaver's AP recon workpaper lists the full 202000 GL detail for the quarter,
+// tags each debit/credit that offsets another with a shared letter, and whatever
+// is left uncancelled equals the ending A/P balance = the open invoices per the
+// Bill.com A/P detail. This reproduces that: a symmetric matcher cancels equal-
+// and-opposite items in either order (payments against bills, reversals, and the
+// lump within-AP reclass JEs), leaving the unmatched credits as the open bills
+// and the unmatched debits (which relieve the beginning balance) tagged X.
+
+// Offset-letter sequence: a..z then A..Z (skipping x/X, which flags beginning-
+// balance items), then double letters.
+function letterSeq(n) {
+  const S = 'abcdefghijklmnopqrstuvwyzABCDEFGHIJKLMNOPQRSTUVWYZ'.split('');
+  if (n < S.length) return S[n];
+  const a = Math.floor(n / S.length) - 1, b = n % S.length;
+  return (a >= 0 && a < S.length ? S[a] : 'z') + S[b];
+}
+
+// Best-effort invoice number from an aging/GL line.
+function parseInv(row) {
+  const d = row.doc_number != null ? String(row.doc_number).trim() : '';
+  if (d) return d;
+  const m = String(row.memo || row.description || '').match(/#\s*([A-Za-z0-9._-]{3,})|—\s*([A-Za-z0-9._-]{3,})/);
+  return m ? (m[1] || m[2]) : '';
+}
+
+// Sum an array of {amount} by a key function.
+function groupSum(rows, keyFn) {
+  const m = new Map();
+  for (const x of rows) { const k = keyFn(x) || '(unnamed)'; m.set(k, r2((m.get(k) || 0) + (x.amount || 0))); }
+  return m;
+}
+
+function buildApRecon(db, eid, q, apGlBal) {
+  const r2c = (n) => Math.round((Number(n) || 0) * 100);
+
+  // Beginning balance (signed liability) before the quarter start.
+  const bRow = db.prepare(
+    'SELECT COALESCE(SUM(jl.credit),0) tc, COALESCE(SUM(jl.debit),0) td '
+    + 'FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id '
+    + "WHERE je.entity_id = ? AND je.date < ? AND jl.account_code LIKE '2020%'"
+  ).get(eid, q.qs);
+  const begin = r2((bRow.tc || 0) - (bRow.td || 0));
+
+  // Period 202000 lines, in GL order (matches the /gl-detail route ordering).
+  const lines = db.prepare(
+    'SELECT je.id AS entry_id, je.date AS date, je.entry_num AS entry_num, je.doc_number AS doc_number, '
+    + 'je.vendor AS vendor, je.memo AS memo, jl.id AS line_id, jl.debit AS debit, jl.credit AS credit, jl.description AS description '
+    + 'FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id '
+    + "WHERE je.entity_id = ? AND je.date >= ? AND je.date <= ? AND jl.account_code LIKE '2020%' "
+    + 'ORDER BY je.date, je.entry_num, jl.id'
+  ).all(eid, q.qs, q.end);
+
+  // Offset account(s) for each entry (the non-AP lines in the same JE).
+  const offStmt = db.prepare(
+    'SELECT jl.account_code AS code, a.name AS name FROM journal_lines jl '
+    + 'LEFT JOIN accounts a ON a.entity_id = ? AND a.code = jl.account_code '
+    + "WHERE jl.entry_id = ? AND jl.account_code NOT LIKE '2020%'"
+  );
+  const offCache = new Map();
+  const offsetFor = (entryId) => {
+    if (offCache.has(entryId)) return offCache.get(entryId);
+    const rs = offStmt.all(eid, entryId);
+    let v;
+    if (!rs.length) v = '';
+    else if (rs.length === 1) v = rs[0].code + (rs[0].name ? ' ' + rs[0].name : '');
+    else v = '-Split-';
+    offCache.set(entryId, v); return v;
+  };
+
+  // Amount -> vendor/invoice lookup, from the real vendored bill credit lines.
+  const vmap = new Map();
+  for (const l of lines) {
+    const cr = r2(l.credit || 0);
+    if (cr > 0 && l.vendor && String(l.vendor).trim()) {
+      const k = r2c(cr);
+      if (!vmap.has(k)) vmap.set(k, {
+        vendor: String(l.vendor).trim(), invoice: l.doc_number != null ? String(l.doc_number) : '',
+        date: l.date, num: l.entry_num != null ? String(l.entry_num) : '', memo: l.memo || l.description || '',
+      });
+    }
+  }
+  const vlookup = (amt, row) => {
+    const hit = vmap.get(r2c(amt));
+    if (hit) return hit;
+    const mm = String((row.memo || row.description) || '').match(/^Bill\s*-\s*([^:]+):/i);
+    return {
+      vendor: mm ? mm[1].trim() : (row.vendor || ''), invoice: row.doc_number != null ? String(row.doc_number) : '',
+      date: row.date, num: row.entry_num != null ? String(row.entry_num) : '', memo: row.memo || row.description || '',
+    };
+  };
+
+  // Symmetric offset matcher. Each open lot carries a sign (+1 credit / -1 debit).
+  // A new line cancels an existing opposite-sign lot (or subset of up to three)
+  // of equal amount, regardless of order; both sides then share one letter.
+  const open = []; // { amtc, sign, idx }
+  const tag = new Array(lines.length).fill(null);
+  let pair = 0;
+  const findOpp = (amtc, sign) => {
+    const want = -sign, pos = [];
+    for (let i = 0; i < open.length; i++) if (open[i].sign === want) pos.push(i);
+    for (const i of pos) if (open[i].amtc === amtc) return [i];
+    for (let a = 0; a < pos.length; a++) for (let b = a + 1; b < pos.length; b++)
+      if (open[pos[a]].amtc + open[pos[b]].amtc === amtc) return [pos[a], pos[b]];
+    for (let a = 0; a < pos.length; a++) for (let b = a + 1; b < pos.length; b++) for (let c = b + 1; c < pos.length; c++)
+      if (open[pos[a]].amtc + open[pos[b]].amtc + open[pos[c]].amtc === amtc) return [pos[a], pos[b], pos[c]];
+    return null;
+  };
+  lines.forEach((l, i) => {
+    const dr = r2(l.debit || 0), cr = r2(l.credit || 0);
+    const sign = cr > 0 ? 1 : -1, amtc = r2c(cr > 0 ? cr : dr);
+    if (amtc === 0) { tag[i] = ''; return; }
+    const m = findOpp(amtc, sign);
+    if (m) {
+      const lt = letterSeq(pair++);
+      tag[i] = lt;
+      m.forEach((p) => (tag[open[p].idx] = lt));
+      m.sort((a, b) => b - a).forEach((p) => open.splice(p, 1));
+    } else {
+      open.push({ amtc, sign, idx: i });
+    }
+  });
+  // Unmatched debit lots relieve the beginning balance -> X; unmatched credit
+  // lots are the open invoices at period end (left unlettered).
+  const openBillIdx = [];
+  let xTotal = 0;
+  for (const o of open) {
+    if (o.sign < 0) { tag[o.idx] = 'X'; xTotal = r2(xTotal + o.amtc / 100); }
+    else { tag[o.idx] = ''; openBillIdx.push(o.idx); }
+  }
+
+  // GL rows with running balance from the beginning balance.
+  let bal = begin;
+  const glRows = lines.map((l, i) => {
+    const dr = r2(l.debit || 0), cr = r2(l.credit || 0);
+    bal = r2(bal + cr - dr);
+    return {
+      date: l.date, num: (l.entry_num != null ? String(l.entry_num) : '') || String(l.doc_number || ''),
+      vendor: l.vendor || '', offset: offsetFor(l.entry_id), memo: l.description || l.memo || '',
+      debit: dr, credit: cr, balance: bal, letter: tag[i],
+    };
+  });
+
+  // Open invoices per GL (unmatched credits) with vendor/invoice detail.
+  const openBills = openBillIdx.map((i) => {
+    const l = lines[i], amt = r2(l.credit || 0), v = vlookup(amt, l);
+    return { vendor: v.vendor, invoice: v.invoice, date: v.date || l.date, num: v.num, amount: amt, memo: v.memo };
+  });
+  openBills.sort((a, b) => b.amount - a.amount);
+  const openTotal = r2(openBills.reduce((a, x) => a + x.amount, 0));
+
+  // Bill.com A/P aging when uploaded; otherwise the open GL bills ARE the Bill.com
+  // open invoices (CLRF A/P is synced from Bill.com).
+  let billcom = null, billcomSource = 'gl';
+  try {
+    const cfg = db.prepare('SELECT ap_aging_lines_json, ap_aging_as_of FROM billcom_config WHERE entity_id = ?').get(eid);
+    if (cfg && cfg.ap_aging_lines_json) {
+      const arr = JSON.parse(cfg.ap_aging_lines_json) || [];
+      const norm = arr.map((x) => ({
+        vendor: x.vendor || '', invoice: x.invoice_number || parseInv(x) || '',
+        date: x.bill_date || '', amount: r2(x.amount || 0),
+      })).filter((x) => Math.abs(x.amount) >= 0.005);
+      if (norm.length) { billcom = { asOf: cfg.ap_aging_as_of || '', lines: norm, total: r2(norm.reduce((a, x) => a + x.amount, 0)) }; billcomSource = 'aging'; }
+    }
+  } catch (e) { billcom = null; }
+  const billcomLines = billcom ? billcom.lines : openBills.map((b) => ({ vendor: b.vendor, invoice: b.invoice, date: b.date, amount: b.amount }));
+  const billcomTotal = billcom ? billcom.total : openTotal;
+  const billcomAsOf = billcom ? billcom.asOf : q.end;
+
+  // Reconciliation by vendor: Bill.com open vs GL open.
+  const glByV = groupSum(openBills, (x) => String(x.vendor || '').trim());
+  const bcByV = groupSum(billcomLines, (x) => String(x.vendor || '').trim());
+  const vnames = new Set([...glByV.keys(), ...bcByV.keys()]);
+  const byVendor = [...vnames].map((k) => {
+    const gl = glByV.get(k) || 0, bc = bcByV.get(k) || 0;
+    return { vendor: k, gl, billcom: bc, diff: r2(bc - gl) };
+  }).sort((a, b) => b.gl - a.gl);
+
+  return {
+    gl: apGlBal, begin,
+    ending: r2(begin + glRows.reduce((a, r) => a + r.credit - r.debit, 0)),
+    totalDebit: r2(glRows.reduce((a, r) => a + r.debit, 0)),
+    totalCredit: r2(glRows.reduce((a, r) => a + r.credit, 0)),
+    glRows, openBills, openTotal, xTotal,
+    billcomLines, billcomTotal, billcomAsOf, billcomSource,
+    byVendor,
+  };
 }
 
 // ─── Workbook ────────────────────────────────────────────────────────────────
@@ -357,30 +541,127 @@ function buildWorkbook(data) {
   const oc = setMoney(oa, 'F' + orow, data.otherAssets.total, { bold: true }); oc.border = { top: THIN, bottom: THIN };
   const oaTotalRow = orow; // Summary links to F here
 
-  // ── 5. AP Recon ───────────────────────────────────────────────────────────
+  // ── 5. AP Recon (summary + supporting schedules) ──────────────────────────
+  // Purpose: show that the open-invoice report per Bill.com ties to the GL A/P
+  // balance (202000). The summary reconciles Bill.com vs GL by vendor; supporting
+  // tabs give the Bill.com A/P detail, the CL open-invoice list per GL, and the
+  // full 202000 GL detail with offset-letter tagging (matched debits/credits
+  // cancel; items tagged X relieve the beginning balance; the unlettered credits
+  // that remain are the open invoices and equal the ending A/P balance).
+  const AP = data.ap;
   const ap = wb.addWorksheet('AP Recon', { views: [{ showGridLines: false }] });
-  ap.getColumn(1).width = 40; [2, 3, 4].forEach((c) => (ap.getColumn(c).width = 16));
-  titleBlock(ap, en, 'AP Recon', 'As of ' + short(q.end));
-  hdrRow(ap, 6, ['Vendor Name', 'Per Bill.com', 'Per GL', 'Difference'], [40, 16, 16, 16]);
+  ap.getColumn(1).width = 44; [2, 3, 4].forEach((c) => (ap.getColumn(c).width = 16));
+  titleBlock(ap, en, 'Accounts Payable Reconciliation — Bill.com to GL (202000)', 'As of ' + short(q.end));
+  hdrRow(ap, 6, ['Vendor', 'Per Bill.com', 'Per GL', 'Difference'], [44, 16, 16, 16]);
   let ar = 7;
-  if (data.ap.byVendor && data.ap.byVendor.length) {
-    for (const v of data.ap.byVendor) {
-      ap.getCell('A' + ar).value = v.vendor; ap.getCell('A' + ar).font = F();
-      setMoney(ap, 'B' + ar, v.amt); ap.getCell('C' + ar).value = ''; setMoney(ap, 'D' + ar, 0); ar++;
-    }
-  } else {
-    ap.getCell('A' + ar).value = 'Accounts Payable (202000) per general ledger'; ap.getCell('A' + ar).font = F();
-    setMoney(ap, 'B' + ar, data.ap.billcom == null ? '' : data.ap.billcom);
-    setMoney(ap, 'C' + ar, data.ap.gl); setMoney(ap, 'D' + ar, data.ap.billcom == null ? 0 : r2(data.ap.billcom - data.ap.gl)); ar++;
+  const apFirst = ar;
+  for (const v of (AP.byVendor || [])) {
+    ap.getCell('A' + ar).value = v.vendor; ap.getCell('A' + ar).font = F();
+    setMoney(ap, 'B' + ar, v.billcom);
+    setMoney(ap, 'C' + ar, v.gl);
+    { const c = ap.getCell('D' + ar); c.value = { formula: 'B' + ar + '-C' + ar, result: v.diff }; c.numFmt = MONEY; c.font = F(); }
+    ar++;
   }
-  ap.getCell('A' + ar).value = 'Total:'; ap.getCell('A' + ar).font = F({ bold: true });
-  const apTot = data.ap.byVendor && data.ap.byVendor.length ? r2(data.ap.byVendor.reduce((a, x) => a + x.amt, 0)) : data.ap.gl;
-  setMoney(ap, 'B' + ar, data.ap.billcom == null ? apTot : data.ap.billcom, { bold: true }).border = { top: THIN };
-  setMoney(ap, 'C' + ar, data.ap.gl, { bold: true }).border = { top: THIN };
-  setMoney(ap, 'D' + ar, data.ap.billcom == null ? 0 : r2(data.ap.billcom - data.ap.gl), { bold: true }).border = { top: THIN };
-  ap.getCell('A' + (ar + 2)).value = 'Per GL = Accounts Payable account 202000, which ties to the Balance Sheet. CL carries no per-vendor tag on GL AP lines; the Bill.com column shows open bills by vendor when available.';
-  ap.getCell('A' + (ar + 2)).font = SMALLI; ap.mergeCells('A' + (ar + 2) + ':D' + (ar + 2));
-  const apTotalRow = ar; // Summary links to C here (Per GL)
+  const apLast = ar - 1;
+  ap.getCell('A' + ar).value = 'Total accounts payable'; ap.getCell('A' + ar).font = F({ bold: true });
+  const sumOrVal = (col, tot) => (apLast >= apFirst ? { formula: 'SUM(' + col + apFirst + ':' + col + apLast + ')', result: tot } : tot);
+  { const c = ap.getCell('B' + ar); c.value = sumOrVal('B', AP.billcomTotal); c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  { const c = ap.getCell('C' + ar); c.value = sumOrVal('C', AP.openTotal); c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  { const c = ap.getCell('D' + ar); c.value = { formula: 'B' + ar + '-C' + ar, result: r2(AP.billcomTotal - AP.openTotal) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  const apTotalRow = ar; // Summary links to C here (Per GL open invoices = 202000)
+  ar += 2;
+  ap.getCell('A' + ar).value = 'Accounts payable per general ledger (202000)'; ap.getCell('A' + ar).font = F();
+  setMoney(ap, 'C' + ar, AP.gl); const apGlRow = ar; ar++;
+  ap.getCell('A' + ar).value = 'Open invoices remaining per GL detail (offsets applied)'; ap.getCell('A' + ar).font = F();
+  setMoney(ap, 'C' + ar, AP.openTotal); const apOpenRow = ar; ar++;
+  ap.getCell('A' + ar).value = 'Difference'; ap.getCell('A' + ar).font = F({ bold: true });
+  { const c = ap.getCell('C' + ar); c.value = { formula: 'C' + apGlRow + '-C' + apOpenRow, result: r2(AP.gl - AP.openTotal) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  ar += 2;
+  ap.getCell('A' + ar).value = AP.billcomSource === 'aging'
+    ? ('Per Bill.com = uploaded Bill.com A/P aging as of ' + (AP.billcomAsOf || short(q.end)) + '. Per GL = open invoices remaining on account 202000 after offsets, which ties to the Balance Sheet.')
+    : ('Per Bill.com = open invoices per the Bill.com A/P sync (no A/P aging file uploaded for this entity; CLRF A/P is synced from Bill.com, so the open GL bills are the Bill.com open invoices). Per GL = open invoices remaining on account 202000 after offsets, which ties to the Balance Sheet.');
+  ap.getCell('A' + ar).font = SMALLI; ap.mergeCells('A' + ar + ':D' + ar);
+
+  // 5a. Bill.com A/P Detail — open invoices.
+  const bc = wb.addWorksheet('Bill.com AP Detail', { views: [{ state: 'frozen', ySplit: 6, showGridLines: false }] });
+  bc.getColumn(1).width = 40; bc.getColumn(2).width = 18; bc.getColumn(3).width = 14; bc.getColumn(4).width = 16;
+  titleBlock(bc, en, 'Bill.com A/P Detail — Open Invoices', 'As of ' + short(AP.billcomAsOf || q.end));
+  hdrRow(bc, 6, ['Vendor', 'Invoice #', 'Bill Date', 'Amount'], [40, 18, 14, 16]);
+  let bcr = 7; const bcFirst = bcr;
+  for (const b of (AP.billcomLines || [])) {
+    bc.getCell('A' + bcr).value = b.vendor; bc.getCell('A' + bcr).font = F();
+    bc.getCell('B' + bcr).value = b.invoice || ''; bc.getCell('B' + bcr).font = F();
+    bc.getCell('C' + bcr).value = b.date || ''; bc.getCell('C' + bcr).font = F();
+    setMoney(bc, 'D' + bcr, b.amount); bcr++;
+  }
+  const bcLast = bcr - 1;
+  bc.getCell('A' + bcr).value = 'Total open invoices per Bill.com'; bc.getCell('A' + bcr).font = F({ bold: true });
+  { const c = bc.getCell('D' + bcr); c.value = bcLast >= bcFirst ? { formula: 'SUM(D' + bcFirst + ':D' + bcLast + ')', result: AP.billcomTotal } : AP.billcomTotal; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  bc.getCell('A' + (bcr + 2)).value = AP.billcomSource === 'aging'
+    ? 'Source: uploaded Bill.com A/P aging detail. Ties to account 202000 and to the CL AP Detail tab.'
+    : 'Source: open bills per the Bill.com sync into CL (no A/P aging file uploaded). Ties to account 202000 and to the CL AP Detail tab.';
+  bc.getCell('A' + (bcr + 2)).font = SMALLI; bc.mergeCells('A' + (bcr + 2) + ':D' + (bcr + 2));
+
+  // 5b. CL A/P Detail — open invoices per GL.
+  const cld = wb.addWorksheet('CL AP Detail', { views: [{ state: 'frozen', ySplit: 6, showGridLines: false }] });
+  cld.getColumn(1).width = 40; cld.getColumn(2).width = 18; cld.getColumn(3).width = 14; cld.getColumn(4).width = 10; cld.getColumn(5).width = 16;
+  titleBlock(cld, en, 'Accounts Payable Detail per GL — Open Invoices', 'As of ' + short(q.end));
+  hdrRow(cld, 6, ['Vendor', 'Invoice #', 'Bill Date', 'JE #', 'Amount'], [40, 18, 14, 10, 16]);
+  let clr = 7; const clFirst = clr;
+  for (const b of (AP.openBills || [])) {
+    cld.getCell('A' + clr).value = b.vendor; cld.getCell('A' + clr).font = F();
+    cld.getCell('B' + clr).value = b.invoice || ''; cld.getCell('B' + clr).font = F();
+    cld.getCell('C' + clr).value = b.date || ''; cld.getCell('C' + clr).font = F();
+    cld.getCell('D' + clr).value = b.num || ''; cld.getCell('D' + clr).font = F();
+    setMoney(cld, 'E' + clr, b.amount); clr++;
+  }
+  const clLast = clr - 1;
+  cld.getCell('A' + clr).value = 'Total open invoices per GL'; cld.getCell('A' + clr).font = F({ bold: true });
+  { const c = cld.getCell('E' + clr); c.value = clLast >= clFirst ? { formula: 'SUM(E' + clFirst + ':E' + clLast + ')', result: AP.openTotal } : AP.openTotal; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  cld.getCell('A' + (clr + 2)).value = 'These are the credits on account 202000 left uncancelled after the offset analysis (AP GL Detail tab). Ties to the A/P balance and to the Bill.com A/P Detail.';
+  cld.getCell('A' + (clr + 2)).font = SMALLI; cld.mergeCells('A' + (clr + 2) + ':E' + (clr + 2));
+
+  // 5c. AP GL Detail — 202000 detail with offset-letter tagging + bottom recon.
+  const gld = wb.addWorksheet('AP GL Detail', { views: [{ state: 'frozen', ySplit: 6, showGridLines: false }] });
+  gld.getColumn(1).width = 11; gld.getColumn(2).width = 8; gld.getColumn(3).width = 26; gld.getColumn(4).width = 26;
+  gld.getColumn(5).width = 46; gld.getColumn(6).width = 14; gld.getColumn(7).width = 14; gld.getColumn(8).width = 15; gld.getColumn(9).width = 8;
+  titleBlock(gld, en, 'Accounts Payable (202000) — GL Detail with Offset', q.qs + ' to ' + short(q.end));
+  hdrRow(gld, 6, ['Date', 'Num', 'Vendor', 'Offset Account', 'Description', 'Debit', 'Credit', 'Balance', 'Offset'], [11, 8, 26, 26, 46, 14, 14, 15, 8]);
+  let gr = 7;
+  gld.getCell('A' + gr).value = 'Beginning balance ' + short(q.prior_ye); gld.getCell('A' + gr).font = F({ bold: true }); gld.mergeCells('A' + gr + ':E' + gr);
+  setMoney(gld, 'H' + gr, AP.begin, { bold: true });
+  { const c = gld.getCell('I' + gr); c.value = 'X'; c.font = F({ bold: true }); c.alignment = { horizontal: 'center' }; }
+  gr++;
+  for (const x of AP.glRows) {
+    gld.getCell('A' + gr).value = x.date; gld.getCell('A' + gr).font = F();
+    gld.getCell('B' + gr).value = x.num; gld.getCell('B' + gr).font = F();
+    gld.getCell('C' + gr).value = x.vendor; gld.getCell('C' + gr).font = F();
+    gld.getCell('D' + gr).value = x.offset; gld.getCell('D' + gr).font = F();
+    gld.getCell('E' + gr).value = x.memo; gld.getCell('E' + gr).font = F();
+    if (x.debit) setMoney(gld, 'F' + gr, x.debit);
+    if (x.credit) setMoney(gld, 'G' + gr, x.credit);
+    setMoney(gld, 'H' + gr, x.balance);
+    { const c = gld.getCell('I' + gr); c.value = x.letter || ''; c.font = (x.letter === 'X') ? F({ bold: true }) : F(); c.alignment = { horizontal: 'center' }; }
+    gr++;
+  }
+  gld.getCell('E' + gr).value = 'TOTAL'; gld.getCell('E' + gr).font = F({ bold: true });
+  setMoney(gld, 'F' + gr, AP.totalDebit, { bold: true }).border = { top: THIN };
+  setMoney(gld, 'G' + gr, AP.totalCredit, { bold: true }).border = { top: THIN };
+  setMoney(gld, 'H' + gr, AP.ending, { bold: true }).border = { top: THIN };
+  gr += 2;
+  gld.getCell('E' + gr).value = 'Reconciliation'; gld.getCell('E' + gr).font = F({ bold: true }); gr++;
+  const rBeg = gr;  gld.getCell('E' + gr).value = 'Beginning A/P balance (tagged X)'; gld.getCell('E' + gr).font = F(); setMoney(gld, 'H' + gr, AP.begin); gr++;
+  const rCr = gr;   gld.getCell('E' + gr).value = 'Add: credits (bills booked) in period'; gld.getCell('E' + gr).font = F(); setMoney(gld, 'H' + gr, AP.totalCredit); gr++;
+  const rDr = gr;   gld.getCell('E' + gr).value = 'Less: debits (payments / reversals) in period'; gld.getCell('E' + gr).font = F(); setMoney(gld, 'H' + gr, r2(-AP.totalDebit)); gr++;
+  const rEnd = gr;  gld.getCell('E' + gr).value = 'Ending A/P balance per GL (202000)'; gld.getCell('E' + gr).font = F({ bold: true });
+  { const c = gld.getCell('H' + gr); c.value = { formula: 'H' + rBeg + '+H' + rCr + '+H' + rDr, result: AP.gl }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  gr += 2;
+  const rOpen = gr; gld.getCell('E' + gr).value = 'Open invoices remaining after offsets'; gld.getCell('E' + gr).font = F(); setMoney(gld, 'H' + gr, AP.openTotal); gr++;
+  gld.getCell('E' + gr).value = 'Difference (should be zero)'; gld.getCell('E' + gr).font = F({ bold: true });
+  { const c = gld.getCell('H' + gr); c.value = { formula: 'H' + rEnd + '-H' + rOpen, result: r2(AP.gl - AP.openTotal) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  gr += 2;
+  gld.getCell('A' + gr).value = 'Matched debits and credits carry the same offset letter and net to zero. Items tagged X relieve the beginning A/P balance (payments of prior-period bills, total ' + fmt(AP.xTotal) + '). The unlettered credits that remain are the open invoices, which equal the ending A/P balance.';
+  gld.getCell('A' + gr).font = SMALLI; gld.mergeCells('A' + gr + ':I' + gr);
 
   // ── 6. Accrual & Subsequent Cash Disbursement ─────────────────────────────
   const ac = wb.addWorksheet('Accrual & Sub Cash Disb', { views: [{ showGridLines: false }] });
