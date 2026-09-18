@@ -862,7 +862,10 @@ export default function App(){
   // flyout to its right listing that category's pages. Entity-conditional pages
   // live inside a permanent category so switching entities never reshuffles the
   // rail, and a category with nothing visible to this user is dropped entirely.
-  const hasWorkpapers = isReqEntity || isCLRF || isBanyanRes || isOdyssey;
+  // Every entity gets the Workpapers rail: the Monthly Closing Workpaper is
+  // generic (reads the chart at run time), so it applies to all. Entity-specific
+  // workpapers below stay gated to their entities.
+  const hasWorkpapers = true;
   const navTree=[
     {key:'ACCOUNTING',label:'Accounting',icon:'📘',items:[
       {id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
@@ -923,7 +926,7 @@ export default function App(){
       ...(isCLRF?[{id:'wp_cashflow',label:'Cash Flow Worksheet',icon:'💵',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_other',label:'Other Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
-      ...(isOdyssey?[{id:'wp_monthclose',label:'Monthly Closing Workpaper',icon:'🗓️',section:'workpapers'}]:[]),
+      {id:'wp_monthclose',label:'Monthly Closing Workpaper',icon:'🗓️',section:'workpapers'},
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
@@ -1024,7 +1027,7 @@ export default function App(){
         {page==='wp_cashflow'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="cashflow" title="Cash Flow Worksheet" description="A standalone Statement of Cash Flows (indirect method, year-to-date) built from the general ledger. Reuses the fund financial-statements model and ties to it; every subtotal is a live SUM formula. A copy is filed under Workpapers › Cash Flow by year and quarter." key={activeEntity+'-'+rk}/>}
       {page==='wp_other'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="other" title="Other Workpapers" description="Balance-sheet account support in one workbook — Due From/To Port Co, Interest Receivable, Prepaid Expenses, Other Assets, AP Recon, Accrual & Subsequent Cash Disbursement, and Distributions Payable — each on its own tab, GL-derived and tying to the Statement of Assets, Liabilities and Partners' Capital. A copy is filed under Workpapers › Other Workpapers by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='wp_monthclose'&&activeEntity&&isOdyssey&&<MonthWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='wp_monthclose'&&activeEntity&&<MonthWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&!isCLRF&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
