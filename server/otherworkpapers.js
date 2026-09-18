@@ -151,6 +151,7 @@ async function buildData(ctx, quarter, opts = {}) {
     const p = matchProp(r.location_name, PROPS); if (!p) return;
     const key = r.entry_num || r.doc_number || r.date;
     dueJEs[key] = dueJEs[key] || { je: key }; PROPS.forEach((pp) => (dueJEs[key][pp] = dueJEs[key][pp] || 0));
+    if (!dueJEs[key].desc) dueJEs[key].desc = String(r.memo || r.description || '').trim();
     dueJEs[key][p] = r2(dueJEs[key][p] + sign * r.signed);
   };
   for (const r of dfrom) addJE(r, 1);
@@ -528,7 +529,7 @@ function traceDueMismatch(ctx, quarter, prop, cpEnt, cpLegCodes) {
     const key = Math.round(Math.abs(r.signed) * 100);
     const i = cpAmts.indexOf(key);
     if (i >= 0) { cpAmts[i] = -1; continue; } // already mirrored in-period
-    const head = (r.entry_num || r.doc_number || '') + ' ' + fmt(Math.abs(r.signed)) + ' "' + String(r.memo || r.description || '').slice(0, 40) + '"';
+    const head = fmt(Math.abs(r.signed)) + ' — "' + String(r.memo || r.description || '').slice(0, 60) + '"';
     const sub = cpSub.find((x) => Math.round((x.debit || 0) * 100) === key || Math.round((x.credit || 0) * 100) === key);
     let tail;
     if (sub) tail = ' recorded on CLRF at ' + short(quarter.end) + '; CONFIRMED TIMING — posts on ' + cpEnt.name + ' ' + sub.date + ' (' + (sub.num || '') + ').';
@@ -817,10 +818,11 @@ function buildWorkbook(data) {
 
   // ── 1. Due Fr (To) Port Co ────────────────────────────────────────────────
   const du = wb.addWorksheet('Due Fr (To) Port Co', { views: [{ showGridLines: false }] });
-  du.getColumn(2).width = 40; du.getColumn(3).width = 14; [5, 7, 9, 11].forEach((c) => (du.getColumn(c).width = 14));
+  du.getColumn(2).width = 40; du.getColumn(3).width = 14; [5, 7, 9, 11].forEach((c) => (du.getColumn(c).width = 14)); du.getColumn(12).width = 54;
   titleBlock(du, en, 'Due From/To Port Co reconciliation', spellDate(q.end));
   const P = data.due.PROPS;
   du.getCell('C5').value = 'JE#'; du.getCell('C5').font = F({ bold: true });
+  du.getCell('L5').value = 'Journal entry description'; du.getCell('L5').font = F({ bold: true });
   P.forEach((p, i) => { const c = du.getCell(String.fromCharCode(69 + i * 2) + '5'); c.value = p; c.font = F({ bold: true }); c.alignment = { horizontal: 'center' }; });
   const propCol = (i) => String.fromCharCode(69 + i * 2); // E,G,I,K
   let R = 6;
@@ -830,6 +832,7 @@ function buildWorkbook(data) {
   for (const j of data.due.jes) {
     du.getCell('C' + R).value = j.je; du.getCell('C' + R).font = F();
     P.forEach((p, i) => setMoney(du, propCol(i) + R, j[p] || 0));
+    du.getCell('L' + R).value = j.desc || ''; du.getCell('L' + R).font = F(); du.getCell('L' + R).alignment = { wrapText: true, vertical: 'top' };
     R++;
   }
   du.getCell('B' + R).value = 'Due From (To) Port Co at ' + short(q.end); du.getCell('B' + R).font = F({ bold: true });
@@ -853,10 +856,8 @@ function buildWorkbook(data) {
         const st = row.status === 'matched' ? 'Tied' : (row.status === 'one_sided' ? 'One-sided' : 'Mismatch');
         const cc = du.getCell('K' + rr); cc.value = st; cc.font = F({ bold: row.status !== 'matched', color: { argb: row.status === 'matched' ? 'FF008000' : 'FFC00000' } });
         rr += 1;
-        for (const tr of (row.trace || [])) { du.getCell('C' + rr).value = '↳ ' + tr.note; du.getCell('C' + rr).font = SMALLI; du.mergeCells('C' + rr + ':K' + rr); rr += 1; }
+        for (const tr of (row.trace || [])) { const _n = '↳ ' + tr.note; du.getCell('C' + rr).value = _n; du.getCell('C' + rr).font = SMALLI; du.getCell('C' + rr).alignment = { wrapText: true, vertical: 'top' }; du.mergeCells('C' + rr + ':K' + rr); du.getRow(rr).height = Math.min(200, 14 * Math.max(1, Math.ceil(_n.length / 95)) + 4); rr += 1; }
       }
-      du.getCell('B' + (rr + 1)).value = 'Each property CLRF balance is agreed to the portfolio company own ledger (its loan payable to / due from CLRF). A difference is a real exception — most often a timing item where one side has posted and the other has not.';
-      du.getCell('B' + (rr + 1)).font = SMALLI; du.mergeCells('B' + (rr + 1) + ':K' + (rr + 1));
     }
   }
 
@@ -919,19 +920,25 @@ function buildWorkbook(data) {
   hdrRow(ap, 6, ['Vendor', 'Per Bill.com', 'Per GL', 'Difference'], [44, 16, 16, 16]);
   let ar = 7;
   const apFirst = ar;
+  // Per Bill.com links to the Bill.com AP Detail tab; Per GL links to the CL AP
+  // Detail tab, so each figure traces to its supporting schedule.
+  const bcN = (AP.billcomLines || []).length, clN = (AP.openBills || []).length;
+  const bcLastRow = 6 + bcN, bcTotRow = 7 + bcN, clLastRow = 6 + clN, clTotRow = 7 + clN;
+  const BC = "'Bill.com AP Detail'!", CL = "'CL AP Detail'!";
+  const money = (c) => { c.numFmt = MONEY; return c; };
   for (const v of (AP.byVendor || [])) {
     ap.getCell('A' + ar).value = v.vendor; ap.getCell('A' + ar).font = F();
-    if (AP.billcomSource !== 'none') setMoney(ap, 'B' + ar, v.billcom);
-    setMoney(ap, 'C' + ar, v.gl);
-    if (AP.billcomSource !== 'none') { const c = ap.getCell('D' + ar); c.value = { formula: 'B' + ar + '-C' + ar, result: v.diff }; c.numFmt = MONEY; c.font = F(); }
+    if (AP.billcomSource !== 'none' && bcN > 0) { const c = ap.getCell('B' + ar); c.value = { formula: 'SUMIF(' + BC + '$A$7:$A$' + bcLastRow + ',A' + ar + ',' + BC + '$D$7:$D$' + bcLastRow + ')', result: v.billcom }; money(c).font = F(); }
+    else if (AP.billcomSource !== 'none') setMoney(ap, 'B' + ar, v.billcom);
+    if (clN > 0) { const c = ap.getCell('C' + ar); c.value = { formula: 'SUMIF(' + CL + '$A$7:$A$' + clLastRow + ',A' + ar + ',' + CL + '$E$7:$E$' + clLastRow + ')', result: v.gl }; money(c).font = F(); }
+    else setMoney(ap, 'C' + ar, v.gl);
+    if (AP.billcomSource !== 'none') { const c = ap.getCell('D' + ar); c.value = { formula: 'B' + ar + '-C' + ar, result: v.diff }; money(c).font = F(); }
     ar++;
   }
-  const apLast = ar - 1;
   ap.getCell('A' + ar).value = 'Total accounts payable'; ap.getCell('A' + ar).font = F({ bold: true });
-  const sumOrVal = (col, tot) => (apLast >= apFirst ? { formula: 'SUM(' + col + apFirst + ':' + col + apLast + ')', result: tot } : tot);
-  { const c = ap.getCell('B' + ar); if (AP.billcomSource !== 'none') c.value = sumOrVal('B', AP.billcomTotal); c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
-  { const c = ap.getCell('C' + ar); c.value = sumOrVal('C', AP.openTotal); c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
-  { const c = ap.getCell('D' + ar); if (AP.billcomSource !== 'none') c.value = { formula: 'B' + ar + '-C' + ar, result: r2((AP.billcomTotal || 0) - AP.openTotal) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  if (AP.billcomSource !== 'none') { const c = ap.getCell('B' + ar); c.value = (bcN > 0 ? { formula: BC + 'D' + bcTotRow, result: AP.billcomTotal } : AP.billcomTotal); money(c).font = F({ bold: true }); c.border = { top: THIN }; }
+  { const c = ap.getCell('C' + ar); c.value = (clN > 0 ? { formula: CL + 'E' + clTotRow, result: AP.openTotal } : AP.openTotal); money(c).font = F({ bold: true }); c.border = { top: THIN }; }
+  { const c = ap.getCell('D' + ar); if (AP.billcomSource !== 'none') c.value = { formula: 'B' + ar + '-C' + ar, result: r2((AP.billcomTotal || 0) - AP.openTotal) }; money(c).font = F({ bold: true }); c.border = { top: THIN }; }
   const apTotalRow = ar; // Summary links to C here (Per GL open invoices = 202000)
   ar += 2;
   ap.getCell('A' + ar).value = 'Accounts payable per general ledger (202000)'; ap.getCell('A' + ar).font = F();
