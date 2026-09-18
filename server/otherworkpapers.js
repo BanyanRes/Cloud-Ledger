@@ -209,6 +209,7 @@ function buildData(ctx, quarter, opts = {}) {
     dist: { rows: distRows, balance: distBal },
     ties: {
       due_to_portfolio: sumWhere(bEnd, ACCT.dueToPort), due_from_portfolio: sumWhere(bEnd, ACCT.dueFrom),
+      due_net: r2(sumWhere(bEnd, ACCT.dueFrom) - sumWhere(bEnd, ACCT.dueToPort)),
       interest_receivable: intBal, prepaid_advisory: prepaid.advEnd, prepaid_insurance: prepaid.insEnd,
       other_assets: oaTotal, accounts_payable: apGl, accrued_expenses: accruedBal,
       management_fees_payable: mgmtPayBal, distributions_payable: distBal,
@@ -273,12 +274,12 @@ function buildWorkbook(data) {
   titleBlock(su, en, 'Other Workpapers — Balance Sheet Account Support', 'As of ' + spellDate(q.end));
   hdrRow(su, 5, ['Workpaper', 'Balance Sheet line', 'GL account(s)', 'CL balance'], [34, 40, 16, 18]);
   const idx = [
-    ['Due Fr (To) Port Co', 'Due to portfolio investments', '101100 / 211100', data.ties.due_to_portfolio],
+    ['Due Fr (To) Port Co', 'Due from (to) portfolio investments (net)', '101100 / 211100', data.ties.due_net],
     ['Interest Receivable', 'Interest receivable', '120010', data.ties.interest_receivable],
     ['Prepaid Expenses', 'Prepaid insurance / advisory', '150300 / 150200', r2(data.ties.prepaid_insurance + data.ties.prepaid_advisory)],
     ['Other Assets', 'Other assets', '180100', data.ties.other_assets],
-    ['AP Recon', 'Accounts payable and accrued expenses', '202000', data.ties.accounts_payable],
-    ['Accrual & Sub Cash Disbursement', 'Mgmt fees payable / accrued expenses', '210600 / 210000', r2(data.ties.management_fees_payable + data.ties.accrued_expenses)],
+    ['AP Recon', 'Accounts payable and accrued expenses', '202000 + 210000', r2(data.ties.accounts_payable + data.ties.accrued_expenses)],
+    ['Accrual & Sub Cash Disbursement', 'Management fees payable', '210600', data.ties.management_fees_payable],
     ['Distributions Payable', 'Due to members', '230100', data.ties.distributions_payable],
   ];
   let sr = 6;
@@ -412,12 +413,16 @@ function buildWorkbook(data) {
   // ── Link each Summary balance to the total cell on its supporting schedule ──
   const sq = (t) => "'" + t + "'!";
   const sumRefs = [
-    { f: '-SUM(' + sq('Due Fr (To) Port Co') + 'E' + dueEndRow + ':K' + dueEndRow + ')', v: data.ties.due_to_portfolio },
+    // Net Due From (To): SUM of the property columns on the ending row. A positive
+    // result is a net due-FROM (asset), shown positive to match the Balance Sheet.
+    { f: 'SUM(' + sq('Due Fr (To) Port Co') + 'E' + dueEndRow + ':K' + dueEndRow + ')', v: data.ties.due_net },
     { f: sq('Interest Receivable') + 'G' + intTotalRow, v: data.ties.interest_receivable },
     { f: sq('Prepaid Expenses') + 'D8', v: r2(data.ties.prepaid_insurance + data.ties.prepaid_advisory) },
     { f: sq('Other Assets') + 'F' + oaTotalRow, v: data.ties.other_assets },
-    { f: sq('AP Recon') + 'C' + apTotalRow, v: data.ties.accounts_payable },
-    { f: sq('Accrual & Sub Cash Disb') + 'F' + accEnd1 + '+' + sq('Accrual & Sub Cash Disb') + 'F' + accEnd2, v: r2(data.ties.management_fees_payable + data.ties.accrued_expenses) },
+    // Accounts payable & accrued expenses = trade AP (202000, AP Recon) + accrued
+    // (210000, Accrual tab), tying to the single Balance Sheet line.
+    { f: sq('AP Recon') + 'C' + apTotalRow + '+' + sq('Accrual & Sub Cash Disb') + 'F' + accEnd2, v: r2(data.ties.accounts_payable + data.ties.accrued_expenses) },
+    { f: sq('Accrual & Sub Cash Disb') + 'F' + accEnd1, v: data.ties.management_fees_payable },
     { f: sq('Distributions Payable') + 'G' + distTotalRow, v: data.ties.distributions_payable },
   ];
   sumRefs.forEach((x, i) => { const c = su.getCell('D' + (6 + i)); c.value = { formula: x.f, result: x.v }; c.numFmt = MONEY; c.font = F(); });

@@ -5495,13 +5495,12 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
             <td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.cash_end)}</td></tr>
         </>}
         {kind==='other'&&s.ties&&<>
-          <tr><td style={S.td}>Due to portfolio investments (101100/211100)</td><td style={S.tdR}>{fmt(s.ties.due_to_portfolio)}</td></tr>
+          <tr><td style={S.td}>Due from (to) portfolio investments, net (101100/211100)</td><td style={S.tdR}>{fmt(s.ties.due_net!=null?s.ties.due_net:((s.ties.due_from_portfolio||0)-(s.ties.due_to_portfolio||0)))}</td></tr>
           <tr><td style={S.td}>Interest receivable (120010)</td><td style={S.tdR}>{fmt(s.ties.interest_receivable)}</td></tr>
-          <tr><td style={S.td}>Prepaid insurance (150300)</td><td style={S.tdR}>{fmt(s.ties.prepaid_insurance)}</td></tr>
+          <tr><td style={S.td}>Prepaid insurance / advisory (150300/150200)</td><td style={S.tdR}>{fmt((s.ties.prepaid_insurance||0)+(s.ties.prepaid_advisory||0))}</td></tr>
           <tr><td style={S.td}>Other assets (180100)</td><td style={S.tdR}>{fmt(s.ties.other_assets)}</td></tr>
-          <tr><td style={S.td}>Accounts payable (202000)</td><td style={S.tdR}>{fmt(s.ties.accounts_payable)}</td></tr>
+          <tr><td style={S.td}>Accounts payable &amp; accrued expenses (202000+210000)</td><td style={S.tdR}>{fmt((s.ties.accounts_payable||0)+(s.ties.accrued_expenses||0))}</td></tr>
           <tr><td style={S.td}>Management fees payable (210600)</td><td style={S.tdR}>{fmt(s.ties.management_fees_payable)}</td></tr>
-          <tr><td style={S.td}>Accrued expenses (210000)</td><td style={S.tdR}>{fmt(s.ties.accrued_expenses)}</td></tr>
           <tr style={S.grandTotalRow}><td style={S.tdBold}>Distributions payable / due to members (230100)</td>
             <td style={{...S.tdBold,textAlign:'right'}}>{fmt(s.ties.distributions_payable)}</td></tr>
         </>}
