@@ -1295,6 +1295,57 @@ function registerOtherWorkpapersRoutes(app, ctx) {
         res.status(400).json({ error: e.message });
       }
     });
+  // ── Bill.com A/P Detail (open items) for the AP Recon ─────────────────────
+  // The user exports the Bill.com A/P Detail report (filtered to this fund) and
+  // uploads it here; the AP Recon reconciles it to the GL. Stored as the aging
+  // lines on billcom_config; the sync cutoff is never touched.
+  app.get('/api/workpapers/other/:entity_id/ap-detail', auth, requireEntityAccess('entity_id'),
+    requireRole('Admin', 'Accountant'), (req, res) => {
+      try {
+        const eid = Number(req.params.entity_id);
+        const cfg = ctx.db.prepare('SELECT ap_aging_lines_json, ap_aging_as_of, ap_aging_uploaded_at FROM billcom_config WHERE entity_id = ?').get(eid);
+        let lines = [];
+        try { lines = cfg && cfg.ap_aging_lines_json ? JSON.parse(cfg.ap_aging_lines_json) : []; } catch (e) { lines = []; }
+        const total = Math.round(lines.reduce((a, x) => a + (Number(x.amount) || 0), 0) * 100) / 100;
+        res.json({ configured: !!cfg, as_of: cfg ? cfg.ap_aging_as_of : null, uploaded_at: cfg ? cfg.ap_aging_uploaded_at : null, count: lines.length, total, lines });
+      } catch (e) { res.status(400).json({ error: e.message }); }
+    });
+  app.post('/api/workpapers/other/:entity_id/ap-detail', auth, requireEntityAccess('entity_id'),
+    requireRole('Admin', 'Accountant'), (req, res) => {
+      try {
+        const eid = Number(req.params.entity_id);
+        const cfg = ctx.db.prepare('SELECT entity_id FROM billcom_config WHERE entity_id = ?').get(eid);
+        if (!cfg) return res.status(400).json({ error: 'Bill.com is not set up for this entity yet. Set up the Bill.com connection first, then upload the A/P Detail.' });
+        const asOf = (req.body && /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.as_of || ''))) ? String(req.body.as_of) : null;
+        const arr = Array.isArray(req.body && req.body.lines) ? req.body.lines : null;
+        if (!arr) return res.status(400).json({ error: 'lines array is required' });
+        const clean = arr.map((l) => {
+          const invRaw = l && (l.invoice_number != null ? l.invoice_number : (l.invoice != null ? l.invoice : l.num));
+          const dtRaw = l && (l.bill_date != null ? l.bill_date : l.date);
+          return {
+            vendor: l && l.vendor != null ? String(l.vendor) : '',
+            invoice_number: invRaw != null ? String(invRaw) : '',
+            bill_date: dtRaw ? String(dtRaw).slice(0, 10) : null,
+            amount: l && l.amount != null && !isNaN(Number(l.amount)) ? Math.round(Number(l.amount) * 100) / 100 : null,
+          };
+        }).filter((l) => l.amount != null && Math.abs(l.amount) >= 0.005);
+        const now = new Date().toISOString();
+        const who = (req.user && (req.user.name || req.user.email)) || 'system';
+        ctx.db.prepare('UPDATE billcom_config SET ap_aging_lines_json=?, ap_aging_as_of=?, ap_aging_uploaded_at=?, updated_by=?, updated_at=? WHERE entity_id=?')
+          .run(JSON.stringify(clean), asOf, now, who, now, eid);
+        const total = Math.round(clean.reduce((a, x) => a + x.amount, 0) * 100) / 100;
+        res.json({ success: true, count: clean.length, total, as_of: asOf });
+      } catch (e) { res.status(400).json({ error: e.message }); }
+    });
+  app.delete('/api/workpapers/other/:entity_id/ap-detail', auth, requireEntityAccess('entity_id'),
+    requireRole('Admin', 'Accountant'), (req, res) => {
+      try {
+        const eid = Number(req.params.entity_id);
+        ctx.db.prepare('UPDATE billcom_config SET ap_aging_lines_json=NULL, ap_aging_as_of=NULL, ap_aging_uploaded_at=NULL WHERE entity_id=?').run(eid);
+        res.json({ success: true });
+      } catch (e) { res.status(400).json({ error: e.message }); }
+    });
+
 }
 
 module.exports = { registerOtherWorkpapersRoutes, findWorkpaper, resolveQuarter, buildData, buildWorkbook, FUND_EID };

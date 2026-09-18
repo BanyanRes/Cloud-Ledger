@@ -614,6 +614,32 @@ export const api = {
     return { blob: await res.blob(), filename: m ? m[1] : cfg.name, summary };
   },
 
+  clrfApDetailGet: async (eid) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/other/' + eid + '/ap-detail', { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    if (!res.ok) return null;
+    return res.json();
+  },
+  clrfApDetailUpload: async (eid, asOf, lines) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/other/' + eid + '/ap-detail', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
+      body: JSON.stringify({ as_of: asOf, lines }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    return data;
+  },
+  clrfApDetailClear: async (eid) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/other/' + eid + '/ap-detail', { method: 'DELETE', headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Clear failed');
+    return data;
+  },
+
   // Fund preferred return + return of capital, maintained per quarter (from the
   // fund's preferred-return workpaper) and read by the carry/clawback workpaper.
   preferredReturnGet: async (eid, quarterEnd) => {

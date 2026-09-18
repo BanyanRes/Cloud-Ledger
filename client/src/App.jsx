@@ -5398,6 +5398,84 @@ function MemorizedReportsPage({entityId,entityName,canEdit=true,onOpen}){
 // returns the .xlsx, which is downloaded here.
 // ─── Workpapers › generic CLRF quarterly xlsx workpaper (carry, PCAP, PCAP
 // schedule). Quarter-end picker → POST → download → summary. ──────────────────
+// Upload card for the Bill.com A/P Detail (Open Items) report — feeds the AP Recon.
+function ClrfApDetailCard({ entityId, qe, canEdit }) {
+  const [status, setStatus] = useState(null);
+  const [preview, setPreview] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const load = async () => { try { const r = await api.clrfApDetailGet(entityId); setStatus(r); } catch (e) { /* ignore */ } };
+  useEffect(() => { load(); }, [entityId]);
+  const norm = (s) => String(s == null ? '' : s).trim();
+  const toNum = (v) => { if (typeof v === 'number') return v; const n = parseFloat(String(v == null ? '' : v).replace(/[^0-9.\-]/g, '')); return isNaN(n) ? null : n; };
+  const normDate = (v) => { const s = norm(v); let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/); if (m) { let y = m[3]; if (y.length === 2) y = '20' + y; return y + '-' + String(m[1]).padStart(2, '0') + '-' + String(m[2]).padStart(2, '0'); } m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); if (m) return s.slice(0, 10); return s ? s.slice(0, 10) : null; };
+  const parse = (rows) => {
+    const isHdr = (r) => r.some((c) => /vendor|payee/i.test(String(c))) && r.some((c) => /amount|balance|open|due/i.test(String(c)));
+    let h = -1; for (let i = 0; i < rows.length; i++) { if (isHdr(rows[i])) { h = i; break; } }
+    if (h < 0) return { error: 'Could not find a header row with a Vendor column and an amount / open-balance column. Make sure this is the Bill.com A/P Detail (Open Items) report.' };
+    const H = rows[h].map((c) => String(c).toLowerCase());
+    const find = (re) => H.findIndex((c) => re.test(c));
+    const vC = find(/vendor|payee/);
+    let aC = find(/open.*(balance|amount)|amount.*due|balance/); if (aC < 0) aC = find(/open/); if (aC < 0) aC = find(/amount|total/);
+    const iC = find(/invoice|bill.*#|bill.*no|document|ref|number/);
+    const dC = find(/bill.*date|invoice.*date|^date|due.*date/);
+    const lines = []; let lastV = '';
+    for (let i = h + 1; i < rows.length; i++) {
+      const r = rows[i]; if (!r || !r.length) continue;
+      const vRaw = vC >= 0 ? norm(r[vC]) : ''; if (vRaw) lastV = vRaw;
+      const amt = aC >= 0 ? toNum(r[aC]) : null;
+      if (amt == null || Math.abs(amt) < 0.005) continue;
+      const rowText = r.map((c) => String(c == null ? '' : c)).join(' ').toLowerCase();
+      if (/\btotal\b/.test(rowText) && !vRaw) continue;
+      const dt = dC >= 0 ? normDate(r[dC]) : null;
+      const inv = iC >= 0 ? norm(r[iC]) : '';
+      lines.push({ vendor: vRaw || lastV || '', invoice_number: inv, bill_date: dt, amount: amt });
+    }
+    if (!lines.length) return { error: 'No open-invoice rows with an amount were found in the file.' };
+    const total = Math.round(lines.reduce((a, x) => a + x.amount, 0) * 100) / 100;
+    return { lines, total };
+  };
+  const onFile = async (e) => {
+    setMsg(''); setPreview(null);
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    try {
+      const ab = await f.arrayBuffer();
+      const wb = XLSX.read(ab, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
+      const p = parse(rows);
+      if (p.error) { setPreview({ error: p.error }); return; }
+      setPreview({ lines: p.lines, total: p.total, fileName: f.name });
+    } catch (err) { setPreview({ error: 'Could not read the file: ' + (err.message || err) }); }
+    finally { e.target.value = ''; }
+  };
+  const submit = async () => {
+    if (!preview || !preview.lines) return; setBusy(true); setMsg('');
+    try { const r = await api.clrfApDetailUpload(entityId, qe, preview.lines); setMsg('Saved ' + r.count + ' open invoices totaling ' + fmt(r.total) + ' as of ' + (r.as_of || qe) + '. Run the report again to reconcile Bill.com to the GL.'); setPreview(null); await load(); }
+    catch (e) { setMsg('Error: ' + (e.message || e)); } finally { setBusy(false); }
+  };
+  const clear = async () => {
+    if (!window.confirm('Remove the uploaded Bill.com A/P Detail?')) return; setBusy(true); setMsg('');
+    try { await api.clrfApDetailClear(entityId); setMsg('Removed.'); await load(); } catch (e) { setMsg('Error: ' + (e.message || e)); } finally { setBusy(false); }
+  };
+  return (<div style={{ ...S.card, marginTop: 14, background: '#f8fafc' }}>
+    <div style={{ fontSize: 15, fontWeight: 700, color: T.textBright, marginBottom: 4 }}>Bill.com A/P Detail — for the AP Recon tab</div>
+    <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 12, maxWidth: 760, lineHeight: 1.5 }}>
+      Export the <strong>A/P Detail (Open Items)</strong> report from Bill.com filtered to this fund, as of the quarter end, and upload it here. The AP Recon tab reconciles it to the general-ledger A/P (202000). Excel or CSV; it needs a Vendor column and an open-balance / amount column.</div>
+    {status && status.count > 0 && <div style={{ fontSize: 12, marginBottom: 10, padding: 10, background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: T.radiusSm }}>
+      On file: <strong>{status.count}</strong> open invoices totaling <strong>{fmt(status.total)}</strong>{status.as_of ? (' as of ' + status.as_of) : ''}{status.uploaded_at ? (' · uploaded ' + String(status.uploaded_at).slice(0, 10)) : ''}.
+      {canEdit && <button style={{ ...S.btnS, marginLeft: 10 }} disabled={busy} onClick={clear}>Remove</button>}</div>}
+    {(!status || !status.count) && <div style={{ fontSize: 12, marginBottom: 10, color: T.orange }}>No Bill.com A/P Detail uploaded yet — the AP Recon flags an exception until one is provided.</div>}
+    {canEdit && <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+      <label style={{ ...S.btnS, cursor: 'pointer' }}>Choose file…<input type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={onFile} /></label>
+      {preview && preview.lines && <span style={{ fontSize: 12, color: T.textMuted }}>{preview.fileName}: parsed <strong>{preview.lines.length}</strong> invoices, <strong>{fmt(preview.total)}</strong></span>}
+      {preview && preview.lines && <button style={{ ...S.btnP, opacity: busy ? 0.5 : 1 }} disabled={busy} onClick={submit}>{busy ? 'Saving…' : ('Use this report (as of ' + qe + ')')}</button>}
+    </div>}
+    {preview && preview.error && <div style={{ fontSize: 12, color: T.red, marginTop: 8 }}>{preview.error}</div>}
+    {msg && <div style={{ fontSize: 12, color: msg.startsWith('Error') ? T.red : T.green, marginTop: 10, fontWeight: 600 }}>{msg}</div>}
+  </div>);
+}
+
 function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,description}){
   const QUARTER_ENDS=['03-31','06-30','09-30','12-31'];
   const isQuarterEnd=(d)=>/^\d{4}-\d{2}-\d{2}$/.test(d)&&QUARTER_ENDS.includes(d.slice(5));
@@ -5441,6 +5519,7 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
     {!valid&&qe&&<div style={{fontSize:12,color:T.orange,marginTop:10}}>
       Enter a quarter end date: March 31, June 30, September 30 or December 31.</div>}
     {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
+    {kind==='other'&&<ClrfApDetailCard entityId={entityId} qe={qe} canEdit={canEdit}/>}
     {result&&<div style={{...S.card,marginTop:18,padding:14,background:'#f3faf5'}}>
       <div style={{fontWeight:700,color:T.green,marginBottom:8}}>
         {s.quarter} workpaper downloaded{s.replaced>0?' · replaced the previous copy':''}</div>
