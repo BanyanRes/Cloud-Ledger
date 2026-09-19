@@ -433,7 +433,7 @@ function buildWorkbook(data) {
   const NI_BEG_REF = qn('Income Statement') + '!$' + niBegCell.replace(/(\d+)/, '$$$1');
 
   // ── Lead Sheet (the balance-sheet summary) — LINKS to the supporting tabs.
-  ls.getCell('A1').value = en; ls.getCell('A1').font = F({ size: 13, bold: true });
+  ls.getCell('A1').value = 'Odyssey Test'; ls.getCell('A1').font = F({ size: 13, bold: true });
   ls.getCell('A2').value = 'Monthly Closing Workpaper — Balance Sheet Lead Schedule'; ls.getCell('A2').font = F({ bold: true });
   ls.getCell('A3').value = 'Month ended ' + spellDate(m.end); ls.getCell('A3').font = SMALLI;
   ls.getCell('A4').value = 'Every figure below links to its supporting schedule; subtotals and the balance-sheet tie are live formulas.'; ls.getCell('A4').font = SMALLI;
