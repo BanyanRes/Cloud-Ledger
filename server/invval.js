@@ -468,10 +468,14 @@ async function buildInvestmentWorkbook(templateBuf, data) {
   { let x = await zip.file(P['Valuations']).async('string');
     const G12 = r2(V.clip - devTotal);
     x = replaceCell(x, 'C8', numCell('C8', styleOf(x, 'C8'), excelSerial(qtr.end)));
-    x = replaceCell(x, 'D12', numCell('D12', styleOf(x, 'D12'), booksExact.clip));
-    x = replaceCell(x, 'D13', numCell('D13', styleOf(x, 'D13'), booksExact.silsbee));
-    x = replaceCell(x, 'D14', numCell('D14', styleOf(x, 'D14'), booksExact.buna));
-    x = replaceCell(x, 'D15', numCell('D15', styleOf(x, 'D15'), booksExact.srn));
+    // Book Carrying Value links to the Carrying Value (Schedule of Investments)
+    // supporting tab, so the source of each figure is visible on the summary —
+    // the same GL-sourced book value the Investment Balance summary ties to.
+    // (J9=CLIP, J11=Silsbee, J13=Buna, J7=SRN on the Carrying Value tab.)
+    x = replaceCell(x, 'D12', fCell('D12', styleOf(x, 'D12'), "'Carrying Value'!J9", books.clip));
+    x = replaceCell(x, 'D13', fCell('D13', styleOf(x, 'D13'), "'Carrying Value'!J11", books.silsbee));
+    x = replaceCell(x, 'D14', fCell('D14', styleOf(x, 'D14'), "'Carrying Value'!J13", books.buna));
+    x = replaceCell(x, 'D15', fCell('D15', styleOf(x, 'D15'), "'Carrying Value'!J7", books.srn));
     x = replaceCell(x, 'D16', fCell('D16', styleOf(x, 'D16'), 'SUM(D12:D15)', r2(booksExact.clip + booksExact.silsbee + booksExact.buna + booksExact.srn)));
     if (params.incomeF12 !== null) x = replaceCell(x, 'F12', numCell('F12', styleOf(x, 'F12'), params.incomeF12));
     x = replaceCell(x, 'G12', numCell('G12', styleOf(x, 'G12'), G12));
@@ -494,7 +498,7 @@ async function buildInvestmentWorkbook(templateBuf, data) {
       + (anyFrozenOther
         ? 'Silsbee/Buna/SRN solved so proceeds equal book carrying value plus the frozen year-end gain/(loss). '
         : 'Silsbee/Buna/SRN kept at prior valuation when proceeds clear book carrying value, otherwise cost and sales approach figures raised so proceeds exceed book by at least $' + BUFFER.toLocaleString() + '. ')
-      + 'Book carrying values per CLRF GL investment accounts at ' + mdyy(qtr.end) + '.';
+      + 'Book carrying values link to the Schedule of Investments (Carrying Value tab), sourced from CLRF GL investment accounts, at ' + mdyy(qtr.end) + '.';
     if (/<row r="27">/.test(x)) x = x.replace(/<row r="27">[\s\S]*?<\/row>/, '<row r="27">' + strCell('B27', null, note) + '</row>');
     else x = x.replace('</sheetData>', '<row r="27">' + strCell('B27', null, note) + '</row></sheetData>');
     zip.file(P['Valuations'], x); }
