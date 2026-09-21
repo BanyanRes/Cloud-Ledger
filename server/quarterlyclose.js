@@ -1,6 +1,6 @@
-// ─── Monthly Closing Workpaper (balance-sheet account support) ───────────────
+// ─── Quarterly Closing Workpaper (balance-sheet account support) ───────────────
 //
-// A single monthly workbook that supports EVERY balance-sheet account of an
+// A single quarterly workbook that supports EVERY balance-sheet account of an
 // entity, fully GL-derived, built as a set of supporting schedules with a Lead
 // Sheet that LINKS to them. Design rules (per the workpaper convention):
 //
@@ -30,21 +30,22 @@ const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 
-// Last day of the month for a YYYY-MM-DD (or YYYY-MM) input.
-function resolveMonth(monthEnd) {
-  const m = String(monthEnd || '').match(/^(\d{4})-(\d{2})(?:-(\d{2}))?$/);
-  if (!m) throw new Error('month_end must be a date in YYYY-MM-DD form');
+// Resolve any date to the quarter end that contains it, plus the prior quarter end.
+function resolveQuarter(dateInput) {
+  const m = String(dateInput || '').match(/^(\d{4})-(\d{2})(?:-(\d{2}))?$/);
+  if (!m) throw new Error('quarter_end must be a date in YYYY-MM-DD form');
   const y = Number(m[1]), mo = Number(m[2]);
-  if (mo < 1 || mo > 12) throw new Error('month_end must be a valid month');
-  const last = new Date(Date.UTC(y, mo, 0)).getUTCDate();
-  const end = y + '-' + String(mo).padStart(2, '0') + '-' + String(last).padStart(2, '0');
-  // Beginning = prior month end.
-  const bd = new Date(Date.UTC(y, mo - 1, 0));
-  const beg = bd.toISOString().slice(0, 10);
+  if (mo < 1 || mo > 12) throw new Error('quarter_end must be a valid date');
+  const q = Math.ceil(mo / 3);        // 1..4 — the quarter containing the picked date
+  const qEndMonth = q * 3;            // 3, 6, 9 or 12
+  const last = new Date(Date.UTC(y, qEndMonth, 0)).getUTCDate();
+  const end = y + '-' + String(qEndMonth).padStart(2, '0') + '-' + String(last).padStart(2, '0');
+  // Beginning = prior quarter end (last day of the month before this quarter starts).
+  const beg = new Date(Date.UTC(y, qEndMonth - 3, 0)).toISOString().slice(0, 10);
   return {
     end, beg,
-    year: String(y), monthNum: mo, monthName: MONTHS[mo - 1],
-    label: y + '-' + String(mo).padStart(2, '0'),
+    year: String(y), quarter: q, quarterLabel: 'Q' + q,
+    label: y + '-Q' + q,
     yearStart: y + '-01-01',
   };
 }
@@ -323,7 +324,7 @@ function buildWorkbook(data) {
     if (!rowsForCat.length) continue;
     built.push(cd);
     const ws = wb.addWorksheet(cd.tab, { views: [{ showGridLines: false }] });
-    titleBlock(ws, en, cd.title, 'Roll-forward for the month ended ' + spellDate(m.end));
+    titleBlock(ws, en, cd.title, 'Roll-forward for the quarter ended ' + spellDate(m.end));
     const isCash = cd.key === 'cash';
     hdrRow(ws, 5, ['Date', 'Num', 'Payee', 'Description / Memo', 'Amount'], [12, 14, 26, 50, 16]);
     let r = 6;
@@ -349,7 +350,7 @@ function buildWorkbook(data) {
       }
       const lastLine = r - 1;
       // Total activity = SUM of the month's lines (0 if none).
-      ws.getCell('D' + r).value = 'Total activity for the month'; ws.getCell('D' + r).font = F({ bold: true });
+      ws.getCell('D' + r).value = 'Total activity for the quarter'; ws.getCell('D' + r).font = F({ bold: true });
       const actCell = 'E' + r;
       if (lastLine >= firstLine) setFormula(ws, actCell, 'SUM(E' + firstLine + ':E' + lastLine + ')', { bold: true }).border = { top: THIN };
       else { setMoney(ws, actCell, 0, { bold: true }).border = { top: THIN }; }
@@ -426,7 +427,7 @@ function buildWorkbook(data) {
   const niEndCell = 'C' + pr;
   setFormula(pl, niEndCell, totRevCell + '-' + totExpCell, { bold: true }).border = { top: THIN, bottom: DBL };
   pr += 2;
-  pl.getCell('B' + pr).value = 'Net income (loss) — fiscal YTD through ' + short(m.beg) + ' (beginning of month, per GL)'; pl.getCell('B' + pr).font = F({ italic: true });
+  pl.getCell('B' + pr).value = 'Net income (loss) — fiscal YTD through ' + short(m.beg) + ' (beginning of quarter, per GL)'; pl.getCell('B' + pr).font = F({ italic: true });
   const niBegCell = 'C' + pr;
   setMoney(pl, niBegCell, ni.begVal, { italic: true });
   const NI_END_REF = qn('Income Statement') + '!$' + niEndCell.replace(/(\d+)/, '$$$1'); // 'Income Statement'!$C$row
@@ -434,8 +435,8 @@ function buildWorkbook(data) {
 
   // ── Lead Sheet (the balance-sheet summary) — LINKS to the supporting tabs.
   ls.getCell('A1').value = en; ls.getCell('A1').font = F({ size: 13, bold: true });
-  ls.getCell('A2').value = 'Monthly Closing Workpaper — Balance Sheet Lead Schedule'; ls.getCell('A2').font = F({ bold: true });
-  ls.getCell('A3').value = 'Month ended ' + spellDate(m.end); ls.getCell('A3').font = SMALLI;
+  ls.getCell('A2').value = 'Quarterly Closing Workpaper — Balance Sheet Lead Schedule'; ls.getCell('A2').font = F({ bold: true });
+  ls.getCell('A3').value = 'Quarter ended ' + spellDate(m.end); ls.getCell('A3').font = SMALLI;
   ls.getCell('A4').value = 'Every figure below links to its supporting schedule; subtotals and the balance-sheet tie are live formulas.'; ls.getCell('A4').font = SMALLI;
   hdrRow(ls, 6, ['Code', 'Account', 'W/P', 'Beginning ' + short(m.beg), 'Activity', 'Ending ' + short(m.end)], [14, 46, 16, 18, 16, 18]);
   let lr = 7;
@@ -484,10 +485,10 @@ function buildWorkbook(data) {
   setFormula(ls, 'F' + lr, 'F' + totalRefs.Asset + '-(F' + totalRefs.Liability + '+F' + totalRefs.Equity + ')', { bold: true });
   ls.getCell('D' + lr).value = 'should be $0.00'; ls.getCell('D' + lr).font = SMALLI;
   lr += 2;
-  ls.getCell('A' + lr).value = 'W/P references point to the supporting schedule tabs, where each ending balance rolls from the beginning balance plus the month’s general-ledger activity.'; ls.getCell('A' + lr).font = SMALLI;
+  ls.getCell('A' + lr).value = 'W/P references point to the supporting schedule tabs, where each ending balance rolls from the beginning balance plus the quarter’s general-ledger activity.'; ls.getCell('A' + lr).font = SMALLI;
 
   // ── Summary / Exceptions tab (first tab). ────────────────────────────────
-  titleBlock(su, en, 'Monthly Closing Workpaper — Summary', 'Month ended ' + spellDate(m.end));
+  titleBlock(su, en, 'Quarterly Closing Workpaper — Summary', 'Quarter ended ' + spellDate(m.end));
   su.getColumn(1).width = 3; su.getColumn(2).width = 60; su.getColumn(3).width = 20; su.getColumn(4).width = 20;
   let sr = 5;
   const flags = data.flags || [];
@@ -532,8 +533,8 @@ function buildWorkbook(data) {
 }
 
 // ── Persistence. ─────────────────────────────────────────────────────────────
-const folderFor = (m) => 'Workpapers/Monthly Closing/' + m.year + '/' + String(m.monthNum).padStart(2, '0') + ' ' + m.monthName;
-const fileNameFor = (m) => 'Monthly_Closing_Workpaper_' + m.label + '.xlsx';
+const folderFor = (m) => 'Workpapers/Quarterly Closing/' + m.year + '/' + m.quarterLabel;
+const fileNameFor = (m) => 'Quarterly_Closing_Workpaper_' + m.label + '.xlsx';
 
 function saveToWorkpapers(ctx, eid, m, buf, who) {
   const { db, workpapersDir } = ctx;
@@ -556,13 +557,13 @@ function saveToWorkpapers(ctx, eid, m, buf, who) {
   return { folder_path: folder, original_name: original, replaced: prior.length };
 }
 
-function registerMonthlyCloseRoutes(app, ctx) {
+function registerQuarterlyCloseRoutes(app, ctx) {
   const { auth, requireEntityAccess, requireRole } = ctx;
-  app.post('/api/workpapers/monthly-close/:entity_id/generate', auth, requireEntityAccess('entity_id'),
+  app.post('/api/workpapers/quarterly-close/:entity_id/generate', auth, requireEntityAccess('entity_id'),
     requireRole('Admin', 'Accountant'), async (req, res) => {
       try {
         const eid = Number(req.params.entity_id);
-        const m = resolveMonth((req.body && req.body.month_end) || '');
+        const m = resolveQuarter((req.body && req.body.quarter_end) || '');
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         const data = buildData(ctx, m, eid);
         const wb = buildWorkbook(data);
@@ -570,8 +571,8 @@ function registerMonthlyCloseRoutes(app, ctx) {
         const saved = saveToWorkpapers(ctx, eid, m, buf, who);
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', 'attachment; filename="' + saved.original_name + '"');
-        res.setHeader('X-Monthclose-Summary', JSON.stringify({
-          month: m.label, month_name: m.monthName + ' ' + m.year,
+        res.setHeader('X-Quarterclose-Summary', JSON.stringify({
+          quarter: m.label, quarter_name: m.quarterLabel + ' ' + m.year,
           saved_to: saved.folder_path + '/' + saved.original_name, replaced: saved.replaced,
           accounts: data.acctRows.length,
           ties: data.ties, exceptions: (data.flags || []).length, flags: (data.flags || []),
@@ -583,4 +584,4 @@ function registerMonthlyCloseRoutes(app, ctx) {
     });
 }
 
-module.exports = { registerMonthlyCloseRoutes, resolveMonth, buildData, buildWorkbook };
+module.exports = { registerQuarterlyCloseRoutes, resolveQuarter, buildData, buildWorkbook };

@@ -614,13 +614,13 @@ export const api = {
     return { blob: await res.blob(), filename: m ? m[1] : cfg.name, summary };
   },
 
-  // Monthly Closing Workpaper — generic balance-sheet support for any entity.
-  monthlyClose: async (eid, monthEnd) => {
+  // Quarterly Closing Workpaper — generic balance-sheet support for any entity.
+  quarterlyClose: async (eid, quarterEnd) => {
     const token = getToken();
-    const res = await fetch(API_BASE + '/workpapers/monthly-close/' + eid + '/generate', {
+    const res = await fetch(API_BASE + '/workpapers/quarterly-close/' + eid + '/generate', {
       method: 'POST',
       headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
-      body: JSON.stringify({ month_end: monthEnd }),
+      body: JSON.stringify({ quarter_end: quarterEnd }),
     });
     if (res.status === 401) { clearToken(); window.location.reload(); return null; }
     const ctype = res.headers.get('content-type') || '';
@@ -628,10 +628,10 @@ export const api = {
       let data = {}; try { data = await res.json(); } catch {}
       throw new Error(data.error || 'Report failed');
     }
-    let summary = {}; try { summary = JSON.parse(res.headers.get('x-monthclose-summary') || '{}'); } catch {}
+    let summary = {}; try { summary = JSON.parse(res.headers.get('x-quarterclose-summary') || '{}'); } catch {}
     const cd = res.headers.get('content-disposition') || '';
     const m = cd.match(/filename="?([^"]+)"?/);
-    return { blob: await res.blob(), filename: m ? m[1] : 'Monthly_Closing_Workpaper.xlsx', summary };
+    return { blob: await res.blob(), filename: m ? m[1] : 'Quarterly_Closing_Workpaper.xlsx', summary };
   },
 
   clrfApDetailGet: async (eid) => {

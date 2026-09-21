@@ -926,7 +926,7 @@ export default function App(){
       ...(isCLRF?[{id:'wp_cashflow',label:'Cash Flow Worksheet',icon:'💵',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_other',label:'Other Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
-      {id:'wp_monthclose',label:'Monthly Closing Workpaper',icon:'🗓️',section:'workpapers'},
+      {id:'wp_qtrclose',label:'Quarterly Closing Workpaper',icon:'🗓️',section:'workpapers'},
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
@@ -1027,7 +1027,7 @@ export default function App(){
         {page==='wp_cashflow'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="cashflow" title="Cash Flow Worksheet" description="A standalone Statement of Cash Flows (indirect method, year-to-date) built from the general ledger. Reuses the fund financial-statements model and ties to it; every subtotal is a live SUM formula. A copy is filed under Workpapers › Cash Flow by year and quarter." key={activeEntity+'-'+rk}/>}
       {page==='wp_other'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="other" title="Other Workpapers" description="Balance-sheet account support in one workbook — Due From/To Port Co, Interest Receivable, Prepaid Expenses, Other Assets, AP Recon, Accrual & Subsequent Cash Disbursement, and Distributions Payable — each on its own tab, GL-derived and tying to the Statement of Assets, Liabilities and Partners' Capital. A copy is filed under Workpapers › Other Workpapers by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='wp_monthclose'&&activeEntity&&<MonthWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='wp_qtrclose'&&activeEntity&&<QuarterlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&!isCLRF&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
@@ -5485,10 +5485,9 @@ function ClrfApDetailCard({ entityId, qe, canEdit }) {
   </div>);
 }
 
-function MonthWorkpaper({entityId,entityName,canEdit=true}){
-  // Default to the most recently completed month.
-  // Default to the end of the most recently completed month, as a full date.
-  const defaultDate=()=>{const t=today();const [y,m]=t.split('-').map(Number);return new Date(Date.UTC(y,m-1,0)).toISOString().slice(0,10);};
+function QuarterlyCloseWorkpaper({entityId,entityName,canEdit=true}){
+  // Default to the most recently completed quarter end.
+  const defaultDate=()=>{const t=today();const y=Number(t.slice(0,4));const cands=[];for(const yy of [y,y-1])for(const mm of ['03-31','06-30','09-30','12-31'])cands.push(yy+'-'+mm);const past=cands.filter(d=>d<=t).sort();return past.length?past[past.length-1]:(y-1)+'-12-31';};
   const[mon,setMon]=useState(defaultDate());
   const[busy,setBusy]=useState(false);
   const[err,setErr]=useState('');
@@ -5498,7 +5497,7 @@ function MonthWorkpaper({entityId,entityName,canEdit=true}){
     if(!valid)return;
     setBusy(true);setErr('');setResult(null);
     try{
-      const r=await api.monthlyClose(entityId,mon);
+      const r=await api.quarterlyClose(entityId,mon);
       if(!r)return;
       const url=URL.createObjectURL(r.blob);
       const a=document.createElement('a');a.href=url;a.download=r.filename;
@@ -5513,12 +5512,12 @@ function MonthWorkpaper({entityId,entityName,canEdit=true}){
   const ties=s.ties||{};
   return(<div><div style={S.card}>
     {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
-    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Monthly Closing Workpaper</div>
+    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Quarterly Closing Workpaper</div>
     <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:760,lineHeight:1.5}}>
-      One workbook supporting every balance-sheet account for the month: a Lead Sheet that links by formula to per-category supporting schedules — Cash (with a bank-rec line), Intercompany (tied to each related entity&rsquo;s own ledger), Investments, Loans &amp; Notes Payable, Members&rsquo; Equity, and Other — each rolling the beginning balance forward with the month&rsquo;s general-ledger activity. Every subtotal and the Assets = Liabilities + Equity check is a live formula; there are no hard-coded amounts. Discrepancies (an out-of-balance sheet, a roll-forward that doesn&rsquo;t tie, or an intercompany account that doesn&rsquo;t mirror the counterparty) are flagged on the Summary tab. A copy is filed under Workpapers › Monthly Closing by year and month.
+      One workbook supporting every balance-sheet account for the quarter: a Lead Sheet that links by formula to per-category supporting schedules — Cash (with a bank-rec line), Intercompany (tied to each related entity&rsquo;s own ledger), Investments, Loans &amp; Notes Payable, Members&rsquo; Equity, and Other — each rolling the beginning balance forward with the quarter&rsquo;s general-ledger activity. Every subtotal and the Assets = Liabilities + Equity check is a live formula; there are no hard-coded amounts. Discrepancies (an out-of-balance sheet, a roll-forward that doesn&rsquo;t tie, or an intercompany account that doesn&rsquo;t mirror the counterparty) are flagged on the Summary tab. A copy is filed under Workpapers › Quarterly Closing by year and quarter.
     </div>
     <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
-      <div><label style={S.label}>Month End Date</label>
+      <div><label style={S.label}>Quarter End Date</label>
         <input style={S.inputSm} type="date" value={mon} onChange={e=>{setMon(e.target.value);setErr('');setResult(null);}}/></div>
       <button style={{...S.btnP,opacity:(!valid||busy||!canEdit)?0.5:1}} disabled={!valid||busy||!canEdit} onClick={run}>
         {busy?'Running…':'Run Report'}</button>
@@ -5526,7 +5525,7 @@ function MonthWorkpaper({entityId,entityName,canEdit=true}){
     {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
     {result&&<div style={{...S.card,marginTop:18,padding:14,background:flags.length?'#fff8f0':'#f3faf5'}}>
       <div style={{fontWeight:700,color:flags.length?(T.orange||'#d08a2a'):T.green,marginBottom:8}}>
-        {s.month_name||s.month} workpaper downloaded{s.replaced>0?' · replaced the previous copy':''}
+        {s.quarter_name||s.quarter} workpaper downloaded{s.replaced>0?' · replaced the previous copy':''}
         {flags.length?(' · '+flags.length+' item'+(flags.length>1?'s':'')+' to review'):' · all checks passed'}</div>
       <table style={{...S.table,minWidth:360,marginBottom:flags.length?12:0}}><tbody>
         <tr><td style={S.td}>Balance-sheet accounts supported</td><td style={S.tdR}>{s.accounts}</td></tr>
