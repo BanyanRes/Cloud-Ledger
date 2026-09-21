@@ -424,16 +424,22 @@ async function parseExecSummaryBlocks(pdfBuffer) {
     let cur = null;
     for (const it of items) {
       if (!cur || Math.abs(it.y - cur.y) > 3) {
-        cur = { y: it.y, parts: [] };
+        cur = { y: it.y, items: [] };
         lines.push(cur);
       }
-      cur.parts.push(it.s);
+      cur.items.push(it);
     }
   }
 
-  let raw = lines
-    .map(l => l.parts.join(' ').replace(/\s+/g, ' ').trim())
-    .filter(s => s.length);
+  // Order each line's items strictly left-to-right by x, then join. A bullet
+  // glyph and its text can differ by a fraction of a point in baseline y, which
+  // the rough (y desc, x asc) sort above can flip -- pushing the bullet glyph to
+  // the END of the line so it is no longer recognized as a bullet. Sorting
+  // within the line by x restores "glyph then text" order regardless of jitter.
+  const lineObjs = lines
+    .map(l => ({ y: l.y, text: l.items.slice().sort((a, b) => a.x - b.x).map(i => i.s).join(' ').replace(/\s+/g, ' ').trim() }))
+    .filter(l => l.text.length);
+  let raw = lineObjs.map(l => l.text);
 
   const isBulletStart = s => /^\s*(?:[\u2022\u00b7\u25aa\u25cf\u2023\uf0b7\ufffd]|[-*])\s+/.test(s);
   const stripBullet = s => s.replace(/^\s*(?:[\u2022\u00b7\u25aa\u25cf\u2023\uf0b7\ufffd]|[-*])\s+/, '').trim();
@@ -451,11 +457,11 @@ async function parseExecSummaryBlocks(pdfBuffer) {
     const esIdx = raw.findIndex(s => /^executive summary$/i.test(s));
     if (esIdx >= 0) startIdx = esIdx + 1;
   }
-  let body = raw.slice(startIdx);
-
-  // Drop a "Notes to the Reader" header (with or without a trailing colon) and
-  // any bare page-number lines anywhere in the body.
-  body = body.filter(s => !/^notes to the reader:?$/i.test(s) && !/^\d{1,3}$/.test(s));
+  // Keep the {y, text} line objects for the body so paragraph breaks can be
+  // detected from the vertical gap between lines (below). Drop a "Notes to the
+  // Reader" header and any bare page-number lines anywhere in the body.
+  let body = lineObjs.slice(startIdx)
+    .filter(l => !/^notes to the reader:?$/i.test(l.text) && !/^\d{1,3}$/.test(l.text));
 
   if (!body.length) { try { await doc.destroy(); } catch (_) {} return null; }
 
@@ -470,6 +476,14 @@ async function parseExecSummaryBlocks(pdfBuffer) {
   //   \u2022 Outside a bullet run, consecutive non-bullet lines join into one
   //     paragraph (CLA's intro and closing are each a single logical block).
   const endsSentence = s => /[.:;!]["')\u2019]?$/.test(s.trim());
+  // Typical single-line leading (median gap between consecutive body lines),
+  // used to tell a wrapped continuation line from a real paragraph break: a gap
+  // noticeably larger than the leading starts a new paragraph.
+  const gaps = [];
+  for (let i = 1; i < body.length; i++) { const g = body[i - 1].y - body[i].y; if (g > 0) gaps.push(g); }
+  const medGap = gaps.length ? gaps.slice().sort((a, b) => a - b)[Math.floor(gaps.length / 2)] : 14;
+  const PARA_GAP = medGap * 1.6;
+
   const blocks = [];
   let curBullets = null;   // array of bullet strings for the open run
   let bulletOpen = false;  // is the last bullet still accepting continuation lines?
@@ -477,7 +491,11 @@ async function parseExecSummaryBlocks(pdfBuffer) {
   const flushPara = () => { if (curPara) { blocks.push({ p: curPara.trim() }); curPara = null; } };
   const flushBullets = () => { if (curBullets && curBullets.length) blocks.push({ bullets: curBullets }); curBullets = null; bulletOpen = false; };
 
-  for (const line of body) {
+  let prevY = null;
+  for (const ln of body) {
+    const line = ln.text;
+    const gap = prevY != null ? (prevY - ln.y) : 0;
+    prevY = ln.y;
     if (isBulletStart(line)) {
       flushPara();
       if (!curBullets) curBullets = [];
@@ -490,7 +508,10 @@ async function parseExecSummaryBlocks(pdfBuffer) {
       bulletOpen = !endsSentence(curBullets[i]);
     } else {
       // Not in an open bullet: close any bullet run and accumulate a paragraph.
+      // A gap larger than the normal leading ends the current paragraph and
+      // starts a new one (CLA's intro / adjustment note / closing are separate).
       flushBullets();
+      if (curPara && gap > PARA_GAP) flushPara();
       curPara = curPara ? (curPara + ' ' + line) : line;
     }
   }
