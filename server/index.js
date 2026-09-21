@@ -10917,6 +10917,43 @@ async function mgmtRollForward(inputBuf, commitmentChanges = []) {
     wbRels = wbRels.replace(/<Relationship[^>]*Type="[^"]*\/calcChain"[^>]*\/>/g, '');
     zip.file('xl/_rels/workbook.xml.rels', wbRels);
   }
+  // ── Strip Weaver's leftover external-data query tables ────────────────────
+  // The template's data tables are tableType="queryTable" backed by
+  // xl/queryTables/queryTableN.xml + xl/connections.xml (a dead external data
+  // range). Excel "repairs" those out on open ("Removed Part: .../queryTable..").
+  // The values are already materialized in the cells, so we downgrade each query
+  // table to a plain static table and drop the query/connection parts, which
+  // makes Excel open the file cleanly with no repair prompt.
+  {
+    const qtParts = Object.keys(zip.files).filter((n) => /^xl\/queryTables\/queryTable\d+\.xml$/i.test(n));
+    if (qtParts.length || zip.file('xl/connections.xml')) {
+      for (const qp of qtParts) zip.remove(qp);
+      ct = ct.replace(/<Override PartName="\/xl\/queryTables\/queryTable\d+\.xml"[^>]*\/>/g, '');
+      for (const n of Object.keys(zip.files)) {
+        if (/^xl\/tables\/table\d+\.xml$/i.test(n)) {
+          let tx = await zip.file(n).async('string');
+          if (/tableType="queryTable"/.test(tx)) {
+            tx = tx.replace(/\s+tableType="queryTable"/g, '').replace(/\s+queryTableFieldId="\d+"/g, '');
+            zip.file(n, tx);
+          }
+        } else if (/^xl\/tables\/_rels\/table\d+\.xml\.rels$/i.test(n)) {
+          let rx = await zip.file(n).async('string');
+          if (/\/queryTable"/.test(rx)) {
+            rx = rx.replace(/<Relationship[^>]*Type="[^"]*\/queryTable"[^>]*\/>/g, '');
+            if (!/<Relationship\b/.test(rx)) zip.remove(n); else zip.file(n, rx);
+          }
+        }
+      }
+      if (zip.file('xl/connections.xml')) {
+        zip.remove('xl/connections.xml');
+        ct = ct.replace(/<Override PartName="\/xl\/connections\.xml"[^>]*\/>/, '');
+        let wbRelsC = await zip.file('xl/_rels/workbook.xml.rels').async('string');
+        wbRelsC = wbRelsC.replace(/<Relationship[^>]*Type="[^"]*\/connections"[^>]*\/>/g, '');
+        zip.file('xl/_rels/workbook.xml.rels', wbRelsC);
+      }
+      zip.file('[Content_Types].xml', ct);
+    }
+  }
   const calcAttrs = ' iterate="1" iterateCount="100" iterateDelta="0.001" fullCalcOnLoad="1"';
   if (/<calcPr/.test(wbXml)) wbXml = wbXml.replace(/<calcPr([^/]*)\/>/, (m, a) => '<calcPr' + a.replace(/\s+(iterate|iterateCount|iterateDelta|fullCalcOnLoad)="[^"]*"/g, '') + calcAttrs + '/>');
   else wbXml = wbXml.replace('</workbook>', '<calcPr calcId="0"' + calcAttrs + '/></workbook>');
