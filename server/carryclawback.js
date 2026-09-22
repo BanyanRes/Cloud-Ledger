@@ -239,7 +239,18 @@ function buildWorkbook(data) {
   const ci = wb.addWorksheet('Carried Interest');
   const wf = wb.addWorksheet('Waterfall Detail', { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
   const gl = wb.addWorksheet('GL Data', { views: [{ state: 'frozen', ySplit: 4, showGridLines: false }] });
+  const cm = wb.addWorksheet('Commitments', { views: [{ state: 'frozen', ySplit: 4, showGridLines: false }] });
+  const pw = wb.addWorksheet('Preferred Return', { views: [{ state: 'frozen', ySplit: 4, showGridLines: false }] });
   const nt = wb.addWorksheet('Notes & Sources');
+
+  // Row maps so the Waterfall Detail can LINK to its supporting tabs instead of
+  // restating values. GL Data lists every partner (LP+GP) from row 5; Commitments
+  // and Preferred Return list the LPs from row 5, in data.lps order.
+  const glRowByClass = {}; data.partners.forEach((p, i) => { glRowByClass[p.class_id] = 5 + i; });
+  const lpRowByClass = {}; data.lps.forEach((p, i) => { lpRowByClass[p.class_id] = 5 + i; });
+  const NLP = data.lps.length;
+  const PR_FUND_ROC = 7 + NLP;   // 'Return of Capital' fund cell on Preferred Return tab
+  const PR_FUND_PREF = 8 + NLP;  // 'Preferred Return' fund cell on Preferred Return tab
 
   // ── Carried Interest (client-facing, mirrors the §17(c) FS schedule) ─────────
   ci.getColumn(1).width = 6; ci.getColumn(2).width = 62; ci.getColumn(3).width = 22;
@@ -325,28 +336,62 @@ function buildWorkbook(data) {
   const wfCols = ['Partner', 'Type', 'Commitment', 'Distributable (capital)', 'Return of Capital', 'Preferred Return',
     'Excess/(Shortfall)', 'Catch-Up GP', 'Catch-Up LP', 'Residual LP', 'Residual GP', 'Carried Interest (GP)'];
   headerRow(wf, 5, wfCols, [34, 7, 16, 18, 17, 16, 16, 14, 14, 14, 14, 18]);
+  // Assumption cells — the waterfall split factors live here so the per-row
+  // formulas reference them instead of hardcoding 80/20/8%. Edit these to flex the
+  // economics and every tier recomputes.
+  wf.getCell('N1').value = 'Assumptions'; wf.getCell('N1').font = F({ bold: true });
+  wf.getColumn('N').width = 22; wf.getColumn('O').width = 9;
+  for (const [lc, vc, lab, val] of [
+    ['N2', 'O2', 'Catch-up GP %', CATCHUP_GP], ['N3', 'O3', 'Catch-up LP %', CATCHUP_LP],
+    ['N4', 'O4', 'Residual LP %', RESIDUAL_LP], ['N5', 'O5', 'Residual GP %', RESIDUAL_GP],
+    ['N6', 'O6', 'GP promote %', 0.20], ['N7', 'O7', 'Preferred rate (p.a.)', PREF_RATE],
+  ]) { wf.getCell(lc).value = lab; wf.getCell(lc).font = F(); const c = wf.getCell(vc); c.value = val; c.numFmt = '0.0%'; c.font = BLUE; }
+
   let wr = 6;
-  const wcell = (col, v, fmt) => { const c = wf.getCell(col + wr); if (v === null || v === undefined) { c.value = '—'; c.font = F({ italic: true }); } else { c.value = v; if (fmt) c.numFmt = fmt; c.font = F(); } };
+  const dash = (col) => { const c = wf.getCell(col + wr); c.value = '—'; c.font = F({ italic: true }); };
+  const fcell = (col, formula, cached, opts = {}) => {
+    const c = wf.getCell(col + wr);
+    if (cached === null || cached === undefined) { c.value = '—'; c.font = F(Object.assign({ italic: true }, opts)); }
+    else { c.value = { formula: formula, result: cached }; c.numFmt = MONEY; c.font = F(opts); }
+  };
   for (const p of data.lps) {
     wf.getCell('A' + wr).value = p.name; wf.getCell('A' + wr).font = F();
     wf.getCell('B' + wr).value = p.partner_type; wf.getCell('B' + wr).font = F();
-    wcell('C', p.commitment, MONEY); wcell('D', p.distributable, MONEY); wcell('E', p.roc, MONEY);
-    wcell('F', p.pref, MONEY); wcell('G', p.pref === null ? null : r2(p.distributable - p.roc - p.pref), MONEY);
-    wcell('H', p.catchupGP, MONEY); wcell('I', p.catchupLP, MONEY);
-    wcell('J', p.residualLP, MONEY); wcell('K', p.residualGP, MONEY); wcell('L', p.carryGP, MONEY);
+    const glr = glRowByClass[p.class_id], lpr = lpRowByClass[p.class_id];
+    // Input columns LINK to their supporting tabs (source values live there).
+    fcell('C', "'Commitments'!C" + lpr, p.commitment);
+    fcell('D', "'GL Data'!C" + glr, p.distributable);
+    fcell('E', "'GL Data'!D" + glr, p.roc);
+    fcell('F', "'Preferred Return'!C" + lpr, p.pref);
+    // Derived columns are per-row formulas over D/E/F and the assumption cells.
+    // (Meaningful only once the per-LP Preferred Return is present; otherwise the
+    // LP's tiers are undetermined and show as em dashes.)
+    if (p.pref === null) { ['G', 'H', 'I', 'J', 'K', 'L'].forEach(dash); }
+    else {
+      const CT = '$O$6*F' + wr + '/($O$2-$O$6)';                 // catch-up target = promote*pref/(catchGP-promote) = pref/3
+      const EX = 'MAX(D' + wr + '-E' + wr + '-F' + wr + ',0)';   // excess available above ROC + Preferred Return
+      fcell('G', 'D' + wr + '-E' + wr + '-F' + wr, r2(p.distributable - p.roc - p.pref));
+      fcell('H', '$O$2*MIN(' + EX + ',' + CT + ')', p.catchupGP);
+      fcell('I', '$O$3*MIN(' + EX + ',' + CT + ')', p.catchupLP);
+      fcell('J', '$O$4*MAX(' + EX + '-' + CT + ',0)', p.residualLP);
+      fcell('K', '$O$5*MAX(' + EX + '-' + CT + ',0)', p.residualGP);
+      fcell('L', 'H' + wr + '+K' + wr, p.carryGP);
+    }
     wr++;
   }
-  // Total row
+  // Total row — column sums are SUM() formulas; Return of Capital / Preferred
+  // Return are the §17(c) build-up figures and LINK to the Preferred Return tab;
+  // Excess is a formula (D − E − F) so the client-facing tab traces straight through.
+  const first = 6, last = wr - 1;
   const tot = wf.getRow(wr); tot.getCell(1).value = 'Total — Limited Partners'; tot.getCell(1).font = F({ bold: true });
-  const sums = { C: 'commitment', D: 'distributable', H: 'catchupGP', I: 'catchupLP', J: 'residualLP', K: 'residualGP', L: 'carryGP' };
   const s = (k) => r2(data.lps.reduce((a, x) => a + (Number(x[k]) || 0), 0));
-  Object.entries(sums).forEach(([col, k]) => { const c = tot.getCell(col); c.value = s(k); c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; });
-  // Total-row Return of Capital / Preferred Return / Excess are the §17(c) build-up
-  // figures per the preferred-return workpaper (D − E − F = G), so the client-facing
-  // Carried Interest tab links to these totals rather than to the CL column sums.
-  { const c = tot.getCell('E'); c.value = fund.roc === null ? '—' : fund.roc; if (fund.roc !== null) c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
-  { const c = tot.getCell('F'); c.value = fund.pref === null ? '—' : fund.pref; if (fund.pref !== null) c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
-  { const c = tot.getCell('G'); c.value = fund.excess === null ? '—' : fund.excess; if (fund.excess !== null) c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  const sumF = (col, cached) => { const c = tot.getCell(col); c.value = { formula: 'SUM(' + col + first + ':' + col + last + ')', result: cached }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; };
+  sumF('C', s('commitment')); sumF('D', s('distributable'));
+  sumF('H', s('catchupGP')); sumF('I', s('catchupLP')); sumF('J', s('residualLP')); sumF('K', s('residualGP')); sumF('L', s('carryGP'));
+  const totLink = (col, formula, cached) => { const c = tot.getCell(col); if (cached === null || cached === undefined) { c.value = '—'; c.font = F({ bold: true, italic: true }); } else { c.value = { formula: formula, result: cached }; c.numFmt = MONEY; c.font = F({ bold: true }); } c.border = { top: THIN }; };
+  totLink('E', "'Preferred Return'!C" + PR_FUND_ROC, fund.roc);
+  totLink('F', "'Preferred Return'!C" + PR_FUND_PREF, fund.pref);
+  totLink('G', 'D' + wr + '-E' + wr + '-F' + wr, fund.excess);
 
   // ── GL Data (per-class equity balances the figures come from) ────────────────
   gl.getCell('A1').value = 'GL DATA — PARTNERS’ CAPITAL BY INVESTOR CLASS AS OF ' + q.end;
@@ -365,6 +410,49 @@ function buildWorkbook(data) {
     });
     gr++;
   }
+
+  // ── Commitments (supporting: capital commitments per LP) ─────────────────────
+  cm.getCell('A1').value = 'CAPITAL COMMITMENTS BY LIMITED PARTNER — ' + fund.entity_name;
+  cm.getCell('A1').font = F({ size: 12, bold: true });
+  cm.getCell('A2').value = 'Per investor subscriptions (investor_commitments). Source figures in blue; the Waterfall Detail Commitment column links here.';
+  cm.getCell('A2').font = SMALLI;
+  headerRow(cm, 4, ['Investor class', 'Type', 'Commitment'], [40, 8, 20]);
+  let cmr = 5;
+  for (const p of data.lps) {
+    const row = cm.getRow(cmr);
+    row.getCell(1).value = p.name; row.getCell(1).font = F();
+    row.getCell(2).value = p.partner_type; row.getCell(2).font = F();
+    const c = row.getCell(3); c.value = p.commitment; c.numFmt = MONEY; c.font = BLUE;
+    cmr++;
+  }
+  cm.getCell('A' + cmr).value = 'Total'; cm.getCell('A' + cmr).font = F({ bold: true });
+  { const c = cm.getCell('C' + cmr); c.value = { formula: 'SUM(C5:C' + (cmr - 1) + ')', result: r2(data.lps.reduce((a, x) => a + (Number(x.commitment) || 0), 0)) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+
+  // ── Preferred Return (supporting: 8% preferred return + §17(c) fund inputs) ──
+  pw.getCell('A1').value = 'PREFERRED RETURN — ' + fund.entity_name;
+  pw.getCell('A1').font = F({ size: 12, bold: true });
+  pw.getCell('A2').value = '8% annually-compounded, IRR-based preferred return from the fund preferred-return workpaper (Weaver). '
+    + 'Source: ' + (fund.pref_source || 'PENDING') + '. Per-LP allocation shown where provided; the fund-level Return of Capital and Preferred Return below feed the §17(c) build-up total.';
+  pw.getCell('A2').font = SMALLI; pw.getCell('A2').alignment = { wrapText: true };
+  headerRow(pw, 4, ['Investor class', 'Type', 'Preferred Return'], [40, 8, 20]);
+  let pwr = 5;
+  for (const p of data.lps) {
+    const row = pw.getRow(pwr);
+    row.getCell(1).value = p.name; row.getCell(1).font = F();
+    row.getCell(2).value = p.partner_type; row.getCell(2).font = F();
+    const c = row.getCell(3);
+    if (p.pref === null) { c.value = '—'; c.font = F({ italic: true }); }
+    else { c.value = p.pref; c.numFmt = MONEY; c.font = BLUE; }
+    pwr++;
+  }
+  // Fund-level block. Rows PR_FUND_ROC / PR_FUND_PREF are referenced by the
+  // Waterfall Detail total row (Return of Capital / Preferred Return).
+  pw.getCell('A' + (6 + NLP)).value = 'Fund-level (per preferred-return workpaper)';
+  pw.getCell('A' + (6 + NLP)).font = F({ bold: true });
+  pw.getCell('A' + PR_FUND_ROC).value = 'Return of Capital'; pw.getCell('A' + PR_FUND_ROC).font = F();
+  { const c = pw.getCell('C' + PR_FUND_ROC); if (fund.roc === null) { c.value = '—'; c.font = F({ italic: true }); } else { c.value = fund.roc; c.numFmt = MONEY; c.font = BLUE; } }
+  pw.getCell('A' + PR_FUND_PREF).value = 'Preferred Return'; pw.getCell('A' + PR_FUND_PREF).font = F();
+  { const c = pw.getCell('C' + PR_FUND_PREF); if (fund.pref === null) { c.value = '—'; c.font = F({ italic: true }); } else { c.value = fund.pref; c.numFmt = MONEY; c.font = BLUE; } }
 
   // ── Notes & Sources ──────────────────────────────────────────────────────────
   nt.getColumn(1).width = 118;
