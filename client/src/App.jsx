@@ -4187,6 +4187,11 @@ function ReportControls({dateFilter,setDateFilter,colMode,setColMode,compare,set
 function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEdit=true}){
   const[data,setData]=useState([]);
   const[dateFilter,setDateFilter]=useState('all');const[colMode,setColMode]=useState('total');const[compare,setCompare]=useState(false);
+  // Show accounts whose balance nets to zero. computeBalances is line-driven, so a
+  // zero-net account still comes back (it has journal lines) — this just stops the
+  // frontend from filtering it out, letting the user see accounts that had activity
+  // in the period but washed to zero. Applies to every entity and both TB views.
+  const[showZero,setShowZero]=useState(false);
   const[rk,setRk]=useState(0);
   const[drillAcct,setDrillAcct]=useState(null);
   const[locations,setLocations]=useState([]);
@@ -4238,7 +4243,7 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
   const balAt=(code,ci)=>(vmap[ci]&&vmap[ci].get(code))||0;
   const typeOf=code=>(meta.find(m=>m.code===code)||{}).type;
   const drcr=(code,ci)=>{const b=balAt(code,ci);const isDr=typeOf(code)==='Asset'||typeOf(code)==='Expense';return{dr:(isDr&&b>0)||(!isDr&&b<0)?Math.abs(b):0,cr:(isDr&&b<0)||(!isDr&&b>0)?Math.abs(b):0};};
-  const rows=meta.filter(m=>vmap.some(mm=>Math.abs((mm&&mm.get(m.code))||0)>0.005));
+  const rows=showZero?meta:meta.filter(m=>vmap.some(mm=>Math.abs((mm&&mm.get(m.code))||0)>0.005));
   const nCols=cols.length;const curI=nCols-1;const priI=prior?0:-1;
   const totDr=ci=>rows.reduce((s,r)=>s+drcr(r.code,ci).dr,0);const totCr=ci=>rows.reduce((s,r)=>s+drcr(r.code,ci).cr,0);
   const pctTxt=p=>p==null?'—':(p>=0?'+':'')+p.toFixed(1)+'%';
@@ -4269,8 +4274,8 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
     (actData.beg||[]).forEach(b=>{const r=m.get(b.code);if(r)r.beg=signOf(b.type,b.balance||0);});
     (actData.end||[]).forEach(b=>{const r=m.get(b.code);if(r)r.end=signOf(b.type,b.balance||0);});
     (actData.act||[]).forEach(b=>{const r=m.get(b.code);if(r){r.dr=b.total_debit||0;r.cr=b.total_credit||0;}});
-    return[...m.values()].filter(r=>Math.abs(r.beg)>0.005||Math.abs(r.end)>0.005||Math.abs(r.dr)>0.005||Math.abs(r.cr)>0.005).sort((a,b)=>String(a.code).localeCompare(String(b.code)));
-  },[actData]);
+    return[...m.values()].filter(r=>showZero||Math.abs(r.beg)>0.005||Math.abs(r.end)>0.005||Math.abs(r.dr)>0.005||Math.abs(r.cr)>0.005).sort((a,b)=>String(a.code).localeCompare(String(b.code)));
+  },[actData,showZero]);
   const actTot=useMemo(()=>actRows.reduce((t,r)=>({beg:t.beg+r.beg,dr:t.dr+r.dr,cr:t.cr+r.cr,end:t.end+r.end}),{beg:0,dr:0,cr:0,end:0}),[actRows]);
   const rnd=n=>{const v=Math.round((n||0)*100)/100;return Math.abs(v)<0.005?0:v;};
   const sfmt=n=>Math.abs(n||0)<0.005?'':fmt(n); // signed money, blank at zero, negatives in ()
@@ -4358,8 +4363,9 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
       {isActivity?<><div><label style={S.label}>From date</label><input style={S.inputSm} type="date" value={fromDate} onChange={e=>setFromDate(e.target.value)}/></div><div><label style={S.label}>To date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div></>:<><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div><ReportControls dateFilter={dateFilter} setDateFilter={setDateFilter} colMode={colMode} setColMode={setColMode} compare={compare} setCompare={setCompare}/></>}
       {showProj&&<div><label style={S.label}>Project</label><select style={S.inputSm} value={projId} onChange={e=>setProjId(e.target.value)}><option value="">All (whole entity)</option>{projects.map(p=><option key={p.id} value={p.id}>{p.code&&p.code!==p.name?p.code+' — '+p.name:p.name}{p.line_count!=null?(' ('+p.line_count+')'):''}</option>)}</select></div>}
       {showLocInv&&<div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>}
-      {showLocInv&&<div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div>}</div>
-    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='trial' currentConfig={{asOf,dateFilter,colMode,compare,format,fromDate}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);if(c.format)setFormat(c.format);if(c.fromDate)setFromDate(c.fromDate);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={isActivity?doExportActivity:doExport}>Export TB</button></div></div>
+      {showLocInv&&<div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div>}
+      <div><label style={S.label}>&nbsp;</label><label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.textMuted,cursor:'pointer',height:28}} title="Show accounts that had activity in the period but net to a zero balance"><input type="checkbox" checked={showZero} onChange={e=>setShowZero(e.target.checked)} style={{cursor:'pointer'}}/>Show zero-balance accounts</label></div></div>
+    <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='trial' currentConfig={{asOf,dateFilter,colMode,compare,format,fromDate,showZero}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);if(c.format)setFormat(c.format);if(c.fromDate)setFromDate(c.fromDate);if(typeof c.showZero==='boolean')setShowZero(c.showZero);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={isActivity?doExportActivity:doExport}>Export TB</button></div></div>
     <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Trial Balance{scopeLabel?(' — '+scopeLabel):''}</div><div style={{fontSize:13,color:T.textMuted}}>{isActivity?('Beginning '+validFrom+' → Ending '+asOf):('As of '+asOf)}{dimmed?' · dimension-tagged activity only':''}</div></div>
     {isActivity&&<div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:640}}>
       <thead><tr><th style={S.th}>Code</th><th style={S.th}>Account</th><th style={S.th}>Type</th>
