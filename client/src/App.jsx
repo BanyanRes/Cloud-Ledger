@@ -9312,7 +9312,6 @@ function AssignmentPage({entities,user}){
   const[err,setErr]=useState('');const[msg,setMsg]=useState('');
   const[tpl,setTpl]=useState(null);
   const[upBusy,setUpBusy]=useState('');
-  const asgRef=useRef(null);const subRef=useRef(null);
 
   const isCLRF=String(entityId)===String(CLRF_ID)||/county\s+line\s+rail\s+fund\s+i\b/i.test(fundName);
 
@@ -9348,25 +9347,26 @@ function AssignmentPage({entities,user}){
     }catch(e){setErr(e.message);}finally{setBusy(false);}
   };
 
-  const uploadTpl=async(kind,ref)=>{
-    const f=ref.current&&ref.current.files&&ref.current.files[0];
-    if(!f){setErr('Choose a file first.');return;}
+  const onPick=async(kind,e)=>{
+    const f=e.target.files&&e.target.files[0];
+    e.target.value='';
+    if(!f)return;
     setUpBusy(kind);setErr('');setMsg('');
     try{await api.uploadAssignmentTemplate(kind,f);
-      setMsg((kind==='assignment'?'Assignment':'Subscription')+' template installed.');
-      if(ref.current)ref.current.value='';
+      setMsg((kind==='assignment'?'Assignment':'Subscription')+' template saved. It is stored on the server and reused for every assignment - no need to upload it again.');
       await loadTpl();
     }catch(e){setErr(e.message);}finally{setUpBusy('');}
   };
 
-  const tplRow=(kind,label,accept,ref)=>{
+  const tplRow=(kind,label,accept)=>{
     const st=tpl?(kind==='assignment'?tpl.assignment:tpl.subscription):null;
     const ok=st&&st.installed;
     return(<div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',padding:'8px 0'}}>
       <div style={{minWidth:230}}><b style={{fontSize:13}}>{label}</b>
-        <div style={{fontSize:11.5,color:ok?T.green:T.textDim}}>{ok?('Installed'+(st.updated_at?(' - '+new Date(st.updated_at).toLocaleDateString()):'')):'Not installed'}</div></div>
-      {isAdmin&&<><input ref={ref} type='file' accept={accept} style={{fontSize:12.5}}/>
-        <button style={S.btnS} onClick={()=>uploadTpl(kind,ref)} disabled={upBusy===kind}>{upBusy===kind?'Uploading...':(ok?'Replace':'Upload')}</button></>}
+        <div style={{fontSize:11.5,color:ok?T.green:T.textDim}}>{ok?('Saved on the server'+(st.updated_at?(' - '+new Date(st.updated_at).toLocaleDateString()):'')):'Not installed'}</div></div>
+      {isAdmin&&<label style={{...S.btnS,cursor:'pointer',display:'inline-block',opacity:upBusy===kind?0.6:1}}>
+        {upBusy===kind?'Saving...':(ok?'Replace file':'Choose file')}
+        <input type='file' accept={accept} style={{display:'none'}} disabled={upBusy===kind} onChange={e=>onPick(kind,e)}/></label>}
     </div>);
   };
 
@@ -9427,9 +9427,9 @@ function AssignmentPage({entities,user}){
 
     <div style={{...S.card,padding:16}}>
       <div style={{fontWeight:600,marginBottom:6}}>Templates</div>
-      <div style={{fontSize:11.5,color:T.textDim,marginBottom:6}}>The paperwork is generated from these master templates. {isAdmin?'Upload a revised template to replace it - no code change needed.':'An administrator manages these.'}</div>
-      {tplRow('assignment','Assignment and Assumption Agreement (.docx)','.docx',asgRef)}
-      {tplRow('subscription','CLRF Subscription Documents (.pdf)','.pdf',subRef)}
+      <div style={{fontSize:11.5,color:T.textDim,marginBottom:6}}>The paperwork is generated from these master templates. Each is uploaded once and stored on the server - reused for every assignment and kept across app updates. {isAdmin?'Choose a revised file anytime to replace it.':'An administrator manages these.'}</div>
+      {tplRow('assignment','Assignment and Assumption Agreement (.docx)','.docx')}
+      {tplRow('subscription','CLRF Subscription Documents (.pdf)','.pdf')}
     </div>
   </div>);
 }
