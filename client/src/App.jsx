@@ -3067,6 +3067,14 @@ function ArInvoiceDetail({entityId,invoice,bankAccts,canEdit,busy,act,onClose}){
   const[sendTo,setSendTo]=useState(inv.customer_email||'');
   const[pay,setPay]=useState({date:today(),amount:'',bank_account_code:bankAccts[0]?bankAccts[0].code:'',memo:''});
   const[reDate,setReDate]=useState(inv.invoice_date||today());const[showRedate,setShowRedate]=useState(false);
+  // Edit-details panel: correct the invoice number, the subject ("Re:") line, and
+  // per-line descriptions after an invoice is issued, without re-issuing it. Seeded
+  // from the current invoice each time the panel is opened.
+  const[showEdit,setShowEdit]=useState(false);
+  const[editNum,setEditNum]=useState(inv.invoice_num||'');
+  const[editMemo,setEditMemo]=useState(inv.memo||'');
+  const[editLines,setEditLines]=useState((inv.lines||[]).map(l=>({id:l.id,description:l.description||''})));
+  const openEdit=()=>{setEditNum(inv.invoice_num||'');setEditMemo(inv.memo||'');setEditLines((inv.lines||[]).map(l=>({id:l.id,description:l.description||''})));setShowEdit(v=>!v);};
   const isCm=inv.doc_type==='credit_memo';
   // Open credit memos for THIS invoice's customer, offered for application
   // when the invoice still has an open balance. Not loaded for a credit memo.
@@ -3117,6 +3125,7 @@ function ArInvoiceDetail({entityId,invoice,bankAccts,canEdit,busy,act,onClose}){
         {canEdit&&!isVoid&&<button style={{...S.btnGhost,color:T.orange}} disabled={!!busy}
           onClick={()=>{if(confirm(isDraft?'Void this draft? Its journal entry will be removed.':'Void '+inv.invoice_num+'? A reversing journal entry will be posted.'))act(()=>api.voidArInvoice(entityId,inv.id),'void');}}>Void</button>}
         {canEdit&&!isVoid&&<button style={S.btnS} disabled={!!busy} onClick={()=>{setReDate(inv.invoice_date||today());setShowRedate(v=>!v);}}>Change date</button>}
+        {canEdit&&!isVoid&&<button style={S.btnS} disabled={!!busy} onClick={openEdit}>Edit number / description</button>}
       </div>
       {canEdit&&!isVoid&&showRedate&&<div style={{...S.card,marginBottom:12}}>
         <div style={{fontSize:13,fontWeight:600,color:T.textBright,marginBottom:8}}>Change invoice date</div>
@@ -3126,6 +3135,22 @@ function ArInvoiceDetail({entityId,invoice,bankAccts,canEdit,busy,act,onClose}){
           <button style={S.btnGhost} disabled={!!busy} onClick={()=>setShowRedate(false)}>Cancel</button>
         </div>
         <div style={{fontSize:11,color:T.textMuted,marginTop:8}}>Moves the invoice's revenue journal entry to the same date, so revenue is recognized in the new period — same entry, nothing duplicated. The due date shifts by the same number of days.</div>
+      </div>}
+      {canEdit&&!isVoid&&showEdit&&<div style={{...S.card,marginBottom:12}}>
+        <div style={{fontSize:13,fontWeight:600,color:T.textBright,marginBottom:8}}>Edit invoice number &amp; descriptions</div>
+        <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap',marginBottom:10}}>
+          <div style={{flex:'0 0 200px'}}><label style={S.label}>Invoice number</label><input style={S.input} value={editNum} onChange={e=>setEditNum(e.target.value)}/></div>
+          <div style={{flex:'1 1 320px'}}><label style={S.label}>Subject / description (Re:)</label><input style={S.input} value={editMemo} onChange={e=>setEditMemo(e.target.value)} placeholder="e.g. August 2026 Asset Management Fees - Milhaus"/></div>
+        </div>
+        {editLines.length>0&&<div style={{marginBottom:6}}>
+          <label style={S.label}>Line description{editLines.length>1?'s':''}</label>
+          {editLines.map((l,i)=><input key={l.id} style={{...S.input,marginBottom:6}} value={l.description} onChange={e=>{const v=e.target.value;setEditLines(a=>a.map((x,j)=>j===i?{...x,description:v}:x));}}/>)}
+        </div>}
+        <div style={{display:'flex',gap:10,alignItems:'center'}}>
+          <button style={S.btnP} disabled={!!busy||!editNum.trim()} onClick={()=>act(()=>api.updateArInvoiceDetails(entityId,inv.id,{invoice_num:editNum.trim(),memo:editMemo,lines:editLines}),'editdet').then(r=>{if(r)setShowEdit(false);})}>{busy==='editdet'?'Saving…':'Save changes'}</button>
+          <button style={S.btnGhost} disabled={!!busy} onClick={()=>setShowEdit(false)}>Cancel</button>
+        </div>
+        <div style={{fontSize:11,color:T.textMuted,marginTop:8}}>Updates the invoice number, the subject line, and line descriptions. The revenue journal entry's memo and line text update to match — same date, same amounts, nothing re-posted. If this invoice was already emailed or filed to Workpapers, re-file or re-send to refresh that saved PDF.</div>
       </div>}
       {canEdit&&!isVoid&&<div style={{...S.card,marginBottom:12}}>
         <div style={{fontSize:13,fontWeight:600,color:T.textBright,marginBottom:8}}>Send to customer</div>

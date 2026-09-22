@@ -1060,6 +1060,79 @@ function registerArRoutes(app, ctx) {
     } catch (e) { fail(res, e); }
   });
 
+  // Edit invoice metadata — number, subject memo, and per-line descriptions —
+  // on an ISSUED invoice, WITHOUT re-issuing it or touching the GL. The draft-only
+  // PATCH above rebuilds the accrual JE (and refuses issued invoices) and the date
+  // PATCH only moves dates; AR (Tiffani) needs to correct an invoice number or a
+  // description after the fact. This updates invoice_num / memo / line descriptions
+  // and then syncs the linked accrual JE's memo and line descriptions IN PLACE —
+  // same entry number, same date, same amounts — so revenue is never touched and no
+  // period lock is tripped. Void invoices are immutable. If the invoice was already
+  // emailed or filed to Workpapers, that PDF is historical: re-file or re-send to
+  // refresh it (View PDF always regenerates from current data).
+  app.patch('/api/entities/:eid/ar/invoices/:id/details', ...writers, (req, res) => {
+    try {
+      const eid = req.params.eid, b = req.body || {};
+      const inv = db.prepare('SELECT * FROM ar_invoices WHERE id = ? AND entity_id = ?').get(req.params.id, eid);
+      if (!inv) return res.status(404).json({ error: 'Not found' });
+      if (inv.status === 'void') throw new Error('A void invoice cannot be edited.');
+
+      // Invoice number (optional): trim, require non-empty, enforce per-entity uniqueness.
+      let newNum = inv.invoice_num;
+      if (b.invoice_num !== undefined) {
+        newNum = String(b.invoice_num || '').trim();
+        if (!newNum) throw new Error('Invoice number cannot be blank.');
+        if (newNum !== inv.invoice_num) {
+          const clash = db.prepare('SELECT 1 FROM ar_invoices WHERE entity_id = ? AND invoice_num = ? AND id != ?').get(eid, newNum, inv.id);
+          if (clash) throw new Error('Invoice number ' + newNum + ' is already in use in this entity.');
+        }
+      }
+
+      // Subject / memo (optional): the "Re:" line on the PDF. Empty clears it.
+      const memo = b.memo !== undefined ? (String(b.memo || '').trim() || null) : inv.memo;
+
+      // Per-line description edits (optional): [{ id, description }]. Text only —
+      // qty/rate/amount/account are untouched, so the invoice total and the GL are unchanged.
+      const lineEdits = Array.isArray(b.lines) ? b.lines : null;
+
+      db.transaction(() => {
+        db.prepare('UPDATE ar_invoices SET invoice_num = ?, memo = ? WHERE id = ?').run(newNum, memo, inv.id);
+
+        if (lineEdits) {
+          const upd = db.prepare('UPDATE ar_invoice_lines SET description = ? WHERE id = ? AND invoice_id = ?');
+          for (const l of lineEdits) {
+            if (l && l.id != null && l.description !== undefined) {
+              const d = String(l.description || '').trim();
+              if (!d) throw new Error('Line description cannot be blank.');
+              upd.run(d, l.id, inv.id);
+            }
+          }
+        }
+
+        // Sync the linked accrual JE in place (native invoices only; opening items
+        // carry no JE). Memo + line descriptions follow the invoice; amounts, date
+        // and entry number are left exactly as posted.
+        if (inv.je_id) {
+          const arCode = String(inv.ar_account_code || '');
+          const isCM = String(inv.doc_type || 'invoice') === 'credit_memo';
+          const label = (isCM ? 'Credit memo ' : 'Invoice ') + newNum + ' - ' + inv.customer_name;
+          db.prepare("UPDATE journal_entries SET memo = ?, updated_by = ?, updated_at = datetime('now') WHERE id = ?")
+            .run((isCM ? 'AR Credit Memo ' : 'AR Invoice ') + newNum + ' - ' + inv.customer_name + (memo ? ' - ' + memo : ''), who(req), inv.je_id);
+          const jl = db.prepare('SELECT id, account_code FROM journal_lines WHERE entry_id = ? ORDER BY id').all(inv.je_id);
+          const invLines = db.prepare('SELECT description FROM ar_invoice_lines WHERE invoice_id = ? ORDER BY sort, id').all(inv.id);
+          const setDesc = db.prepare('UPDATE journal_lines SET description = ? WHERE id = ?');
+          let li = 0, arDone = false;
+          for (const line of jl) {
+            if (!arDone && String(line.account_code) === arCode) { setDesc.run(label, line.id); arDone = true; }
+            else if (invLines[li]) { setDesc.run(invLines[li].description, line.id); li++; }
+          }
+        }
+      })();
+
+      res.json(invoiceWithLines(db, eid, inv.id));
+    } catch (e) { fail(res, e); }
+  });
+
   app.delete('/api/entities/:eid/ar/invoices/:id', ...writers, (req, res) => {
     const eid = req.params.eid;
     const inv = db.prepare('SELECT * FROM ar_invoices WHERE id = ? AND entity_id = ?').get(req.params.id, eid);

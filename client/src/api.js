@@ -293,6 +293,7 @@ export const api = {
   deleteArInvoice: (eid, id) => request('/entities/' + eid + '/ar/invoices/' + id, { method: 'DELETE' }),
   voidArInvoice: (eid, id, date) => request('/entities/' + eid + '/ar/invoices/' + id + '/void', { method: 'POST', body: { date } }),
   redateArInvoice: (eid, id, body = {}) => request('/entities/' + eid + '/ar/invoices/' + id + '/date', { method: 'PATCH', body }),
+  updateArInvoiceDetails: (eid, id, body = {}) => request('/entities/' + eid + '/ar/invoices/' + id + '/details', { method: 'PATCH', body }),
   sendArInvoice: (eid, id, body = {}) => request('/entities/' + eid + '/ar/invoices/' + id + '/send', { method: 'POST', body }),
   markArInvoiceSent: (eid, id) => request('/entities/' + eid + '/ar/invoices/' + id + '/mark-sent', { method: 'POST', body: {} }),
   saveArInvoicePdf: (eid, id) => request('/entities/' + eid + '/ar/invoices/' + id + '/save-pdf', { method: 'POST', body: {} }),
