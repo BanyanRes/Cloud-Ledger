@@ -821,7 +821,7 @@ export default function App(){
   useEffect(()=>{if(user)Promise.all([api.getEntities(),api.getMyPrefs().catch(()=>({}))]).then(([e,p])=>{setEntities(e);if(p&&p.defaultEntityId!=null)setDefaultEntityId(p.defaultEntityId);if(e.length>0&&!activeEntity){const def=p&&p.defaultEntityId;setActiveEntity((def!=null&&e.find(x=>x.id===def))?def:e[0].id);}});},[user]);
   const setDefaultEntity=(id)=>{setDefaultEntityId(id);api.saveMyPrefs({defaultEntityId:id}).catch(err=>console.error('[prefs] save default entity failed:',err.message));};
   const refreshEntities=useCallback(async()=>{const e=await api.getEntities();setEntities(e);return e;},[]);
-  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers','intercompany','consolidation','periods'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
+  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers','intercompany','consolidation','periods','administration'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
   // Read-only users (Viewer) SEE the same sections as an Accountant but cannot edit.
   // canEdit gates every write control; it must never be derived from mere visibility.
   const canEdit = !!user && (user.role==='Admin' || (()=>{ const ae=activeEntity?entities.find(e=>e.id===activeEntity):null; return ae&&ae.access_level ? ae.access_level==='full' : user.role==='Accountant'; })());
@@ -929,6 +929,7 @@ export default function App(){
       {id:'wp_qtrclose',label:'Quarterly Closing Workpaper',icon:'🗓️',section:'workpapers'},
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
+      {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
       {id:'users',label:'Users',icon:NI.users,section:'all'},
       {id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
@@ -1005,6 +1006,7 @@ export default function App(){
         {page==='ic_recon'&&canAccess('intercompany')&&<IntercompanyReconciliation entities={entities} activeEntity={activeEntity} setPage={setPage} key={'icr-'+rk}/>}
         {page==='external_tb'&&canAccess('intercompany')&&<ExternalTbPage canEdit={canEdit} key={'etb-'+rk}/>}
         {page==='org_structure'&&canAccess('intercompany')&&<OrgStructurePage entities={entities} canEdit={canEdit} key={'org-'+rk}/>}
+        {page==='assignment'&&canAccess('administration')&&<AssignmentPage entities={entities} user={user} key={'asg-'+rk}/>}
         {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
@@ -9287,6 +9289,149 @@ function UnmappedRow({u,canEdit,onAdd}){
     <td style={S.td}>{canEdit?<select style={S.selectSm} value={tt} onChange={e=>setTt(e.target.value)}>{TYPES.map(t=><option key={t}>{t}</option>)}</select>:''}</td>
     <td style={S.td}>{canEdit?<button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>onAdd(u,tc.trim(),tn.trim(),tt)}>map</button>:''}</td>
   </tr>);
+}
+
+function AssignmentPage({entities,user}){
+  const isAdmin=user&&user.role==='Admin';
+  const TYPE_OPTS=[['individual','Individual'],['llc','LLC'],['lp','Limited Partnership'],['corporation','Corporation'],['scorp','S Corporation'],['partnership','Partnership'],['trust','Trust'],['ira','IRA']];
+  const CLRF_ID=40;
+  const entityOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
+  const[entityId,setEntityId]=useState('');
+  const[fundName,setFundName]=useState('');
+  const[assignorName,setAssignorName]=useState('');
+  const[assignorType,setAssignorType]=useState('llc');
+  const[assigneeName,setAssigneeName]=useState('');
+  const[assigneeType,setAssigneeType]=useState('individual');
+  const[effDate,setEffDate]=useState(today());
+  const[showAdv,setShowAdv]=useState(false);
+  const[interestType,setInterestType]=useState('');
+  const[governingLaw,setGoverningLaw]=useState('');
+  const[assignorSignatory,setAssignorSignatory]=useState('');
+  const[assignorTitle,setAssignorTitle]=useState('');
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');const[msg,setMsg]=useState('');
+  const[tpl,setTpl]=useState(null);
+  const[upBusy,setUpBusy]=useState('');
+  const asgRef=useRef(null);const subRef=useRef(null);
+
+  const isCLRF=String(entityId)===String(CLRF_ID)||/county\s+line\s+rail\s+fund\s+i\b/i.test(fundName);
+
+  const loadTpl=useCallback(async()=>{try{setTpl(await api.getAssignmentTemplateStatus());}catch(e){setErr(e.message);}},[]);
+  useEffect(()=>{loadTpl();},[loadTpl]);
+
+  const pickEntity=id=>{
+    setEntityId(id);
+    const e=(entities||[]).find(x=>String(x.id)===String(id));
+    if(String(id)===String(CLRF_ID))setFundName('County Line Rail Fund I, LP');
+    else if(e)setFundName(String(e.name).replace(/\s*\([^)]*\)\s*$/,'').trim());
+  };
+
+  const fmtDate=iso=>{
+    if(!iso)return'';
+    const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);if(!m)return iso;
+    const months=['January','February','March','April','May','June','July','August','September','October','November','December'];
+    return months[Number(m[2])-1]+' '+Number(m[3])+', '+m[1];
+  };
+
+  const generate=async()=>{
+    setErr('');setMsg('');
+    if(!fundName.trim()){setErr('Enter the fund (legal) name.');return;}
+    if(!assignorName.trim()){setErr('Enter the assignor name.');return;}
+    if(!assigneeName.trim()){setErr('Enter the assignee name.');return;}
+    if(!effDate){setErr('Pick the effective date.');return;}
+    setBusy(true);
+    try{
+      const out=await api.generateAssignment({fundName:fundName.trim(),isCLRF,assignorName:assignorName.trim(),assignorType,assigneeName:assigneeName.trim(),assigneeType,effectiveDate:fmtDate(effDate),interestType:interestType.trim()||undefined,governingLaw:governingLaw.trim()||undefined,assignorSignatory:assignorSignatory.trim()||undefined,assignorTitle:assignorTitle.trim()||undefined});
+      if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
+      setMsg('Generated '+out.filename+(out.subscriptionMissing?' - note: the CLRF subscription template is not installed, so only the assignment agreement was produced. Install it below.':(isCLRF?' (assignment agreement plus subscription documents).':'.')));
+    }catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+
+  const uploadTpl=async(kind,ref)=>{
+    const f=ref.current&&ref.current.files&&ref.current.files[0];
+    if(!f){setErr('Choose a file first.');return;}
+    setUpBusy(kind);setErr('');setMsg('');
+    try{await api.uploadAssignmentTemplate(kind,f);
+      setMsg((kind==='assignment'?'Assignment':'Subscription')+' template installed.');
+      if(ref.current)ref.current.value='';
+      await loadTpl();
+    }catch(e){setErr(e.message);}finally{setUpBusy('');}
+  };
+
+  const tplRow=(kind,label,accept,ref)=>{
+    const st=tpl?(kind==='assignment'?tpl.assignment:tpl.subscription):null;
+    const ok=st&&st.installed;
+    return(<div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',padding:'8px 0'}}>
+      <div style={{minWidth:230}}><b style={{fontSize:13}}>{label}</b>
+        <div style={{fontSize:11.5,color:ok?T.green:T.textDim}}>{ok?('Installed'+(st.updated_at?(' - '+new Date(st.updated_at).toLocaleDateString()):'')):'Not installed'}</div></div>
+      {isAdmin&&<><input ref={ref} type='file' accept={accept} style={{fontSize:12.5}}/>
+        <button style={S.btnS} onClick={()=>uploadTpl(kind,ref)} disabled={upBusy===kind}>{upBusy===kind?'Uploading...':(ok?'Replace':'Upload')}</button></>}
+    </div>);
+  };
+
+  const assignmentReady=tpl&&tpl.assignment&&tpl.assignment.installed;
+
+  return(<div>
+    <div style={S.h1}>Assignment of Interest</div>
+    <div style={S.sub}>Generate an assignment and assumption agreement from the fund, the assignor, the assignee and the effective date. For County Line Rail Fund I, the incoming investor's subscription documents are produced alongside it.</div>
+    {err&&<div style={{...S.card,borderColor:T.red+'40'}}><div style={S.err}>{err}</div></div>}
+    {msg&&<div style={{...S.card,borderColor:T.green+'40',padding:14}}><div style={S.success}>{msg}</div></div>}
+
+    <div style={{...S.card,padding:16,marginBottom:18}}>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+        <div style={{minWidth:260}}><label style={S.label}>Fund</label>
+          <select style={{...S.selectSm,minWidth:260}} value={entityId} onChange={e=>pickEntity(e.target.value)}>
+            <option value=''>Select a fund...</option>
+            {entityOpts.map(e=><option key={e.id} value={String(e.id)}>{e.name}</option>)}</select></div>
+        <div style={{flex:1,minWidth:260}}><label style={S.label}>Fund legal name (as it should read)</label>
+          <input style={{...S.inputSm,width:'100%'}} value={fundName} onChange={e=>setFundName(e.target.value)} placeholder='e.g. County Line Rail Fund I, LP'/></div>
+      </div>
+      {isCLRF&&<div style={{fontSize:11.5,color:T.green,marginTop:8}}>County Line Rail Fund I - the subscription documents will be included.</div>}
+
+      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginTop:14}}>
+        <div style={{flex:1,minWidth:260}}><label style={S.label}>Assignor (current holder)</label>
+          <input style={{...S.inputSm,width:'100%'}} value={assignorName} onChange={e=>setAssignorName(e.target.value)} placeholder='Full legal name'/></div>
+        <div style={{minWidth:170}}><label style={S.label}>Assignor type</label>
+          <select style={{...S.selectSm,minWidth:170}} value={assignorType} onChange={e=>setAssignorType(e.target.value)}>
+            {TYPE_OPTS.map(o=><option key={o[0]} value={o[0]}>{o[1]}</option>)}</select></div>
+      </div>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginTop:14}}>
+        <div style={{flex:1,minWidth:260}}><label style={S.label}>Assignee (incoming holder)</label>
+          <input style={{...S.inputSm,width:'100%'}} value={assigneeName} onChange={e=>setAssigneeName(e.target.value)} placeholder='Full legal name'/></div>
+        <div style={{minWidth:170}}><label style={S.label}>Assignee type</label>
+          <select style={{...S.selectSm,minWidth:170}} value={assigneeType} onChange={e=>setAssigneeType(e.target.value)}>
+            {TYPE_OPTS.map(o=><option key={o[0]} value={o[0]}>{o[1]}</option>)}</select></div>
+        <div style={{minWidth:170}}><label style={S.label}>Effective date</label>
+          <input style={S.inputSm} type='date' value={effDate} onChange={e=>setEffDate(e.target.value)}/></div>
+      </div>
+
+      <div style={{marginTop:12}}>
+        <button style={S.btnS} onClick={()=>setShowAdv(!showAdv)}>{showAdv?'- Hide options':'+ More options'}</button></div>
+      {showAdv&&<div style={{display:'flex',gap:12,flexWrap:'wrap',marginTop:8}}>
+        <div style={{minWidth:200}}><label style={S.label}>Interest type</label>
+          <input style={S.inputSm} value={interestType} onChange={e=>setInterestType(e.target.value)} placeholder='(default: by assignor type)'/></div>
+        <div style={{minWidth:170}}><label style={S.label}>Governing law (state)</label>
+          <input style={S.inputSm} value={governingLaw} onChange={e=>setGoverningLaw(e.target.value)} placeholder='Delaware'/></div>
+        <div style={{minWidth:220}}><label style={S.label}>Assignor signatory name</label>
+          <input style={S.inputSm} value={assignorSignatory} onChange={e=>setAssignorSignatory(e.target.value)} placeholder='(default: assignor name)'/></div>
+        <div style={{minWidth:170}}><label style={S.label}>Assignor signatory title</label>
+          <input style={S.inputSm} value={assignorTitle} onChange={e=>setAssignorTitle(e.target.value)} placeholder='e.g. Manager'/></div>
+      </div>}
+
+      <div style={{marginTop:16}}>
+        <button style={S.btnP} onClick={generate} disabled={busy||!assignmentReady}>{busy?'Generating...':(isCLRF?'Generate assignment + subscription':'Generate assignment')}</button>
+        {!assignmentReady&&<span style={{fontSize:11.5,color:T.textDim,marginLeft:10}}>Install the assignment template below first.</span>}
+      </div>
+    </div>
+
+    <div style={{...S.card,padding:16}}>
+      <div style={{fontWeight:600,marginBottom:6}}>Templates</div>
+      <div style={{fontSize:11.5,color:T.textDim,marginBottom:6}}>The paperwork is generated from these master templates. {isAdmin?'Upload a revised template to replace it - no code change needed.':'An administrator manages these.'}</div>
+      {tplRow('assignment','Assignment and Assumption Agreement (.docx)','.docx',asgRef)}
+      {tplRow('subscription','CLRF Subscription Documents (.pdf)','.pdf',subRef)}
+    </div>
+  </div>);
 }
 
 function OrgStructurePage({entities,canEdit=true}){

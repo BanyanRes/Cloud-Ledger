@@ -1003,5 +1003,38 @@ export const api = {
   getConsolSchedules: (parentEid, asOf) =>
     request('/consolidation/' + parentEid + '/schedules?as_of=' + asOf),
 
+  // ── Assignment of Interest (document generator) ──
+  getAssignmentTemplateStatus: () => request('/assignments/templates/status'),
+  uploadAssignmentTemplate: async (kind, file) => {
+    const token = getToken();
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(API_BASE + '/assignments/templates/' + kind, {
+      method: 'POST',
+      headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: fd,
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    let data = {}; try { data = await res.json(); } catch {}
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    return data;
+  },
+  generateAssignment: async (payload) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/assignments/generate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: JSON.stringify(payload),
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) { let data = {}; try { data = await res.json(); } catch {} throw new Error(data.error || 'Generation failed'); }
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const filename = m ? m[1] : 'Assignment.docx';
+    const subscriptionMissing = res.headers.get('x-subscription-missing') === '1';
+    const blob = await res.blob();
+    return { blob, filename, subscriptionMissing };
+  },
   setToken, getToken, clearToken,
 };

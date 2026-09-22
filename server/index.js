@@ -11302,6 +11302,19 @@ require('./orgstructure').registerOrgStructureRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ Assignment of Interest — document generator ═══
+// Fund + Assignor + Assignee + Effective Date -> filled Assignment & Assumption
+// Agreement (.docx) for any fund; for CLRF, additionally the Subscription
+// Documents (.pdf) with the incoming investor name stamped on. Templates live on
+// the persistent data volume under <dataDir>/templates and are uploaded once via
+// the Assignment page (Admin only). See server/assignments.js.
+require('./assignments').registerAssignmentRoutes(app, {
+  auth,
+  requireRole,
+  memUpload,
+  templatesDir: path.join(dataDir, 'templates'),
+});
+
 // ═══ Financial Statements package generator ═══
 // Generates GL-derived financial statements (Balance Sheet, Operations, Cash
 // Flows, Members' Equity) for an entity as of a date, on a monthly/quarterly/
