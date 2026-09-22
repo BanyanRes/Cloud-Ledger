@@ -633,6 +633,7 @@ const BS_ACCOUNT_MAP_BANYAN = {
   '16900': ['Other Assets', 'Land'],
   // Other Assets → Other Development
   '12383': ['Other Assets', 'Other Development'],
+  '12384': ['Other Assets', 'Other Development'], // Accumulated Amortization — contra to 12383 Organization Fees; code order puts it directly below Org Fees within Other Development
   '12720': ['Other Assets', 'Other Development'],
   '12730': ['Other Assets', 'Other Development'],
   // Current Liabilities → Accounts Payable (incl. Credit Card Payable)
