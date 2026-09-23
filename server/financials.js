@@ -2887,7 +2887,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     // On every page: draw the repeated date-line heading + a wider blank space
     // (~2 lines) between the heading and the column headers / first row so the
     // top of the statement doesn't look cramped.
-    if (dateLine) { textC(dateLine, opts.plainHeader ? 11 : FS.sub, reg, PH - PAGE.mT - (opts.plainHeader ? 8 : 2)); y -= (opts.plainHeader ? 18 : 14); }
+    if (dateLine) { textC(dateLine, opts.plainHeader ? 11 : FS.sub, reg, PH - PAGE.mT - (opts.plainHeader ? 8 : 12)); y -= (opts.plainHeader ? 18 : 14); }
     y -= 20;
     // Repeat the column headers on continuation pages (not the very first page,
     // where the statement body calls colHeaders() itself in the right spot).
@@ -4121,9 +4121,9 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     y = PH - PAGE.mT;
     dcenter(meta.entityName, F.title, bold, PH - PAGE.mT + 22);
     dcenter(curTitle, F.sub, bold, PH - PAGE.mT + 10);
-    if (curDateLine) dcenter(curDateLine, F.sub, reg, PH - PAGE.mT - 1);
+    if (curDateLine) dcenter(curDateLine, F.sub, reg, PH - PAGE.mT - 11);
     footer();
-    y -= 24; colHeaders();
+    y -= 28; colHeaders();
   };
   const ensure = (space) => { if (y - space < PAGE.mB + 8) newPage(); };
   // Draw the figure in every column, right-aligned on the column edge. When
