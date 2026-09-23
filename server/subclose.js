@@ -214,6 +214,37 @@ async function fixSheetPrOrder(buf) {
   } catch (e) { return buf; }
 }
 
+// The Weaver template's "Sub Close Summary" sheet is built from formulas that
+// reference an EXTERNAL workbook ('[1]...'!Ref — Weaver's own source file). ExcelJS
+// drops the external-link parts on save (xl/externalLinks + the workbook's
+// <externalReference>), which leaves those formulas pointing at a workbook that no
+// longer exists, so Excel reports "Removed Records: Formula" and strips them on open.
+// Those cells only ever displayed cached values anyway (the Weaver file is never
+// shipped with this workpaper and can't recompute on anyone's machine), so freeze
+// every externally-linked formula to its cached value: drop the <f> element, keep
+// the <v>. Only sheets that actually carry an external '[1]' reference are touched,
+// so the Calculation sheet's live internal formulas are left intact.
+async function freezeExternalLinkFormulas(buf) {
+  try {
+    const zip = await JSZip.loadAsync(buf);
+    const names = Object.keys(zip.files).filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n));
+    let changed = false;
+    for (const name of names) {
+      const xml = await zip.file(name).async('string');
+      if (!xml.includes('[1]')) continue; // sheet has no external-workbook links
+      // Strip the formula (shared follower <f .../> or full <f>…</f>) from any cell
+      // that has a cached <v>, keeping the value and the cell's attributes/style.
+      const fixed = xml.replace(
+        /<c\b([^>]*)>(?:<f\b[^>]*\/>|<f\b[^>]*>[\s\S]*?<\/f>)(<v>[\s\S]*?<\/v>)<\/c>/g,
+        '<c$1>$2</c>',
+      );
+      if (fixed !== xml) { zip.file(name, fixed); changed = true; }
+    }
+    if (!changed) return buf;
+    return await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  } catch (e) { return buf; }
+}
+
 async function buildWorkbook(data) {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.readFile(TEMPLATE_PATH);
@@ -336,7 +367,7 @@ function registerSubcloseRoutes(app, ctx) {
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         const data = buildData(ctx, asOf, { entity_id: eid });
         const wb = await buildWorkbook(data);
-        const buf = await fixSheetPrOrder(Buffer.from(await wb.xlsx.writeBuffer()));
+        const buf = await freezeExternalLinkFormulas(await fixSheetPrOrder(Buffer.from(await wb.xlsx.writeBuffer())));
         const saved = saveToWorkpapers(ctx, eid, asOf, buf, who);
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', 'attachment; filename="' + saved.original_name + '"');
@@ -360,7 +391,7 @@ function registerSubcloseRoutes(app, ctx) {
       if (!isDate(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
       const data = buildData(ctx, asOf, { entity_id: eid });
       const wb = await buildWorkbook(data);
-      const buf = await fixSheetPrOrder(Buffer.from(await wb.xlsx.writeBuffer()));
+      const buf = await freezeExternalLinkFormulas(await fixSheetPrOrder(Buffer.from(await wb.xlsx.writeBuffer())));
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename="' + fileNameFor(asOf) + '"');
       res.send(buf);
