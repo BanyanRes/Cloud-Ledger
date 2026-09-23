@@ -119,6 +119,7 @@ function buildData(ctx, quarter, opts = {}) {
   // flows) and stored in fund_preferred_return. Read them when the caller didn't
   // pass an explicit override.
   let storedPref = null;
+  let prWorkpaper = null; // full preferred-return workpaper data (schedule + XIRR) for the Preferred Return tab
   if (!prefByClass && opts.prefTotal == null) {
     try {
       // Route through the preferred-return workpaper so the §17(c) build-up uses
@@ -128,6 +129,7 @@ function buildData(ctx, quarter, opts = {}) {
       const prwp = require('./preferredreturn');
       const prData = prwp.buildData({ db }, quarter, { entity_id: eid });
       if (prData && prData.fund) storedPref = { roc: prData.fund.roc, pref: prData.fund.pref, note: prData.fund.note };
+      if (prData) prWorkpaper = { fund: prData.fund, calc: prData.calc };
     } catch (e) {
       try {
         storedPref = db.prepare('SELECT roc, pref, note FROM fund_preferred_return WHERE entity_id = ? AND quarter_end = ?')
@@ -169,6 +171,19 @@ function buildData(ctx, quarter, opts = {}) {
   const prefKnown = prefByClass ? lps.every((p) => p.pref !== null) : (prefTotal != null);
   const distributable = sum(lps, 'distributable');
   const rocCL = sum(lps, 'roc');
+  // Allocate the fund-level preferred return (from the preferred-return workpaper)
+  // to each LP pro-rata by contributed capital, so the per-LP waterfall columns
+  // compute: pref_LP = fund_pref * ROC_LP / Σ ROC. The shares sum to 1, so the
+  // allocated preferred returns sum back to the fund figure. Runs only when a
+  // per-LP schedule was not supplied and a fund-level preferred return is known.
+  let prefAllocated = false;
+  if (!prefByClass && prefTotal != null && rocCL > 0.005) {
+    for (const p of lps) {
+      p.pref = r2(prefTotal * (p.roc / rocCL));
+      Object.assign(p, waterfallLP(p.distributable, p.roc, p.pref));
+    }
+    prefAllocated = true;
+  }
   // §17(c) Return of Capital: use the maintained workpaper figure when present so
   // the build-up ties to the fund's preferred-return workpaper; otherwise the
   // CL-derived unreturned contributions.
@@ -184,16 +199,20 @@ function buildData(ctx, quarter, opts = {}) {
     // Carry build-up: sum of per-LP carry (0 in a shortfall). Only meaningful when
     // pref is per-class; with a fund-level pref override the tiers stay 0 unless
     // the aggregate excess is positive.
-    catchupGP: prefByClass && prefKnown ? sum(lps, 'catchupGP') : 0,
-    catchupLP: prefByClass && prefKnown ? sum(lps, 'catchupLP') : 0,
-    residualLP: prefByClass && prefKnown ? sum(lps, 'residualLP') : 0,
-    residualGP: prefByClass && prefKnown ? sum(lps, 'residualGP') : 0,
-    carry_quarter: prefByClass && prefKnown ? sum(lps, 'carryGP') : (prefKnown && prefTotal != null && (distributable - rocBuildup - prefTotal) > 0 ? null : 0),
+    // Carry build-up = sum of the per-LP tiers. The per-LP rows are populated
+    // either from a supplied per-LP schedule or from the pro-rata allocation of the
+    // fund preferred return above, so this sums correctly in both cases.
+    catchupGP: prefKnown ? sum(lps, 'catchupGP') : 0,
+    catchupLP: prefKnown ? sum(lps, 'catchupLP') : 0,
+    residualLP: prefKnown ? sum(lps, 'residualLP') : 0,
+    residualGP: prefKnown ? sum(lps, 'residualGP') : 0,
+    carry_quarter: prefKnown ? sum(lps, 'carryGP') : 0,
     accum_carry: accumCarryByClass ? sum(lps, 'accum_carry') : r2(opts.accumCarryTotal || 0),
     pref_known: prefKnown,
+    pref_allocated: prefAllocated,
     pref_source: prefByClass ? 'per-LP preferred-return workpaper'
-      : (opts.prefTotal != null ? 'fund-level override'
-        : (storedPref ? ('stored preferred-return workpaper' + (storedPref.note ? ' (' + storedPref.note + ')' : '')) : null)),
+      : ((opts.prefTotal != null ? 'fund-level override' : (storedPref ? ('preferred-return workpaper' + (storedPref.note ? ' (' + storedPref.note + ')' : '')) : null))
+        + (prefAllocated ? ', allocated to each LP pro-rata by Return of Capital' : '')),
     roc_note: (opts.rocTotal != null || (storedPref && storedPref.roc != null)) ? 'per preferred-return workpaper' : 'CL general ledger',
   };
   // §17(c)(iii) clawback if liquidated & dissolved today = carry received to date
@@ -202,7 +221,7 @@ function buildData(ctx, quarter, opts = {}) {
   fund.carry_to_date = fund.accum_carry;
   fund.clawback = prefKnown ? Math.max(0, r2(fund.accum_carry - (fund.carry_quarter || 0))) : null;
 
-  return { quarter, fund, partners, lps };
+  return { quarter, fund, partners, lps, prWorkpaper };
 }
 
 // ─── Workbook ────────────────────────────────────────────────────────────────
@@ -249,8 +268,9 @@ function buildWorkbook(data) {
   const glRowByClass = {}; data.partners.forEach((p, i) => { glRowByClass[p.class_id] = 5 + i; });
   const lpRowByClass = {}; data.lps.forEach((p, i) => { lpRowByClass[p.class_id] = 5 + i; });
   const NLP = data.lps.length;
-  const PR_FUND_ROC = 7 + NLP;   // 'Return of Capital' fund cell on Preferred Return tab
-  const PR_FUND_PREF = 8 + NLP;  // 'Preferred Return' fund cell on Preferred Return tab
+  const PR_ALLOC_TOTAL = 5 + NLP; // 'Total' row of the per-LP allocation on Preferred Return tab
+  const PR_FUND_ROC = 8 + NLP;    // 'Return of Capital' fund cell on Preferred Return tab
+  const PR_FUND_PREF = 9 + NLP;   // 'Preferred Return' fund cell on Preferred Return tab
 
   // ── Carried Interest (client-facing, mirrors the §17(c) FS schedule) ─────────
   ci.getColumn(1).width = 6; ci.getColumn(2).width = 62; ci.getColumn(3).width = 22;
@@ -428,31 +448,71 @@ function buildWorkbook(data) {
   cm.getCell('A' + cmr).value = 'Total'; cm.getCell('A' + cmr).font = F({ bold: true });
   { const c = cm.getCell('C' + cmr); c.value = { formula: 'SUM(C5:C' + (cmr - 1) + ')', result: r2(data.lps.reduce((a, x) => a + (Number(x.commitment) || 0), 0)) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
 
-  // ── Preferred Return (supporting: 8% preferred return + §17(c) fund inputs) ──
+  // ── Preferred Return (supporting) — reproduces the preferred-return workpaper
+  //    and allocates the fund preferred return to each LP by Return of Capital ──
   pw.getCell('A1').value = 'PREFERRED RETURN — ' + fund.entity_name;
   pw.getCell('A1').font = F({ size: 12, bold: true });
-  pw.getCell('A2').value = '8% annually-compounded, IRR-based preferred return from the fund preferred-return workpaper (Weaver). '
-    + 'Source: ' + (fund.pref_source || 'PENDING') + '. Per-LP allocation shown where provided; the fund-level Return of Capital and Preferred Return below feed the §17(c) build-up total.';
-  pw.getCell('A2').font = SMALLI; pw.getCell('A2').alignment = { wrapText: true };
-  headerRow(pw, 4, ['Investor class', 'Type', 'Preferred Return'], [40, 8, 20]);
+  pw.getCell('A2').value = '8% annually-compounded, IRR-based preferred return from the fund preferred-return workpaper. Source: '
+    + (fund.pref_source || 'PENDING') + '. Each LP’s preferred return is the fund figure allocated pro-rata by Return of Capital; '
+    + 'the fund calculation (equalized LP cash-flow schedule and the 8% XIRR that solves it) is shown below.';
+  pw.getCell('A2').font = SMALLI; pw.getCell('A2').alignment = { wrapText: true }; pw.mergeCells('A2:E2');
+  pw.getColumn(2).width = 16;
+  headerRow(pw, 4, ['Investor class', 'Type', 'Preferred Return', 'Return of Capital', 'Allocation %'], [40, 16, 18, 18, 14]);
   let pwr = 5;
   for (const p of data.lps) {
+    const glr = glRowByClass[p.class_id];
     const row = pw.getRow(pwr);
     row.getCell(1).value = p.name; row.getCell(1).font = F();
     row.getCell(2).value = p.partner_type; row.getCell(2).font = F();
-    const c = row.getCell(3);
-    if (p.pref === null) { c.value = '—'; c.font = F({ italic: true }); }
-    else { c.value = p.pref; c.numFmt = MONEY; c.font = BLUE; }
+    // Return of Capital links to GL Data; Allocation % = ROC / total ROC;
+    // Preferred Return = fund preferred return × allocation % (all live formulas).
+    { const c = row.getCell(4); c.value = { formula: "'GL Data'!D" + glr, result: p.roc }; c.numFmt = MONEY; c.font = F(); }
+    { const c = row.getCell(5); c.value = { formula: 'IF($D$' + PR_ALLOC_TOTAL + '=0,0,D' + pwr + '/$D$' + PR_ALLOC_TOTAL + ')', result: (fund.roc_cl > 0.005 ? (p.roc / fund.roc_cl) : 0) }; c.numFmt = '0.0000%'; c.font = F(); }
+    { const c = row.getCell(3); if (p.pref === null) { c.value = '—'; c.font = F({ italic: true }); } else { c.value = { formula: '$C$' + PR_FUND_PREF + '*E' + pwr, result: p.pref }; c.numFmt = MONEY; c.font = F(); } }
     pwr++;
   }
-  // Fund-level block. Rows PR_FUND_ROC / PR_FUND_PREF are referenced by the
-  // Waterfall Detail total row (Return of Capital / Preferred Return).
-  pw.getCell('A' + (6 + NLP)).value = 'Fund-level (per preferred-return workpaper)';
-  pw.getCell('A' + (6 + NLP)).font = F({ bold: true });
+  // Allocation total row (Σ Preferred Return = fund preferred return; Σ % = 100%).
+  { const rt = PR_ALLOC_TOTAL;
+    pw.getCell('A' + rt).value = 'Total'; pw.getCell('A' + rt).font = F({ bold: true });
+    const put = (col, formula, cached, fmt) => { const c = pw.getCell(col + rt); c.value = { formula: formula, result: cached }; c.numFmt = fmt; c.font = F({ bold: true }); c.border = { top: THIN }; };
+    put('C', 'SUM(C5:C' + (rt - 1) + ')', fund.pref == null ? 0 : fund.pref, MONEY);
+    put('D', 'SUM(D5:D' + (rt - 1) + ')', fund.roc_cl, MONEY);
+    put('E', 'SUM(E5:E' + (rt - 1) + ')', 1, '0.0000%');
+    pw.getCell('A' + rt).border = { top: THIN }; pw.getCell('B' + rt).border = { top: THIN };
+  }
+  // Fund-level block (rows PR_FUND_ROC / PR_FUND_PREF are referenced by the
+  // Waterfall Detail total row and by the per-LP allocation formulas above).
+  pw.getCell('A' + (7 + NLP)).value = 'Fund-level (per preferred-return workpaper)'; pw.getCell('A' + (7 + NLP)).font = F({ bold: true });
   pw.getCell('A' + PR_FUND_ROC).value = 'Return of Capital'; pw.getCell('A' + PR_FUND_ROC).font = F();
   { const c = pw.getCell('C' + PR_FUND_ROC); if (fund.roc === null) { c.value = '—'; c.font = F({ italic: true }); } else { c.value = fund.roc; c.numFmt = MONEY; c.font = BLUE; } }
   pw.getCell('A' + PR_FUND_PREF).value = 'Preferred Return'; pw.getCell('A' + PR_FUND_PREF).font = F();
   { const c = pw.getCell('C' + PR_FUND_PREF); if (fund.pref === null) { c.value = '—'; c.font = F({ italic: true }); } else { c.value = fund.pref; c.numFmt = MONEY; c.font = BLUE; } }
+
+  // Embed the preferred-return workpaper calculation: the equalized LP cash-flow
+  // stream and the 8% XIRR that solves the fund preferred return.
+  const prc = data.prWorkpaper && data.prWorkpaper.calc;
+  let sr = PR_FUND_PREF + 2;
+  if (prc && prc.flows && prc.flows.length) {
+    pw.getCell('A' + sr).value = 'Fund preferred-return calculation — 8% XIRR on the equalized Limited-Partner cash flows';
+    pw.getCell('A' + sr).font = F({ bold: true }); pw.mergeCells('A' + sr + ':E' + sr); sr += 1;
+    pw.getCell('A' + sr).value = 'Contributions are outflows to the LPs; a single assumed liquidating distribution of Return of Capital + Preferred Return at the measurement date makes the stream’s XIRR equal 8%.';
+    pw.getCell('A' + sr).font = SMALLI; pw.getCell('A' + sr).alignment = { wrapText: true }; pw.mergeCells('A' + sr + ':E' + sr); sr += 1;
+    headerRow(pw, sr, ['Date', 'LP net cash flow'], null); sr += 1;
+    for (const f of prc.flows) {
+      pw.getCell('A' + sr).value = f.date; pw.getCell('A' + sr).font = F(); pw.getCell('A' + sr).alignment = { horizontal: 'left' };
+      const c = pw.getCell('B' + sr); c.value = r2(f.amount); c.numFmt = MONEY; c.font = BLUE; sr += 1;
+    }
+    // Terminal liquidating distribution = Return of Capital + Preferred Return.
+    pw.getCell('A' + sr).value = prc.terminal_date || q.end; pw.getCell('A' + sr).font = F({ bold: true }); pw.getCell('A' + sr).alignment = { horizontal: 'left' };
+    { const c = pw.getCell('B' + sr); c.value = { formula: 'C' + PR_FUND_ROC + '+C' + PR_FUND_PREF, result: prc.terminal_inflow != null ? prc.terminal_inflow : r2((fund.roc || 0) + (fund.pref || 0)) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+    pw.getCell('A' + sr).border = { top: THIN }; sr += 1;
+    pw.getCell('A' + sr).value = 'Internal rate of return (XIRR)'; pw.getCell('A' + sr).font = F({ bold: true });
+    { const c = pw.getCell('B' + sr); if (prc.irr == null) { c.value = '—'; c.font = F({ italic: true }); } else { c.value = prc.irr; c.numFmt = '0.0000%'; c.font = F({ bold: true }); } }
+    { const c = pw.getCell('C' + sr); c.value = 'target ' + (PREF_RATE * 100).toFixed(0) + '%'; c.font = SMALLI; }
+  } else {
+    pw.getCell('A' + sr).value = 'The dated cash-flow schedule is maintained in the preferred-return workpaper; only the Return of Capital and Preferred Return totals above were available for this run.';
+    pw.getCell('A' + sr).font = SMALLI; pw.getCell('A' + sr).alignment = { wrapText: true }; pw.mergeCells('A' + sr + ':E' + sr);
+  }
 
   // ── Notes & Sources ──────────────────────────────────────────────────────────
   nt.getColumn(1).width = 118;
