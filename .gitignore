@@ -7,3 +7,6 @@ data/
 *.db-shm
 tools/docx/examples/_selftest_*.docx
 _verify_*/
+# Claude Code worktrees and per-machine settings
+.claude/worktrees/
+.claude/settings.local.json

@@ -4,7 +4,7 @@ Guidance for Claude working in this repository.
 
 ## Commit & deploy workflow
 
-- **When an update is made, commit AND push to `origin/main` without stopping to ask.** Do not pause for confirmation before pushing, and never ask "do you want me to commit and push?" — this is a standing, pre-authorized instruction. Just commit and push. `main` auto-deploys to Railway (`cloud-ledger.up.railway.app`, ~2–3 min).
+- **In the main checkout (`C:\Users\JimmyYun\Cloud-Ledger` on `main`): when an update is made, commit AND push to `origin/main` without stopping to ask.** (Worktree sessions follow "Parallel sessions" below instead.) Do not pause for confirmation before pushing, and never ask "do you want me to commit and push?" — this is a standing, pre-authorized instruction. Just commit and push. `main` auto-deploys to Railway (`cloud-ledger.up.railway.app`, ~2–3 min).
 - Stage only named production files by explicit `git add <file>` — never `git add -A`/`.`. Scratch files (`_*.js`, `*.b64`, `*.pdf`, `*.jpg`, `*.png`, `_tmp*`) are never committed.
 - Commit-message footer: `Co-Authored-By: Claude <noreply@anthropic.com>`
 - Git identity: Jimmy Yun / `jyun@banyanres.com`. Never use `jimmyyun1212@gmail.com` for commits.
@@ -16,9 +16,22 @@ Guidance for Claude working in this repository.
 - Local repo: `C:\Users\JimmyYun\Cloud-Ledger` (Git Bash / MINGW64).
 - Remote: `BanyanRes/Cloud-Ledger` on GitHub, `main` branch → Railway auto-deploy.
 - Stack: React + Vite frontend (`client/src/App.jsx`, `client/src/api.js`); Express + better-sqlite3 backend (`server/*.js`).
-- **Never run the server locally** — better-sqlite3 is Railway-only. Test pure modules (e.g. ExcelJS builders) by calling their functions directly with mock data.
+- The server runs locally (better-sqlite3 works on node 22.11.0 via nvm-windows; use `npm.cmd`, not `npm`). `npm.cmd run dev` starts the API server (PORT from `.env`) and Vite (CLIENT_PORT from `.env`, default 5173). Pure modules (e.g. ExcelJS builders) can still be tested directly with mock data.
 - Syntax-check before committing: `node --check server/<file>.js`.
 
+## Parallel sessions (worktrees)
+
+Several Claude Code sessions can work on CloudLedger at once, each in its own git worktree (Code tab worktree option, or `claude --worktree <name>`). Worktrees live in `.claude/worktrees/` (gitignored).
+
+- **What happens automatically:** `.worktreeinclude` copies `.env` and `data/` into the new worktree; the SessionStart hook (`scripts/worktree-setup.js`) runs `npm ci` for root and `client/` and writes a unique `PORT` (3101+) / `CLIENT_PORT` (5174+) into that worktree's own `.env`. It never touches the main checkout.
+- **One narrow task per worktree.** Keep each session to a single, well-scoped change so branches merge cleanly.
+- **Own branch.** Commit and push only the worktree's branch (`git push -u origin <branch>`). Never push to `main` from a worktree, and never commit in the main checkout from a worktree session.
+- **Own port.** Start the app with `npm.cmd run dev`; use the ports printed at session start (also in the worktree's `.env`). Never use 3000/3001/5173 from a worktree.
+- **Own database.** Each worktree has its own snapshot copy of `data/cloudledger.db`. Local test data and schema changes stay in that worktree. Don't point `DB_PATH` at another checkout's DB.
+- **Merge back via branch/PR, one at a time.** In the main checkout: `git pull`, then merge the branch (or merge its PR), resolve conflicts showing both sides for anything ambiguous, run `npm.cmd run build` before declaring done.
+- **Only `main` deploys.** Pushing `main` auto-deploys Railway production, so merging to main is a deploy: do it only when Jimmy says the task is done.
+- **Browser:** only one session can drive Claude in Chrome at a time; other sessions stay code-only (see `C:\Users\JimmyYun\claude_lanes\LANES.md` for the browser pool).
+- **Cleanup:** when a task is merged, remove its worktree and delete its branch.
 ## Verification
 
 - After a deploy, confirm the build landed (poll a live endpoint or check a bundle hash) rather than assuming.

@@ -1,0 +1,6 @@
+# Gitignored files copied into every new Claude Code worktree.
+# Secrets and local settings (PORT, JWT_SECRET, DB_PATH, admin login, Bill.com key).
+.env
+# Local SQLite DB (+ -wal/-shm, which must travel together) and uploaded files.
+# Each worktree gets its OWN snapshot copy; nothing is shared between sessions.
+data/
