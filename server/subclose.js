@@ -214,6 +214,43 @@ async function fixSheetPrOrder(buf) {
   } catch (e) { return buf; }
 }
 
+// Weaver's source workbooks carry thousands of legacy named ranges (FactSet/model
+// junk like "\a", "_______EPS91", plus many pointing at #REF!). ExcelJS drops
+// defined names on save, so app output is normally clean, but this is a defensive
+// guard: remove every defined name that is broken (#REF!) or references a sheet not
+// in this workbook. Such names make Excel show "We found a problem with some content
+// ... recover?" on open. Legitimate names (_xlnm.* print areas on existing sheets,
+// or names actually used by a formula) are kept.
+async function stripBadDefinedNames(buf) {
+  try {
+    const zip = await JSZip.loadAsync(buf);
+    let wb = await zip.file('xl/workbook.xml').async('string');
+    const m = wb.match(/<definedNames>([\s\S]*?)<\/definedNames>/);
+    if (!m) return buf;
+    const sheets = new Set([...wb.matchAll(/<sheet [^>]*name="([^"]*)"/g)].map((x) => x[1]));
+    // formula text across worksheets, to keep names a formula actually uses
+    let blob = '';
+    for (const n of Object.keys(zip.files).filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n))) {
+      blob += (await zip.file(n).async('string')).replace(/[\s\S]*?(<f\b)/g, '$1');
+    }
+    const keep = [];
+    for (const dn of m[1].match(/<definedName\b[^>]*>[\s\S]*?<\/definedName>/g) || []) {
+      const nm = (dn.match(/name="([^"]*)"/) || [])[1] || '';
+      const val = dn.replace(/<[^>]+>/g, '');
+      if (dn.includes('#REF!')) continue;
+      const refs = [...val.matchAll(/(?:^|[=,+\-*/(! ])'?([A-Za-z0-9 _.&\-]+?)'?!/g)].map((x) => x[1]);
+      if (refs.some((r) => !sheets.has(r))) continue; // orphaned sheet reference
+      const used = new RegExp('(?<![A-Za-z0-9_.])' + nm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![A-Za-z0-9_.])').test(blob);
+      if (nm.startsWith('_xlnm.') || used) keep.push(dn);
+    }
+    if (keep.length === (m[1].match(/<definedName\b/g) || []).length) return buf; // nothing removed
+    const block = keep.length ? '<definedNames>' + keep.join('') + '</definedNames>' : '';
+    wb = wb.slice(0, m.index) + block + wb.slice(m.index + m[0].length);
+    zip.file('xl/workbook.xml', wb);
+    return await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+  } catch (e) { return buf; }
+}
+
 // The Weaver template's "Sub Close Summary" sheet is built from formulas that
 // reference an EXTERNAL workbook ('[1]...'!Ref — Weaver's own source file). ExcelJS
 // drops the external-link parts on save (xl/externalLinks + the workbook's
@@ -367,7 +404,7 @@ function registerSubcloseRoutes(app, ctx) {
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         const data = buildData(ctx, asOf, { entity_id: eid });
         const wb = await buildWorkbook(data);
-        const buf = await freezeExternalLinkFormulas(await fixSheetPrOrder(Buffer.from(await wb.xlsx.writeBuffer())));
+        const buf = await stripBadDefinedNames(await freezeExternalLinkFormulas(await fixSheetPrOrder(Buffer.from(await wb.xlsx.writeBuffer()))));
         const saved = saveToWorkpapers(ctx, eid, asOf, buf, who);
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', 'attachment; filename="' + saved.original_name + '"');
@@ -391,7 +428,7 @@ function registerSubcloseRoutes(app, ctx) {
       if (!isDate(asOf)) return res.status(400).json({ error: 'as_of (YYYY-MM-DD) is required' });
       const data = buildData(ctx, asOf, { entity_id: eid });
       const wb = await buildWorkbook(data);
-      const buf = await freezeExternalLinkFormulas(await fixSheetPrOrder(Buffer.from(await wb.xlsx.writeBuffer())));
+      const buf = await stripBadDefinedNames(await freezeExternalLinkFormulas(await fixSheetPrOrder(Buffer.from(await wb.xlsx.writeBuffer()))));
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename="' + fileNameFor(asOf) + '"');
       res.send(buf);

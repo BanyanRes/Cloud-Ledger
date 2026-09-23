@@ -29,6 +29,11 @@ const periods = require('./periods');
 const budget = require('./budget');
 const execSummaries = require('./execSummaries');
 const ExcelJS = require('exceljs');
+// Make every workbook we write open cleanly in Excel (no "recover?" prompt) by
+// sanitizing the buffer on save: fixes <sheetPr> child order, strips orphaned
+// external links, and removes broken/junk defined names. Hooks writeBuffer once,
+// so all report generators (current and future) are covered automatically.
+require('./xlsx_sanitize').install(ExcelJS);
 const xlsxStyledReport = require('./xlsxStyledReport.js');
 const JSZip = require('jszip');
 
