@@ -921,7 +921,6 @@ export default function App(){
       ...(isCLRF?[{id:'wp_pref',label:'Preferred Return',icon:'📈',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_carry',label:'Carried Interest',icon:'📊',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_pcapsched',label:'Partners’ Capital Accounts',icon:'📋',section:'workpapers'}]:[]),
-      ...(isCLRF?[{id:'wp_subclose',label:'Subclose',icon:'🧾',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_ilpafee',label:'ILPA Fee',icon:'📄',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_cashflow',label:'Cash Flow Worksheet',icon:'💵',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_other',label:'Other Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
