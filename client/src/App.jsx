@@ -926,8 +926,6 @@ export default function App(){
       ...(isCLRF?[{id:'wp_other',label:'Other Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_cla_monthlyclose',label:'Monthly Close (CLA Format)',icon:'📑',section:'workpapers'}]:[]),
-      ...(!isCLRF?[{id:'wp_qtrclose',label:'Quarterly Closing Workpaper',icon:'🗓️',section:'workpapers'}]:[]),
-      ...(!isCLRF?[{id:'wp_monthlyclose',label:'Monthly Closing Workpaper',icon:'🗓️',section:'workpapers'}]:[]),
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
