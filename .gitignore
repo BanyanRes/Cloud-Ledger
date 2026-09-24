@@ -10,3 +10,5 @@ _verify_*/
 # Claude Code worktrees and per-machine settings
 .claude/worktrees/
 .claude/settings.local.json
+
+_attachments/
