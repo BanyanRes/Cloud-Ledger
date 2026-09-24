@@ -11211,6 +11211,17 @@ require('./quarterlyclose').registerQuarterlyCloseRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// Monthly Closing Workpaper (CLA leadsheet format) - one monthly workbook per
+// entity covering every balance-sheet account, GL-derived, in CLA leadsheet style.
+require('./monthlyclose').registerMonthlyCloseRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLRF workpaper: Preferred Return (fund-level 8% XIRR) ═══
 // Quarterly. Reproduces Weaver's fund-level preferred-return calculation: the
 // dated equalized LP net cash-flow schedule, Return of Capital, and the Preferred
