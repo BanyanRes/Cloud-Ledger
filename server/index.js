@@ -11222,6 +11222,21 @@ require('./monthlyclose').registerMonthlyCloseRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// Monthly Close — CLA Leadsheets (high-fidelity CLA replica, built for Banyan
+// Residential). A separate monthly workbook reproducing CLA's numbered close
+// leadsheets account-for-account (Cash cleared/register + bank rec, Receivables,
+// Prepaids, Fixed Assets cost/accum-dep/net + schedule, Other Assets, Intercompany
+// tie-out, Payables, Credit Cards, Debt, Equity), GL-derived with blue input cells
+// and FQ anchors. Filed under Workpapers › Monthly Close - CLA by year and month.
+require('./clamonthlyclose').registerClaMonthlyCloseRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLRF workpaper: Preferred Return (fund-level 8% XIRR) ═══
 // Quarterly. Reproduces Weaver's fund-level preferred-return calculation: the
 // dated equalized LP net cash-flow schedule, Return of Capital, and the Preferred

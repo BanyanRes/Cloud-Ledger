@@ -925,6 +925,7 @@ export default function App(){
       ...(isCLRF?[{id:'wp_cashflow',label:'Cash Flow Worksheet',icon:'💵',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_other',label:'Other Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
+      ...(isBanyanRes?[{id:'wp_cla_monthlyclose',label:'Monthly Close (CLA Format)',icon:'📑',section:'workpapers'}]:[]),
       ...(!isCLRF?[{id:'wp_qtrclose',label:'Quarterly Closing Workpaper',icon:'🗓️',section:'workpapers'}]:[]),
       ...(!isCLRF?[{id:'wp_monthlyclose',label:'Monthly Closing Workpaper',icon:'🗓️',section:'workpapers'}]:[]),
     ]}]:[]),
@@ -1031,6 +1032,7 @@ export default function App(){
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_qtrclose'&&activeEntity&&!isCLRF&&<QuarterlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_monthlyclose'&&activeEntity&&!isCLRF&&<MonthlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='wp_cla_monthlyclose'&&activeEntity&&isBanyanRes&&<ClaMonthlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&!isCLRF&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
@@ -5627,6 +5629,52 @@ function MonthlyCloseWorkpaper({entityId,entityName,canEdit=true}){
         {busy?'Running…':'Run Report'}</button>
     </div>
     {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
+  </div></div>);
+}
+
+// ─── Workpapers › Monthly Close (CLA Format) — Banyan Residential ──────────────────
+// High-fidelity replica of CLA's numbered monthly-close leadsheets (Cash,
+// Receivables, Prepaids, Fixed Assets, Other Assets, Intercompany, Payables,
+// Credit Cards, Debt, Equity), GL-derived with blue input cells and FQ anchors.
+function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true}){
+  const defaultDate=()=>{const t=today();const d=new Date(t.slice(0,4),Number(t.slice(5,7))-1,1);d.setDate(0);return d.toISOString().slice(0,10);};
+  const[mon,setMon]=useState(defaultDate());
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const[result,setResult]=useState(null);
+  const valid=/^\d{4}-\d{2}-\d{2}$/.test(mon);
+  const run=async()=>{
+    if(!valid)return;
+    setBusy(true);setErr('');setResult(null);
+    try{
+      const r=await api.claMonthlyClose(entityId,mon);
+      if(!r)return;
+      const url=URL.createObjectURL(r.blob);
+      const a=document.createElement('a');a.href=url;a.download=r.filename;
+      document.body.appendChild(a);a.click();document.body.removeChild(a);
+      setTimeout(()=>URL.revokeObjectURL(url),4000);
+      setResult(r.summary||{});
+    }catch(e){ setErr(e.message||String(e)); }
+    finally{ setBusy(false); }
+  };
+  return(<div><div style={S.card}>
+    {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
+    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Monthly Close (CLA Format)</div>
+    <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:760,lineHeight:1.5}}>
+      A high-fidelity replica of CLA&rsquo;s monthly close leadsheets, one workbook covering every balance-sheet account in CLA&rsquo;s exact numbered-leadsheet display: Cash (Cleared / Register / Bank Statement Ref with a per-bank reconciliation tab), Receivables, Prepaids, Fixed Assets (Asset Cost / Accumulated Depreciation / Net Asset, keyed to a Fixed Asset Schedule), Other Assets, Intercompany (Entity / Balance / Other Entity Bal / Variance, tied to each counterparty&rsquo;s own ledger), Payables, Credit Cards, Debt and Equity. Balances are drawn from the general ledger and linked by formula to a supporting schedule for each account; blue input cells carry the data CloudLedger doesn&rsquo;t hold (bank and credit-card statement balances, aging), and every account keeps its FQ Anchor. Every subtotal and the Assets = Liabilities + Equity + Net income check is a live formula. A copy is filed under Workpapers &rsaquo; Monthly Close - CLA by year and month.
+    </div>
+    <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
+      <div><label style={S.label}>Month End Date</label>
+        <input style={S.inputSm} type="date" value={mon} onChange={e=>{setMon(e.target.value);setErr('');setResult(null);}}/></div>
+      <button style={{...S.btnP,opacity:(!valid||busy||!canEdit)?0.5:1}} disabled={!valid||busy||!canEdit} onClick={run}>
+        {busy?'Running\u2026':'Run Report'}</button>
+    </div>
+    {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
+    {result&&<div style={{marginTop:16,padding:'12px 14px',background:T.bgAlt||'#f6f8fa',borderRadius:8,border:'1px solid '+T.border}}>
+      <div style={{fontSize:13,fontWeight:700,color:T.textBright,marginBottom:6}}>{result.month_name||result.month} \u2014 generated</div>
+      <div style={{fontSize:12,color:T.textMuted}}>Filed to {result.saved_to||'Workpapers'}{result.replaced?' (replaced the prior copy)':''}. {result.accounts||0} balance-sheet accounts.</div>
+      <div style={{fontSize:12,marginTop:6,fontWeight:600,color:(result.exceptions?T.orange:'#1E7A34')}}>{result.exceptions?((result.exceptions)+' item'+(result.exceptions>1?'s':'')+' need review \u2014 see the Summary tab'):'\u2713 Balance sheet ties; all accounts roll forward from the GL.'}</div>
+    </div>}
   </div></div>);
 }
 
