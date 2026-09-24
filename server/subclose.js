@@ -1,3 +1,4 @@
+// CLIP monthly-close review 2026
 // ─── CLRF workpaper: Subsequent-Closing (Sub Close) workpaper ────────────────
 //
 // The Legacy Knight subsequent-closing / equalization workpaper for County Line
