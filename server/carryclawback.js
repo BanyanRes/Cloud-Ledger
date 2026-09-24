@@ -226,6 +226,11 @@ function buildData(ctx, quarter, opts = {}) {
 
 // ─── Workbook ────────────────────────────────────────────────────────────────
 const MONEY = '$#,##0.00;($#,##0.00);-';
+const PCT4 = '0.0000%';
+const DATEFMT = 'yyyy-mm-dd';
+// Write a real Excel date (not text) so XIRR/XNPV can consume the cell. Local
+// noon avoids any DST/timezone rounding to the prior day.
+const xlDate = (s) => new Date(String(s).slice(0, 10) + 'T12:00:00');
 const NAVY = 'FF1F3864';
 const HDR_FONT = { name: 'Arial', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
 const F = (o = {}) => Object.assign({ name: 'Arial', size: 10 }, o);
@@ -495,20 +500,54 @@ function buildWorkbook(data) {
   if (prc && prc.flows && prc.flows.length) {
     pw.getCell('A' + sr).value = 'Fund preferred-return calculation — 8% XIRR on the equalized Limited-Partner cash flows';
     pw.getCell('A' + sr).font = F({ bold: true }); pw.mergeCells('A' + sr + ':E' + sr); sr += 1;
-    pw.getCell('A' + sr).value = 'Contributions are outflows to the LPs; a single assumed liquidating distribution of Return of Capital + Preferred Return at the measurement date makes the stream’s XIRR equal 8%.';
+    pw.getCell('A' + sr).value = 'Contributions are outflows to the LPs; a single assumed liquidating distribution of Return of Capital + Preferred Return at the measurement date makes the stream’s XIRR equal 8%. Every figure below is a live formula — click a cell to see it.';
     pw.getCell('A' + sr).font = SMALLI; pw.getCell('A' + sr).alignment = { wrapText: true }; pw.mergeCells('A' + sr + ':E' + sr); sr += 1;
     headerRow(pw, sr, ['Date', 'LP net cash flow'], null); sr += 1;
+    const firstFlow = sr;
     for (const f of prc.flows) {
-      pw.getCell('A' + sr).value = f.date; pw.getCell('A' + sr).font = F(); pw.getCell('A' + sr).alignment = { horizontal: 'left' };
+      const dc = pw.getCell('A' + sr); dc.value = xlDate(f.date); dc.numFmt = DATEFMT; dc.font = F(); dc.alignment = { horizontal: 'left' };
       const c = pw.getCell('B' + sr); c.value = r2(f.amount); c.numFmt = MONEY; c.font = BLUE; sr += 1;
     }
+    const lastFlow = sr - 1;
     // Terminal liquidating distribution = Return of Capital + Preferred Return.
-    pw.getCell('A' + sr).value = prc.terminal_date || q.end; pw.getCell('A' + sr).font = F({ bold: true }); pw.getCell('A' + sr).alignment = { horizontal: 'left' };
+    const termRow = sr;
+    { const dc = pw.getCell('A' + sr); dc.value = xlDate(prc.terminal_date || q.end); dc.numFmt = DATEFMT; dc.font = F({ bold: true }); dc.alignment = { horizontal: 'left' }; }
     { const c = pw.getCell('B' + sr); c.value = { formula: 'C' + PR_FUND_ROC + '+C' + PR_FUND_PREF, result: prc.terminal_inflow != null ? prc.terminal_inflow : r2((fund.roc || 0) + (fund.pref || 0)) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
     pw.getCell('A' + sr).border = { top: THIN }; sr += 1;
+    // Internal rate of return — live XIRR over the dated LP stream (incl. terminal).
     pw.getCell('A' + sr).value = 'Internal rate of return (XIRR)'; pw.getCell('A' + sr).font = F({ bold: true });
-    { const c = pw.getCell('B' + sr); if (prc.irr == null) { c.value = '—'; c.font = F({ italic: true }); } else { c.value = prc.irr; c.numFmt = '0.0000%'; c.font = F({ bold: true }); } }
-    { const c = pw.getCell('C' + sr); c.value = 'target ' + (PREF_RATE * 100).toFixed(0) + '%'; c.font = SMALLI; }
+    { const c = pw.getCell('B' + sr);
+      if (prc.irr == null) { c.value = '—'; c.font = F({ italic: true }); }
+      else { c.value = { formula: 'XIRR(B' + firstFlow + ':B' + termRow + ',A' + firstFlow + ':A' + termRow + ')', result: prc.irr }; c.numFmt = PCT4; c.font = F({ bold: true }); }
+    }
+    { const c = pw.getCell('C' + sr); c.value = 'target ' + (PREF_RATE * 100).toFixed(0) + '%'; c.font = SMALLI; } sr += 2;
+
+    // ── Reference solve — the Preferred Return that makes XIRR exactly 8.0000%,
+    //    as live formulas. Only the single terminal cash flow is unknown, so the
+    //    Goal Seek is closed form: discount the LP contributions to inception at 8%
+    //    (XNPV), compound to the measurement date, negate for the terminal that
+    //    zeroes NPV; Preferred Return = terminal − Return of Capital. ─────────────
+    if (fund.roc != null) {
+      const d0 = new Date(prc.flows[0].date + 'T00:00:00Z').getTime();
+      const yr = (s) => (new Date(String(s).slice(0, 10) + 'T00:00:00Z').getTime() - d0) / (365 * 24 * 3600 * 1000);
+      const pvContribs = prc.flows.reduce((a, f) => a + f.amount / Math.pow(1 + PREF_RATE, yr(f.date)), 0);
+      const termStar = -pvContribs * Math.pow(1 + PREF_RATE, yr(prc.terminal_date || q.end));
+      const prefStar = r2(termStar - fund.roc);
+      const prefStarDelta = fund.pref == null ? null : r2(prefStar - fund.pref);
+      pw.getCell('A' + sr).value = 'Reference — Preferred Return that solves XIRR to exactly 8.0000%';
+      pw.getCell('A' + sr).font = F({ bold: true, size: 9 }); pw.mergeCells('A' + sr + ':E' + sr); sr += 1;
+      const rateRow = sr; pw.getCell('A' + sr).value = 'Hurdle rate (per annum, annually compounded)'; pw.getCell('A' + sr).font = F();
+      { const c = pw.getCell('B' + sr); c.value = PREF_RATE; c.numFmt = PCT4; c.font = BLUE; } sr += 1;
+      const pvRow = sr; pw.getCell('A' + sr).value = 'PV of LP contributions at the hurdle (XNPV to inception)'; pw.getCell('A' + sr).font = F();
+      { const c = pw.getCell('B' + sr); c.value = { formula: 'XNPV(B' + rateRow + ',B' + firstFlow + ':B' + lastFlow + ',A' + firstFlow + ':A' + lastFlow + ')', result: r2(pvContribs) }; c.numFmt = MONEY; c.font = F(); } sr += 1;
+      const tRow = sr; pw.getCell('A' + sr).value = 'Terminal distribution for exactly 8% (compounded to measurement date)'; pw.getCell('A' + sr).font = F();
+      { const c = pw.getCell('B' + sr); c.value = { formula: '-B' + pvRow + '*(1+B' + rateRow + ')^((A' + termRow + '-A' + firstFlow + ')/365)', result: r2(termStar) }; c.numFmt = MONEY; c.font = F(); } sr += 1;
+      const psRow = sr; pw.getCell('A' + sr).value = 'Preferred Return to reach exactly 8.0000% (= terminal − Return of Capital)'; pw.getCell('A' + sr).font = F({ bold: true });
+      { const c = pw.getCell('B' + sr); c.value = { formula: 'B' + tRow + '-C' + PR_FUND_ROC, result: prefStar }; c.numFmt = MONEY; c.font = F({ bold: true }); } sr += 1;
+      pw.getCell('A' + sr).value = 'Difference vs. stored Preferred Return (Weaver Goal-Seek residual)'; pw.getCell('A' + sr).font = F();
+      if (fund.pref == null) { const c = pw.getCell('B' + sr); c.value = '—'; c.font = F({ italic: true }); }
+      else { const c = pw.getCell('B' + sr); c.value = { formula: 'B' + psRow + '-C' + PR_FUND_PREF, result: prefStarDelta }; c.numFmt = MONEY; c.font = F(); } sr += 1;
+    }
   } else {
     pw.getCell('A' + sr).value = 'The dated cash-flow schedule is maintained in the preferred-return workpaper; only the Return of Capital and Preferred Return totals above were available for this run.';
     pw.getCell('A' + sr).font = SMALLI; pw.getCell('A' + sr).alignment = { wrapText: true }; pw.mergeCells('A' + sr + ':E' + sr);

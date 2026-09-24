@@ -239,6 +239,10 @@ function buildData(ctx, quarter, opts = {}) {
 const MONEY = '$#,##0.00;($#,##0.00);-';
 const SUM_MONEY = '_($* #,##0.00_);_($* (#,##0.00);_($* -??_);_(@_)';
 const PCT4 = '0.0000%';
+const DATEFMT = 'yyyy-mm-dd';
+// Write a real Excel date (not a text string) so XIRR/XNPV can consume the cell.
+// Local noon avoids any DST/timezone rounding to the prior day.
+const xlDate = (s) => new Date(String(s).slice(0, 10) + 'T12:00:00');
 const NAVY = 'FF1F3864';
 const HDR_FONT = { name: 'Arial', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
 const F = (o = {}) => Object.assign({ name: 'Arial', size: 10 }, o);
@@ -287,32 +291,32 @@ function buildWorkbook(data) {
     else { c.value = v; c.numFmt = SUM_MONEY; c.font = SF(o); }
   };
 
+  // Row anchors so the terminal / total / XIRR / reference cells can be written as
+  // live formulas once every source cell they point at has been laid out.
+  const A = {};
+  const RATE = fund.rate; // 8% hurdle, annually compounded
+
   if (calc.schedule_loaded) {
     put('A' + R, 'Equalized Limited-Partner net cash flows (contributions negative, refunds positive):', SF({ italic: true, size: 9 }));
     pr.mergeCells('A' + R + ':D' + R); R++;
     headerRow(pr, R, ['Date', 'LP Net Cash Flow', 'Return of Capital', 'Preferred Return'], [16, 30, 22, 22]);
     R++;
+    A.firstFlow = R;
     for (const f of calc.flows) {
-      pr.getCell('A' + R).value = f.date; pr.getCell('A' + R).font = SF();
-      pr.getCell('A' + R).alignment = { horizontal: 'left' };
+      const dc = pr.getCell('A' + R); dc.value = xlDate(f.date); dc.numFmt = DATEFMT; dc.font = SF();
+      dc.alignment = { horizontal: 'left' };
       money('B' + R, r2(f.amount), {}); pr.getCell('B' + R).font = BLUE;
       R++;
     }
-    // Terminal liquidating distribution row at the measurement date.
-    pr.getCell('A' + R).value = calc.terminal_date; pr.getCell('A' + R).font = SF({ bold: true });
-    pr.getCell('A' + R).alignment = { horizontal: 'left' };
-    money('B' + R, calc.terminal_inflow, { bold: true });
-    money('C' + R, fund.roc === null ? null : -fund.roc);
-    money('D' + R, fund.pref === null ? null : -fund.pref);
+    A.lastFlow = R - 1;
+    // Terminal liquidating distribution row at the measurement date (formulas wired
+    // below: components link to the Summary source cells, LP inflow = their sum).
+    A.term = R;
+    { const dc = pr.getCell('A' + R); dc.value = xlDate(calc.terminal_date); dc.numFmt = DATEFMT; dc.font = SF({ bold: true }); dc.alignment = { horizontal: 'left' }; }
     ['A', 'B', 'C', 'D'].forEach((col) => { pr.getCell(col + R).border = { top: THIN }; });
     R++;
-    // Totals + IRR.
-    put('A' + R, 'Total', SF({ bold: true }));
-    money('B' + R, r2(calc.flows.reduce((s, f) => s + f.amount, 0) + calc.terminal_inflow), { bold: true });
-    pr.getCell('B' + R).border = { top: THIN, bottom: { style: 'double' } };
-    R += 2;
-    put('A' + R, 'Internal rate of return (XIRR)', SF({ bold: true }));
-    { const c = pr.getCell('B' + R); c.value = calc.irr == null ? '—' : calc.irr; if (calc.irr != null) c.numFmt = PCT4; c.font = SF({ bold: true }); }
+    A.total = R; put('A' + R, 'Total', SF({ bold: true })); R += 2;
+    A.irr = R; put('A' + R, 'Internal rate of return (XIRR)', SF({ bold: true }));
     put('C' + R, 'Target', SF({ italic: true, size: 9 }));
     { const c = pr.getCell('D' + R); c.value = calc.irr_target; c.numFmt = PCT4; c.font = SF({ italic: true }); }
     R += 2;
@@ -321,29 +325,74 @@ function buildWorkbook(data) {
     pr.getCell('A' + R).alignment = { wrapText: true }; pr.mergeCells('A' + R + ':D' + R); R += 2;
   }
 
-  // ── Summary block (always). ──────────────────────────────────────────────────
+  // ── Summary block (always). Return of Capital and Preferred Return are the
+  //    source figures (blue); the total threshold is a live sum of the two. ──────
   put('A' + R, 'Summary', SF({ bold: true })); R++;
-  put('A' + R, '   Return of Capital (LP net capital invested)'); pr.mergeCells('A' + R + ':C' + R); money('D' + R, fund.roc); R++;
-  put('A' + R, '   Preferred Return (8% p.a., annually compounded)'); pr.mergeCells('A' + R + ':C' + R); money('D' + R, fund.pref); R++;
-  put('A' + R, 'Total return threshold (Return of Capital + Preferred Return)', SF({ bold: true })); pr.mergeCells('A' + R + ':C' + R);
+  A.roc = R; put('A' + R, '   Return of Capital (LP net capital invested)'); pr.mergeCells('A' + R + ':C' + R);
+  money('D' + R, fund.roc); if (fund.roc !== null) pr.getCell('D' + R).font = SF({ color: { argb: 'FF0000FF' } }); R++;
+  A.pref = R; put('A' + R, '   Preferred Return (8% p.a., annually compounded)'); pr.mergeCells('A' + R + ':C' + R);
+  money('D' + R, fund.pref); if (fund.pref !== null) pr.getCell('D' + R).font = SF({ color: { argb: 'FF0000FF' } }); R++;
+  A.threshold = R; put('A' + R, 'Total return threshold (Return of Capital + Preferred Return)', SF({ bold: true })); pr.mergeCells('A' + R + ':C' + R);
   money('D' + R, fund.total, { bold: true });
   ['A', 'B', 'C', 'D'].forEach((col) => { pr.getCell(col + R).border = { top: THIN, bottom: THIN }; }); R += 2;
+  if (fund.roc !== null && fund.pref !== null) {
+    const c = pr.getCell('D' + A.threshold); c.value = { formula: 'D' + A.roc + '+D' + A.pref, result: fund.total }; c.numFmt = SUM_MONEY; c.font = SF({ bold: true });
+  }
+
+  // ── Wire the schedule cells to live formulas now that the Summary source cells
+  //    exist, so a reviewer can click any amount and trace the calculation. ──────
+  if (calc.schedule_loaded) {
+    // Terminal components link to the Summary Return of Capital / Preferred Return.
+    if (fund.roc !== null) { const c = pr.getCell('C' + A.term); c.value = { formula: '-D' + A.roc, result: -fund.roc }; c.numFmt = SUM_MONEY; c.font = SF(); }
+    else { const c = pr.getCell('C' + A.term); c.value = '—'; c.font = SF({ italic: true }); }
+    if (fund.pref !== null) { const c = pr.getCell('D' + A.term); c.value = { formula: '-D' + A.pref, result: -fund.pref }; c.numFmt = SUM_MONEY; c.font = SF(); }
+    else { const c = pr.getCell('D' + A.term); c.value = '—'; c.font = SF({ italic: true }); }
+    // LP inflow at the terminal = Return of Capital + Preferred Return.
+    { const c = pr.getCell('B' + A.term); c.value = { formula: '-(C' + A.term + '+D' + A.term + ')', result: calc.terminal_inflow }; c.numFmt = SUM_MONEY; c.font = SF({ bold: true }); }
+    // Total column = live SUM of every LP net cash flow, terminal included.
+    { const c = pr.getCell('B' + A.total); c.value = { formula: 'SUM(B' + A.firstFlow + ':B' + A.term + ')', result: r2(calc.flows.reduce((s, f) => s + f.amount, 0) + calc.terminal_inflow) }; c.numFmt = SUM_MONEY; c.font = SF({ bold: true }); c.border = { top: THIN, bottom: { style: 'double' } }; }
+    // Internal rate of return — live XIRR over the dated LP stream.
+    { const c = pr.getCell('B' + A.irr);
+      if (calc.irr == null) { c.value = '—'; c.font = SF({ italic: true }); }
+      else { c.value = { formula: 'XIRR(B' + A.firstFlow + ':B' + A.term + ',A' + A.firstFlow + ':A' + A.term + ')', result: calc.irr }; c.numFmt = PCT4; c.font = SF({ bold: true }); }
+    }
+  }
+
+  // ── Reference solve — the Preferred Return that makes XIRR exactly 8.0000%,
+  //    shown as live formulas. The only unknown is a single terminal cash flow, so
+  //    the Goal Seek has a closed form: discount the LP contributions to inception
+  //    at 8% (XNPV), compound that to the measurement date, and the terminal that
+  //    zeroes NPV is its negative; Preferred Return = terminal − Return of Capital. ─
+  if (calc.schedule_loaded && fund.roc !== null) {
+    const d0 = new Date(calc.flows[0].date + 'T00:00:00Z').getTime();
+    const yr = (s) => (new Date(s + 'T00:00:00Z').getTime() - d0) / (365 * 24 * 3600 * 1000);
+    const pvContribs = calc.flows.reduce((s, f) => s + f.amount / Math.pow(1 + RATE, yr(f.date)), 0);
+    const termStar = -pvContribs * Math.pow(1 + RATE, yr(calc.terminal_date));
+    const prefStar = r2(termStar - fund.roc);
+    const prefStarDelta = fund.pref === null ? null : r2(prefStar - fund.pref);
+
+    put('A' + R, 'Reference — Preferred Return that solves XIRR to exactly 8.0000%', SF({ bold: true, size: 9 })); R++;
+    const rateRow = R; put('A' + R, '   Hurdle rate (per annum, annually compounded)'); pr.mergeCells('A' + R + ':C' + R);
+    { const c = pr.getCell('D' + R); c.value = RATE; c.numFmt = PCT4; c.font = SF({ color: { argb: 'FF0000FF' } }); } R++;
+    const pvRow = R; put('A' + R, '   PV of LP contributions at the hurdle (XNPV to inception)'); pr.mergeCells('A' + R + ':C' + R);
+    { const c = pr.getCell('D' + R); c.value = { formula: 'XNPV(D' + rateRow + ',B' + A.firstFlow + ':B' + A.lastFlow + ',A' + A.firstFlow + ':A' + A.lastFlow + ')', result: r2(pvContribs) }; c.numFmt = SUM_MONEY; c.font = SF(); } R++;
+    const termRow = R; put('A' + R, '   Terminal distribution for exactly 8% (compounded to ' + spellDate(calc.terminal_date) + ')'); pr.mergeCells('A' + R + ':C' + R);
+    { const c = pr.getCell('D' + R); c.value = { formula: '-D' + pvRow + '*(1+D' + rateRow + ')^((A' + A.term + '-A' + A.firstFlow + ')/365)', result: r2(termStar) }; c.numFmt = SUM_MONEY; c.font = SF(); } R++;
+    const psRow = R; put('A' + R, '   Preferred Return to reach exactly 8.0000% (= terminal − Return of Capital)', SF({ bold: true })); pr.mergeCells('A' + R + ':C' + R);
+    { const c = pr.getCell('D' + R); c.value = { formula: 'D' + termRow + '-D' + A.roc, result: prefStar }; c.numFmt = SUM_MONEY; c.font = SF({ bold: true }); } R++;
+    put('A' + R, '   Difference vs. stored Preferred Return (Weaver Goal-Seek residual)'); pr.mergeCells('A' + R + ':C' + R);
+    if (fund.pref === null) { const c = pr.getCell('D' + R); c.value = '—'; c.font = SF({ italic: true }); }
+    else { const c = pr.getCell('D' + R); c.value = { formula: 'D' + psRow + '-D' + A.pref, result: prefStarDelta }; c.numFmt = SUM_MONEY; c.font = SF(); } R += 2;
+  }
 
   if (calc.schedule_loaded) {
     put('A' + R, 'Independent checks', SF({ bold: true, size: 9 })); R++;
     put('A' + R, '   Return of Capital ties to LP net capital invested (−Σ cash flows = '
       + (calc.lp_net_invested).toLocaleString('en-US', { style: 'currency', currency: 'USD' }) + '): '
       + (calc.roc_ties ? 'YES' : 'review'), SF({ size: 9, italic: true })); pr.mergeCells('A' + R + ':D' + R); R++;
-    put('A' + R, '   LP stream IRR at the stored Preferred Return reaches the 8% hurdle (computed '
+    put('A' + R, '   LP stream IRR at the stored Preferred Return reaches the 8% hurdle (XIRR cell above = '
       + (calc.irr == null ? 'n/a' : (calc.irr * 100).toFixed(4) + '%') + '): '
-      + (calc.irr_ties ? 'YES' : 'review'), SF({ size: 9, italic: true })); pr.mergeCells('A' + R + ':D' + R); R++;
-    put('A' + R, '   Preferred Return to reach exactly 8.0000% (reference): '
-      + (calc.solved_pref == null ? 'n/a' : calc.solved_pref.toLocaleString('en-US', { style: 'currency', currency: 'USD' }))
-      + (calc.solved_pref_delta == null ? '' : ' — '
-        + (Math.abs(calc.solved_pref_delta) < 0.5 ? 'equals the stored figure'
-          : (Math.abs(calc.solved_pref_delta).toLocaleString('en-US', { style: 'currency', currency: 'USD' })
-            + ' ' + (calc.solved_pref_delta > 0 ? 'above' : 'below') + ' stored; Weaver Goal-Seek tolerance'))),
-      SF({ size: 9, italic: true })); pr.mergeCells('A' + R + ':D' + R); R += 2;
+      + (calc.irr_ties ? 'YES' : 'review'), SF({ size: 9, italic: true })); pr.mergeCells('A' + R + ':D' + R); R += 2;
   }
   put('A' + R, 'No Assurance Provided.', SF({ italic: true, size: 9 }));
 
