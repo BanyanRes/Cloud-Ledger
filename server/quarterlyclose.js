@@ -584,4 +584,5 @@ function registerQuarterlyCloseRoutes(app, ctx) {
     });
 }
 
-module.exports = { registerQuarterlyCloseRoutes, resolveQuarter, buildData, buildWorkbook };
+module.exports = { registerQuarterlyCloseRoutes, resolveQuarter, buildData, buildWorkbook,
+  selfToken, counterpartyNet, resolveCounterparty };
