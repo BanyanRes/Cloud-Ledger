@@ -4550,34 +4550,48 @@ function BalanceSheet({entityId,entityName,asOf,setAsOf,canEdit=true}){
   const anchor=/^\d{4}-\d{2}-\d{2}$/.test(asOf)?asOf:today();
   const periods=useMemo(()=>rptPeriods(dateFilter,colMode,anchor),[dateFilter,colMode,anchor]);
   const prior=(compare&&colMode==='total'&&periods[0]&&periods[0].from)?rptPriorWindow(periods[0]):null;
-  const cols=useMemo(()=>prior?[prior,...periods]:periods,[JSON.stringify(prior),JSON.stringify(periods)]);
+  // Compare puts the CURRENT (selected) period FIRST, then the prior period — matching the
+  // Income Statement. $ / % change is still current − prior, independent of display order.
+  const cols=useMemo(()=>prior?[...periods,prior]:periods,[JSON.stringify(prior),JSON.stringify(periods)]);
+  // Column reorder (Liting #2): drag a period-column header to rearrange. `ord` holds the
+  // display order as original indices into `cols`; it resets when the column set changes.
+  const[colOrder,setColOrder]=useState(null);const dragFrom=useRef(null);
+  const colSig=cols.map(c=>c.label+'|'+(c.from||'')+'|'+c.to).join(',');
+  useEffect(()=>{setColOrder(null);},[colSig]);
+  const ord=(colOrder&&colOrder.length===cols.length)?colOrder:cols.map((_,i)=>i);
+  const moveCol=(fromPos,toPos)=>{setColOrder(prev=>{const base=(prev&&prev.length===cols.length)?[...prev]:cols.map((_,i)=>i);const[x]=base.splice(fromPos,1);base.splice(toPos,0,x);return base;});};
   const[data,setData]=useState([]);
   useEffect(()=>{let ok=true;Promise.all(cols.map(c=>api.getBalances(entityId,{as_of:c.to,close_pl_before:c.to.slice(0,4)+'-01-01'}).catch(()=>[]))).then(r=>{if(ok)setData(r);});return()=>{ok=false;};},[entityId,JSON.stringify(cols),rk]);
   const meta=useMemo(()=>{const m=new Map();data.forEach(bs=>(bs||[]).forEach(b=>{if(!m.has(b.code))m.set(b.code,{code:b.code,name:b.name,type:b.type});}));return m;},[data]);
   const vmap=useMemo(()=>data.map(bs=>{const mm=new Map();(bs||[]).forEach(b=>mm.set(b.code,b.balance));return mm;}),[data]);
   const val=(code,ci)=>(vmap[ci]&&vmap[ci].get(code))||0;
-  const grp=type=>[...meta.values()].filter(a=>a.type===type).filter(a=>vmap.some(mm=>Math.abs((mm&&mm.get(a.code))||0)>0.005));
+  // Account order (Liting #1): sort by account code so every column selection places an
+  // account in the SAME spot. The row set was built in first-seen order across columns
+  // (earliest column first), which dropped an account that was nil in the earliest column
+  // (e.g. Cash Sweep, $0 in Q1) to the bottom of its section.
+  const byCode=(a,b)=>{const na=Number(a.code),nb=Number(b.code);if(!isNaN(na)&&!isNaN(nb)&&na!==nb)return na-nb;return String(a.code).localeCompare(String(b.code),undefined,{numeric:true});};
+  const grp=type=>[...meta.values()].filter(a=>a.type===type).filter(a=>vmap.some(mm=>Math.abs((mm&&mm.get(a.code))||0)>0.005)).sort(byCode);
   const assets=grp('Asset'),liabs=grp('Liability'),eq=grp('Equity');
   const sumC=(items,ci)=>items.reduce((s,a)=>s+val(a.code,ci),0);
   const niCol=ci=>{let r=0,e=0;(data[ci]||[]).forEach(b=>{if(b.type==='Revenue')r+=b.balance;else if(b.type==='Expense')e+=b.balance;});return r-e;};
   const tA=ci=>sumC(assets,ci);const tE=ci=>sumC(eq,ci)+niCol(ci);const tLE=ci=>sumC(liabs,ci)+tE(ci);
-  const nCols=cols.length;const curI=nCols-1;const priI=prior?0:-1;
+  const nCols=cols.length;const curI=prior?0:nCols-1;const priI=prior?nCols-1:-1;
   const pctTxt=p=>p==null?'—':(p>=0?'+':'')+p.toFixed(1)+'%';
   const chgCells=(getter)=>{if(!prior)return null;const c=getter(curI),p=getter(priI);return[<td key="d" style={S.tdR}>{fmt(c-p)}</td>,<td key="p" style={{...S.tdR,color:(c-p)>=0?T.green:T.red}}>{pctTxt(rptPct(c,p))}</td>];};
   const nColSpan=1+nCols+(prior?2:0);
   const oneYrBefore=d=>{const x=new Date(d+'T00:00:00');x.setFullYear(x.getFullYear()-1);x.setDate(x.getDate()+1);return _ymd(x);};
   const Sec=({title,items,totalGetter,extraNiRow})=>(<><tr><td style={S.sectionHeader} colSpan={nColSpan}>{title}</td></tr>
-    {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,type:a.type,from:oneYrBefore(c.to),to:c.to})}>{fmt(val(a.code,i))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
-    {extraNiRow&&<tr><td style={{...S.indentTd,fontStyle:'italic',color:T.textMuted}}>Net Income (current period)</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,fontStyle:'italic'}}>{fmt(niCol(i))}</td>)}{chgCells(niCol)}</tr>}
-    <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td>{cols.map((c,i)=><td key={i} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(totalGetter(i))}</td>)}{chgCells(totalGetter)}</tr></>);
-  const colHead=(c,i)=>prior&&i===0?'Prev':(c.label==='Total'?('As of '+anchor):c.label);
-  const doExport=()=>{const hdr=['',...cols.map((c,i)=>colHead(c,i)),...(prior?['$ Change','% Change']:[])];
+    {items.map(a=><tr key={a.code}><td style={S.indentTd}>{a.name}</td>{ord.map(oi=><td key={oi} style={{...S.tdR,borderBottom:'1px solid '+T.borderLight,cursor:'pointer'}} onClick={()=>setDrillAcct({code:a.code,name:a.name,type:a.type,from:oneYrBefore(cols[oi].to),to:cols[oi].to})}>{fmt(val(a.code,oi))}</td>)}{chgCells(ci=>val(a.code,ci))}</tr>)}
+    {extraNiRow&&<tr><td style={{...S.indentTd,fontStyle:'italic',color:T.textMuted}}>Net Income (current period)</td>{ord.map(oi=><td key={oi} style={{...S.tdR,fontStyle:'italic'}}>{fmt(niCol(oi))}</td>)}{chgCells(niCol)}</tr>}
+    <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600,paddingLeft:14}}>Total {title}</td>{ord.map(oi=><td key={oi} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(totalGetter(oi))}</td>)}{chgCells(totalGetter)}</tr></>);
+  const colHead=(c)=>c===prior?'Prev':(c.label==='Total'?('As of '+anchor):c.label);
+  const doExport=()=>{const hdr=['',...ord.map(oi=>colHead(cols[oi])),...(prior?['$ Change','% Change']:[])];
     const d=[[entityName||'Balance Sheet'],['Balance Sheet'],[],hdr];
-    const F=[];const nP=cols.length;const chgC=nP+1,pctC=nP+2;const pcols=cols.map((c,i)=>1+i);
+    const F=[];const nP=nCols;const chgC=nP+1,pctC=nP+2;const pcols=Array.from({length:nP},(_,i)=>1+i);
     // Every total is a live SUM(); Total L+E sums the two subtotal rows; $/%
-    // change columns are formulas on every row.
-    const push=(label,getter)=>{const row=[label,...cols.map((c,i)=>getter(i))];if(prior)row.push(getter(curI)-getter(priI),rptPct(getter(curI),getter(priI)));d.push(row);const r=d.length-1;
-      if(prior){const rr=r+1,cc=XLC(1+curI),pc=XLC(1+priI);F.push({r,c:chgC,f:cc+rr+'-'+pc+rr});F.push({r,c:pctC,f:'IF(ABS('+pc+rr+')<0.005,"",('+cc+rr+'-'+pc+rr+')/ABS('+pc+rr+')*100)'});}
+    // change columns are formulas on every row. Columns follow the on-screen order (`ord`).
+    const push=(label,getter)=>{const row=[label,...ord.map(oi=>getter(oi))];if(prior)row.push(getter(curI)-getter(priI),rptPct(getter(curI),getter(priI)));d.push(row);const r=d.length-1;
+      if(prior){const rr=r+1,cc=XLC(1+ord.indexOf(curI)),pc=XLC(1+ord.indexOf(priI));F.push({r,c:chgC,f:cc+rr+'-'+pc+rr});F.push({r,c:pctC,f:'IF(ABS('+pc+rr+')<0.005,"",('+cc+rr+'-'+pc+rr+')/ABS('+pc+rr+')*100)'});}
       return r;};
     d.push(['Assets']);const aF=d.length;assets.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));const aL=d.length-1;const aT=push('Total Assets',tA);sumCols(F,aT,pcols,aF,aL);
     d.push(['Liabilities']);const lF=d.length;liabs.forEach(a=>push('  '+a.name,ci=>val(a.code,ci)));const lL=d.length-1;const lT=push('Total Liabilities',ci=>sumC(liabs,ci));sumCols(F,lT,pcols,lF,lL);
@@ -4591,11 +4605,11 @@ function BalanceSheet({entityId,entityName,asOf,setAsOf,canEdit=true}){
     </div>
     <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='bs' currentConfig={{asOf,dateFilter,colMode,compare}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExport}>Export Excel</button></div></div>
     <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Balance Sheet</div><div style={{fontSize:13,color:T.textMuted}}>As of {anchor}{colMode!=='total'?(' · '+RPT_COL_MODES.find(m=>m[0]===colMode)[1]):''}</div></div>
-    <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520,margin:'0 auto'}}><thead><tr><th style={S.th}></th>{cols.map((c,i)=><th key={i} style={S.thR}>{colHead(c,i)}</th>)}{prior&&<><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}</tr></thead><tbody>
+    <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:520,margin:'0 auto'}}><thead><tr><th style={S.th}></th>{ord.map((oi,pos)=><th key={oi} draggable onDragStart={()=>{dragFrom.current=pos;}} onDragOver={e=>e.preventDefault()} onDrop={()=>{if(dragFrom.current!=null&&dragFrom.current!==pos)moveCol(dragFrom.current,pos);dragFrom.current=null;}} style={{...S.thR,cursor:cols.length>1?'grab':'default',userSelect:'none'}} title={cols.length>1?'Drag to reorder columns':undefined}>{colHead(cols[oi])}</th>)}{prior&&<><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}</tr></thead><tbody>
       <Sec title="Assets" items={assets} totalGetter={tA}/><tr><td colSpan={nColSpan} style={{padding:6}}/></tr>
       <Sec title="Liabilities" items={liabs} totalGetter={ci=>sumC(liabs,ci)}/><tr><td colSpan={nColSpan} style={{padding:3}}/></tr>
       <Sec title="Equity" items={eq} totalGetter={tE} extraNiRow/>
-      <tr style={S.grandTotalRow}><td style={S.tdBold}>Total Liabilities + Equity</td>{cols.map((c,i)=><td key={i} style={{...S.tdBold,textAlign:'right',fontSize:15}}>{fmt(tLE(i))}</td>)}{chgCells(tLE)}</tr>
+      <tr style={S.grandTotalRow}><td style={S.tdBold}>Total Liabilities + Equity</td>{ord.map(oi=><td key={oi} style={{...S.tdBold,textAlign:'right',fontSize:15}}>{fmt(tLE(oi))}</td>)}{chgCells(tLE)}</tr>
     </tbody></table></div>
     <div style={{textAlign:'center',marginTop:14,fontSize:13,fontWeight:600,color:Math.abs(tA(curI)-tLE(curI))<0.005?T.green:T.red}}>{Math.abs(tA(curI)-tLE(curI))<0.005?'A = L + E':'Off by $'+fmt(tA(curI)-tLE(curI))}</div></div>
     {drillAcct&&<AccountDrillDownModal entityId={entityId} entityName={entityName} acct={drillAcct} from={drillAcct.from} to={drillAcct.to} onClose={()=>setDrillAcct(null)} onChanged={()=>setRk(k=>k+1)}/>}
