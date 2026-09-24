@@ -927,7 +927,6 @@ export default function App(){
       ...(isCLRF?[{id:'wp_other',label:'Other Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
       ...(!isCLRF?[{id:'wp_qtrclose',label:'Quarterly Closing Workpaper',icon:'🗓️',section:'workpapers'}]:[]),
-      ...(!isCLRF?[{id:'wp_monthlyclose',label:'Monthly Closing Workpaper',icon:'🗓️',section:'workpapers'}]:[]),
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
@@ -1031,7 +1030,6 @@ export default function App(){
       {page==='wp_other'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="other" title="Other Workpapers" description="Balance-sheet account support in one workbook — Due From/To Port Co, Interest Receivable, Prepaid Expenses, Other Assets, AP Recon, Accrual & Subsequent Cash Disbursement, and Distributions Payable — each on its own tab, GL-derived and tying to the Statement of Assets, Liabilities and Partners' Capital. A copy is filed under Workpapers › Other Workpapers by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_qtrclose'&&activeEntity&&!isCLRF&&<QuarterlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='wp_monthlyclose'&&activeEntity&&!isCLRF&&<MonthlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&!isCLRF&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
@@ -5577,43 +5575,6 @@ function QuarterlyCloseWorkpaper({entityId,entityName,canEdit=true}){
       </div>}
       {s.saved_to&&<div style={{fontSize:12,color:T.textMuted,marginTop:10}}>Filed at <strong>{s.saved_to}</strong></div>}
     </div>}
-  </div></div>);
-}
-
-function MonthlyCloseWorkpaper({entityId,entityName,canEdit=true}){
-  const defaultDate=()=>{const t=today();const d=new Date(t.slice(0,4),Number(t.slice(5,7))-1,1);d.setDate(0);return d.toISOString().slice(0,10);};
-  const[mon,setMon]=useState(defaultDate());
-  const[busy,setBusy]=useState(false);
-  const[err,setErr]=useState('');
-  const[result,setResult]=useState(null);
-  const valid=/^\d{4}-\d{2}-\d{2}$/.test(mon);
-  const run=async()=>{
-    if(!valid)return;
-    setBusy(true);setErr('');setResult(null);
-    try{
-      const r=await api.monthlyClose(entityId,mon);
-      if(!r)return;
-      const url=URL.createObjectURL(r.blob);
-      const a=document.createElement('a');a.href=url;a.download=r.filename;
-      document.body.appendChild(a);a.click();document.body.removeChild(a);
-      setTimeout(()=>URL.revokeObjectURL(url),4000);
-      setResult(r.summary||{});
-    }catch(e){ setErr(e.message||String(e)); }
-    finally{ setBusy(false); }
-  };
-  return(<div><div style={S.card}>
-    {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
-    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Monthly Closing Workpaper</div>
-    <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:760,lineHeight:1.5}}>
-      One monthly workbook supporting every balance-sheet account for the entity, in the CLA numbered-leadsheet style: a per-category Lead Sheet (Cash, Receivables, Prepaids, Fixed Assets, Other Assets, Investments, Intercompany, Payables, Credit Cards, Debt, Other Liabilities, Equity) linking by formula to a supporting roll-forward tab per account, each carrying the prior month-end balance forward with the month&rsquo;s general-ledger activity. Cash includes a per-bank-statement input and an unreconciled-difference line. Every subtotal and the Assets = Liabilities + Equity check is a live formula; the only literals are the atomic GL amounts and prior-month opening balances. A copy is filed under Workpapers &rsaquo; Monthly Closing by year and month.
-    </div>
-    <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
-      <div><label style={S.label}>Month End Date</label>
-        <input style={S.inputSm} type="date" value={mon} onChange={e=>{setMon(e.target.value);setErr('');setResult(null);}}/></div>
-      <button style={{...S.btnP,opacity:(!valid||busy||!canEdit)?0.5:1}} disabled={!valid||busy||!canEdit} onClick={run}>
-        {busy?'Running…':'Run Report'}</button>
-    </div>
-    {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
   </div></div>);
 }
 
