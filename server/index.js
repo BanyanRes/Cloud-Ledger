@@ -11195,6 +11195,21 @@ require('./otherworkpapers').registerOtherWorkpapersRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ CLRFI Midco I workpapers (CLA lead-sheet format) ═══
+// Monthly. CLA's four Midco balance-sheet workpapers in one workbook — Cash,
+// Other Assets (13100 Interest Reserve), Debt (25063 BOT loan) and the Equity
+// Rollforward + YTD NI — each lead sheet linking by formula to its supporting
+// tab, built from the CL ledger and bank reconciliations. Filed under
+// Workpapers › Midco Workpapers by year and month. See server/midcoworkpapers.js.
+require('./midcoworkpapers').registerMidcoWorkpapersRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ Quarterly Closing Workpaper (generic balance-sheet support) ═══
 // A monthly workbook supporting EVERY balance-sheet account of an entity: a Lead
 // Sheet that links by formula to per-category supporting roll-forward schedules

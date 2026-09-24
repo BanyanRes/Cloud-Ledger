@@ -635,6 +635,26 @@ export const api = {
     return { blob: await res.blob(), filename: m ? m[1] : 'Quarterly_Closing_Workpaper.xlsx', summary };
   },
 
+  // CLRFI Midco I workpapers (CLA lead-sheet format) for a month end.
+  midcoWorkpapers: async (eid, monthEnd) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/midco/' + eid + '/generate', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
+      body: JSON.stringify({ month_end: monthEnd }),
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) {
+      let data = {}; try { data = await res.json(); } catch {}
+      throw new Error(data.error || 'Report failed');
+    }
+    let summary = {}; try { summary = JSON.parse(res.headers.get('x-midco-summary') || '{}'); } catch {}
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    return { blob: await res.blob(), filename: m ? m[1] : 'CLRFI_Midco_I_Workpapers.xlsx', summary };
+  },
+
   clrfApDetailGet: async (eid) => {
     const token = getToken();
     const res = await fetch(API_BASE + '/workpapers/other/' + eid + '/ap-detail', { headers: token ? { Authorization: 'Bearer ' + token } : {} });

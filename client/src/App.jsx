@@ -846,6 +846,8 @@ export default function App(){
   // monthly Insurance Allocation workpaper. Not a development entity, so it has
   // no Requisitions; the allocation is its only workpaper.
   const isBanyanRes = !!(_activeEnt && (_activeEnt.code==='BANYANRE1' || /^banyan\s*residential$/i.test((_activeEnt.name||'').trim())));
+  // CLRFI Midco I (entity 70; the ledger name is spelled "CLFRI") — gets CLA's lead-sheet workpapers.
+  const isMidco = !!(_activeEnt && (String(_activeEnt.id)==='70' || /cl[rf]{2}i\s*midco\s*i\b/i.test(_activeEnt.name||'')));
   // Odyssey Holdings — the holding company that gets a monthly closing workpaper
   // supporting every balance-sheet account. The generator itself is generic.
   const isOdyssey = !!(_activeEnt && /odyssey/i.test(_activeEnt.name||''));
@@ -926,6 +928,7 @@ export default function App(){
       ...(isCLRF?[{id:'wp_cashflow',label:'Cash Flow Worksheet',icon:'💵',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_other',label:'Other Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
+      ...(isMidco?[{id:'wp_midco',label:'Midco Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
       ...(!isCLRF?[{id:'wp_qtrclose',label:'Quarterly Closing Workpaper',icon:'🗓️',section:'workpapers'}]:[]),
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
@@ -1030,6 +1033,7 @@ export default function App(){
       {page==='wp_other'&&activeEntity&&isCLRF&&<QuarterWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} kind="other" title="Other Workpapers" description="Balance-sheet account support in one workbook — Due From/To Port Co, Interest Receivable, Prepaid Expenses, Other Assets, AP Recon, Accrual & Subsequent Cash Disbursement, and Distributions Payable — each on its own tab, GL-derived and tying to the Statement of Assets, Liabilities and Partners' Capital. A copy is filed under Workpapers › Other Workpapers by year and quarter." key={activeEntity+'-'+rk}/>}
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_qtrclose'&&activeEntity&&!isCLRF&&<QuarterlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='wp_midco'&&activeEntity&&isMidco&&<MidcoWorkpapers entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&!isCLRF&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
@@ -5569,6 +5573,65 @@ function QuarterlyCloseWorkpaper({entityId,entityName,canEdit=true}){
         <tr style={S.grandTotalRow}><td style={S.tdBold}>Assets − (Liabilities + Equity)</td>
           <td style={{...S.tdBold,textAlign:'right',color:Math.abs(ties.imbalance||0)<0.01?T.green:T.red}}>{fmt(ties.imbalance)}</td></tr>
       </tbody></table>
+      {flags.length>0&&<div style={{display:'flex',flexDirection:'column',gap:6}}>
+        {flags.map((f,i)=>(<div key={i} style={{fontSize:12,lineHeight:1.5,color:f.severity==='exception'?T.red:(T.orange||'#d08a2a'),display:'flex',gap:6}}>
+          <span>{f.severity==='exception'?'✖':'⚠'}</span><span>{f.message}</span></div>))}
+      </div>}
+      {s.saved_to&&<div style={{fontSize:12,color:T.textMuted,marginTop:10}}>Filed at <strong>{s.saved_to}</strong></div>}
+    </div>}
+  </div></div>);
+}
+
+function MidcoWorkpapers({entityId,entityName,canEdit=true}){
+  // Default to the most recent month end that has already passed.
+  const defaultDate=()=>{const t=today();const [y,m]=t.split('-').map(Number);return new Date(Date.UTC(y,m-1,0)).toISOString().slice(0,10);};
+  const[mon,setMon]=useState(defaultDate());
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const[result,setResult]=useState(null);
+  const valid=/^\d{4}-\d{2}-\d{2}$/.test(mon);
+  const run=async()=>{
+    if(!valid)return;
+    setBusy(true);setErr('');setResult(null);
+    try{
+      const r=await api.midcoWorkpapers(entityId,mon);
+      if(!r)return;
+      const url=URL.createObjectURL(r.blob);
+      const a=document.createElement('a');a.href=url;a.download=r.filename;
+      document.body.appendChild(a);a.click();document.body.removeChild(a);
+      setTimeout(()=>URL.revokeObjectURL(url),4000);
+      setResult(r.summary||{});
+    }catch(e){ setErr(e.message||String(e)); }
+    finally{ setBusy(false); }
+  };
+  const s=result||{};
+  const flags=(s.flags||[]);
+  const ties=s.ties||{};
+  return(<div><div style={S.card}>
+    {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
+    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Midco Workpapers</div>
+    <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:760,lineHeight:1.5}}>
+      CLA&rsquo;s four balance-sheet workpapers for Midco in one workbook, in CLA&rsquo;s layout: the Cash lead sheet (each bank account&rsquo;s statement balance against the register, with the CloudLedger bank reconciliation behind it), Other Assets (13100 Interest Reserve), Debt (25063 BOT loan, with the current / long-term split) and the monthly Equity Rollforward with YTD net income. Each roll-forward starts at the prior quarter end. Every lead-sheet figure links to its supporting tab and ties to the general ledger; anything that needs attention is listed on the Index tab. A copy is filed under Workpapers › Midco Workpapers by year and month.
+    </div>
+    <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
+      <div><label style={S.label}>Month Ended</label>
+        <input style={S.inputSm} type="date" value={mon} onChange={e=>{setMon(e.target.value);setErr('');setResult(null);}}/></div>
+      <button style={{...S.btnP,opacity:(!valid||busy||!canEdit)?0.5:1}} disabled={!valid||busy||!canEdit} onClick={run}>
+        {busy?'Running…':'Run Report'}</button>
+    </div>
+    {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
+    {result&&<div style={{...S.card,marginTop:18,padding:14,background:flags.length?'#fff8f0':'#f3faf5'}}>
+      <div style={{fontWeight:700,color:flags.length?(T.orange||'#d08a2a'):T.green,marginBottom:8}}>
+        {s.period} workpapers downloaded{s.replaced>0?' · replaced the previous copy':''}
+        {flags.length?(' · '+flags.length+' item'+(flags.length>1?'s':'')+' to review'):' · all checks passed'}</div>
+      <table style={{...S.table,minWidth:360,marginBottom:flags.length?12:0}}><tbody>
+        <tr><td style={S.td}>Cash and cash equivalents</td><td style={S.tdR}>{fmt(ties.cash)}</td></tr>
+        <tr><td style={S.td}>Other assets</td><td style={S.tdR}>{fmt(ties.other_assets)}</td></tr>
+        <tr><td style={S.td}>Loans payable</td><td style={S.tdR}>{fmt(ties.loans)}</td></tr>
+        <tr style={S.grandTotalRow}><td style={S.tdBold}>Total equity (incl. current-year net income)</td>
+          <td style={{...S.tdBold,textAlign:'right'}}>{fmt(ties.equity)}</td></tr>
+      </tbody></table>
+      <div style={{fontSize:12,color:T.textMuted,marginBottom:flags.length?10:0}}>Shown as on CLA&rsquo;s lead sheets: credit balances (the loan, equity) in parentheses.</div>
       {flags.length>0&&<div style={{display:'flex',flexDirection:'column',gap:6}}>
         {flags.map((f,i)=>(<div key={i} style={{fontSize:12,lineHeight:1.5,color:f.severity==='exception'?T.red:(T.orange||'#d08a2a'),display:'flex',gap:6}}>
           <span>{f.severity==='exception'?'✖':'⚠'}</span><span>{f.message}</span></div>))}
