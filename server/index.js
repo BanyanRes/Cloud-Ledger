@@ -8225,8 +8225,12 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       const priorSync = latestBillSync.get(entityId, billId);
       if (priorSync) {
         const listUpdated = pick(bill, 'updatedTime', 'updated_time') || null;
-        if (priorSync.bc_updated_time && listUpdated && String(listUpdated) === String(priorSync.bc_updated_time)) {
-          // Unchanged since last sync. Backfill a missing vendor (legacy bills) and skip.
+        // Only take the cheap unchanged-skip when the posted JE STILL EXISTS. If the entry
+        // was deleted (manual delete, or a past false-delete), fall through so the bill is
+        // re-created — never skip a bill as "already synced" when its JE is gone (2026-09-25).
+        const _jeExists = db.prepare('SELECT 1 FROM journal_entries WHERE id = ? AND entity_id = ?').get(priorSync.cl_entry_id, entityId);
+        if (_jeExists && priorSync.bc_updated_time && listUpdated && String(listUpdated) === String(priorSync.bc_updated_time)) {
+          // Unchanged since last sync and JE present. Backfill a missing vendor (legacy) and skip.
           const vn = vendorOf(bill);
           const bnum = pick(bill, 'invoiceNumber', 'invoice_number') || billId;
           if (!preview && vn && bnum) { try { backfillVendor.run(vn, entityId, 'Bill.com bill #' + bnum); } catch (e) {} }
