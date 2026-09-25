@@ -8770,13 +8770,13 @@ app.post('/api/billcom/payment-reconcile/:entity_id', auth, requireEntityAccess(
 // reading bills works. Buckets match Weaver's sample: current, 1-30, 31-60,
 // 61-90, 91+ (relative to as_of, default today).
 // ───────────────────────────────────────────────────────────────────────────
-app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
-
+// A/P aging as of a date, built from the GL A/P account: Bill.com-synced bills
+// aged by vendor, all other control-account activity in an un-aged GL column,
+// tied to the GL balance. Shared by the A/P aging report route and the Monthly
+// Closing Workpapers (which pass the entity's own A/P account code).
+function buildApAging(entityId, asOf, apAccountOverride) {
   const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  const apAccount = (cfg && cfg.default_ap_account) ? String(cfg.default_ap_account) : '202000';
-  const asOf = String((req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of)) ? req.query.as_of : new Date().toISOString().slice(0, 10));
+  const apAccount = apAccountOverride ? String(apAccountOverride) : ((cfg && cfg.default_ap_account) ? String(cfg.default_ap_account) : '202000');
 
   // ── 1. Pull all GL activity on the AP account through the as-of date. This is
   //    the authoritative AP record: credits = bills, debits = payments/relief.
@@ -8950,7 +8950,7 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
   const reportTotal = grand.total;
   const reconDiff = Math.round((reportTotal - glBalance) * 100) / 100;
 
-  res.json({
+  return {
     entity_id: entityId,
     as_of: asOf,
     ap_account: apAccount,
@@ -8966,7 +8966,14 @@ app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id
     bill_count: vendorsOut.reduce((n, g) => n + g.rows.length, 0),
     gl_entry_count: glRows.length,
     billcom_error: billcomError,
-  });
+  };
+}
+
+app.get('/api/billcom/ap-aging/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const asOf = String((req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of)) ? req.query.as_of : new Date().toISOString().slice(0, 10));
+  res.json(buildApAging(entityId, asOf));
 });
 
 
@@ -11235,6 +11242,7 @@ require('./clamonthlyclose').registerClaMonthlyCloseRoutes(app, {
   requireRole,
   workpapersDir: WORKPAPERS_DIR,
   computeBalances: (eid, opts) => computeBalances(eid, opts),
+  buildApAging: (eid, asOf, apAcct) => buildApAging(eid, asOf, apAcct),
 });
 
 // ═══ CLRF workpaper: Preferred Return (fund-level 8% XIRR) ═══
