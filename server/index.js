@@ -796,6 +796,29 @@ console.log('[db migrate] bank_transactions/splits dimension columns ensured');
   if (!_sc.includes('invoice_id')) db.exec('ALTER TABLE bank_transaction_splits ADD COLUMN invoice_id INTEGER');
   console.log('[db migrate] bank_transaction_splits.invoice_id ensured');
 }
+// Financial-statement placement override: a user can pin an account to a
+// specific statement section + subsection from the Chart of Accounts instead of
+// relying on the profile's classification heuristics. Both columns are nullable;
+// an account with no override classifies exactly as before, so this changes
+// nothing on any entity's statements until a placement is actually set.
+{
+  const _ac = db.prepare("PRAGMA table_info(accounts)").all().map(c => c.name);
+  if (!_ac.includes('fs_section'))    db.exec("ALTER TABLE accounts ADD COLUMN fs_section TEXT");
+  if (!_ac.includes('fs_subsection')) db.exec("ALTER TABLE accounts ADD COLUMN fs_subsection TEXT");
+  console.log('[db migrate] accounts.fs_section/fs_subsection ensured');
+}
+// Custom statement subsections a user creates on the fly, per entity, so the
+// section picker can offer them alongside the profile's built-in groupings.
+db.exec(`CREATE TABLE IF NOT EXISTS statement_subsections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  statement TEXT NOT NULL,
+  section TEXT NOT NULL,
+  subsection TEXT NOT NULL,
+  created_by TEXT, created_at TEXT DEFAULT (datetime('now')),
+  UNIQUE(entity_id, section, subsection)
+)`);
+console.log('[db migrate] statement_subsections ensured');
 // Dimension code columns (name was the only label originally; code added for reporting/sorting)
 const dcCols = db.prepare("PRAGMA table_info(dim_classes)").all().map(c => c.name);
 if (!dcCols.includes('code')) { db.exec("ALTER TABLE dim_classes ADD COLUMN code TEXT"); console.log('[db migrate] dim_classes.code added'); }
@@ -3416,8 +3439,10 @@ app.get('/api/entities/:eid/pivot', auth, requireEntityAccess(), (req, res) => {
 
 app.post('/api/entities/:eid/accounts', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { code, name, type, subtype, bank_acct } = req.body; if (!code||!name||!type) return res.status(400).json({ error: 'Required' });
-  try { const r = db.prepare('INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct) VALUES (?, ?, ?, ?, ?, ?)').run(req.params.eid, code, name, type, subtype||'', bank_acct?1:0);
-    res.json({ id: r.lastInsertRowid, code, name, type, subtype: subtype||'', bank_acct: bank_acct?1:0, entity_id: +req.params.eid }); }
+  const fsSection = req.body.fs_section ? String(req.body.fs_section) : null;
+  const fsSubsection = req.body.fs_subsection ? String(req.body.fs_subsection) : null;
+  try { const r = db.prepare('INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct, fs_section, fs_subsection) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(req.params.eid, code, name, type, subtype||'', bank_acct?1:0, fsSection, fsSubsection);
+    res.json({ id: r.lastInsertRowid, code, name, type, subtype: subtype||'', bank_acct: bank_acct?1:0, fs_section: fsSection, fs_subsection: fsSubsection, entity_id: +req.params.eid }); }
   catch(e) { if (e.message.includes('UNIQUE')) return res.status(400).json({ error: 'Code exists' }); throw e; }
 });
 app.delete('/api/entities/:eid/accounts/:code', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
@@ -3437,6 +3462,8 @@ app.put('/api/entities/:eid/accounts/:code', auth, requireEntityAccess(), requir
   const updatedType = type || acct.type;
   const updatedSubtype = subtype !== undefined ? subtype : acct.subtype;
   const updatedBank = bank_acct !== undefined ? (bank_acct ? 1 : 0) : acct.bank_acct;
+  const updatedFsSection = req.body.fs_section !== undefined ? (req.body.fs_section ? String(req.body.fs_section) : null) : acct.fs_section;
+  const updatedFsSubsection = req.body.fs_subsection !== undefined ? (req.body.fs_subsection ? String(req.body.fs_subsection) : null) : acct.fs_subsection;
   if (updatedCode !== oldCode) {
     const existing = db.prepare('SELECT id FROM accounts WHERE entity_id=? AND code=?').get(eid, updatedCode);
     if (existing) return res.status(400).json({ error: 'Account code ' + updatedCode + ' already exists' });
@@ -3449,10 +3476,54 @@ app.put('/api/entities/:eid/accounts/:code', auth, requireEntityAccess(), requir
       db.prepare('UPDATE bank_transactions SET account_code=? WHERE account_code=? AND entity_id=?').run(updatedCode, oldCode, eid);
       db.prepare('UPDATE cleared_items SET account_code=? WHERE account_code=? AND entity_id=?').run(updatedCode, oldCode, eid);
     }
-    db.prepare('UPDATE accounts SET code=?, name=?, type=?, subtype=?, bank_acct=? WHERE entity_id=? AND code=?')
-      .run(updatedCode, updatedName, updatedType, updatedSubtype, updatedBank, eid, oldCode);
+    db.prepare('UPDATE accounts SET code=?, name=?, type=?, subtype=?, bank_acct=?, fs_section=?, fs_subsection=? WHERE entity_id=? AND code=?')
+      .run(updatedCode, updatedName, updatedType, updatedSubtype, updatedBank, updatedFsSection, updatedFsSubsection, eid, oldCode);
   })();
   res.json({ success: true, code: updatedCode });
+});
+
+// Statement-section pick-list for the Chart of Accounts section picker: the
+// profile's built-in sections/subsections per account type, plus any custom
+// subsections this entity has added. The account's stored fs_section/
+// fs_subsection is what actually moves the line on the statements.
+app.get('/api/entities/:eid/statement-sections', auth, requireEntityAccess(), (req, res) => {
+  const eid = +req.params.eid;
+  const ent = db.prepare('SELECT name, code, entity_type FROM entities WHERE id=?').get(eid);
+  if (!ent) return res.status(404).json({ error: 'Entity not found' });
+  const profile = financials.entityProfile({ entityName: ent.name, entityCode: ent.code, entityType: ent.entity_type });
+  const tax = financials.statementTaxonomy(profile);
+  const byType = {};
+  for (const [type, def] of Object.entries(tax)) {
+    byType[type] = { statement: def.statement, sections: def.sections.map(sec => ({ section: sec.section, subsections: sec.subsections.slice(), custom: [] })) };
+  }
+  const customs = db.prepare('SELECT statement, section, subsection FROM statement_subsections WHERE entity_id=? ORDER BY subsection').all(eid);
+  for (const c of customs) {
+    for (const def of Object.values(byType)) {
+      const sec = def.sections.find(s => s.section === c.section);
+      if (sec && !sec.subsections.includes(c.subsection)) { sec.subsections.push(c.subsection); sec.custom.push(c.subsection); }
+    }
+  }
+  res.json({ profile, types: byType });
+});
+
+// Create a custom statement subsection for an entity (the "+ New subsection"
+// control). Idempotent on (entity, section, subsection); validates the parent
+// section is real for this entity's profile.
+app.post('/api/entities/:eid/statement-subsections', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+  const eid = +req.params.eid;
+  const section = req.body && req.body.section ? String(req.body.section).trim() : '';
+  const subsection = req.body && req.body.subsection ? String(req.body.subsection).trim() : '';
+  const statement = req.body && req.body.statement ? String(req.body.statement).trim() : 'Statement of Operations';
+  if (!section || !subsection) return res.status(400).json({ error: 'section and subsection are required' });
+  const ent = db.prepare('SELECT name, code, entity_type FROM entities WHERE id=?').get(eid);
+  if (!ent) return res.status(404).json({ error: 'Entity not found' });
+  const profile = financials.entityProfile({ entityName: ent.name, entityCode: ent.code, entityType: ent.entity_type });
+  const tax = financials.statementTaxonomy(profile);
+  const validSection = Object.values(tax).some(def => def.sections.some(s => s.section === section));
+  if (!validSection) return res.status(400).json({ error: 'Unknown section for this entity: ' + section });
+  db.prepare('INSERT OR IGNORE INTO statement_subsections (entity_id, statement, section, subsection, created_by) VALUES (?, ?, ?, ?, ?)')
+    .run(eid, statement, section, subsection, (req.user && (req.user.email || req.user.name)) || null);
+  res.json({ success: true, statement, section, subsection });
 });
 
 // ═══ Journal Entries ═══
@@ -5577,18 +5648,18 @@ function computeBalances(eid, opts = {}) {
       } catch (e) { console.error('Auto-create RE 39000 failed:', e.message); }
     }
     const reCode = reAcct ? reAcct.code : null;
-    const bsRows = db.prepare(`SELECT jl.account_code, a.type, a.name, a.subtype, a.bank_acct, SUM(jl.debit) as total_debit, SUM(jl.credit) as total_credit FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=? AND je.date<=? AND (a.type NOT IN ('Revenue','Expense') OR je.date>=?) GROUP BY jl.account_code`).all(eid, as_of, close_pl_before);
+    const bsRows = db.prepare(`SELECT jl.account_code, a.type, a.name, a.subtype, a.bank_acct, a.fs_section, a.fs_subsection, SUM(jl.debit) as total_debit, SUM(jl.credit) as total_credit FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=? AND je.date<=? AND (a.type NOT IN ('Revenue','Expense') OR je.date>=?) GROUP BY jl.account_code`).all(eid, as_of, close_pl_before);
     const results = bsRows.map(r => { const isDr=r.type==='Asset'||r.type==='Expense'; let bal=isDr?(r.total_debit-r.total_credit):(r.total_credit-r.total_debit);
       if (reCode && r.account_code===reCode) bal+=priorNI;
-      return { code:r.account_code, name:r.name, type:r.type, subtype:r.subtype, bank_acct:r.bank_acct, balance:bal, total_debit:r.total_debit, total_credit:r.total_credit }; });
+      return { code:r.account_code, name:r.name, type:r.type, subtype:r.subtype, bank_acct:r.bank_acct, fs_section:r.fs_section, fs_subsection:r.fs_subsection, balance:bal, total_debit:r.total_debit, total_credit:r.total_credit }; });
     if (Math.abs(priorNI)>0.005 && reCode && !results.find(r=>r.code===reCode)) {
       results.push({ code:reCode, name:reAcct.name, type:reAcct.type, subtype:reAcct.subtype, bank_acct:0, balance:priorNI, total_debit:0, total_credit:0 });
     }
     return results;
   }
 
-  const rows = db.prepare(`SELECT jl.account_code, a.type, a.name, a.subtype, a.bank_acct, SUM(jl.debit) as total_debit, SUM(jl.credit) as total_credit FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=?${dateFilter}${dimFilter} GROUP BY jl.account_code`).all(...params);
-  return rows.map(r => { const isDr=r.type==='Asset'||r.type==='Expense'; return { code:r.account_code, name:r.name, type:r.type, subtype:r.subtype, bank_acct:r.bank_acct, balance:isDr?(r.total_debit-r.total_credit):(r.total_credit-r.total_debit), total_debit:r.total_debit, total_credit:r.total_credit }; });
+  const rows = db.prepare(`SELECT jl.account_code, a.type, a.name, a.subtype, a.bank_acct, a.fs_section, a.fs_subsection, SUM(jl.debit) as total_debit, SUM(jl.credit) as total_credit FROM journal_lines jl JOIN journal_entries je ON jl.entry_id=je.id JOIN accounts a ON a.entity_id=je.entity_id AND a.code=jl.account_code WHERE je.entity_id=?${dateFilter}${dimFilter} GROUP BY jl.account_code`).all(...params);
+  return rows.map(r => { const isDr=r.type==='Asset'||r.type==='Expense'; return { code:r.account_code, name:r.name, type:r.type, subtype:r.subtype, bank_acct:r.bank_acct, fs_section:r.fs_section, fs_subsection:r.fs_subsection, balance:isDr?(r.total_debit-r.total_credit):(r.total_credit-r.total_debit), total_debit:r.total_debit, total_credit:r.total_credit }; });
 }
 
 app.get('/api/entities/:eid/balances', auth, requireEntityAccess(), (req, res) => {

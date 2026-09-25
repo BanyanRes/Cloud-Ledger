@@ -3465,22 +3465,66 @@ function ArAgingReport({entityId,entityName}){
   </div>);
 }
 
+// Financial-statement section picker (Chart of Accounts). Options come from the
+// entity's own statement profile; "Auto" leaves the rule-based placement.
+function SectionPicker({types,type,value,onChange,onAddSub}){
+  const [adding,setAdding]=useState(false);
+  const [parent,setParent]=useState('');
+  const [nm,setNm]=useState('');
+  const [busy,setBusy]=useState(false);
+  const def=types&&types[type];const sections=(def&&def.sections)||[];const stmt=def?def.statement:'';
+  // If the account type changed and the stored placement no longer belongs to
+  // this type's sections, drop back to Auto so we never save a stale placement.
+  useEffect(()=>{
+    if(!value||!value.fs_subsection)return;
+    const ok=sections.some(sec=>sec.section===value.fs_section&&sec.subsections.indexOf(value.fs_subsection)>=0);
+    if(!ok)onChange({fs_section:null,fs_subsection:null});
+  },[type]); // eslint-disable-line react-hooks/exhaustive-deps
+  const val=value&&value.fs_subsection?((value.fs_section||'')+'||'+value.fs_subsection):'';
+  const pick=v=>{
+    if(v==='__new__'){setParent((sections[0]&&sections[0].section)||'');setNm('');setAdding(true);return;}
+    setAdding(false);
+    if(!v){onChange({fs_section:null,fs_subsection:null});return;}
+    const i=v.indexOf('||');onChange({fs_section:v.slice(0,i),fs_subsection:v.slice(i+2)});
+  };
+  const doAdd=async()=>{const name=nm.trim();if(!name||!parent||busy)return;setBusy(true);try{await onAddSub(parent,name);onChange({fs_section:parent,fs_subsection:name});setAdding(false);}finally{setBusy(false);}};
+  return(<div><label style={S.label}>Financial-statement section</label>
+    <select style={S.select} value={val} onChange={e=>pick(e.target.value)}>
+      <option value="">Auto (use default placement)</option>
+      {sections.map(sec=><optgroup key={sec.section} label={sec.section}>{sec.subsections.map(sub=><option key={sec.section+'||'+sub} value={sec.section+'||'+sub}>{sub}</option>)}</optgroup>)}
+      {sections.length>0&&<option value="__new__">+ New subsection...</option>}
+    </select>
+    {sections.length===0&&<div style={{fontSize:11,color:T.textMuted,marginTop:6}}>Section placement applies to income-statement accounts. Balance-sheet placement is not configurable yet.</div>}
+    {val&&!adding&&<div style={{fontSize:11,color:T.textMuted,marginTop:6}}>Appears under {stmt} &rsaquo; {value.fs_section}{value.fs_subsection!==value.fs_section?' › '+value.fs_subsection:''}</div>}
+    {adding&&<div style={{marginTop:8,padding:10,border:'1px dashed '+T.accent+'80',borderRadius:8,background:T.accentDim}}>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+        <select style={{...S.inputSm}} value={parent} onChange={e=>setParent(e.target.value)}>{sections.map(sec=><option key={sec.section} value={sec.section}>{sec.section}</option>)}</select>
+        <input style={{...S.inputSm,flex:1,minWidth:150}} placeholder="New subsection name" value={nm} onChange={e=>setNm(e.target.value)}/>
+        <button style={{...S.btnP,padding:'6px 12px',fontSize:12}} onClick={doAdd}>Add</button>
+        <button style={{...S.btnS,padding:'6px 12px',fontSize:12}} onClick={()=>{setAdding(false);pick('');}}>Cancel</button>
+      </div>
+      <div style={{fontSize:11,color:T.textMuted,marginTop:6}}>Adds a subsection to this entity's statement structure, reusable for future accounts.</div>
+    </div>}
+  </div>);
+}
+
 // ═══ Chart of Accounts ═══
 function ChartOfAccounts({entityId,entityName,canEdit}){const[accounts,setAccounts]=useState([]);const[showAdd,setShowAdd]=useState(false);const[q,setQ]=useState('');
-  const[form,setForm]=useState({code:'',name:'',type:'Asset',subtype:'',bank_acct:false});const[err,setErr]=useState('');
+  const[form,setForm]=useState({code:'',name:'',type:'Asset',subtype:'',bank_acct:false,fs_section:null,fs_subsection:null});const[err,setErr]=useState('');
   const[editing,setEditing]=useState(null);const[editForm,setEditForm]=useState({});const[editErr,setEditErr]=useState('');
-  const[balByCode,setBalByCode]=useState({});const[drillAcct,setDrillAcct]=useState(null);
+  const[balByCode,setBalByCode]=useState({});const[drillAcct,setDrillAcct]=useState(null);const[sectTax,setSectTax]=useState(null);
   const asOf=today();
   const yearAgo=(()=>{const d=new Date();d.setFullYear(d.getFullYear()-1);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');})();
   const load=useCallback(async()=>{
-    const[accts,bals]=await Promise.all([api.getAccounts(entityId),api.getBalances(entityId,{as_of:asOf}).catch(()=>[])]);
-    setAccounts(accts);const m={};(bals||[]).forEach(b=>{m[b.code]=b.balance;});setBalByCode(m);
+    const[accts,bals,tax]=await Promise.all([api.getAccounts(entityId),api.getBalances(entityId,{as_of:asOf}).catch(()=>[]),api.getStatementSections(entityId).catch(()=>null)]);
+    setAccounts(accts);const m={};(bals||[]).forEach(b=>{m[b.code]=b.balance;});setBalByCode(m);setSectTax(tax);
   },[entityId,asOf]);useEffect(()=>{load();},[load]);
+  const addSub=useCallback(async(section,subsection)=>{await api.addStatementSubsection(entityId,{section,subsection});const tax=await api.getStatementSections(entityId).catch(()=>null);if(tax)setSectTax(tax);},[entityId]);
   const editPanelRef=useRef(null);
   // The edit form renders at the top of the page; when Edit is clicked on a row
   // far down a long chart of accounts, the form would open off-screen and look
   // like nothing happened. Scroll it into view so it's always visible.
-  const startEdit=a=>{setEditing(a.code);setEditForm({new_code:a.code,name:a.name,type:a.type,subtype:a.subtype||'',bank_acct:!!a.bank_acct});setEditErr('');
+  const startEdit=a=>{setEditing(a.code);setEditForm({new_code:a.code,name:a.name,type:a.type,subtype:a.subtype||'',bank_acct:!!a.bank_acct,fs_section:a.fs_section||null,fs_subsection:a.fs_subsection||null});setEditErr('');
     setTimeout(()=>{editPanelRef.current&&editPanelRef.current.scrollIntoView({behavior:'smooth',block:'center'});},50);};
   const saveEdit=async()=>{if(!editForm.new_code||!editForm.name){setEditErr('Code and name required');return;}
     try{await api.updateAccount(entityId,editing,editForm);setEditing(null);load();}catch(e){setEditErr(e.message);}};
@@ -3504,7 +3548,8 @@ function ChartOfAccounts({entityId,entityName,canEdit}){const[accounts,setAccoun
       <div style={{...S.col,flex:2}}><label style={S.label}>Name</label><input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))}/></div>
       <div style={S.col}><label style={S.label}>Type</label><select style={S.select} value={form.type} onChange={e=>setForm(f=>({...f,type:e.target.value}))}>{['Asset','Liability','Equity','Revenue','Expense'].map(t=><option key={t}>{t}</option>)}</select></div></div>
       <div style={{marginBottom:14}}><label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,cursor:'pointer'}}><input type="checkbox" style={S.checkbox} checked={form.bank_acct} onChange={e=>setForm(f=>({...f,bank_acct:e.target.checked}))}/>Bank / cash account</label></div>
-      {err&&<div style={S.err}>{err}</div>}<button style={S.btnP} onClick={async()=>{if(!form.code||!form.name){setErr('Required');return;}try{await api.createAccount(entityId,form);setForm({code:'',name:'',type:'Asset',subtype:'',bank_acct:false});setShowAdd(false);setErr('');load();}catch(e){setErr(e.message);}}}>Add Account</button></div>}
+      <div style={{marginBottom:14}}><SectionPicker types={sectTax&&sectTax.types} type={form.type} value={form} onChange={v=>setForm(f=>({...f,...v}))} onAddSub={addSub}/></div>
+      {err&&<div style={S.err}>{err}</div>}<button style={S.btnP} onClick={async()=>{if(!form.code||!form.name){setErr('Required');return;}try{await api.createAccount(entityId,form);setForm({code:'',name:'',type:'Asset',subtype:'',bank_acct:false,fs_section:null,fs_subsection:null});setShowAdd(false);setErr('');load();}catch(e){setErr(e.message);}}}>Add Account</button></div>}
     {editing&&<div ref={editPanelRef} style={{...S.card,borderColor:T.accent+'40',marginBottom:16}}>
       <div style={{fontSize:14,fontWeight:600,color:T.textBright,marginBottom:12}}>Edit Account: {editing}</div>
       <div style={S.row}>
@@ -3512,12 +3557,14 @@ function ChartOfAccounts({entityId,entityName,canEdit}){const[accounts,setAccoun
         <div style={{...S.col,flex:2}}><label style={S.label}>Name</label><input style={S.input} value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))}/></div>
         <div style={S.col}><label style={S.label}>Type</label><select style={S.select} value={editForm.type} onChange={e=>setEditForm(f=>({...f,type:e.target.value}))}>{['Asset','Liability','Equity','Revenue','Expense'].map(t=><option key={t}>{t}</option>)}</select></div></div>
       <div style={{marginBottom:14}}><label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,cursor:'pointer'}}><input type="checkbox" style={S.checkbox} checked={editForm.bank_acct} onChange={e=>setEditForm(f=>({...f,bank_acct:e.target.checked}))}/>Bank / cash account</label></div>
+      <div style={{marginBottom:14}}><SectionPicker types={sectTax&&sectTax.types} type={editForm.type} value={editForm} onChange={v=>setEditForm(f=>({...f,...v}))} onAddSub={addSub}/></div>
       {editErr&&<div style={S.err}>{editErr}</div>}
       {editForm.new_code!==editing&&<div style={{fontSize:11,color:T.orange,marginBottom:8}}>Changing code from {editing} to {editForm.new_code} will update all journal entries, bank transactions, and reconciliations.</div>}
       <div style={{display:'flex',gap:10}}><button style={S.btnP} onClick={saveEdit}>Save Changes</button><button style={S.btnS} onClick={()=>setEditing(null)}>Cancel</button></div></div>}
-    <div style={S.cardFlush}><table style={S.table}><thead><tr><th style={S.th}>Code</th><th style={S.th}>Name</th><th style={S.th}>Type</th><th style={S.thC}>Bank</th><th style={S.thR}>Balance (as of {asOf})</th>{canEdit&&<th style={{...S.th,width:80}}>Actions</th>}</tr></thead>
+    <div style={S.cardFlush}><table style={S.table}><thead><tr><th style={S.th}>Code</th><th style={S.th}>Name</th><th style={S.th}>Type</th><th style={S.th}>Statement section</th><th style={S.thC}>Bank</th><th style={S.thR}>Balance (as of {asOf})</th>{canEdit&&<th style={{...S.th,width:80}}>Actions</th>}</tr></thead>
       <tbody>{accounts.filter(a=>{const t=q.trim().toLowerCase();if(!t)return true;return (a.code||'').toLowerCase().includes(t)||(a.name||'').toLowerCase().includes(t)||(a.type||'').toLowerCase().includes(t);}).map(a=><tr key={a.code} style={editing===a.code?{background:T.accentDim}:{cursor:'pointer'}} onClick={e=>{if(e.target.closest('button'))return;setDrillAcct({code:a.code,name:a.name,type:a.type,balance:balByCode[a.code]||0});}}>
         <td style={{...S.td,color:T.textBright}}>{a.code}</td><td style={S.td}>{a.name}</td><td style={S.td}><span style={S.tag(a.type)}>{a.type}</span></td>
+        <td style={S.td}>{a.fs_subsection?<span style={{fontSize:12,color:T.textBright}}>{a.fs_subsection}</span>:<span style={{fontSize:11,color:T.textMuted}}>Auto</span>}</td>
         <td style={S.tdC}>{a.bank_acct?<span style={{color:T.green}}>Yes</span>:''}</td>
         <td style={{...S.tdR,fontWeight:600,color:T.textBright}}>{fmt(balByCode[a.code]||0)}</td>
         {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}>

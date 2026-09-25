@@ -88,6 +88,8 @@ export const api = {
   createAccount: (eid, data) => request('/entities/' + eid + '/accounts', { method: 'POST', body: data }),
   updateAccount: (eid, code, data) => request('/entities/' + eid + '/accounts/' + encodeURIComponent(code), { method: 'PUT', body: data }),
   deleteAccount: (eid, code) => request('/entities/' + eid + '/accounts/' + encodeURIComponent(code), { method: 'DELETE' }),
+  getStatementSections: (eid) => request('/entities/' + eid + '/statement-sections'),
+  addStatementSubsection: (eid, data) => request('/entities/' + eid + '/statement-subsections', { method: 'POST', body: data }),
 
   // Journal Entries
   getEntries: (eid, from, to) => {

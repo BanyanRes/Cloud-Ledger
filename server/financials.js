@@ -224,6 +224,12 @@ function otherIeRoute(row) {
   const name = String(row.name || '').toLowerCase().trim();
   const sub = String(row.subtype || '').toLowerCase();
   const type = String(row.type || '');
+  // A user-set financial-statement placement (Chart of Accounts) wins over
+  // every heuristic below, on every profile. fs_section is null for accounts
+  // that were never pinned, so this is a no-op until a placement is chosen.
+  if (row.fs_section === 'Other Income (Expense)') return type === 'Revenue' ? OIE_INCOME : OIE_EXPENSE;
+  if (row.fs_section === 'Income Taxes') return OIE_TAX;
+  if (row.fs_section) return null; // pinned to an operating section (Revenue / COGS / Operating Expenses)
   if (type === 'Revenue') {
     // Non-operating income: interest, misc, other, gains/losses, dividends,
     // debt forgiveness, tax refunds. Deliberately NOT matched: Banyan
@@ -240,12 +246,6 @@ function otherIeRoute(row) {
     return null;
   }
   if (type !== 'Expense') return null;
-  // SRN (Sabine River & Northern) presents Track Maintenance (75100) and
-  // Emergency Repairs (75101) in the Other Expense section, right under
-  // Interest Expense (75000), per Jimmy 2026-09-25. These codes/names are
-  // unique to SRN across every entity, so pinning by code is safe for all
-  // other charts (no risk of catching a real operating expense elsewhere).
-  if (row.code === '75100' || row.code === '75101') return OIE_EXPENSE;
   // Penalties BEFORE the tax test: 'State and Local Tax Penalties' contains
   // 'state and local tax' but is an other expense, not an income tax.
   if (/penalt/.test(name)) return OIE_EXPENSE;
@@ -1863,6 +1863,12 @@ const PL_EXPENSE_CATEGORY_ORDER = [
 // otherwise a name heuristic keeps unmapped accounts (other CLR entities) from
 // being dropped. Falls back to 'Administrative & Other' as a catch-all.
 function plExpenseCategory(row) {
+  // User-set placement: an account pinned to an operating category shows there,
+  // ahead of the code map and the name heuristic below.
+  if (row.fs_section && row.fs_subsection
+      && row.fs_section !== 'Other Income (Expense)' && row.fs_section !== 'Income Taxes'
+      && row.fs_section !== 'Cost of Goods Sold' && row.fs_section !== 'Revenue')
+    return row.fs_subsection;
   const explicit = PL_EXPENSE_MAP[String(row.code)];
   if (explicit) return explicit;
   const name = (row.name || '').toLowerCase();
@@ -1878,6 +1884,34 @@ function plExpenseCategory(row) {
   if (/insurance/.test(name)) return 'Insurance';
   if (/property tax|state and local tax|tax & license|tax and license|assessment|other tax/.test(name)) return 'Taxes & Assessments';
   return 'Administrative & Other';
+}
+
+// ── Statement-section taxonomy for the Chart of Accounts section picker ──────
+// Returns, per account type, the statement + the ordered sections a user can
+// pin an account to, and the built-in subsections under each. The account's
+// stored fs_section / fs_subsection (see otherIeRoute / plExpenseCategory /
+// the COGS predicate) is what actually moves the line; this only supplies the
+// pick-list. Operating-expense regrouping is honored on the default profile
+// family (the opexGroups path); the special CPA-mirrored profiles still expose
+// the cross-bucket targets (COGS / Other Income (Expense) / Income Taxes) that
+// the shared classifier honors on every profile.
+const SPECIAL_OPEX_PROFILES = new Set(['banyan', 'bsfrgp', 'turnkey', 'midco']);
+function statementTaxonomy(profile) {
+  const SOO = 'Statement of Operations';
+  const supportsOpexRegroup = !SPECIAL_OPEX_PROFILES.has(profile);
+  const expenseSections = [{ section: 'Cost of Goods Sold', subsections: ['Cost of Goods Sold'] }];
+  if (supportsOpexRegroup) expenseSections.push({ section: 'Operating Expenses', subsections: PL_EXPENSE_CATEGORY_ORDER.slice() });
+  expenseSections.push({ section: 'Other Income (Expense)', subsections: ['Other Expense'] });
+  expenseSections.push({ section: 'Income Taxes', subsections: ['State and Local Taxes'] });
+  return {
+    Revenue:   { statement: SOO, sections: [
+                   { section: 'Revenue', subsections: ['Revenue'] },
+                   { section: 'Other Income (Expense)', subsections: ['Other Income', 'Interest Income'] } ] },
+    Expense:   { statement: SOO, sections: expenseSections },
+    Asset:     { statement: 'Balance Sheet', sections: [] },
+    Liability: { statement: 'Balance Sheet', sections: [] },
+    Equity:    { statement: 'Balance Sheet', sections: [] },
+  };
 }
 
 
@@ -2183,7 +2217,7 @@ async function buildStatements(getBalances, opts) {
       const val = m => { const r = m.get(code); return r ? bal(r) : 0; };
       const cur = val(mCur), pri = val(mPri), ytd = val(mYtd);
       if (isZero(cur) && isZero(pri) && isZero(ytd)) return null;
-      return { code, name: ref.name, cur: r2(cur), pri: r2(pri), ytd: r2(ytd), change: r2(cur - pri) };
+      return { code, name: ref.name, fs_section: ref.fs_section, fs_subsection: ref.fs_subsection, type: ref.type, subtype: ref.subtype, cur: r2(cur), pri: r2(pri), ytd: r2(ytd), change: r2(cur - pri) };
     }).filter(Boolean);
   }
 
@@ -2195,9 +2229,12 @@ async function buildStatements(getBalances, opts) {
   // COGS is resolved FIRST and always wins: a cost-of-construction line can
   // never be lifted out of cost of goods sold by an Other Income (Expense)
   // name test.
-  const cogs = plLines(r => r.type === 'Expense' && (isTk
+  const cogsHeur = r => isTk
     ? turnkeyIsCogs(r)
-    : /cogs|cost of goods|cost of revenue|car hire/i.test((r.subtype || '') + ' ' + (r.name || ''))));
+    : /cogs|cost of goods|cost of revenue|car hire/i.test((r.subtype || '') + ' ' + (r.name || ''));
+  // A user-set placement wins: an account pinned to Cost of Goods Sold is COGS,
+  // and one pinned to any other section is pulled out of COGS.
+  const cogs = plLines(r => r.type === 'Expense' && (r.fs_section ? r.fs_section === 'Cost of Goods Sold' : cogsHeur(r)));
   const cogsCodes = new Set(cogs.map(l => l.code));
   // Other Income (Expense) + Income Taxes, from the one shared classifier
   // (otherIeRoute). Turnkey keeps its own pins on top of it because its chart
@@ -2301,7 +2338,7 @@ async function buildStatements(getBalances, opts) {
     const routeOf = {};
     for (const l of allPl) {
       const bref = mYtd.get(l.code) || mCur.get(l.code) || mPri.get(l.code);
-      const route = bsfrgpPlRoute({ code: l.code, name: l.name, type: bref.type, subtype: bref.subtype });
+      const route = bsfrgpPlRoute({ code: l.code, name: l.name, type: bref.type, subtype: bref.subtype, fs_section: l.fs_section, fs_subsection: l.fs_subsection });
       routeOf[l.code] = route;
       (byBucket[route.bucket] || byBucket.opex).push(l);
     }
@@ -2396,10 +2433,10 @@ async function buildStatements(getBalances, opts) {
     for (const l of allPl) {
       const ref = mYtd.get(l.code) || mCur.get(l.code) || mPri.get(l.code);
       const route = isMidco
-        ? midcoPlRoute({ code: l.code, name: l.name, type: ref.type, subtype: ref.subtype })
+        ? midcoPlRoute({ code: l.code, name: l.name, type: ref.type, subtype: ref.subtype, fs_section: l.fs_section, fs_subsection: l.fs_subsection })
         : isBd
-        ? banyandevPlRoute(bdKey, { code: l.code, name: l.name, type: ref.type, subtype: ref.subtype })
-        : banyanPlRoute({ code: l.code, name: l.name, type: ref.type, subtype: ref.subtype });
+        ? banyandevPlRoute(bdKey, { code: l.code, name: l.name, type: ref.type, subtype: ref.subtype, fs_section: l.fs_section, fs_subsection: l.fs_subsection })
+        : banyanPlRoute({ code: l.code, name: l.name, type: ref.type, subtype: ref.subtype, fs_section: l.fs_section, fs_subsection: l.fs_subsection });
       routeOf[l.code] = route;
       (byBucket[route.bucket] || byBucket.opex).push(l);
     }
@@ -6285,6 +6322,8 @@ function groupConsolidatingSchedule(schedules, meta) {
 
 module.exports = {
   buildStatements,
+  entityProfile,
+  statementTaxonomy,
   groupConsolidatingSchedule,
   renderConsolidatingSchedulesPdf,
   buildTtmPL,
