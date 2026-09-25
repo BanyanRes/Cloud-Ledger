@@ -140,7 +140,7 @@ function tabHead(ws, title, entityName, subtitle, backTab) {
 }
 function num(ws, addr, v, o = {}) {
   const c = ws.getCell(addr); c.numFmt = o.fmt || ACCT; c.font = F(o.font || {});
-  if (v && typeof v === 'object' && v.formula) c.value = v; else c.value = (v == null ? '' : v);
+  if (v && typeof v === 'object' && v.formula) c.value = v; else c.value = (v == null || v === '' ? null : v);
   if (o.border) c.border = o.border; if (o.fill) c.fill = o.fill;
   return c;
 }
@@ -302,6 +302,15 @@ function buildClaData(ctx, m, eid) {
   const base = buildData(ctx, m, eid);
   ensureRegisterSchema(db); ensureSeed(db, base.entity);
   const reg = loadRegisters(db, eid);
+  // Categorization overrides on top of the generic rules: any account carried in
+  // the fixed-asset register (asset or accumulated side) is a fixed asset, and a
+  // security deposit is an other asset, as on CLA's leadsheets.
+  const regFixed = new Set();
+  for (const fa of reg.fixedAssets) { if (fa.asset_account) regFixed.add(String(fa.asset_account)); if (fa.dep_account) regFixed.add(String(fa.dep_account)); }
+  for (const a of base.acctRows) {
+    if (regFixed.has(String(a.code))) a.cat = 'fixed';
+    else if (a.cat === 'fixed' && /security\s+deposit/i.test(String(a.name || ''))) a.cat = 'otherassets';
+  }
   const byCat = {}; for (const a of base.acctRows) (byCat[a.cat] = byCat[a.cat] || []).push(a);
   const flags = base.flags.slice();
 
@@ -569,7 +578,7 @@ function buildPrepaidTab(wb, a, items, en, m, used, leadTab) {
       const prev = k === 1 ? 'I' + r : colL(12 + 3 * (k - 2)) + r;
       const add = (it.premium != null && it.date_paid && ym(it.date_paid) === ym(ends[k - 1])) ? r2(it.premium) : 0;
       num(ws, addC + r, add);
-      num(ws, expC + r, { formula: 'IF(AND($F' + r + '<>"",$H' + r + '>0,' + balC + '$10>=EOMONTH($F' + r + ',1),(' + prev + '+' + addC + r + ')>0.005),-MIN($H' + r + ',' + prev + '+' + addC + r + '),0)' });
+      num(ws, expC + r, { formula: 'IF(OR($F' + r + '="",$H' + r + '<=0),0,IF(AND(' + balC + '$10>=EOMONTH($F' + r + ',1),(' + prev + '+' + addC + r + ')>0.005),-MIN($H' + r + ',' + prev + '+' + addC + r + '),0))' });
       num(ws, balC + r, { formula: prev + '+' + addC + r + '+' + expC + r });
     }
     r++;
