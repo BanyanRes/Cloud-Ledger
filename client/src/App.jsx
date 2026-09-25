@@ -3494,7 +3494,7 @@ function SectionPicker({types,type,value,onChange,onAddSub}){
       {sections.map(sec=><optgroup key={sec.section} label={sec.section}>{sec.subsections.map(sub=><option key={sec.section+'||'+sub} value={sec.section+'||'+sub}>{sub}</option>)}</optgroup>)}
       {sections.length>0&&<option value="__new__">+ New subsection...</option>}
     </select>
-    {sections.length===0&&<div style={{fontSize:11,color:T.textMuted,marginTop:6}}>Section placement applies to income-statement accounts. Balance-sheet placement is not configurable yet.</div>}
+    {sections.length===0&&<div style={{fontSize:11,color:T.textMuted,marginTop:6}}>Placement for this account type is not configurable yet.</div>}
     {val&&!adding&&<div style={{fontSize:11,color:T.textMuted,marginTop:6}}>Appears under {stmt} &rsaquo; {value.fs_section}{value.fs_subsection!==value.fs_section?' › '+value.fs_subsection:''}</div>}
     {adding&&<div style={{marginTop:8,padding:10,border:'1px dashed '+T.accent+'80',borderRadius:8,background:T.accentDim}}>
       <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>

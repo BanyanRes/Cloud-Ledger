@@ -455,6 +455,11 @@ const BS_ACCOUNT_MAP_BSFRGP = {
 // (BS_ACCOUNT_MAP) via bsClassify(); bsfrgp uses its own map with the same
 // heuristic fallback so no account is ever dropped.
 function bsClassifyFor(profile, row) {
+  // A user-set placement (Chart of Accounts) wins over the profile heuristics.
+  // The section picker only offers this account's own side (asset subsections
+  // for an asset, etc.), so this regroups within a side and never unbalances
+  // the statement. Null for accounts that were never pinned.
+  if (row.fs_section && row.fs_subsection) return { section: row.fs_section, sub: row.fs_subsection };
   if (profile === 'banyan') return banyanBsClassify(row);
   if (profile === 'banyandev') return banyandevBsClassify(row);
   if (profile === 'bsfrgp') {
@@ -1908,8 +1913,15 @@ function statementTaxonomy(profile) {
                    { section: 'Revenue', subsections: ['Revenue'] },
                    { section: 'Other Income (Expense)', subsections: ['Other Income', 'Interest Income'] } ] },
     Expense:   { statement: SOO, sections: expenseSections },
-    Asset:     { statement: 'Balance Sheet', sections: [] },
-    Liability: { statement: 'Balance Sheet', sections: [] },
+    Asset:     { statement: 'Balance Sheet', sections: [
+                   { section: 'Current Assets', subsections: ['Cash and Cash Equivalents', 'Accounts Receivable, Net', 'Intercompany Receivable', 'Other Current Assets'] },
+                   { section: 'Fixed Assets, Net', subsections: ['Fixed Assets', 'Accumulated Depreciation'] },
+                   { section: 'Intangible Assets, Net', subsections: ['Intangible Assets', 'Amortization'] },
+                   { section: 'Investments', subsections: ['Long Term Investments'] },
+                   { section: 'Other Assets', subsections: ['Other Assets'] } ] },
+    Liability: { statement: 'Balance Sheet', sections: [
+                   { section: 'Current Liabilities', subsections: ['Accounts Payable', 'Intercompany Payable', 'Other Current Liabilities'] },
+                   { section: 'Long Term Liabilities', subsections: ['Loans'] } ] },
     Equity:    { statement: 'Balance Sheet', sections: [] },
   };
 }
