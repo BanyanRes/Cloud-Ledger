@@ -28,7 +28,7 @@
 // Assets = Liabilities + Equity + Net income tie is a live formula. The only
 // literals are atomic GL line amounts, prior-month opening balances, and blank
 // blue input cells for data CloudLedger does not hold (bank/CC statement balances,
-// aging buckets). FQ Anchor columns ("#fq-<code>") match CLA for FinQuery linking.
+// aging buckets).
 //
 // Reuses the GL data layer of ./monthlyclose (buildData, resolveMonth) and is
 // registered by index.js. ctx = { db, auth, requireEntityAccess, requireRole,
@@ -108,9 +108,8 @@ function wpLink(ws, addr, sheet, text) {
 
 // ─── Supporting-tab builders ──────────────────────────────────────────────────
 
-// FQ anchor marker + entity/account heading at the top of a supporting tab.
+// Entity/account heading at the top of a supporting tab.
 function tabHead(ws, a, entityName, m, subtitle) {
-  ws.getCell('A1').value = '#fq-' + a.code; ws.getCell('A1').font = F({ size: 8, italic: true, color: { argb: 'FFBFBFBF' } });
   ws.getCell('C1').value = entityName; ws.getCell('C1').font = F({ size: 12, bold: true });
   ws.getCell('C2').value = a.code + '  —  ' + a.name; ws.getCell('C2').font = F({ bold: true });
   ws.getCell('C3').value = subtitle; ws.getCell('C3').font = F({ italic: true });
@@ -255,14 +254,13 @@ function buildFixedSchedule(wb, fixedRows, entityName, m) {
 // ─── Leadsheet builders (exact CLA columns) ───────────────────────────────────
 
 // Generic simple leadsheet: Account No. | Account Name | Worksheet | Balance |
-// FQ Anchor | Comments. `balanceRef(a)` returns the supporting-tab cell formula.
-// Returns the SUBTOTAL tie cell (e.g. "'AP Leadsheet'!$E$15").
+// Comments. Returns the SUBTOTAL tie cell (e.g. "'AP Leadsheet'!$E$15").
 function simpleLeadsheet(ws, cd, entityName, m, rows, refByCode) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 40;
-  ws.getColumn('D').width = 14; ws.getColumn('E').width = 16; ws.getColumn('F').width = 14; ws.getColumn('G').width = 40;
+  ws.getColumn('D').width = 14; ws.getColumn('E').width = 16; ws.getColumn('F').width = 40;
   titleBlock(ws, entityName, cd.lead, m, 'G');
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet', 'Balance', 'FQ Anchor', 'Comments']);
+  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet', 'Balance', 'Comments']);
   let r = HR + 1; const first = r;
   for (const a of rows) {
     const rr = refByCode.get(a.code) || {};
@@ -271,7 +269,6 @@ function simpleLeadsheet(ws, cd, entityName, m, rows, refByCode) {
     wpLink(ws, 'D' + r, rr.sheet, a.code);
     const bcell = ws.getCell('E' + r); bcell.numFmt = ACCT; bcell.font = F();
     bcell.value = rr.endRef ? { formula: rr.endRef } : a.end;
-    const fq = ws.getCell('F' + r); fq.value = '#fq-' + a.code; fq.font = F({ bold: true, color: { argb: RED } });
     r++;
   }
   const last = r - 1;
@@ -285,10 +282,10 @@ function simpleLeadsheet(ws, cd, entityName, m, rows, refByCode) {
 function cashLeadsheet(ws, cd, entityName, m, rows, refByCode) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 38;
   ws.getColumn('D').width = 12; ws.getColumn('E').width = 16; ws.getColumn('F').width = 16;
-  ws.getColumn('G').width = 14; ws.getColumn('H').width = 18; ws.getColumn('I').width = 30;
-  titleBlock(ws, entityName, cd.lead, m, 'I');
+  ws.getColumn('G').width = 18; ws.getColumn('H').width = 30;
+  titleBlock(ws, entityName, cd.lead, m, 'H');
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet / Location', 'Cleared Balance', 'Register Balance', 'FQ Anchor', 'Bank Statement Ref', 'Comments']);
+  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet / Location', 'Cleared Balance', 'Register Balance', 'Bank Statement Ref', 'Comments']);
   let r = HR + 1; const first = r;
   for (const a of rows) {
     const rr = refByCode.get(a.code) || {};
@@ -297,8 +294,7 @@ function cashLeadsheet(ws, cd, entityName, m, rows, refByCode) {
     wpLink(ws, 'D' + r, rr.sheet, a.code);
     const clr = ws.getCell('E' + r); clr.numFmt = ACCT; clr.font = F(); clr.value = rr.clearedRef ? { formula: rr.clearedRef } : '';
     const reg = ws.getCell('F' + r); reg.numFmt = ACCT; reg.font = F(); reg.value = rr.registerRef ? { formula: rr.registerRef } : a.end;
-    const fq = ws.getCell('G' + r); fq.value = '#fq-' + a.code; fq.font = F({ bold: true, color: { argb: RED } });
-    ws.getCell('H' + r).value = 'Bank Statement'; ws.getCell('H' + r).font = F();
+    ws.getCell('G' + r).value = 'Bank Statement'; ws.getCell('G' + r).font = F();
     r++;
   }
   const last = r - 1;
@@ -315,12 +311,12 @@ function cashLeadsheet(ws, cd, entityName, m, rows, refByCode) {
 function ccLeadsheet(ws, cd, entityName, m, rows, refByCode) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 34;
   ws.getColumn('D').width = 12; ws.getColumn('E').width = 15; ws.getColumn('F').width = 15; ws.getColumn('G').width = 15;
-  ws.getColumn('H').width = 14; ws.getColumn('I').width = 16; ws.getColumn('J').width = 26;
-  titleBlock(ws, entityName, cd.lead, m, 'J');
+  ws.getColumn('H').width = 16; ws.getColumn('I').width = 26;
+  titleBlock(ws, entityName, cd.lead, m, 'I');
   ws.getCell('E6').value = '(As of Statement Date)'; ws.getCell('E6').font = F({ italic: true, size: 9 });
   ws.getCell('G6').value = '(As of Period-End)'; ws.getCell('G6').font = F({ italic: true, size: 9 });
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet / Location', 'Cleared Balance', 'Register Balance', 'Ending Balance', 'FQ Anchor', 'CC Statement Ref', 'Comments']);
+  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet / Location', 'Cleared Balance', 'Register Balance', 'Ending Balance', 'CC Statement Ref', 'Comments']);
   let r = HR + 1; const first = r;
   for (const a of rows) {
     const rr = refByCode.get(a.code) || {};
@@ -330,7 +326,6 @@ function ccLeadsheet(ws, cd, entityName, m, rows, refByCode) {
     const clr = ws.getCell('E' + r); clr.numFmt = ACCT; clr.font = F(); clr.value = rr.clearedRef ? { formula: rr.clearedRef } : '';
     const reg = ws.getCell('F' + r); reg.numFmt = ACCT; reg.font = F(); reg.value = rr.registerRef ? { formula: rr.registerRef } : a.end;
     const end = ws.getCell('G' + r); end.numFmt = ACCT; end.font = F(); end.value = rr.endingRef ? { formula: 'IF(' + rr.endingRef + '=0,' + rr.registerRef + ',' + rr.endingRef + ')' } : (rr.registerRef ? { formula: rr.registerRef } : a.end);
-    const fq = ws.getCell('H' + r); fq.value = '#fq-' + a.code; fq.font = F({ bold: true, color: { argb: RED } });
     r++;
   }
   const last = r - 1;
@@ -346,15 +341,14 @@ function ccLeadsheet(ws, cd, entityName, m, rows, refByCode) {
 // Net = Cost + Deprec. Tie = Net total.
 function fixedLeadsheet(ws, cd, entityName, m, pairs, fixedRef) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 30; ws.getColumn('D').width = 15;
-  ws.getColumn('E').width = 12; ws.getColumn('F').width = 12; ws.getColumn('G').width = 30; ws.getColumn('H').width = 15;
-  ws.getColumn('I').width = 12; ws.getColumn('J').width = 15; ws.getColumn('K').width = 26;
-  titleBlock(ws, entityName, cd.lead, m, 'K');
-  ws.getCell('H3').value = 'Capitalization Policy:'; ws.getCell('H3').font = F();
-  ws.getCell('I3').value = '>$1,000 for single item'; ws.getCell('I3').font = F();
+  ws.getColumn('E').width = 12; ws.getColumn('F').width = 30; ws.getColumn('G').width = 15; ws.getColumn('H').width = 15; ws.getColumn('I').width = 26;
+  titleBlock(ws, entityName, cd.lead, m, 'J');
+  ws.getCell('G3').value = 'Capitalization Policy:'; ws.getCell('G3').font = F();
+  ws.getCell('H3').value = '>$1,000 for single item'; ws.getCell('H3').font = F();
   // Section ribbon (row 7) + header (row 8).
   const sB = ws.getCell('B7'); sB.value = 'Fixed Asset Account Breakdown'; sB.font = F({ bold: true }); sB.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
-  const sF = ws.getCell('F7'); sF.value = 'Depreciation Account Breakdown'; sF.font = F({ bold: true }); sF.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
-  hdr(ws, 8, 2, ['Asset Acct. #', 'Asset Acct. Name', 'Asset Cost', 'Asset FQ Anchor', 'Depreciation Account #', 'Depreciation Account Name', 'Deprec. Balance', 'Deprec. FQ Anchor', 'Net Asset Amount', 'Comments']);
+  const sF = ws.getCell('E7'); sF.value = 'Depreciation Account Breakdown'; sF.font = F({ bold: true }); sF.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
+  hdr(ws, 8, 2, ['Asset Acct. #', 'Asset Acct. Name', 'Asset Cost', 'Depreciation Account #', 'Depreciation Account Name', 'Deprec. Balance', 'Net Asset Amount', 'Comments']);
   let r = 9; const first = r;
   for (const p of pairs) {
     const asset = p.asset, dep = p.dep;
@@ -363,21 +357,19 @@ function fixedLeadsheet(ws, cd, entityName, m, pairs, fixedRef) {
       ws.getCell('C' + r).value = asset.name; ws.getCell('C' + r).font = F();
       const dcell = ws.getCell('D' + r); dcell.numFmt = ACCT; dcell.font = F();
       const ar = fixedRef.get(asset.code); dcell.value = ar ? { formula: ar.costRef } : asset.end;
-      ws.getCell('E' + r).value = '#fq-' + asset.code; ws.getCell('E' + r).font = F({ bold: true, color: { argb: RED } });
     } else { ws.getCell('D' + r).value = 0; ws.getCell('D' + r).numFmt = ACCT; ws.getCell('D' + r).font = F(); }
     if (dep) {
-      ws.getCell('F' + r).value = dep.code; ws.getCell('F' + r).font = F();
-      ws.getCell('G' + r).value = dep.name; ws.getCell('G' + r).font = F();
-      const hcell = ws.getCell('H' + r); hcell.numFmt = ACCT; hcell.font = F();
-      const dr = fixedRef.get(dep.code); hcell.value = dr ? { formula: dr.costRef } : dep.end;
-      ws.getCell('I' + r).value = '#fq-' + dep.code; ws.getCell('I' + r).font = F({ bold: true, color: { argb: RED } });
-    } else { ws.getCell('H' + r).value = 0; ws.getCell('H' + r).numFmt = ACCT; ws.getCell('H' + r).font = F(); }
-    const nc = ws.getCell('J' + r); nc.numFmt = ACCT; nc.font = F(); nc.value = { formula: 'D' + r + '+H' + r };
+      ws.getCell('E' + r).value = dep.code; ws.getCell('E' + r).font = F();
+      ws.getCell('F' + r).value = dep.name; ws.getCell('F' + r).font = F();
+      const gcell = ws.getCell('G' + r); gcell.numFmt = ACCT; gcell.font = F();
+      const dr = fixedRef.get(dep.code); gcell.value = dr ? { formula: dr.costRef } : dep.end;
+    } else { ws.getCell('G' + r).value = 0; ws.getCell('G' + r).numFmt = ACCT; ws.getCell('G' + r).font = F(); }
+    const nc = ws.getCell('H' + r); nc.numFmt = ACCT; nc.font = F(); nc.value = { formula: 'D' + r + '+G' + r };
     r++;
   }
   const last = r - 1;
   ws.getCell('B' + r).value = cd.total; ws.getCell('B' + r).font = F({ bold: true });
-  ['D', 'H', 'J'].forEach((col) => {
+  ['D', 'G', 'H'].forEach((col) => {
     const c = ws.getCell(col + r); c.numFmt = ACCT; c.font = F({ bold: true }); c.border = { top: THIN, bottom: DBL };
     c.value = last >= first ? { formula: 'SUBTOTAL(109,' + col + first + ':' + col + last + ')' } : 0;
   });
@@ -389,16 +381,16 @@ function fixedLeadsheet(ws, cd, entityName, m, pairs, fixedRef) {
   const dr1 = ws.getCell('D' + (jr + 2)); dr1.numFmt = ACCT; dr1.fill = INPUT_FILL; dr1.font = F({ color: { argb: BLUE } }); dr1.border = box;
   ws.getCell('C' + (jr + 3)).value = 'Accumulated Depreciation'; ws.getCell('C' + (jr + 3)).font = F();
   const cr1 = ws.getCell('E' + (jr + 3)); cr1.numFmt = ACCT; cr1.fill = INPUT_FILL; cr1.font = F({ color: { argb: BLUE } }); cr1.border = box;
-  return qn(cd.tab) + '!$J$' + r; // Net total ties to the balance sheet.
+  return qn(cd.tab) + '!$H$' + r; // Net total ties to the balance sheet.
 }
 
 // Other assets leadsheet: Balance Dr (Cr) linked to each detail tab "Grand Total".
 function otherAssetsLeadsheet(ws, cd, entityName, m, rows, refByCode, projects) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 44;
-  ws.getColumn('D').width = 14; ws.getColumn('E').width = 16; ws.getColumn('F').width = 14; ws.getColumn('G').width = 30;
+  ws.getColumn('D').width = 14; ws.getColumn('E').width = 16; ws.getColumn('F').width = 30;
   titleBlock(ws, entityName, cd.lead, m, 'G');
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet', 'Balance\nDr (Cr)', 'FQ Anchor', 'Comments']);
+  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet', 'Balance\nDr (Cr)', 'Comments']);
   let r = HR + 1; const first = r;
   for (const a of rows) {
     const rr = refByCode.get(a.code) || {};
@@ -407,7 +399,6 @@ function otherAssetsLeadsheet(ws, cd, entityName, m, rows, refByCode, projects) 
     wpLink(ws, 'D' + r, rr.sheet, a.code);
     const bcell = ws.getCell('E' + r); bcell.numFmt = ACCT; bcell.font = F();
     bcell.value = rr.sheet ? { formula: 'SUMIF(' + qn(rr.sheet) + '!A:A,"Grand Total",' + qn(rr.sheet) + '!E:E)' } : a.end;
-    const fq = ws.getCell('F' + r); fq.value = '#fq-' + a.code; fq.font = F({ bold: true, color: { argb: RED } });
     r++;
   }
   const last = r - 1;
@@ -427,12 +418,12 @@ function otherAssetsLeadsheet(ws, cd, entityName, m, rows, refByCode, projects) 
 // Intercompany leadsheet: Entity / Balance / Other Entity Bal / Variance tie-out.
 function intercoLeadsheet(ws, cd, entityName, m, rows, refByCode) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 34; ws.getColumn('D').width = 22;
-  ws.getColumn('E').width = 12; ws.getColumn('F').width = 15; ws.getColumn('G').width = 12; ws.getColumn('H').width = 15; ws.getColumn('I').width = 12; ws.getColumn('J').width = 26;
-  titleBlock(ws, entityName, cd.lead, m, 'J');
+  ws.getColumn('E').width = 12; ws.getColumn('F').width = 15; ws.getColumn('G').width = 15; ws.getColumn('H').width = 15; ws.getColumn('I').width = 26;
+  titleBlock(ws, entityName, cd.lead, m, 'I');
   ws.getCell('C5').value = 'Entity Name:'; ws.getCell('C5').font = F();
   ws.getCell('D5').value = entityName; ws.getCell('D5').font = F({ bold: true });
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Entity Name', 'Account Name', 'Worksheet', 'Balance', 'FQ Anchor', 'Other Entity Bal', 'Variance', 'Comments']);
+  hdr(ws, HR, 2, ['Account No.', 'Entity Name', 'Account Name', 'Worksheet', 'Balance', 'Other Entity Bal', 'Variance', 'Comments']);
   let r = HR + 1; const first = r;
   for (const a of rows) {
     const rr = refByCode.get(a.code) || {};
@@ -441,19 +432,17 @@ function intercoLeadsheet(ws, cd, entityName, m, rows, refByCode) {
     ws.getCell('D' + r).value = a.name; ws.getCell('D' + r).font = F();
     wpLink(ws, 'E' + r, rr.sheet, a.code);
     const bcell = ws.getCell('F' + r); bcell.numFmt = ACCT; bcell.font = F(); bcell.value = rr.endRef ? { formula: rr.endRef } : a.end;
-    const fq = ws.getCell('G' + r); fq.value = '#fq-' + a.code; fq.font = F({ bold: true, color: { argb: RED } });
-    const oc = ws.getCell('H' + r); oc.numFmt = ACCT; oc.font = F();
+    const oc = ws.getCell('G' + r); oc.numFmt = ACCT; oc.font = F();
     if (a.cp) oc.value = a.cpNet || 0; else { oc.value = ''; }
-    const vc = ws.getCell('I' + r); vc.numFmt = ACCT; vc.font = F();
-    // Our net receivable (asset +, liability −) plus the counterparty's net.
+    const vc = ws.getCell('H' + r); vc.numFmt = ACCT; vc.font = F();
     const ourSigned = (a.type === 'Asset' ? '' : '-') + 'F' + r;
-    if (a.cp) vc.value = { formula: 'IFERROR(' + ourSigned + '+H' + r + ',"")' }; else vc.value = '';
-    if (!a.cp && Math.abs(a.end) >= 0.01) { const cm = ws.getCell('J' + r); cm.value = 'No matching CL entity — confirm manually'; cm.font = F({ italic: true, color: { argb: 'FF9C4221' } }); }
+    if (a.cp) vc.value = { formula: 'IFERROR(' + ourSigned + '+G' + r + ',"")' }; else vc.value = '';
+    if (!a.cp && Math.abs(a.end) >= 0.01) { const cm = ws.getCell('I' + r); cm.value = 'No matching CL entity — confirm manually'; cm.font = F({ italic: true, color: { argb: 'FF9C4221' } }); }
     r++;
   }
   const last = r - 1;
   ws.getCell('B' + r).value = cd.total; ws.getCell('B' + r).font = F({ bold: true });
-  ['F', 'H', 'I'].forEach((col) => {
+  ['F', 'G', 'H'].forEach((col) => {
     const c = ws.getCell(col + r); c.numFmt = ACCT; c.font = F({ bold: true }); c.border = { top: THIN, bottom: DBL };
     c.value = last >= first ? { formula: 'SUBTOTAL(109,' + col + first + ':' + col + last + ')' } : 0;
   });
