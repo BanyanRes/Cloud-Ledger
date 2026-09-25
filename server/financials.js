@@ -240,6 +240,12 @@ function otherIeRoute(row) {
     return null;
   }
   if (type !== 'Expense') return null;
+  // SRN (Sabine River & Northern) presents Track Maintenance (75100) and
+  // Emergency Repairs (75101) in the Other Expense section, right under
+  // Interest Expense (75000), per Jimmy 2026-09-25. These codes/names are
+  // unique to SRN across every entity, so pinning by code is safe for all
+  // other charts (no risk of catching a real operating expense elsewhere).
+  if (row.code === '75100' || row.code === '75101') return OIE_EXPENSE;
   // Penalties BEFORE the tax test: 'State and Local Tax Penalties' contains
   // 'state and local tax' but is an other expense, not an income tax.
   if (/penalt/.test(name)) return OIE_EXPENSE;
