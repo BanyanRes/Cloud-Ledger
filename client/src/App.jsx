@@ -925,7 +925,7 @@ export default function App(){
       ...(isCLRF?[{id:'wp_cashflow',label:'Cash Flow Worksheet',icon:'💵',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_other',label:'Other Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
-      ...(isBanyanRes?[{id:'wp_cla_monthlyclose',label:'Monthly Close (CLA Format)',icon:'📑',section:'workpapers'}]:[]),
+      ...(isBanyanRes?[{id:'wp_cla_monthlyclose',label:'Monthly Closing Workpapers',icon:'📑',section:'workpapers'}]:[]),
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
@@ -5630,7 +5630,7 @@ function MonthlyCloseWorkpaper({entityId,entityName,canEdit=true}){
   </div></div>);
 }
 
-// ─── Workpapers › Monthly Close (CLA Format) — Banyan Residential ──────────────────
+// ─── Workpapers › Monthly Closing Workpapers — Banyan Residential ──────────────────
 // High-fidelity replica of CLA's numbered monthly-close leadsheets (Cash,
 // Receivables, Prepaids, Fixed Assets, Other Assets, Intercompany, Payables,
 // Credit Cards, Debt, Equity), GL-derived with blue input cells and FQ anchors.
@@ -5657,10 +5657,7 @@ function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true}){
   };
   return(<div><div style={S.card}>
     {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
-    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Monthly Close (CLA Format)</div>
-    <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:760,lineHeight:1.5}}>
-      A high-fidelity replica of CLA&rsquo;s monthly close leadsheets, one workbook covering every balance-sheet account in CLA&rsquo;s exact numbered-leadsheet display: Cash (Cleared / Register / Bank Statement Ref with a per-bank reconciliation tab), Receivables, Prepaids, Fixed Assets (Asset Cost / Accumulated Depreciation / Net Asset, keyed to a Fixed Asset Schedule), Other Assets, Intercompany (Entity / Balance / Other Entity Bal / Variance, tied to each counterparty&rsquo;s own ledger), Payables, Credit Cards, Debt and Equity. Balances are drawn from the general ledger and linked by formula to a supporting schedule for each account; blue input cells carry the data CloudLedger doesn&rsquo;t hold (bank and credit-card statement balances, aging), and every account keeps its FQ Anchor. Every subtotal and the Assets = Liabilities + Equity + Net income check is a live formula. A copy is filed under Workpapers &rsaquo; Monthly Close - CLA by year and month.
-    </div>
+    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Monthly Closing Workpapers</div>
     <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
       <div><label style={S.label}>Month End Date</label>
         <input style={S.inputSm} type="date" value={mon} onChange={e=>{setMon(e.target.value);setErr('');setResult(null);}}/></div>
