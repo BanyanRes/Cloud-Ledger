@@ -1219,34 +1219,12 @@ async function billcomListVendors(args) {
 // We walk month-sized windows across [fromYM, toYM], union + dedupe by id.
 // Each window for CLRF returns well under 100 rows, so nothing truncates.
 async function billcomListBillsWindowed({ sessionId, devKey, baseUrl, fromDate, toDate }) {
-  const base = (baseUrl || BILLCOM_BASE_URLS.sandbox);
-  const hdr = { sessionId, devKey, Accept: "application/json" };
   const addMonth = (d) => { const [Y, M] = d.split("-"); let yy = +Y, mm = +M + 1; if (mm > 12) { mm = 1; yy++; } return yy + "-" + String(mm).padStart(2, "0") + "-01"; };
-  // normalize to first-of-month window starts
-  const startYM = fromDate.slice(0, 7) + "-01";
-  const endExclusive = addMonth(toDate.slice(0, 7) + "-01"); // include the toDate month fully
+  const from = fromDate.slice(0, 7) + "-01";
+  const to = addMonth(toDate.slice(0, 7) + "-01"); // include the toDate month fully
   const byId = new Map();
-  let win = startYM;
-  let guard = 0;
-  while (win < endExclusive && guard < 240) {
-    guard++;
-    const winEnd = addMonth(win);
-    const filt = "dueDate:gte:" + win + ",dueDate:lt:" + winEnd;
-    const url = base + "/bills?max=100&filters=" + encodeURIComponent(filt);
-    let json;
-    try {
-      const resp = await billcomFetch(url, { method: "GET", headers: hdr }, 20000);
-      const text = await resp.text();
-      try { json = JSON.parse(text); } catch { throw new Error("Non-JSON bills window (HTTP " + resp.status + ")"); }
-      if (!resp.ok) { const msg = Array.isArray(json) ? json.map(e => e.message || JSON.stringify(e)).join("; ") : (json.message || ("HTTP " + resp.status)); throw new Error("bills window: " + msg); }
-    } catch (e) { throw new Error("bills window " + win + ": " + e.message); }
-    const results = Array.isArray(json.results) ? json.results : [];
-    for (const b of results) { const id = b && b.id; if (id != null && !byId.has(String(id))) byId.set(String(id), b); }
-    // Safety: if a single month ever returns the 100 cap, narrow it would be needed;
-    // log so we know to split finer. (CLRF volume is far below this.)
-    if (results.length >= 100) console.log("[ap-aging] WARNING window " + win + " hit 100-row cap; may be truncated");
-    win = winEnd;
-  }
+  // Adaptive date-window splitting so a month with >100 bills is never truncated.
+  await billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, resourcePath: "/bills", field: "dueDate", from, to, byId });
   return Array.from(byId.values());
 }
 
@@ -1260,14 +1238,14 @@ async function billcomListBillsWindowed({ sessionId, devKey, baseUrl, fromDate, 
 // This replaces the old fixed one-month-per-request loop, which silently dropped every
 // bill past the first 100 in any month that had more than 100 (root cause of live bills
 // vanishing from the sync and being false-deleted, 2026-09-25).
-async function billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, field, from, to, extraQuery, byId, ctx }) {
+async function billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, resourcePath, field, from, to, extraQuery, byId, ctx }) {
   const base = (baseUrl || BILLCOM_BASE_URLS.sandbox);
   const hdr = { sessionId, devKey, Accept: "application/json" };
   ctx = ctx || { calls: 0 };
   if (ctx.calls > 2000) throw new Error("billcom bills range fetch exceeded call budget (" + from + ".." + to + ")");
   ctx.calls++;
   const filt = field + ":gte:" + from + "," + field + ":lt:" + to;
-  const url = base + "/bills?max=100" + (extraQuery || "") + "&filters=" + encodeURIComponent(filt);
+  const url = base + (resourcePath || "/bills") + "?max=100" + (extraQuery || "") + "&filters=" + encodeURIComponent(filt);
   let json;
   try {
     const resp = await billcomFetch(url, { method: "GET", headers: hdr }, 20000);
@@ -1284,8 +1262,8 @@ async function billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, fiel
     const spanDays = Math.round((dTo - dFrom) / 86400000);
     if (spanDays > 1) {
       const mid = new Date(dFrom + Math.floor(spanDays / 2) * 86400000).toISOString().slice(0, 10);
-      await billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, field, from, to: mid, extraQuery, byId, ctx });
-      await billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, field, from: mid, to, extraQuery, byId, ctx });
+      await billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, resourcePath, field, from, to: mid, extraQuery, byId, ctx });
+      await billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, resourcePath, field, from: mid, to, extraQuery, byId, ctx });
     } else {
       // A single day already at the 100 cap: v3 offset paging is broken so we cannot page
       // further. Extremely rare (>100 bills sharing one <field> day); log loudly.
@@ -1359,31 +1337,12 @@ function anyApproverApproved(bill) {
 // month-sized processDate windows and union+dedupe by id. Each CLRF window is far
 // below the 100-row cap. Returns the full payment set across [fromDate, toDate].
 async function billcomListPaymentsWindowed({ sessionId, devKey, baseUrl, fromDate, toDate }) {
-  const base = (baseUrl || BILLCOM_BASE_URLS.sandbox);
-  const hdr = { sessionId, devKey, Accept: "application/json" };
   const addMonth = (d) => { const [Y, M] = d.split("-"); let yy = +Y, mm = +M + 1; if (mm > 12) { mm = 1; yy++; } return yy + "-" + String(mm).padStart(2, "0") + "-01"; };
-  const startYM = fromDate.slice(0, 7) + "-01";
-  const endExclusive = addMonth(toDate.slice(0, 7) + "-01");
+  const from = fromDate.slice(0, 7) + "-01";
+  const to = addMonth(toDate.slice(0, 7) + "-01");
   const byId = new Map();
-  let win = startYM;
-  let guard = 0;
-  while (win < endExclusive && guard < 240) {
-    guard++;
-    const winEnd = addMonth(win);
-    const filt = "processDate:gte:" + win + ",processDate:lt:" + winEnd;
-    const url = base + "/payments?max=100&filters=" + encodeURIComponent(filt);
-    let json;
-    try {
-      const resp = await billcomFetch(url, { method: "GET", headers: hdr }, 20000);
-      const text = await resp.text();
-      try { json = JSON.parse(text); } catch { throw new Error("Non-JSON payments window (HTTP " + resp.status + ")"); }
-      if (!resp.ok) { const msg = Array.isArray(json) ? json.map(e => e.message || JSON.stringify(e)).join("; ") : (json.message || ("HTTP " + resp.status)); throw new Error("payments window: " + msg); }
-    } catch (e) { throw new Error("payments window " + win + ": " + e.message); }
-    const results = Array.isArray(json.results) ? json.results : [];
-    for (const p of results) { const id = p && p.id; if (id != null && !byId.has(String(id))) byId.set(String(id), p); }
-    if (results.length >= 100) console.log("[billcom-sync] WARNING payments window " + win + " hit 100-row cap; may be truncated");
-    win = winEnd;
-  }
+  // Adaptive date-window splitting so a month with >100 payments is never truncated.
+  await billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, resourcePath: "/payments", field: "processDate", from, to, byId });
   return Array.from(byId.values());
 }
 
