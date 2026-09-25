@@ -1250,36 +1250,60 @@ async function billcomListBillsWindowed({ sessionId, devKey, baseUrl, fromDate, 
   return Array.from(byId.values());
 }
 
+// Fetch ALL bills whose <field> ("updatedTime" | "dueDate") falls in [from, to)
+// (YYYY-MM-DD strings), defeating Bill.com v3's broken offset pagination (nextPage
+// re-serves the first page) by ADAPTIVE DATE-WINDOW SPLITTING: request the range with
+// max=100; if it returns the full 100 rows the range is truncated, so split it in half
+// and recurse into each half, until every leaf range returns fewer than 100. Results
+// union by id into `byId`.
+//
+// This replaces the old fixed one-month-per-request loop, which silently dropped every
+// bill past the first 100 in any month that had more than 100 (root cause of live bills
+// vanishing from the sync and being false-deleted, 2026-09-25).
+async function billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, field, from, to, extraQuery, byId, ctx }) {
+  const base = (baseUrl || BILLCOM_BASE_URLS.sandbox);
+  const hdr = { sessionId, devKey, Accept: "application/json" };
+  ctx = ctx || { calls: 0 };
+  if (ctx.calls > 2000) throw new Error("billcom bills range fetch exceeded call budget (" + from + ".." + to + ")");
+  ctx.calls++;
+  const filt = field + ":gte:" + from + "," + field + ":lt:" + to;
+  const url = base + "/bills?max=100" + (extraQuery || "") + "&filters=" + encodeURIComponent(filt);
+  let json;
+  try {
+    const resp = await billcomFetch(url, { method: "GET", headers: hdr }, 20000);
+    const text = await resp.text();
+    try { json = JSON.parse(text); } catch { throw new Error("Non-JSON bills window (HTTP " + resp.status + ")"); }
+    if (!resp.ok) { const msg = Array.isArray(json) ? json.map(e => e.message || JSON.stringify(e)).join("; ") : (json.message || ("HTTP " + resp.status)); throw new Error(msg); }
+  } catch (e) { throw new Error("bills range " + from + ".." + to + ": " + e.message); }
+  const results = Array.isArray(json.results) ? json.results : [];
+  for (const b of results) { const id = b && b.id; if (id != null && !byId.has(String(id))) byId.set(String(id), b); }
+  if (results.length >= 100) {
+    // Truncated at the cap → split [from, to) and recurse so nothing is dropped.
+    const dFrom = Date.parse(from + "T00:00:00Z");
+    const dTo = Date.parse(to + "T00:00:00Z");
+    const spanDays = Math.round((dTo - dFrom) / 86400000);
+    if (spanDays > 1) {
+      const mid = new Date(dFrom + Math.floor(spanDays / 2) * 86400000).toISOString().slice(0, 10);
+      await billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, field, from, to: mid, extraQuery, byId, ctx });
+      await billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, field, from: mid, to, extraQuery, byId, ctx });
+    } else {
+      // A single day already at the 100 cap: v3 offset paging is broken so we cannot page
+      // further. Extremely rare (>100 bills sharing one <field> day); log loudly.
+      console.log("[billcom sync] WARNING single-day range " + from + " (" + field + ") returned the 100-row cap; may be truncated");
+    }
+  }
+}
+
 // Fetch bills by updatedTime window instead of dueDate. A bill approved after the
 // sync cutoff must have been updated at/after approval, so this captures late,
 // back-dated invoices a dueDate window (anchored on the cutoff month) would miss.
-// Same month-windowing to dodge v3's broken offset pagination.
+// Completeness is guaranteed by adaptive date-window splitting (see above).
 async function billcomListBillsByUpdatedWindowed({ sessionId, devKey, baseUrl, fromDate, toDate }) {
-  const base = (baseUrl || BILLCOM_BASE_URLS.sandbox);
-  const hdr = { sessionId, devKey, Accept: "application/json" };
   const addMonth = (d) => { const [Y, M] = d.split("-"); let yy = +Y, mm = +M + 1; if (mm > 12) { mm = 1; yy++; } return yy + "-" + String(mm).padStart(2, "0") + "-01"; };
-  const startYM = fromDate.slice(0, 7) + "-01";
-  const endExclusive = addMonth(toDate.slice(0, 7) + "-01");
+  const from = fromDate.slice(0, 7) + "-01";
+  const to = addMonth(toDate.slice(0, 7) + "-01"); // include the toDate month fully
   const byId = new Map();
-  let win = startYM;
-  let guard = 0;
-  while (win < endExclusive && guard < 240) {
-    guard++;
-    const winEnd = addMonth(win);
-    const filt = "updatedTime:gte:" + win + ",updatedTime:lt:" + winEnd;
-    const url = base + "/bills?max=100&billApprovals=true&filters=" + encodeURIComponent(filt);
-    let json;
-    try {
-      const resp = await billcomFetch(url, { method: "GET", headers: hdr }, 20000);
-      const text = await resp.text();
-      try { json = JSON.parse(text); } catch { throw new Error("Non-JSON bills window (HTTP " + resp.status + ")"); }
-      if (!resp.ok) { const msg = Array.isArray(json) ? json.map(e => e.message || JSON.stringify(e)).join("; ") : (json.message || ("HTTP " + resp.status)); throw new Error("bills window: " + msg); }
-    } catch (e) { throw new Error("bills updated-window " + win + ": " + e.message); }
-    const results = Array.isArray(json.results) ? json.results : [];
-    for (const b of results) { const id = b && b.id; if (id != null && !byId.has(String(id))) byId.set(String(id), b); }
-    if (results.length >= 100) console.log("[billcom sync] WARNING updated-window " + win + " hit 100-row cap; may be truncated");
-    win = winEnd;
-  }
+  await billcomFetchBillsRangeAdaptive({ sessionId, devKey, baseUrl, field: "updatedTime", from, to, extraQuery: "&billApprovals=true", byId });
   return Array.from(byId.values());
 }
 
@@ -8663,6 +8687,23 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
       // only delete if the CL entry actually exists (it may have been removed manually)
       if (!entryStillExists.get(row.cl_entry_id, entityId)) {
         logSync.run(entityId, 'bill_deleted', bid, row.cl_entry_id, 'success', 'bill absent in Bill.com; CL entry already gone', now, null);
+        continue;
+      }
+      // POSITIVE-CONFIRMATION GUARD (2026-09-25): NEVER delete a CL entry merely because a
+      // bill is absent from the list fetch. A truncated/incomplete fetch previously caused
+      // mass false deletions of live bills. Look the bill up directly and delete ONLY if
+      // Bill.com confirms it is inactive/deleted (isActive === '2'); on "still active" or any
+      // lookup error, leave the entry untouched.
+      let _confirmedDeleted = false;
+      try {
+        const _chk = await billcomGetById({ ...listArgs, resourcePath: '/bills', id: bid });
+        _confirmedDeleted = !!_chk && String(pick(_chk, 'isActive', 'is_active') || '') === '2';
+      } catch (e) {
+        result.bills.deleted_details.push({ id: bid, cl_entry_id: row.cl_entry_id, status: 'kept', reason: 'delete-guard lookup failed, entry kept: ' + e.message });
+        continue;
+      }
+      if (!_confirmedDeleted) {
+        result.bills.deleted_details.push({ id: bid, cl_entry_id: row.cl_entry_id, status: 'kept', reason: 'absent from fetch but still active in Bill.com — entry kept' });
         continue;
       }
       try {
