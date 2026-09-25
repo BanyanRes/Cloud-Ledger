@@ -257,8 +257,7 @@ function buildFixedSchedule(wb, fixedRows, entityName, m) {
 // Generic simple leadsheet: Account No. | Account Name | Worksheet | Balance |
 // FQ Anchor | Comments. `balanceRef(a)` returns the supporting-tab cell formula.
 // Returns the SUBTOTAL tie cell (e.g. "'AP Leadsheet'!$E$15").
-function simpleLeadsheet(wb, cd, entityName, m, rows, refByCode) {
-  const ws = wb.addWorksheet(cd.tab, { views: [{ showGridLines: false }] });
+function simpleLeadsheet(ws, cd, entityName, m, rows, refByCode) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 40;
   ws.getColumn('D').width = 14; ws.getColumn('E').width = 16; ws.getColumn('F').width = 14; ws.getColumn('G').width = 40;
   titleBlock(ws, entityName, cd.lead, m, 'G');
@@ -283,8 +282,7 @@ function simpleLeadsheet(wb, cd, entityName, m, rows, refByCode) {
 }
 
 // Cash leadsheet: Cleared / Register / Bank Statement Ref. Tie = Register total.
-function cashLeadsheet(wb, cd, entityName, m, rows, refByCode) {
-  const ws = wb.addWorksheet(cd.tab, { views: [{ showGridLines: false }] });
+function cashLeadsheet(ws, cd, entityName, m, rows, refByCode) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 38;
   ws.getColumn('D').width = 12; ws.getColumn('E').width = 16; ws.getColumn('F').width = 16;
   ws.getColumn('G').width = 14; ws.getColumn('H').width = 18; ws.getColumn('I').width = 30;
@@ -314,8 +312,7 @@ function cashLeadsheet(wb, cd, entityName, m, rows, refByCode) {
 
 // Credit cards leadsheet: Cleared (stmt date) / Register (period-end) / Ending.
 // Tie = Register total.
-function ccLeadsheet(wb, cd, entityName, m, rows, refByCode) {
-  const ws = wb.addWorksheet(cd.tab, { views: [{ showGridLines: false }] });
+function ccLeadsheet(ws, cd, entityName, m, rows, refByCode) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 34;
   ws.getColumn('D').width = 12; ws.getColumn('E').width = 15; ws.getColumn('F').width = 15; ws.getColumn('G').width = 15;
   ws.getColumn('H').width = 14; ws.getColumn('I').width = 16; ws.getColumn('J').width = 26;
@@ -347,8 +344,7 @@ function ccLeadsheet(wb, cd, entityName, m, rows, refByCode) {
 
 // Fixed assets leadsheet: two-section (asset breakdown / depreciation breakdown),
 // Net = Cost + Deprec. Tie = Net total.
-function fixedLeadsheet(wb, cd, entityName, m, pairs, fixedRef) {
-  const ws = wb.addWorksheet(cd.tab, { views: [{ showGridLines: false }] });
+function fixedLeadsheet(ws, cd, entityName, m, pairs, fixedRef) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 30; ws.getColumn('D').width = 15;
   ws.getColumn('E').width = 12; ws.getColumn('F').width = 12; ws.getColumn('G').width = 30; ws.getColumn('H').width = 15;
   ws.getColumn('I').width = 12; ws.getColumn('J').width = 15; ws.getColumn('K').width = 26;
@@ -397,8 +393,7 @@ function fixedLeadsheet(wb, cd, entityName, m, pairs, fixedRef) {
 }
 
 // Other assets leadsheet: Balance Dr (Cr) linked to each detail tab "Grand Total".
-function otherAssetsLeadsheet(wb, cd, entityName, m, rows, refByCode, projects) {
-  const ws = wb.addWorksheet(cd.tab, { views: [{ showGridLines: false }] });
+function otherAssetsLeadsheet(ws, cd, entityName, m, rows, refByCode, projects) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 44;
   ws.getColumn('D').width = 14; ws.getColumn('E').width = 16; ws.getColumn('F').width = 14; ws.getColumn('G').width = 30;
   titleBlock(ws, entityName, cd.lead, m, 'G');
@@ -430,8 +425,7 @@ function otherAssetsLeadsheet(wb, cd, entityName, m, rows, refByCode, projects) 
 }
 
 // Intercompany leadsheet: Entity / Balance / Other Entity Bal / Variance tie-out.
-function intercoLeadsheet(wb, cd, entityName, m, rows, refByCode) {
-  const ws = wb.addWorksheet(cd.tab, { views: [{ showGridLines: false }] });
+function intercoLeadsheet(ws, cd, entityName, m, rows, refByCode) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 34; ws.getColumn('D').width = 22;
   ws.getColumn('E').width = 12; ws.getColumn('F').width = 15; ws.getColumn('G').width = 12; ws.getColumn('H').width = 15; ws.getColumn('I').width = 12; ws.getColumn('J').width = 26;
   titleBlock(ws, entityName, cd.lead, m, 'J');
@@ -519,45 +513,51 @@ function buildWorkbook(data) {
 
   const catTie = {}; // key -> tie cell formula string
 
-  // ── Assets ──
-  // Cash: bank-rec tabs then leadsheet.
+  // ── Assets ── (each category: Leadsheet tab first, then its account tabs)
+  // Cash: leadsheet, then per-bank reconciliation tabs.
   if ((byCat.cash || []).length) {
+    const ws = wb.addWorksheet(CATS[0].tab, { views: [{ showGridLines: false }] });
     const refByCode = new Map();
     for (const a of byCat.cash) { const rr = buildCashRecTab(wb, a, en, m, used); refByCode.set(a.code, rr); }
-    catTie.cash = cashLeadsheet(wb, CATS[0], en, m, byCat.cash, refByCode);
+    catTie.cash = cashLeadsheet(ws, CATS[0], en, m, byCat.cash, refByCode);
   }
-  // AR, Prepaid, Investments, Other Liab, Debt, Equity, AP: generic roll tabs + simple leadsheet.
+  // AR, Prepaid, Investments, Other Liab, Debt, Equity, AP: leadsheet, then roll tabs.
   const simpleKeys = ['ar', 'prepaid', 'invest', 'ap', 'debt', 'otherliab', 'equity'];
   for (const key of simpleKeys) {
     const rows = byCat[key] || []; if (!rows.length) continue;
     const cd = CATS.find((c) => c.key === key);
+    const ws = wb.addWorksheet(cd.tab, { views: [{ showGridLines: false }] });
     const refByCode = new Map();
     for (const a of rows) { const rr = buildRollTab(wb, a, en, m, used); refByCode.set(a.code, rr); }
-    catTie[key] = simpleLeadsheet(wb, cd, en, m, rows, refByCode);
+    catTie[key] = simpleLeadsheet(ws, cd, en, m, rows, refByCode);
   }
-  // Other Assets: detail tabs with a "Grand Total" foot + leadsheet SUMIF.
+  // Other Assets: leadsheet, then detail tabs (footed "Grand Total" for the SUMIF).
   if ((byCat.otherassets || []).length) {
+    const ws = wb.addWorksheet(CATS[4].tab, { views: [{ showGridLines: false }] });
     const refByCode = new Map();
     for (const a of byCat.otherassets) { const rr = buildRollTab(wb, a, en, m, used, { grandTotal: true, endLabel: 'Grand Total — ' + short(m.end) }); refByCode.set(a.code, rr); }
-    catTie.otherassets = otherAssetsLeadsheet(wb, CATS[4], en, m, byCat.otherassets, refByCode, data.projects || []);
+    catTie.otherassets = otherAssetsLeadsheet(ws, CATS[4], en, m, byCat.otherassets, refByCode, data.projects || []);
   }
-  // Fixed assets: one schedule tab + two-section leadsheet.
+  // Fixed assets: leadsheet, then the Fixed Asset Schedule tab.
   if ((byCat.fixed || []).length) {
+    const ws = wb.addWorksheet(CATS[3].tab, { views: [{ showGridLines: false }] });
     const fixedRef = buildFixedSchedule(wb, byCat.fixed, en, m);
     const pairs = splitFixed(byCat.fixed);
-    catTie.fixed = fixedLeadsheet(wb, CATS[3], en, m, pairs, fixedRef);
+    catTie.fixed = fixedLeadsheet(ws, CATS[3], en, m, pairs, fixedRef);
   }
-  // Intercompany: roll tabs + tie-out leadsheet.
+  // Intercompany: leadsheet, then roll tabs.
   if ((byCat.interco || []).length) {
+    const ws = wb.addWorksheet(CATS[6].tab, { views: [{ showGridLines: false }] });
     const refByCode = new Map();
     for (const a of byCat.interco) { const rr = buildRollTab(wb, a, en, m, used); refByCode.set(a.code, rr); }
-    catTie.interco = intercoLeadsheet(wb, CATS[6], en, m, byCat.interco, refByCode);
+    catTie.interco = intercoLeadsheet(ws, CATS[6], en, m, byCat.interco, refByCode);
   }
-  // Credit cards: cc-rec tabs + leadsheet.
+  // Credit cards: leadsheet, then cc-rec tabs.
   if ((byCat.cc || []).length) {
+    const ws = wb.addWorksheet(CATS[8].tab, { views: [{ showGridLines: false }] });
     const refByCode = new Map();
     for (const a of byCat.cc) { const rr = buildCcRecTab(wb, a, en, m, used); refByCode.set(a.code, rr); }
-    catTie.cc = ccLeadsheet(wb, CATS[8], en, m, byCat.cc, refByCode);
+    catTie.cc = ccLeadsheet(ws, CATS[8], en, m, byCat.cc, refByCode);
   }
 
   // ── Income Statement (fiscal-YTD) supporting tab for the equity NI line. ──
