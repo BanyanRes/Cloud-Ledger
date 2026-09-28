@@ -532,7 +532,11 @@ function buildClaData(ctx, m, eid) {
       if (rows.length) {
         const accum = r2(rows.reduce((s, x) => s + x.accumEnd, 0)); // positive magnitude
         const schedBal = r2(-accum);                                // credit balance
-        if (Math.abs(schedBal - p.dep.end) >= 0.01) {
+        // Straight-line depreciation rounds to the cent per asset per month, so a
+        // schedule with many assets under one accumulated-depreciation account can
+        // differ from the GL by a few cents of rounding — absorb that.
+        const accumTol = Math.max(1.00, rows.length * 0.05);
+        if (Math.abs(schedBal - p.dep.end) >= accumTol) {
           const lines = ytd.get(String(p.dep.code)) || [];
           const glAct = monthlyActivity(lines, 'credit'); // accum dep is credit-natural
           const schedAct = new Array(m.monthNum).fill(0);
