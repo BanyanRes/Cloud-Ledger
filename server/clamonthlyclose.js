@@ -423,14 +423,18 @@ function buildClaData(ctx, m, eid) {
   const base = buildData(ctx, m, eid);
   ensureRegisterSchema(db); ensureSeed(db, base.entity);
   const reg = loadRegisters(db, eid);
-  // Categorization overrides on top of the generic rules: any account carried in
-  // the fixed-asset register (asset or accumulated side) is a fixed asset, and a
-  // security deposit is an other asset, as on CLA's leadsheets.
+  // Categorization overrides on top of the generic rules: the fixed-asset register
+  // is the source of truth for depreciating fixed assets. Any account carried in
+  // the register (asset or accumulated side) is a fixed asset; any account the
+  // generic keyword rule called "fixed" but that is NOT in the register is not a
+  // depreciating fixed asset (land, acquisition/development costs, security
+  // deposits, etc.) and belongs on the Other Assets leadsheet, as on CLA's
+  // packages. (Entities with a complete register are unaffected.)
   const regFixed = new Set();
   for (const fa of reg.fixedAssets) { if (fa.asset_account) regFixed.add(String(fa.asset_account)); if (fa.dep_account) regFixed.add(String(fa.dep_account)); }
   for (const a of base.acctRows) {
     if (regFixed.has(String(a.code))) a.cat = 'fixed';
-    else if (a.cat === 'fixed' && /security\s+deposit/i.test(String(a.name || ''))) a.cat = 'otherassets';
+    else if (a.cat === 'fixed') a.cat = 'otherassets';
   }
   const byCat = {}; for (const a of base.acctRows) (byCat[a.cat] = byCat[a.cat] || []).push(a);
 
