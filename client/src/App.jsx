@@ -5541,22 +5541,26 @@ function ClrfApDetailCard({ entityId, qe, canEdit, apAcct = '202000', periodLabe
   };
   const onFile = async (e) => {
     setMsg(''); setPreview(null);
-    const f = e.target.files && e.target.files[0]; if (!f) return;
+    const f = e.target.files && e.target.files[0];
+    if (e.target) e.target.value = '';
+    if (!f) return;
+    let p;
     try {
       const ab = await f.arrayBuffer();
       const wb = XLSX.read(ab, { type: 'array' });
       const ws = wb.Sheets[wb.SheetNames[0]];
       const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: '' });
-      const p = parse(rows);
-      if (p.error) { setPreview({ error: p.error }); return; }
-      setPreview({ lines: p.lines, total: p.total, fileName: f.name });
-    } catch (err) { setPreview({ error: 'Could not read the file: ' + (err.message || err) }); }
-    finally { e.target.value = ''; }
-  };
-  const submit = async () => {
-    if (!preview || !preview.lines) return; setBusy(true); setMsg('');
-    try { const r = await api.clrfApDetailUpload(entityId, qe, preview.lines); setMsg('Saved ' + r.count + ' open invoices totaling ' + fmt(r.total) + ' as of ' + (r.as_of || qe) + '. Run the report again to reconcile Bill.com to the GL.'); setPreview(null); await load(); }
-    catch (e) { setMsg('Error: ' + (e.message || e)); } finally { setBusy(false); }
+      p = parse(rows);
+    } catch (err) { setPreview({ error: 'Could not read the file: ' + (err.message || err) }); return; }
+    if (p.error) { setPreview({ error: p.error }); return; }
+    // Uploading a valid report is enough — save it immediately, no confirm step.
+    setBusy(true);
+    try {
+      const r = await api.clrfApDetailUpload(entityId, qe, p.lines);
+      setMsg('Uploaded ' + r.count + ' open invoices totaling ' + fmt(r.total) + ' as of ' + (r.as_of || qe) + '. Run the report again to reconcile Bill.com to the GL.');
+      await load();
+    } catch (err) { setMsg('Error: ' + (err.message || err)); }
+    finally { setBusy(false); }
   };
   const clear = async () => {
     if (!window.confirm('Remove the uploaded Bill.com A/P Detail?')) return; setBusy(true); setMsg('');
@@ -5571,9 +5575,7 @@ function ClrfApDetailCard({ entityId, qe, canEdit, apAcct = '202000', periodLabe
       {canEdit && <button style={{ ...S.btnS, marginLeft: 10 }} disabled={busy} onClick={clear}>Remove</button>}</div>}
     {(!status || !status.count) && <div style={{ fontSize: 12, marginBottom: 10, color: T.orange }}>No Bill.com A/P Detail uploaded yet — the AP Recon flags an exception until one is provided.</div>}
     {canEdit && <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-      <label style={{ ...S.btnS, cursor: 'pointer' }}>Choose file…<input type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={onFile} /></label>
-      {preview && preview.lines && <span style={{ fontSize: 12, color: T.textMuted }}>{preview.fileName}: parsed <strong>{preview.lines.length}</strong> invoices, <strong>{fmt(preview.total)}</strong></span>}
-      {preview && preview.lines && <button style={{ ...S.btnP, opacity: busy ? 0.5 : 1 }} disabled={busy} onClick={submit}>{busy ? 'Saving…' : ('Use this report (as of ' + qe + ')')}</button>}
+      <label style={{ ...S.btnS, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1 }}>{busy ? 'Uploading…' : 'Choose file…'}<input type="file" accept=".xlsx,.xls,.csv" disabled={busy} style={{ display: 'none' }} onChange={onFile} /></label>
     </div>}
     {preview && preview.error && <div style={{ fontSize: 12, color: T.red, marginTop: 8 }}>{preview.error}</div>}
     {msg && <div style={{ fontSize: 12, color: msg.startsWith('Error') ? T.red : T.green, marginTop: 10, fontWeight: 600 }}>{msg}</div>}
