@@ -138,7 +138,7 @@ function tabHead(ws, title, entityName, subtitle, backTab) {
 function num(ws, addr, v, o = {}) {
   const c = ws.getCell(addr); c.numFmt = o.fmt || ACCT; c.font = F(o.font || {});
   if (v && typeof v === 'object' && v.formula) c.value = v; else c.value = (v == null || v === '' ? null : v);
-  if (o.border) c.border = o.border; if (o.fill) c.fill = o.fill;
+  if (o.border) c.border = o.border; if (o.fill) c.fill = o.fill; if (o.align) c.alignment = o.align;
   return c;
 }
 function txt(ws, addr, v, o = {}) { const c = ws.getCell(addr); c.value = v; c.font = F(o.font || {}); if (o.fmt) c.numFmt = o.fmt; if (o.align) c.alignment = o.align; return c; }
@@ -1105,6 +1105,7 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell) {
   const sB = ws.getCell('B7'); sB.value = 'Fixed Asset Account Breakdown'; sB.font = F({ bold: true }); sB.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
   const sF = ws.getCell('E7'); sF.value = 'Depreciation Account Breakdown'; sF.font = F({ bold: true }); sF.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
   hdr(ws, 8, 2, ['Asset Acct. #', 'Asset Acct. Name', 'Asset Cost', 'Depreciation Account #', 'Depreciation Account Name', 'Deprec. Balance', 'Net Asset Amount', 'Comments']);
+  ws.getCell('E8').alignment = { horizontal: 'center' };
   let r = 9; const first = r;
   for (const p of pairs) {
     if (p.asset) {
@@ -1114,7 +1115,7 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell) {
       leadCell.set(String(p.asset.code), ref(cd.tab, 'D' + r));
     } else num(ws, 'D' + r, 0);
     if (p.dep) {
-      txt(ws, 'E' + r, p.dep.code); txt(ws, 'F' + r, p.dep.name);
+      txt(ws, 'E' + r, p.dep.code, { align: { horizontal: 'center' } }); txt(ws, 'F' + r, p.dep.name);
       const o = faRefs.get(String(p.dep.code));
       num(ws, 'G' + r, o && o.accumRef ? { formula: '-' + o.accumRef } : p.dep.end);
       leadCell.set(String(p.dep.code), ref(cd.tab, 'G' + r));
@@ -1191,9 +1192,6 @@ function buildSummary(su, en, m, data) {
     c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF7EE' } }; su.getRow(sr).height = 22;
     return;
   }
-  su.mergeCells('B' + sr + ':H' + sr);
-  const b = su.getCell('B' + sr); b.value = '⚠  ' + discs.length + ' discrepanc' + (discs.length > 1 ? 'ies' : 'y') + ' between the GL and the supporting schedules'; b.font = F({ bold: true, color: { argb: 'FF9C4221' } });
-  b.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFDECEA' } }; su.getRow(sr).height = 22; sr += 2;
   txt(su, 'B' + sr, 'Discrepancies — GL vs Supporting Schedule', { font: { bold: true, size: 12 } }); sr++;
   txt(su, 'B' + sr, 'Each discrepancy shows the account, the supporting schedule, the two balances and the difference; the transactions that caused it are listed beneath.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } }); sr += 2;
 
@@ -1211,10 +1209,12 @@ function buildSummary(su, en, m, data) {
     if (d.note) { su.mergeCells('C' + sr + ':H' + sr); txt(su, 'C' + sr, d.note, { font: { italic: true, color: { argb: 'FF9C4221' } }, align: { wrapText: true, vertical: 'top' } }); su.getRow(sr).height = Math.min(90, 14 * Math.max(1, Math.ceil(String(d.note).length / 120)) + 4); sr++; }
     if (d.causes && d.causes.length) {
       txt(su, 'C' + sr, 'Transaction(s) that caused the discrepancy:', { font: { bold: true, italic: true } }); sr++;
-      hdr(su, sr, 3, ['Date', 'JE #', 'Memo / Vendor', 'Amount', 'Note']); sr++;
+      hdr(su, sr, 3, ['Date', 'JE #', 'Memo / Vendor', 'Amount', 'Note']);
+      su.getCell('C' + sr).alignment = { horizontal: 'center' }; su.getCell('D' + sr).alignment = { horizontal: 'center' };
+      sr++;
       for (const cz of d.causes) {
-        if (cz.date) num(su, 'C' + sr, asDate(String(cz.date).slice(0, 10)), { fmt: DATEFMT }); else txt(su, 'C' + sr, '');
-        txt(su, 'D' + sr, cz.num || '');
+        if (cz.date) num(su, 'C' + sr, asDate(String(cz.date).slice(0, 10)), { fmt: DATEFMT, align: { horizontal: 'center' } }); else txt(su, 'C' + sr, '');
+        txt(su, 'D' + sr, cz.num || '', { align: { horizontal: 'center' } });
         txt(su, 'E' + sr, cz.memo || '');
         num(su, 'F' + sr, cz.amount);
         if (cz.note) { su.mergeCells('G' + sr + ':H' + sr); txt(su, 'G' + sr, cz.note, { align: { wrapText: true } }); }
@@ -1309,11 +1309,32 @@ function buildWorkbook(data) {
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
 const folderFor = (m) => 'Workpapers/Monthly Closing Workpapers/' + m.year;
-const fileNameFor = (m) => 'Monthly_Closing_Workpapers_' + m.label + '.xlsx';
+const fileNameFor = (m, dispId) => (dispId ? String(dispId).replace(/[^A-Za-z0-9._-]/g, '') + '_' : '') + 'Monthly_Closing_Workpapers_' + m.label + '.xlsx';
 
-function saveToWorkpapers(ctx, eid, m, buf, who) {
+// Post-process the ExcelJS buffer to suppress Excel's cell error indicators (the
+// green triangles on account/JE/invoice numbers stored as text) across every tab.
+async function finalizeWorkbook(wb) {
+  const buf0 = Buffer.from(await wb.xlsx.writeBuffer());
+  let JSZip; try { JSZip = require('jszip'); } catch (e) { return buf0; }
+  try {
+    const zip = await JSZip.loadAsync(buf0);
+    const inject = '<ignoredErrors><ignoredError sqref="A1:BZ10000" evalError="1" twoDigitTextYear="1" numberStoredAsText="1" formula="1" formulaRange="1" unlockedFormula="1" emptyCellReference="1" listDataValidation="1" calculatedColumn="1"/></ignoredErrors>';
+    const files = Object.keys(zip.files).filter((f) => /^xl\/worksheets\/sheet\d+\.xml$/.test(f));
+    for (const f of files) {
+      let xml = await zip.file(f).async('string');
+      if (xml.indexOf('<ignoredErrors') !== -1) continue;
+      const mm = xml.match(/<(drawing|legacyDrawing|legacyDrawingHF|drawingHF|picture|oleObjects|controls|webPublishItems|tableParts|extLst)\b/);
+      if (mm) xml = xml.slice(0, mm.index) + inject + xml.slice(mm.index);
+      else xml = xml.replace('</worksheet>', inject + '</worksheet>');
+      zip.file(f, xml);
+    }
+    return Buffer.from(await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+  } catch (e) { return buf0; }
+}
+
+function saveToWorkpapers(ctx, eid, m, buf, who, dispId) {
   const { db, workpapersDir } = ctx;
-  const folder = folderFor(m), original = fileNameFor(m);
+  const folder = folderFor(m), original = fileNameFor(m, dispId);
   const parts = folder.split('/');
   const ins = db.prepare('INSERT OR IGNORE INTO entity_folders (entity_id, folder_path, created_by, created_at) '
     + "VALUES (?, ?, ?, datetime('now'))");
@@ -1344,8 +1365,9 @@ function registerClaMonthlyCloseRoutes(app, ctx) {
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         const data = buildClaData(ctx, m, eid);
         const wb = buildWorkbook(data);
-        const buf = Buffer.from(await wb.xlsx.writeBuffer());
-        const saved = saveToWorkpapers(ctx, eid, m, buf, who);
+        const buf = await finalizeWorkbook(wb);
+        const entRow = db.prepare('SELECT display_id FROM entities WHERE id = ?').get(eid) || {};
+        const saved = saveToWorkpapers(ctx, eid, m, buf, who, entRow.display_id);
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
         res.setHeader('Content-Disposition', 'attachment; filename="' + saved.original_name + '"');
         res.setHeader('X-ClaClose-Summary', JSON.stringify({
