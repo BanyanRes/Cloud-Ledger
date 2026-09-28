@@ -208,7 +208,8 @@ const CATS = [
   { key: 'fixed', tab: 'Fixed Assets Leadsheet', lead: 'FIXED ASSETS LEADSHEET', total: 'Total Fixed Assets', type: 'Asset', label: 'Fixed Assets' },
   { key: 'otherassets', tab: 'Other Assets Leadsheet', lead: 'OTHER ASSETS LEADSHEET', total: 'Total Other Assets', type: 'Asset', label: 'Other Assets', sched: 'Other Assets Schedule' },
   { key: 'invest', tab: 'Investments Leadsheet', lead: 'INVESTMENTS LEADSHEET', total: 'Total Investments', type: 'Asset', label: 'Investments', sched: 'Investments Schedule' },
-  { key: 'interco', tab: 'Intercompany Leadsheet', lead: 'INTERCOMPANY LEADSHEET', total: 'Total Intercompany', type: 'Asset', label: 'Intercompany' },
+  // Intercompany is intentionally omitted: intercompany accounts are reconciled in
+  // the Intercompany module for all entities, not on this monthly close workbook.
   { key: 'ap', tab: 'AP Leadsheet', lead: 'ACCOUNTS PAYABLE LEADSHEET', total: 'Total Payables', type: 'Liability', label: 'Accounts Payable' },
   { key: 'cc', tab: 'Credit Cards Leadsheet', lead: 'CREDIT CARDS LEADSHEET', total: 'Total Credit Cards', type: 'Liability', label: 'Credit Cards' },
   { key: 'debt', tab: 'Debt Leadsheet', lead: 'DEBT LEADSHEET', total: 'Total Debt', type: 'Liability', label: 'Debt', sched: 'Debt Schedule' },
@@ -297,6 +298,136 @@ function fixedSchedule(assets, m) {
   });
 }
 
+// Fiscal-YTD GL detail for a set of accounts, bucketed by account code, each line
+// carrying its posting month (1..n). Used to pinpoint the transaction behind a
+// schedule-vs-GL difference on the Summary.
+function glYtd(db, eid, from, to, codes) {
+  const set = new Set([...codes].map(String));
+  if (!set.size) return new Map();
+  const rows = db.prepare(`SELECT je.date date, je.entry_num entry_num, je.doc_number doc_number,
+      je.vendor vendor, je.memo memo, jl.account_code code, jl.debit debit, jl.credit credit, jl.description description,
+      CAST(strftime('%m', je.date) AS INTEGER) mo
+    FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
+    WHERE je.entity_id = ? AND je.date >= ? AND je.date <= ?
+    ORDER BY jl.account_code, je.date, je.entry_num, jl.id`).all(eid, from, to);
+  const byAcct = new Map();
+  for (const r of rows) {
+    const c = String(r.code); if (!set.has(c)) continue;
+    if (!byAcct.has(c)) byAcct.set(c, []);
+    byAcct.get(c).push({
+      date: r.date, num: (r.entry_num != null ? String(r.entry_num) : '') || String(r.doc_number || ''),
+      vendor: r.vendor || '', memo: r.memo || r.description || '', debit: r2(r.debit || 0), credit: r2(r.credit || 0), mo: r.mo,
+    });
+  }
+  return byAcct;
+}
+
+// Other-asset balances as of a date, per account, split by project (the GL
+// location dimension). Signed debit-natural (assets). Returns the project name
+// list and a Map(code -> Map(project -> balance)); '(No project)' collects lines
+// with no location so the row always ties to the GL balance.
+function oaBalancesByProject(db, eid, asOf, codes) {
+  const set = codes.map(String);
+  if (!set.length) return { projects: [], byAcct: new Map() };
+  const ph = set.map(() => '?').join(',');
+  const rows = db.prepare(`SELECT jl.account_code code, COALESCE(dl.name, '(No project)') loc, SUM(jl.debit - jl.credit) amt
+    FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
+    LEFT JOIN dim_locations dl ON dl.id = jl.location_id
+    WHERE je.entity_id = ? AND je.date <= ? AND jl.account_code IN (${ph})
+    GROUP BY jl.account_code, loc`).all(eid, asOf, ...set);
+  const byAcct = new Map(); const projSet = new Set();
+  for (const r of rows) {
+    const c = String(r.code), loc = r.loc || '(No project)';
+    if (!byAcct.has(c)) byAcct.set(c, new Map());
+    byAcct.get(c).set(loc, r2((byAcct.get(c).get(loc) || 0) + r.amt));
+    if (loc !== '(No project)') projSet.add(loc);
+  }
+  const projects = Array.from(projSet).sort((a, b) => a.localeCompare(b));
+  return { projects, byAcct };
+}
+
+// Offset-letter sequence for the AP recon (a..z then A..Z, skipping x/X which
+// flags beginning-balance items), then double letters.
+function apLetterSeq(n) {
+  const S = 'abcdefghijklmnopqrstuvwyzABCDEFGHIJKLMNOPQRSTUVWYZ'.split('');
+  if (n < S.length) return S[n];
+  const a = Math.floor(n / S.length) - 1, b = n % S.length;
+  return (a >= 0 && a < S.length ? S[a] : 'z') + S[b];
+}
+function apGroupSum(rows, keyFn) { const m = new Map(); for (const x of rows) { const k = keyFn(x) || '(unnamed)'; m.set(k, r2((m.get(k) || 0) + (x.amount || 0))); } return m; }
+
+// AP Recon engine (same symmetric offset matcher CLA/Weaver use, adapted for a
+// monthly close on any A/P account): inception-to-date on the A/P account, so all
+// paid bills cancel against their payments and every remaining unmatched credit
+// is a genuinely open invoice, which should equal the GL A/P balance and the
+// Bill.com open-invoice report. Beginning balance is 0 (nothing before inception).
+function buildApReconData(db, eid, apCode, asOf, bcfg) {
+  const r2c = (n) => Math.round((Number(n) || 0) * 100);
+  const begin = 0;
+  const lines = db.prepare(
+    'SELECT je.id entry_id, je.date date, je.entry_num entry_num, je.doc_number doc_number, je.vendor vendor, je.memo memo, jl.id line_id, jl.debit debit, jl.credit credit, jl.description description '
+    + 'FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id '
+    + 'WHERE je.entity_id = ? AND je.date <= ? AND jl.account_code = ? '
+    + 'ORDER BY je.date, je.entry_num, jl.id'
+  ).all(eid, asOf, String(apCode));
+  const offStmt = db.prepare('SELECT jl.account_code code, a.name name FROM journal_lines jl LEFT JOIN accounts a ON a.entity_id = ? AND a.code = jl.account_code WHERE jl.entry_id = ? AND jl.account_code <> ?');
+  const offCache = new Map();
+  const offsetFor = (entryId) => {
+    if (offCache.has(entryId)) return offCache.get(entryId);
+    const rs = offStmt.all(eid, entryId, String(apCode));
+    let v; if (!rs.length) v = ''; else if (rs.length === 1) v = rs[0].code + (rs[0].name ? ' ' + rs[0].name : ''); else v = '-Split-';
+    offCache.set(entryId, v); return v;
+  };
+  const vmap = new Map();
+  for (const l of lines) { const cr = r2(l.credit || 0); if (cr > 0 && l.vendor && String(l.vendor).trim()) { const k = r2c(cr); if (!vmap.has(k)) vmap.set(k, { vendor: String(l.vendor).trim(), invoice: l.doc_number != null ? String(l.doc_number) : '', date: l.date, num: l.entry_num != null ? String(l.entry_num) : '', memo: l.memo || l.description || '' }); } }
+  const vlookup = (amt, row) => {
+    const hit = vmap.get(r2c(amt)); if (hit) return hit;
+    const mm = String((row.memo || row.description) || '').match(/^Bill\s*-\s*([^:]+):/i);
+    return { vendor: mm ? mm[1].trim() : (row.vendor || ''), invoice: row.doc_number != null ? String(row.doc_number) : '', date: row.date, num: row.entry_num != null ? String(row.entry_num) : '', memo: row.memo || row.description || '' };
+  };
+  const open = []; const tag = new Array(lines.length).fill(null); let pair = 0;
+  const findOpp = (amtc, sign) => {
+    const want = -sign, pos = [];
+    for (let i = 0; i < open.length; i++) if (open[i].sign === want) pos.push(i);
+    for (const i of pos) if (open[i].amtc === amtc) return [i];
+    for (let a = 0; a < pos.length; a++) for (let b = a + 1; b < pos.length; b++) if (open[pos[a]].amtc + open[pos[b]].amtc === amtc) return [pos[a], pos[b]];
+    for (let a = 0; a < pos.length; a++) for (let b = a + 1; b < pos.length; b++) for (let c = b + 1; c < pos.length; c++) if (open[pos[a]].amtc + open[pos[b]].amtc + open[pos[c]].amtc === amtc) return [pos[a], pos[b], pos[c]];
+    return null;
+  };
+  lines.forEach((l, i) => {
+    const dr = r2(l.debit || 0), cr = r2(l.credit || 0);
+    const sign = cr > 0 ? 1 : -1, amtc = r2c(cr > 0 ? cr : dr);
+    if (amtc === 0) { tag[i] = ''; return; }
+    const mm = findOpp(amtc, sign);
+    if (mm) { const lt = apLetterSeq(pair++); tag[i] = lt; mm.forEach((p) => (tag[open[p].idx] = lt)); mm.sort((a, b) => b - a).forEach((p) => open.splice(p, 1)); }
+    else open.push({ amtc, sign, idx: i });
+  });
+  const openBillIdx = []; let xTotal = 0;
+  for (const o of open) { if (o.sign < 0) { tag[o.idx] = 'X'; xTotal = r2(xTotal + o.amtc / 100); } else { tag[o.idx] = ''; openBillIdx.push(o.idx); } }
+  let bal = begin;
+  const glRows = lines.map((l, i) => { const dr = r2(l.debit || 0), cr = r2(l.credit || 0); bal = r2(bal + cr - dr); return { date: l.date, num: (l.entry_num != null ? String(l.entry_num) : '') || String(l.doc_number || ''), vendor: l.vendor || '', offset: offsetFor(l.entry_id), memo: l.description || l.memo || '', debit: dr, credit: cr, balance: bal, letter: tag[i] }; });
+  const openBills = openBillIdx.map((i) => { const l = lines[i], amt = r2(l.credit || 0), v = vlookup(amt, l); return { vendor: v.vendor, invoice: v.invoice, date: v.date || l.date, num: v.num, amount: amt, memo: v.memo }; });
+  openBills.sort((a, b) => b.amount - a.amount);
+  const openTotal = r2(openBills.reduce((a, x) => a + x.amount, 0));
+  let billcom = null, billcomSource = 'none';
+  try {
+    if (bcfg && bcfg.ap_aging_lines_json) {
+      const arr = JSON.parse(bcfg.ap_aging_lines_json) || [];
+      const norm = arr.map((x) => ({ vendor: x.vendor || '', invoice: x.invoice_number || '', date: x.bill_date || '', amount: r2(x.amount || 0) })).filter((x) => Math.abs(x.amount) >= 0.005);
+      if (norm.length) { billcom = { asOf: bcfg.ap_aging_as_of || '', lines: norm, total: r2(norm.reduce((a, x) => a + x.amount, 0)) }; billcomSource = 'aging'; }
+    }
+  } catch (e) { billcom = null; }
+  const billcomLines = billcom ? billcom.lines : [];
+  const billcomTotal = billcom ? billcom.total : null;
+  const billcomAsOf = billcom ? billcom.asOf : asOf;
+  const glByV = apGroupSum(openBills, (x) => String(x.vendor || '').trim());
+  const bcByV = apGroupSum(billcomLines, (x) => String(x.vendor || '').trim());
+  const vnames = new Set([...glByV.keys(), ...bcByV.keys()]);
+  const byVendor = [...vnames].map((k) => { const gl = glByV.get(k) || 0, bc = bcByV.get(k) || 0; return { vendor: k, gl, billcom: bc, diff: r2(bc - gl) }; }).sort((a, b) => b.gl - a.gl);
+  const glBal = r2(begin + glRows.reduce((a, r) => a + r.credit - r.debit, 0));
+  return { apCode: String(apCode), gl: glBal, begin, ending: glBal, totalDebit: r2(glRows.reduce((a, r) => a + r.debit, 0)), totalCredit: r2(glRows.reduce((a, r) => a + r.credit, 0)), glRows, openBills, openTotal, xTotal, billcomLines, billcomTotal, billcomAsOf, billcomSource, byVendor };
+}
+
 function buildClaData(ctx, m, eid) {
   const { db, computeBalances } = ctx;
   const base = buildData(ctx, m, eid);
@@ -312,13 +443,28 @@ function buildClaData(ctx, m, eid) {
     else if (a.cat === 'fixed' && /security\s+deposit/i.test(String(a.name || ''))) a.cat = 'otherassets';
   }
   const byCat = {}; for (const a of base.acctRows) (byCat[a.cat] = byCat[a.cat] || []).push(a);
-  const flags = base.flags.slice();
+
+  // The Summary lists discrepancies between the GL and each supporting schedule,
+  // and for every discrepancy names the GL transaction(s) that caused it. The
+  // generic layer's intercompany and balance-sheet-tie flags are intentionally
+  // NOT carried here — intercompany is reconciled in the Intercompany module.
+  const discrepancies = [];
+  const pushDisc = (d) => { d.causes = d.causes || []; discrepancies.push(d); };
+
+  // Prior year end balances (shared by the discrepancy openings and the equity
+  // rollforward), and fiscal-YTD GL detail for the schedule accounts.
+  const pye = (Number(m.year) - 1) + '-12-31';
+  const pyeBal = new Map();
+  for (const r of (computeBalances(eid, { as_of: pye, close_pl_before: m.yearStart }) || [])) pyeBal.set(String(r.code), r2(r.balance));
 
   // A/R aging (current + prior month), from the invoice subledger.
   let arCur = null, arPrior = null;
   try { arCur = buildAging(db, eid, m.end); arPrior = buildAging(db, eid, m.beg); } catch (e) { arCur = null; arPrior = null; }
   const arPrimary = (byCat.ar || []).find((a) => arCur && String(a.code) === String(arCur.ar_account)) || pickPrimary(byCat.ar || [], /^accounts receivable$/i, ['12000', '120000', '11000']);
-  if (arCur && Math.abs(arCur.recon_diff || 0) >= 0.01) flags.push({ severity: 'exception', wp: 'AR Aging', message: 'A/R aging does not tie to the GL: aging total ' + fmt(arCur.totals.total) + ' vs GL ' + fmt(arCur.gl_ar_balance) + ' (off by ' + fmt(arCur.recon_diff) + ').' });
+  if (arCur && Math.abs(arCur.recon_diff || 0) >= 0.01) {
+    const causes = (arCur.gl_rows || []).map((g) => ({ date: g.date, num: g.entry_num || '', memo: g.memo || 'GL entry', amount: r2(g.amount), note: 'On the A/R account but not tied to an open invoice' }));
+    pushDisc({ code: (arCur.ar_accounts || []).join(', '), name: 'Accounts Receivable (aging)', schedName: 'AR Aging', schedBal: r2(arCur.totals.total), glBal: r2(arCur.gl_ar_balance), diff: r2(arCur.recon_diff), causes, note: causes.length ? '' : 'Aging total differs from the GL; no un-aged GL entries were isolated — review the AR Aging detail.' });
+  }
 
   // A/P aging (current + prior month): Bill.com bills by vendor + un-aged GL.
   const apPrimary = pickPrimary(byCat.ap || [], /^accounts payable$/i, ['20000', '202000']);
@@ -326,41 +472,95 @@ function buildClaData(ctx, m, eid) {
   if (apPrimary && typeof ctx.buildApAging === 'function') {
     try { apCur = ctx.buildApAging(eid, m.end, apPrimary.code); apPrior = ctx.buildApAging(eid, m.beg, apPrimary.code); } catch (e) { apCur = null; apPrior = null; }
   }
-  if (apCur && Math.abs(apCur.recon_diff || 0) >= 0.01) flags.push({ severity: 'exception', wp: 'AP Aging', message: 'A/P aging does not tie to the GL: aging total ' + fmt(apCur.grand_total.total) + ' vs GL ' + fmt(apCur.gl_balance) + ' (off by ' + fmt(apCur.recon_diff) + ').' });
+  if (apCur && Math.abs(apCur.recon_diff || 0) >= 0.01) {
+    const causes = (apCur.gl_rows || []).map((g) => ({ date: g.date, num: g.entry_num || '', memo: g.memo || 'GL entry', amount: r2(g.amount), note: 'On the A/P account but not tied to an open bill' }));
+    pushDisc({ code: apPrimary ? apPrimary.code : (apCur.ap_account || ''), name: 'Accounts Payable (aging)', schedName: 'AP Aging', schedBal: r2(apCur.grand_total.total), glBal: r2(apCur.gl_balance), diff: r2(apCur.recon_diff), causes, note: causes.length ? '' : 'Aging total differs from the GL; no un-aged GL entries were isolated — review the AP Aging detail.' });
+  }
 
-  // Prepaid schedules vs GL.
+  // Prepaid + fixed-asset schedules. Pull fiscal-YTD GL detail for those accounts
+  // so a schedule-vs-GL difference can name the exact posting behind it.
   const prepaidByAcct = new Map();
   for (const it of reg.prepaid) { const k = String(it.account_code); if (!prepaidByAcct.has(k)) prepaidByAcct.set(k, []); prepaidByAcct.get(k).push(it); }
   const prepaidSched = new Map();
+  const faSched = fixedSchedule(reg.fixedAssets, m);
+  const fixedPairs = splitFixed(byCat.fixed || [], reg.fixedAssets);
+  const detailCodes = new Set();
+  for (const a of byCat.prepaid || []) detailCodes.add(String(a.code));
+  for (const p of fixedPairs) { if (p.asset) detailCodes.add(String(p.asset.code)); if (p.dep) detailCodes.add(String(p.dep.code)); }
+  const ytd = glYtd(db, eid, m.yearStart, m.end, detailCodes);
+  const monthlyActivity = (lines, natural) => { const a = new Array(m.monthNum).fill(0); for (const l of (lines || [])) { const s = natural === 'debit' ? r2(l.debit - l.credit) : r2(l.credit - l.debit); if (l.mo >= 1 && l.mo <= m.monthNum) a[l.mo - 1] = r2(a[l.mo - 1] + s); } return a; };
+  const monthLines = (lines, k) => (lines || []).filter((l) => l.mo === k);
+
+  // Prepaid amortization schedule vs GL.
   for (const a of byCat.prepaid || []) {
     const items = prepaidByAcct.get(String(a.code)) || [];
     const sched = prepaidSchedule(items, m);
     prepaidSched.set(String(a.code), sched);
     const tot = r2(sched.reduce((s, x) => s + x.ending, 0));
-    if (!items.length && Math.abs(a.end) >= 0.01) flags.push({ severity: 'review', wp: a.code + ' ' + a.name, message: a.code + ' ' + a.name + ': GL balance ' + fmt(a.end) + ' but no items in the prepaid register — add the policies (Registers) so the amortization schedule supports it.' });
-    else if (items.length && Math.abs(tot - a.end) >= 0.01) flags.push({ severity: 'exception', wp: a.code + ' ' + a.name, message: a.code + ' ' + a.name + ': amortization schedule ' + fmt(tot) + ' does not agree to the GL ' + fmt(a.end) + ' (off by ' + fmt(tot - a.end) + ').' });
+    if (!items.length && Math.abs(a.end) >= 0.01) {
+      pushDisc({ code: a.code, name: a.name, schedName: 'Prepaid amortization', schedBal: 0, glBal: r2(a.end), diff: r2(-a.end), causes: [], note: 'No items in the prepaid register for this account — add the policy(ies) on the Registers screen so the amortization schedule supports the GL balance.' });
+    } else if (items.length && Math.abs(tot - a.end) >= 0.01) {
+      const lines = ytd.get(String(a.code)) || [];
+      const glAct = monthlyActivity(lines, 'debit');
+      const schedAct = new Array(m.monthNum).fill(0);
+      for (const s of sched) s.cols.forEach((c, k) => { schedAct[k] = r2(schedAct[k] + c.add + c.exp); });
+      const causes = [];
+      const openSched = r2(items.reduce((s, it) => s + (it.opening_balance || 0), 0));
+      const openGl = r2(pyeBal.get(String(a.code)) || 0);
+      if (Math.abs(openSched - openGl) >= 0.01) causes.push({ date: pye, num: '', memo: 'Opening balance at ' + short(pye), amount: r2(openGl - openSched), note: 'Schedule P0 ' + fmt(openSched) + ' vs GL ' + fmt(openGl) });
+      for (let k = 0; k < m.monthNum; k++) {
+        if (Math.abs(glAct[k] - schedAct[k]) < 0.01) continue;
+        const ls = monthLines(lines, k + 1);
+        if (ls.length) for (const l of ls) causes.push({ date: l.date, num: l.num, memo: l.memo || l.vendor || 'GL entry', amount: r2(l.debit - l.credit), note: MON3[k] + ': schedule expected ' + fmt(schedAct[k]) });
+        else causes.push({ date: monthEndOf(Number(m.year), k + 1), num: '', memo: 'No prepaid activity posted', amount: 0, note: MON3[k] + ': schedule expected ' + fmt(schedAct[k]) + ' but the GL has no entry' });
+      }
+      pushDisc({ code: a.code, name: a.name, schedName: 'Prepaid amortization', schedBal: tot, glBal: r2(a.end), diff: r2(tot - a.end), causes, note: causes.length ? '' : 'Difference not isolated to a single month — review the schedule inputs (start date / monthly amount).' });
+    }
   }
-  // Fixed-asset schedule vs GL.
-  const faSched = fixedSchedule(reg.fixedAssets, m);
-  const fixedPairs = splitFixed(byCat.fixed || [], reg.fixedAssets);
+
+  // Fixed-asset schedule vs GL (cost and accumulated depreciation).
   for (const p of fixedPairs) {
     if (p.asset) {
       const rows = faSched.filter((x) => String(x.asset.asset_account) === String(p.asset.code));
       const cost = r2(rows.reduce((s, x) => s + r2(x.asset.cost), 0));
-      if (!rows.length && Math.abs(p.asset.end) >= 0.01) flags.push({ severity: 'review', wp: p.asset.code + ' ' + p.asset.name, message: p.asset.code + ' ' + p.asset.name + ': GL cost ' + fmt(p.asset.end) + ' but no assets in the fixed-asset register for this account.' });
-      else if (rows.length && Math.abs(cost - p.asset.end) >= 0.01) flags.push({ severity: 'exception', wp: p.asset.code + ' ' + p.asset.name, message: p.asset.code + ' ' + p.asset.name + ': fixed-asset schedule cost ' + fmt(cost) + ' does not agree to the GL ' + fmt(p.asset.end) + ' (off by ' + fmt(cost - p.asset.end) + ').' });
+      if (!rows.length && Math.abs(p.asset.end) >= 0.01) {
+        pushDisc({ code: p.asset.code, name: p.asset.name + ' (cost)', schedName: 'Fixed asset schedule', schedBal: 0, glBal: r2(p.asset.end), diff: r2(-p.asset.end), causes: [], note: 'No assets in the fixed-asset register for this account — add them on the Registers screen.' });
+      } else if (rows.length && Math.abs(cost - p.asset.end) >= 0.01) {
+        const lines = ytd.get(String(p.asset.code)) || [];
+        const causes = lines.map((l) => ({ date: l.date, num: l.num, memo: l.memo || l.vendor || 'GL entry', amount: r2(l.debit - l.credit), note: 'Cost account activity this year' }));
+        const openGl = r2(pyeBal.get(String(p.asset.code)) || 0);
+        if (!causes.length) causes.push({ date: pye, num: '', memo: 'Opening cost at ' + short(pye), amount: r2(openGl - cost), note: 'Register cost ' + fmt(cost) + ' vs GL cost at ' + short(pye) + ' ' + fmt(openGl) + ' — the difference predates the fiscal year' });
+        pushDisc({ code: p.asset.code, name: p.asset.name + ' (cost)', schedName: 'Fixed asset schedule', schedBal: cost, glBal: r2(p.asset.end), diff: r2(cost - p.asset.end), causes, note: '' });
+      }
     }
     if (p.dep) {
       const rows = faSched.filter((x) => String(x.asset.dep_account) === String(p.dep.code));
-      const accum = r2(rows.reduce((s, x) => s + x.accumEnd, 0));
-      if (rows.length && Math.abs(-accum - p.dep.end) >= 0.01) flags.push({ severity: 'exception', wp: p.dep.code + ' ' + p.dep.name, message: p.dep.code + ' ' + p.dep.name + ': schedule accumulated depreciation ' + fmt(-accum) + ' does not agree to the GL ' + fmt(p.dep.end) + ' (off by ' + fmt(-accum - p.dep.end) + ').' });
+      if (rows.length) {
+        const accum = r2(rows.reduce((s, x) => s + x.accumEnd, 0)); // positive magnitude
+        const schedBal = r2(-accum);                                // credit balance
+        if (Math.abs(schedBal - p.dep.end) >= 0.01) {
+          const lines = ytd.get(String(p.dep.code)) || [];
+          const glAct = monthlyActivity(lines, 'credit'); // accum dep is credit-natural
+          const schedAct = new Array(m.monthNum).fill(0);
+          for (const x of rows) x.dep.forEach((d, k) => { schedAct[k] = r2(schedAct[k] + d); });
+          const causes = [];
+          const openSched = r2(rows.reduce((s, x) => s + r2(x.asset.accum_dep_beg), 0)); // debit magnitude
+          const openGl = r2(pyeBal.get(String(p.dep.code)) || 0);                        // credit (negative)
+          if (Math.abs(r2(-openSched) - openGl) >= 0.01) causes.push({ date: pye, num: '', memo: 'Opening accumulated depreciation at ' + short(pye), amount: r2(openGl - r2(-openSched)), note: 'Schedule beg ' + fmt(-openSched) + ' vs GL ' + fmt(openGl) });
+          for (let k = 0; k < m.monthNum; k++) {
+            if (Math.abs(glAct[k] - schedAct[k]) < 0.01) continue;
+            const ls = monthLines(lines, k + 1);
+            if (ls.length) for (const l of ls) causes.push({ date: l.date, num: l.num, memo: l.memo || 'Depreciation', amount: r2(l.credit - l.debit), note: MON3[k] + ': schedule expected ' + fmt(schedAct[k]) + ' depreciation' });
+            else causes.push({ date: monthEndOf(Number(m.year), k + 1), num: '', memo: 'No depreciation posted', amount: 0, note: MON3[k] + ': schedule expected ' + fmt(schedAct[k]) + ' but the GL has no entry' });
+          }
+          pushDisc({ code: p.dep.code, name: p.dep.name + ' (accumulated)', schedName: 'Fixed asset schedule', schedBal, glBal: r2(p.dep.end), diff: r2(schedBal - p.dep.end), causes, note: causes.length ? '' : 'Difference not isolated to a single month — review the depreciation schedule inputs.' });
+        }
+      }
     }
   }
 
-  // Equity: prior year end balances + monthly activity through the report month.
-  const pye = (Number(m.year) - 1) + '-12-31';
-  const pyeBal = new Map();
-  for (const r of (computeBalances(eid, { as_of: pye, close_pl_before: m.yearStart }) || [])) pyeBal.set(String(r.code), r2(r.balance));
+  // Equity: monthly activity through the report month (prior year end balances
+  // already loaded into pyeBal above).
   const eqMonthly = new Map(); // code -> [activity m1..mn]
   const eqCodes = new Set((byCat.equity || []).map((a) => String(a.code)));
   if (eqCodes.size) {
@@ -370,7 +570,37 @@ function buildClaData(ctx, m, eid) {
     for (const r of rows) { const c = String(r.code); if (!eqCodes.has(c)) continue; if (!eqMonthly.has(c)) eqMonthly.set(c, new Array(m.monthNum).fill(0)); if (r.mo >= 1 && r.mo <= m.monthNum) eqMonthly.get(c)[r.mo - 1] = r2(r.amt); }
   }
 
-  return Object.assign({}, base, { flags, byCat, arCur, arPrior, arPrimary, apCur, apPrior, apPrimary, reg, prepaidByAcct, prepaidSched, faSched, fixedPairs, pye, pyeBal, eqMonthly });
+  // Other Assets by project (GL location dimension), as of month end.
+  const oaByProject = oaBalancesByProject(db, eid, m.end, (byCat.otherassets || []).map((a) => String(a.code)));
+
+  // AP Recon: Bill.com A/P Detail vs GL open invoices (inception-to-date offsets).
+  let apRecon = null;
+  if (apPrimary) {
+    try {
+      const bcfg = db.prepare('SELECT ap_aging_lines_json, ap_aging_as_of FROM billcom_config WHERE entity_id = ?').get(eid);
+      apRecon = buildApReconData(db, eid, apPrimary.code, m.end, bcfg);
+    } catch (e) { apRecon = null; }
+  }
+  if (apRecon) {
+    if (apRecon.billcomSource === 'none') {
+      pushDisc({ code: apPrimary.code, name: 'Accounts Payable — Bill.com recon', schedName: 'AP Recon', schedBal: null, glBal: r2(apRecon.openTotal), diff: null, causes: [], note: 'No Bill.com A/P Detail report has been uploaded, so the GL A/P of ' + fmt(apRecon.openTotal) + ' is not yet independently verified against Bill.com. Upload the Bill.com A/P Detail (Open Items) report as of ' + short(m.end) + ' (card below the report), then regenerate.' });
+    } else if (Math.abs(r2((apRecon.billcomTotal || 0) - apRecon.openTotal)) >= 0.01) {
+      const causes = (apRecon.byVendor || []).filter((v) => Math.abs(v.diff) >= 0.01).map((v) => ({ date: '', num: '', memo: v.vendor, amount: r2(v.diff), note: 'Bill.com ' + fmt(v.billcom) + ' vs GL ' + fmt(v.gl) }));
+      pushDisc({ code: apPrimary.code, name: 'Accounts Payable — Bill.com recon', schedName: 'AP Recon', schedBal: r2(apRecon.billcomTotal), glBal: r2(apRecon.openTotal), diff: r2((apRecon.billcomTotal || 0) - apRecon.openTotal), causes, note: causes.length ? 'Open A/P per Bill.com does not agree to the GL by vendor.' : '' });
+    }
+  }
+
+  // Flags (for the summary banner count and the X-header / client card) are derived
+  // from the discrepancy list — schedule-vs-GL differences only.
+  const flags = discrepancies.map((d) => ({
+    severity: 'exception',
+    wp: (d.code ? d.code + ' ' : '') + d.name,
+    message: (d.code ? d.code + ' ' : '') + d.name + (d.diff != null && d.schedBal != null
+      ? (': ' + d.schedName + ' ' + fmt(d.schedBal) + ' vs GL ' + fmt(d.glBal) + ' (off by ' + fmt(d.diff) + ')')
+      : (': ' + (d.note || 'review'))),
+  }));
+
+  return Object.assign({}, base, { flags, discrepancies, byCat, arCur, arPrior, arPrimary, apCur, apPrior, apPrimary, apRecon, reg, prepaidByAcct, prepaidSched, faSched, fixedPairs, pye, pyeBal, eqMonthly, oaByProject });
 }
 
 // ─── Supporting tabs ──────────────────────────────────────────────────────────
@@ -703,29 +933,87 @@ function rollBlock(ws, startRow, title, rows, m, tab) {
   return { refs, nextRow: r };
 }
 
-// Intercompany Tie Out: our balance (Dr = receivable) vs the counterparty's ledger.
-function buildTieOut(wb, rows, en, m, used, leadTab) {
-  const tab = reserveName('Tie Out', used);
-  const ws = wb.addWorksheet(tab, { views: [{ showGridLines: false }] });
-  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 36; ws.getColumn('D').width = 32; ws.getColumn('E').width = 17; ws.getColumn('F').width = 17; ws.getColumn('G').width = 15; ws.getColumn('H').width = 40;
-  tabHead(ws, 'Intercompany Tie Out', en, 'Month ended ' + spell(m.end) + ' — Debit = receivable, Credit = payable; counterparty balances per their own CloudLedger ledger', leadTab);
-  const HR = 5;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Counterparty Entity', 'Our Balance', 'Per Counterparty GL', 'Variance', 'Comments']);
-  let r = HR + 1; const first = r; const refs = new Map();
-  for (const a of rows) {
-    const ours = a.type === 'Asset' ? a.end : -a.end;
-    txt(ws, 'B' + r, a.code, { align: { horizontal: 'left' } }); txt(ws, 'C' + r, a.name);
-    txt(ws, 'D' + r, a.cp ? a.cp.name : '');
-    num(ws, 'E' + r, ours);
-    if (a.cp) { num(ws, 'F' + r, a.cpNet || 0); num(ws, 'G' + r, { formula: 'E' + r + '-F' + r }); }
-    else { num(ws, 'F' + r, ''); num(ws, 'G' + r, ''); if (Math.abs(a.end) >= 0.01) txt(ws, 'H' + r, 'No matching CloudLedger entity — confirm the counterparty balance manually', { font: { italic: true, color: { argb: 'FF9C4221' } } }); }
-    refs.set(String(a.code), { sheet: tab, ourRef: ref(tab, 'E' + r), cpRef: a.cp ? ref(tab, 'F' + r) : null });
-    r++;
+// AP Recon (CLA/Weaver format): 4 tabs proving the Bill.com open-invoice report
+// ties to the GL A/P. Sits alongside the AP Aging + AP Summary. Returns nothing
+// (its own tabs; the AP leadsheet still links to the AP Aging total).
+function buildApReconTabs(wb, recon, en, m, used) {
+  const apAcct = recon.apCode;
+  // 1. AP Recon (summary) — Per Bill.com vs Per GL by vendor, tying to the A/P account.
+  const ap = wb.addWorksheet(reserveName('AP Recon', used), { views: [{ showGridLines: false }] });
+  ap.getColumn('A').width = 3.4; ap.getColumn('B').width = 44; ap.getColumn('C').width = 16; ap.getColumn('D').width = 16; ap.getColumn('E').width = 16;
+  tabHead(ap, 'Accounts Payable Reconciliation — Bill.com to GL (' + apAcct + ')', en, 'As of ' + short(m.end));
+  const noBc = recon.billcomSource === 'none';
+  hdr(ap, 6, 2, ['Vendor', 'Per Bill.com', 'Per GL', 'Difference']);
+  let ar = 7; const first = ar;
+  for (const v of (recon.byVendor || [])) {
+    txt(ap, 'B' + ar, v.vendor);
+    if (!noBc) num(ap, 'C' + ar, v.billcom);
+    num(ap, 'D' + ar, v.gl);
+    if (!noBc) num(ap, 'E' + ar, { formula: 'C' + ar + '-D' + ar });
+    ar++;
   }
-  const last = r - 1;
-  txt(ws, 'B' + r, 'Total Intercompany', { font: { bold: true } });
-  for (const c of ['E', 'F', 'G']) totalCell(ws, c + r, last >= first ? 'SUM(' + c + first + ':' + c + last + ')' : null);
-  return { tab, refs };
+  const last = ar - 1;
+  txt(ap, 'B' + ar, 'Total accounts payable', { font: { bold: true } });
+  if (!noBc) totalCell(ap, 'C' + ar, last >= first ? 'SUM(C' + first + ':C' + last + ')' : null);
+  totalCell(ap, 'D' + ar, last >= first ? 'SUM(D' + first + ':D' + last + ')' : null);
+  if (!noBc) totalCell(ap, 'E' + ar, 'C' + ar + '-D' + ar);
+  ar += 2;
+  txt(ap, 'B' + ar, 'Accounts payable per general ledger (' + apAcct + ')'); num(ap, 'D' + ar, recon.gl); const glRow = ar; ar++;
+  txt(ap, 'B' + ar, 'Open invoices remaining per GL detail (offsets applied)'); num(ap, 'D' + ar, recon.openTotal); const openRow = ar; ar++;
+  txt(ap, 'B' + ar, 'Difference', { font: { bold: true } }); num(ap, 'D' + ar, { formula: 'D' + glRow + '-D' + openRow }, { font: { bold: true }, border: { top: THIN } }); ar += 2;
+  ap.mergeCells('B' + ar + ':E' + ar);
+  txt(ap, 'B' + ar, noBc
+    ? ('Per Bill.com is blank because no Bill.com A/P Detail report has been uploaded, so the GL A/P is not yet independently verified. Upload the Bill.com A/P Detail (Open Items) report as of ' + short(m.end) + ' and regenerate.')
+    : ('Per Bill.com = the uploaded Bill.com A/P Detail as of ' + short(recon.billcomAsOf || m.end) + '. Per GL = open invoices remaining on account ' + apAcct + ' after offsets, which ties to the balance sheet.'),
+    { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
+
+  // 2. Bill.com AP Detail — open invoices.
+  const bc = wb.addWorksheet(reserveName('Bill.com AP Detail', used), { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
+  bc.getColumn('A').width = 3.4; bc.getColumn('B').width = 40; bc.getColumn('C').width = 18; bc.getColumn('D').width = 14; bc.getColumn('E').width = 16;
+  tabHead(bc, 'Bill.com A/P Detail — Open Invoices', en, 'As of ' + short(recon.billcomAsOf || m.end));
+  hdr(bc, 5, 2, ['Vendor', 'Invoice #', 'Bill Date', 'Amount']);
+  let bcr = 6; const bcFirst = bcr;
+  for (const b of (recon.billcomLines || [])) { txt(bc, 'B' + bcr, b.vendor); txt(bc, 'C' + bcr, b.invoice || ''); txt(bc, 'D' + bcr, b.date || ''); num(bc, 'E' + bcr, b.amount); bcr++; }
+  const bcLast = bcr - 1;
+  if (noBc) { bc.mergeCells('B' + bcr + ':E' + bcr); txt(bc, 'B' + bcr, 'No Bill.com A/P Detail report uploaded. Export the Bill.com A/P Detail (Open Items) report as of ' + short(m.end) + ' and upload it (card under the report) to complete this reconciliation.', { font: { italic: true, color: { argb: 'FF9C4221' } } }); }
+  else { txt(bc, 'B' + bcr, 'Total open invoices per Bill.com', { font: { bold: true } }); totalCell(bc, 'E' + bcr, bcLast >= bcFirst ? 'SUM(E' + bcFirst + ':E' + bcLast + ')' : null); }
+
+  // 3. CL AP Detail — open invoices per GL (unmatched credits after offsets).
+  const cld = wb.addWorksheet(reserveName('CL AP Detail', used), { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
+  cld.getColumn('A').width = 3.4; cld.getColumn('B').width = 40; cld.getColumn('C').width = 18; cld.getColumn('D').width = 14; cld.getColumn('E').width = 10; cld.getColumn('F').width = 16;
+  tabHead(cld, 'Accounts Payable Detail per GL — Open Invoices', en, 'As of ' + short(m.end));
+  hdr(cld, 5, 2, ['Vendor', 'Invoice #', 'Bill Date', 'JE #', 'Amount']);
+  let clr = 6; const clFirst = clr;
+  for (const b of (recon.openBills || [])) { txt(cld, 'B' + clr, b.vendor); txt(cld, 'C' + clr, b.invoice || ''); txt(cld, 'D' + clr, b.date || ''); txt(cld, 'E' + clr, b.num || ''); num(cld, 'F' + clr, b.amount); clr++; }
+  const clLast = clr - 1;
+  txt(cld, 'B' + clr, 'Total open invoices per GL', { font: { bold: true } }); totalCell(cld, 'F' + clr, clLast >= clFirst ? 'SUM(F' + clFirst + ':F' + clLast + ')' : null); clr += 2;
+  cld.mergeCells('B' + clr + ':F' + clr);
+  txt(cld, 'B' + clr, 'The credits on account ' + apAcct + ' left uncancelled after the offset analysis (AP GL Detail tab). Ties to the A/P balance and to the Bill.com A/P Detail.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
+
+  // 4. AP GL Detail — full A/P account detail with offset-letter tagging + recon.
+  const gld = wb.addWorksheet(reserveName('AP GL Detail', used), { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
+  gld.getColumn('A').width = 3.4; gld.getColumn('B').width = 11; gld.getColumn('C').width = 8; gld.getColumn('D').width = 26; gld.getColumn('E').width = 26; gld.getColumn('F').width = 44; gld.getColumn('G').width = 14; gld.getColumn('H').width = 14; gld.getColumn('I').width = 15; gld.getColumn('J').width = 8;
+  tabHead(gld, 'Accounts Payable (' + apAcct + ') — GL Detail with Offset', en, 'Inception to ' + short(m.end));
+  hdr(gld, 5, 2, ['Date', 'Num', 'Vendor', 'Offset Account', 'Description', 'Debit', 'Credit', 'Balance', 'Offset']);
+  let gr = 6;
+  for (const x of (recon.glRows || [])) {
+    num(gld, 'B' + gr, asDate(x.date), { fmt: DATEFMT }); txt(gld, 'C' + gr, x.num || ''); txt(gld, 'D' + gr, x.vendor || ''); txt(gld, 'E' + gr, x.offset || ''); txt(gld, 'F' + gr, x.memo || '');
+    if (x.debit) num(gld, 'G' + gr, x.debit); if (x.credit) num(gld, 'H' + gr, x.credit); num(gld, 'I' + gr, x.balance);
+    const oc = gld.getCell('J' + gr); oc.value = x.letter || ''; oc.font = (x.letter === 'X') ? F({ bold: true }) : F(); oc.alignment = { horizontal: 'center' };
+    gr++;
+  }
+  txt(gld, 'F' + gr, 'TOTAL', { font: { bold: true } });
+  totalCell(gld, 'G' + gr, recon.glRows && recon.glRows.length ? 'SUM(G6:G' + (gr - 1) + ')' : null);
+  totalCell(gld, 'H' + gr, recon.glRows && recon.glRows.length ? 'SUM(H6:H' + (gr - 1) + ')' : null);
+  num(gld, 'I' + gr, recon.ending, { font: { bold: true }, border: { top: THIN, bottom: DBL } }); gr += 2;
+  txt(gld, 'E' + gr, 'Reconciliation', { font: { bold: true } }); gr++;
+  txt(gld, 'E' + gr, 'Credits (bills booked)'); num(gld, 'I' + gr, recon.totalCredit); const rCr = gr; gr++;
+  txt(gld, 'E' + gr, 'Less: debits (payments / reversals)'); num(gld, 'I' + gr, r2(-recon.totalDebit)); const rDr = gr; gr++;
+  txt(gld, 'E' + gr, 'Ending A/P balance per GL (' + apAcct + ')', { font: { bold: true } }); num(gld, 'I' + gr, { formula: 'I' + rCr + '+I' + rDr }, { font: { bold: true }, border: { top: THIN } }); const rEnd = gr; gr++;
+  txt(gld, 'E' + gr, 'Open invoices remaining after offsets'); num(gld, 'I' + gr, recon.openTotal); const rOpen = gr; gr++;
+  txt(gld, 'E' + gr, 'Difference (should be zero)', { font: { bold: true } }); num(gld, 'I' + gr, { formula: 'I' + rEnd + '-I' + rOpen }, { font: { bold: true }, border: { top: THIN } }); gr += 2;
+  gld.mergeCells('B' + gr + ':J' + gr);
+  txt(gld, 'B' + gr, 'Matched debits and credits carry the same offset letter and net to zero. The unlettered credits that remain are the open invoices, which equal the ending A/P balance.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
 }
 
 // Equity Rollforward: prior year end → monthly activity → ending, by account.
@@ -888,120 +1176,97 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell) {
   for (const c of ['D', 'G', 'H']) totalCell(ws, c + r, last >= first ? 'SUBTOTAL(109,' + c + first + ':' + c + last + ')' : null);
   return ref(cd.tab, 'H' + r);
 }
-function otherAssetsLeadsheet(ws, cd, en, m, rows, refByCode, projects, leadCell) {
-  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 44; ws.getColumn('D').width = 16; ws.getColumn('E').width = 16; ws.getColumn('F').width = 30;
-  titleBlock(ws, en, cd.lead, m, 'G');
+// Other Assets leadsheet as an account × project matrix: every Other Assets GL
+// account down the rows, one column per project (GL location) plus a "(No project)"
+// column, so the balances are summarized by project and each row's Total ties to
+// the GL. Project columns and the grand total foot with SUM formulas.
+function otherAssetsLeadsheet(ws, cd, en, m, rows, oaByProject, leadCell) {
+  const projects = (oaByProject && oaByProject.projects) || [];
+  const byAcct = (oaByProject && oaByProject.byAcct) || new Map();
+  const cols = projects.concat(['(No project)']); // project columns, then unallocated
+  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 40;
+  const firstProjCol = 4; // column D
+  for (let i = 0; i < cols.length; i++) ws.getColumn(colL(firstProjCol + i)).width = 15;
+  const totalCol = colL(firstProjCol + cols.length);
+  const commentCol = colL(firstProjCol + cols.length + 1);
+  ws.getColumn(totalCol).width = 16; ws.getColumn(commentCol).width = 30;
+  titleBlock(ws, en, cd.lead, m, commentCol);
+  txt(ws, 'C5', 'Balances by project as of ' + short(m.end) + ' (Dr positive / Cr in parentheses)', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet', 'Balance\nDr (Cr)', 'Comments']);
+  hdr(ws, HR, 2, ['Account No.', 'Account Name'].concat(cols, ['Total', 'Comments']));
   let r = HR + 1; const first = r;
   for (const a of rows) {
-    const rr = refByCode.get(String(a.code)) || {};
     txt(ws, 'B' + r, a.code, { align: { horizontal: 'left' } }); txt(ws, 'C' + r, a.name);
-    wpLink(ws, 'D' + r, rr.sheet, rr.sheet || '');
-    num(ws, 'E' + r, rr.endRef ? { formula: rr.endRef } : a.end);
-    leadCell.set(String(a.code), ref(cd.tab, 'E' + r));
+    const projMap = byAcct.get(String(a.code)) || new Map();
+    let allocated = 0;
+    for (let i = 0; i < cols.length; i++) {
+      const v = r2(projMap.get(cols[i]) || 0);
+      if (cols[i] !== '(No project)') allocated = r2(allocated + v);
+      num(ws, colL(firstProjCol + i) + r, v);
+    }
+    // Force the "(No project)" cell so the row Total ties to the GL end balance
+    // even if some lines carry no location.
+    const noProjIdx = cols.length - 1;
+    const explicitNoProj = r2((projMap.get('(No project)') || 0));
+    const impliedNoProj = r2(a.end - allocated);
+    num(ws, colL(firstProjCol + noProjIdx) + r, Math.abs(explicitNoProj) >= 0.005 ? explicitNoProj : impliedNoProj);
+    num(ws, totalCol + r, { formula: 'SUM(' + colL(firstProjCol) + r + ':' + colL(firstProjCol + cols.length - 1) + r + ')' });
+    leadCell.set(String(a.code), ref(cd.tab, totalCol + r));
     r++;
   }
   const last = r - 1;
   txt(ws, 'B' + r, cd.total, { font: { bold: true } });
-  totalCell(ws, 'E' + r, last >= first ? 'SUM(E' + first + ':E' + last + ')' : null);
-  if (projects && projects.length) {
-    let pr = r + 3;
-    txt(ws, 'C' + pr, 'Project Name', { font: { bold: true } }); txt(ws, 'D' + pr, 'Project Code', { font: { bold: true } }); pr++;
-    for (const p of projects) { txt(ws, 'C' + pr, p.name); txt(ws, 'D' + pr, p.code); pr++; }
-  }
-  return ref(cd.tab, 'E' + r);
+  for (let i = 0; i <= cols.length; i++) { const c = colL(firstProjCol + i); totalCell(ws, c + r, last >= first ? 'SUM(' + c + first + ':' + c + last + ')' : null); }
+  return ref(cd.tab, totalCol + r);
 }
-function intercoLeadsheet(ws, cd, en, m, rows, refByCode, leadCell) {
-  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 34; ws.getColumn('D').width = 22;
-  ws.getColumn('E').width = 12; ws.getColumn('F').width = 15; ws.getColumn('G').width = 15; ws.getColumn('H').width = 15; ws.getColumn('I').width = 26;
-  titleBlock(ws, en, cd.lead, m, 'I');
-  txt(ws, 'C5', 'Entity Name:'); txt(ws, 'D5', en, { font: { bold: true } });
-  const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Entity Name', 'Account Name', 'Worksheet', 'Balance', 'Other Entity Bal', 'Variance', 'Comments']);
-  let r = HR + 1; const first = r;
-  for (const a of rows) {
-    const rr = refByCode.get(String(a.code)) || {};
-    txt(ws, 'B' + r, a.code, { align: { horizontal: 'left' } });
-    txt(ws, 'C' + r, a.cp ? a.cp.name : String(a.name).replace(/^due\s+(to|from)\s+/i, ''));
-    txt(ws, 'D' + r, a.name);
-    wpLink(ws, 'E' + r, rr.sheet, rr.sheet || '');
-    num(ws, 'F' + r, rr.ourRef ? { formula: rr.ourRef } : (a.type === 'Asset' ? a.end : -a.end));
-    if (rr.cpRef) { num(ws, 'G' + r, { formula: rr.cpRef }); num(ws, 'H' + r, { formula: 'F' + r + '-G' + r }); }
-    else { num(ws, 'G' + r, ''); num(ws, 'H' + r, ''); if (Math.abs(a.end) >= 0.01) txt(ws, 'I' + r, 'No matching CL entity — confirm manually', { font: { italic: true, color: { argb: 'FF9C4221' } } }); }
-    leadCell.set(String(a.code), ref(cd.tab, 'F' + r));
-    r++;
-  }
-  const last = r - 1;
-  txt(ws, 'B' + r, cd.total, { font: { bold: true } });
-  for (const c of ['F', 'G', 'H']) totalCell(ws, c + r, last >= first ? 'SUBTOTAL(109,' + c + first + ':' + c + last + ')' : null);
-  return ref(cd.tab, 'F' + r);
-}
-
-// ─── Summary ──────────────────────────────────────────────────────────────────
-function buildSummary(su, en, m, data, catTie, niRef, leadCell) {
-  su.getColumn('A').width = 3.4; su.getColumn('B').width = 14; su.getColumn('C').width = 48; su.getColumn('D').width = 18; su.getColumn('E').width = 18; su.getColumn('F').width = 18; su.getColumn('G').width = 11;
+// ─── Summary ──────────────────────────────────────────────────────
+// A list of the discrepancies between the GL and each supporting schedule, and,
+// under each, the specific GL transaction(s) that caused it. No balance-sheet tie
+// and no prior-vs-current comparison — just what disagrees and why.
+function buildSummary(su, en, m, data) {
+  su.getColumn('A').width = 3.4; su.getColumn('B').width = 13; su.getColumn('C').width = 46; su.getColumn('D').width = 30; su.getColumn('E').width = 18; su.getColumn('F').width = 18; su.getColumn('G').width = 18; su.getColumn('H').width = 40;
   su.getCell('C1').value = en; su.getCell('C1').font = F({ size: 16, bold: true });
   su.getCell('C2').value = 'MONTHLY CLOSING WORKPAPERS — SUMMARY'; su.getCell('C2').font = F({ size: 12, bold: true });
   su.getCell('C3').value = 'Month ended ' + spell(m.end); su.getCell('C3').font = F({ italic: true });
+  const discs = data.discrepancies || [];
   let sr = 5;
-  const flags = data.flags || [];
-  if (!flags.length) {
-    su.mergeCells('B' + sr + ':G' + sr);
-    const c = su.getCell('B' + sr); c.value = '✓  All checks passed — every schedule agrees to the general ledger and the balance sheet ties.'; c.font = F({ bold: true, color: { argb: 'FF1E7A34' } });
-    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF7EE' } }; su.getRow(sr).height = 22; sr += 2;
-  } else {
-    su.mergeCells('B' + sr + ':G' + sr);
-    const c = su.getCell('B' + sr); c.value = '⚠  ' + flags.length + ' item' + (flags.length > 1 ? 's' : '') + ' require review'; c.font = F({ bold: true, color: { argb: 'FF9C4221' } });
-    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFDECEA' } }; su.getRow(sr).height = 22; sr += 2;
-    txt(su, 'B' + sr, 'Exceptions — Review Required', { font: { bold: true, size: 12 } }); sr++;
-    for (const f of flags) {
-      su.mergeCells('B' + sr + ':G' + sr);
-      const cc = su.getCell('B' + sr);
-      cc.value = (f.severity === 'exception' ? '✖ ' : '⚠ ') + f.message;
-      cc.font = F({ color: { argb: f.severity === 'exception' ? 'FFB3261E' : 'FF9C4221' } });
-      cc.alignment = { wrapText: true, vertical: 'top' };
-      su.getRow(sr).height = Math.min(220, 14 * Math.max(1, Math.ceil(String(f.message).length / 110)) + 4); sr++;
-    }
-    sr++;
+  if (!discs.length) {
+    su.mergeCells('B' + sr + ':H' + sr);
+    const c = su.getCell('B' + sr); c.value = '✓  No discrepancies — every supporting schedule agrees to the general ledger.'; c.font = F({ bold: true, color: { argb: 'FF1E7A34' } });
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEAF7EE' } }; su.getRow(sr).height = 22;
+    return;
   }
-  txt(su, 'B' + sr, 'Balance-sheet tie', { font: { bold: true, size: 12 } }); sr++;
-  const assetRefs = CATS.filter((cd) => catTie[cd.key] && cd.type === 'Asset').map((cd) => catTie[cd.key]);
-  const liabRefs = CATS.filter((cd) => catTie[cd.key] && cd.type === 'Liability').map((cd) => catTie[cd.key]);
-  const eqRefs = CATS.filter((cd) => catTie[cd.key] && cd.type === 'Equity').map((cd) => catTie[cd.key]);
-  const sumOf = (refs) => refs.length ? refs.join('+') : '0';
-  const aRow = sr; txt(su, 'C' + sr, 'Total assets'); num(su, 'D' + sr, { formula: sumOf(assetRefs) }); sr++;
-  const lRow = sr; txt(su, 'C' + sr, 'Total liabilities'); num(su, 'D' + sr, { formula: sumOf(liabRefs) }); sr++;
-  const eRow = sr; txt(su, 'C' + sr, 'Total members’ equity'); num(su, 'D' + sr, { formula: sumOf(eqRefs) }); sr++;
-  const nRow = sr; txt(su, 'C' + sr, 'Net income (loss) — fiscal YTD (per Income Statement)'); num(su, 'D' + sr, { formula: niRef }); sr++;
-  txt(su, 'C' + sr, 'Assets − (Liabilities + Equity + Net income)  —  should be $0.00', { font: { bold: true } });
-  { const c = num(su, 'D' + sr, { formula: 'D' + aRow + '-(D' + lRow + '+D' + eRow + '+D' + nRow + ')' }, { font: { bold: true } }); c.border = { top: THIN }; }
-  sr += 3;
+  su.mergeCells('B' + sr + ':H' + sr);
+  const b = su.getCell('B' + sr); b.value = '⚠  ' + discs.length + ' discrepanc' + (discs.length > 1 ? 'ies' : 'y') + ' between the GL and the supporting schedules'; b.font = F({ bold: true, color: { argb: 'FF9C4221' } });
+  b.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFDECEA' } }; su.getRow(sr).height = 22; sr += 2;
+  txt(su, 'B' + sr, 'Discrepancies — GL vs Supporting Schedule', { font: { bold: true, size: 12 } }); sr++;
+  txt(su, 'B' + sr, 'Each discrepancy shows the account, the supporting schedule, the two balances and the difference; the transactions that caused it are listed beneath.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } }); sr += 2;
 
-  txt(su, 'B' + sr, 'Balance comparison — current month vs prior month', { font: { bold: true, size: 12 } }); sr++;
-  txt(su, 'B' + sr, 'Prior-month balances are taken directly from CloudLedger as of ' + short(m.beg) + '; current-month balances link to the leadsheets.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } }); sr++;
-  hdr(su, sr, 2, ['Account No.', 'Account Name', 'Prior Month ' + short(m.beg), 'Current Month ' + short(m.end), 'Change', 'Change %']); sr++;
-  const priorOf = (a) => (a.cat === 'interco' ? (a.type === 'Asset' ? a.begin : -a.begin) : a.begin);
-  for (const cd of CATS) {
-    const rows = data.byCat[cd.key] || []; if (!rows.length) continue;
-    const hcell = su.getCell('B' + sr); hcell.value = cd.label; hcell.font = F({ bold: true });
-    for (let c = 2; c <= 7; c++) su.getRow(sr).getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: GRPFILL } };
+  for (const d of discs) {
+    const hc = su.getCell('B' + sr); hc.value = (d.code ? d.code + '  ' : '') + d.name; hc.font = F({ bold: true });
+    for (let c = 2; c <= 8; c++) su.getRow(sr).getCell(c).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: GRPFILL } };
+    txt(su, 'E' + sr, 'Per ' + d.schedName, { font: { bold: true }, align: { horizontal: 'right' } });
+    txt(su, 'F' + sr, 'Per GL', { font: { bold: true }, align: { horizontal: 'right' } });
+    txt(su, 'G' + sr, 'Difference', { font: { bold: true }, align: { horizontal: 'right' } });
     sr++;
-    const gFirst = sr;
-    for (const a of rows) {
-      txt(su, 'B' + sr, a.code, { align: { horizontal: 'left' } }); txt(su, 'C' + sr, a.name);
-      num(su, 'D' + sr, priorOf(a));
-      const lc = leadCell.get(String(a.code));
-      num(su, 'E' + sr, lc ? { formula: lc } : (a.cat === 'interco' ? (a.type === 'Asset' ? a.end : -a.end) : a.end));
-      num(su, 'F' + sr, { formula: 'E' + sr + '-D' + sr });
-      num(su, 'G' + sr, { formula: 'IF(ABS(D' + sr + ')<0.005,"",F' + sr + '/ABS(D' + sr + '))' }, { fmt: PCT });
-      sr++;
+    if (d.schedBal != null) num(su, 'E' + sr, d.schedBal); else txt(su, 'E' + sr, 'n/a', { align: { horizontal: 'right' } });
+    num(su, 'F' + sr, d.glBal);
+    if (d.diff != null) num(su, 'G' + sr, d.diff, { font: { bold: true, color: { argb: 'FFB3261E' } } });
+    sr++;
+    if (d.note) { su.mergeCells('C' + sr + ':H' + sr); txt(su, 'C' + sr, d.note, { font: { italic: true, color: { argb: 'FF9C4221' } }, align: { wrapText: true, vertical: 'top' } }); su.getRow(sr).height = Math.min(90, 14 * Math.max(1, Math.ceil(String(d.note).length / 120)) + 4); sr++; }
+    if (d.causes && d.causes.length) {
+      txt(su, 'C' + sr, 'Transaction(s) that caused the discrepancy:', { font: { bold: true, italic: true } }); sr++;
+      hdr(su, sr, 3, ['Date', 'JE #', 'Memo / Vendor', 'Amount', 'Note']); sr++;
+      for (const cz of d.causes) {
+        if (cz.date) num(su, 'C' + sr, asDate(String(cz.date).slice(0, 10)), { fmt: DATEFMT }); else txt(su, 'C' + sr, '');
+        txt(su, 'D' + sr, cz.num || '');
+        txt(su, 'E' + sr, cz.memo || '');
+        num(su, 'F' + sr, cz.amount);
+        if (cz.note) { su.mergeCells('G' + sr + ':H' + sr); txt(su, 'G' + sr, cz.note, { align: { wrapText: true } }); }
+        sr++;
+      }
     }
-    const gLast = sr - 1;
-    txt(su, 'C' + sr, 'Total ' + cd.label, { font: { bold: true } });
-    for (const c of ['D', 'E', 'F']) { const cell = num(su, c + sr, { formula: 'SUM(' + c + gFirst + ':' + c + gLast + ')' }, { font: { bold: true } }); cell.border = { top: THIN }; }
-    num(su, 'G' + sr, { formula: 'IF(ABS(D' + sr + ')<0.005,"",F' + sr + '/ABS(D' + sr + '))' }, { fmt: PCT, font: { bold: true } });
-    sr += 2;
+    sr += 1;
   }
 }
 
@@ -1040,16 +1305,16 @@ function buildWorkbook(data) {
     const fa = buildFixedSchedule(wb, data, en, m, used, cd.tab);
     catTie.fixed = fixedLeadsheet(ws, cd, en, m, data.fixedPairs, fa.refs, fa.tab, leadCell);
   }
-  for (const key of ['otherassets', 'invest']) {
-    const rows = byCat[key] || []; if (!rows.length) continue;
-    const cd = catOf(key); const ws = newLead(cd);
-    const sc = buildCategorySchedule(wb, cd, rows, en, m, used, cd.tab);
-    catTie[key] = key === 'otherassets' ? otherAssetsLeadsheet(ws, cd, en, m, rows, sc.refs, data.projects || [], leadCell) : simpleLeadsheet(ws, cd, en, m, rows, sc.refs, leadCell);
+  // Other Assets is an account × project matrix (no roll-forward schedule);
+  // Investments keeps the roll-forward schedule.
+  if ((byCat.otherassets || []).length) {
+    const cd = catOf('otherassets'); const ws = newLead(cd);
+    catTie.otherassets = otherAssetsLeadsheet(ws, cd, en, m, byCat.otherassets, data.oaByProject, leadCell);
   }
-  if ((byCat.interco || []).length) {
-    const cd = catOf('interco'); const ws = newLead(cd);
-    const t = buildTieOut(wb, byCat.interco, en, m, used, cd.tab);
-    catTie.interco = intercoLeadsheet(ws, cd, en, m, byCat.interco, t.refs, leadCell);
+  if ((byCat.invest || []).length) {
+    const cd = catOf('invest'); const ws = newLead(cd);
+    const sc = buildCategorySchedule(wb, cd, byCat.invest, en, m, used, cd.tab);
+    catTie.invest = simpleLeadsheet(ws, cd, en, m, byCat.invest, sc.refs, leadCell);
   }
   if ((byCat.ap || []).length) {
     const cd = catOf('ap'); const ws = newLead(cd); const refs = new Map();
@@ -1058,6 +1323,8 @@ function buildWorkbook(data) {
     if (data.apPrimary) refs.set(String(data.apPrimary.code), { sheet: t.agingTab, endRef: t.totalRef });
     if (others.length) { const ag = wb.getWorksheet(t.agingTab); const rb = rollBlock(ag, ag.rowCount + 3, 'Accrued and other payable accounts (per general ledger)', others, m, t.agingTab); for (const [k, v] of rb.refs) refs.set(k, v); }
     catTie.ap = simpleLeadsheet(ws, cd, en, m, byCat.ap, refs, leadCell);
+    // Bill.com-to-GL AP Recon (4 tabs) alongside the AP Aging + AP Summary.
+    if (data.apRecon) buildApReconTabs(wb, data.apRecon, en, m, used);
   }
   if ((byCat.cc || []).length) {
     const cd = catOf('cc'); const ws = newLead(cd); const refs = new Map();
@@ -1076,7 +1343,7 @@ function buildWorkbook(data) {
     const eq = buildEquityRollforward(wb, byCat.equity, data, en, m, used, cd.tab, niRef);
     catTie.equity = simpleLeadsheet(ws, cd, en, m, byCat.equity, eq.refs, leadCell);
   }
-  buildSummary(su, en, m, data, catTie, niRef, leadCell);
+  buildSummary(su, en, m, data);
   return wb;
 }
 

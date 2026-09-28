@@ -5502,7 +5502,7 @@ function MemorizedReportsPage({entityId,entityName,canEdit=true,onOpen}){
 // ─── Workpapers › generic CLRF quarterly xlsx workpaper (carry, PCAP, PCAP
 // schedule). Quarter-end picker → POST → download → summary. ──────────────────
 // Upload card for the Bill.com A/P Detail (Open Items) report — feeds the AP Recon.
-function ClrfApDetailCard({ entityId, qe, canEdit }) {
+function ClrfApDetailCard({ entityId, qe, canEdit, apAcct = '202000', periodLabel = 'quarter end' }) {
   const [status, setStatus] = useState(null);
   const [preview, setPreview] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -5565,7 +5565,7 @@ function ClrfApDetailCard({ entityId, qe, canEdit }) {
   return (<div style={{ ...S.card, marginTop: 14, background: '#f8fafc' }}>
     <div style={{ fontSize: 15, fontWeight: 700, color: T.textBright, marginBottom: 4 }}>Bill.com A/P Detail — for the AP Recon tab</div>
     <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 12, maxWidth: 760, lineHeight: 1.5 }}>
-      Export the <strong>A/P Detail (Open Items)</strong> report from Bill.com filtered to this fund, as of the quarter end, and upload it here. The AP Recon tab reconciles it to the general-ledger A/P (202000). Excel or CSV; it needs a Vendor column and an open-balance / amount column.</div>
+      Export the <strong>A/P Detail (Open Items)</strong> report from Bill.com filtered to this entity, as of the {periodLabel}, and upload it here. The AP Recon tab reconciles it to the general-ledger A/P ({apAcct}). Excel or CSV; it needs a Vendor column and an open-balance / amount column.</div>
     {status && status.count > 0 && <div style={{ fontSize: 12, marginBottom: 10, padding: 10, background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: T.radiusSm }}>
       On file: <strong>{status.count}</strong> open invoices totaling <strong>{fmt(status.total)}</strong>{status.as_of ? (' as of ' + status.as_of) : ''}{status.uploaded_at ? (' · uploaded ' + String(status.uploaded_at).slice(0, 10)) : ''}.
       {canEdit && <button style={{ ...S.btnS, marginLeft: 10 }} disabled={busy} onClick={clear}>Remove</button>}</div>}
@@ -5715,9 +5715,11 @@ function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true}){
     {result&&<div style={{marginTop:16,padding:'12px 14px',background:T.bgAlt||'#f6f8fa',borderRadius:8,border:'1px solid '+T.border}}>
       <div style={{fontSize:13,fontWeight:700,color:T.textBright,marginBottom:6}}>{result.month_name||result.month} \u2014 generated</div>
       <div style={{fontSize:12,color:T.textMuted}}>Filed to {result.saved_to||'Workpapers'}{result.replaced?' (replaced the prior copy)':''}. {result.accounts||0} balance-sheet accounts.</div>
-      <div style={{fontSize:12,marginTop:6,fontWeight:600,color:(result.exceptions?T.orange:'#1E7A34')}}>{result.exceptions?((result.exceptions)+' item'+(result.exceptions>1?'s':'')+' need review \u2014 see the Summary tab'):'\u2713 Balance sheet ties; all accounts roll forward from the GL.'}</div>
+      <div style={{fontSize:12,marginTop:6,fontWeight:600,color:(result.exceptions?T.orange:'#1E7A34')}}>{result.exceptions?((result.exceptions)+' discrepanc'+(result.exceptions>1?'ies':'y')+' between the GL and the supporting schedules \u2014 see the Summary tab'):'\u2713 Every supporting schedule agrees to the general ledger.'}</div>
     </div>}
-  </div></div>);
+  </div>
+  {valid&&<ClrfApDetailCard entityId={entityId} qe={mon} canEdit={canEdit} apAcct="20000" periodLabel="month end"/>}
+  </div>);
 }
 
 function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,description}){
