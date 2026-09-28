@@ -1326,7 +1326,11 @@ function registerOtherWorkpapersRoutes(app, ctx) {
       try {
         const eid = Number(req.params.entity_id);
         const cfg = ctx.db.prepare('SELECT entity_id FROM billcom_config WHERE entity_id = ?').get(eid);
-        if (!cfg) return res.status(400).json({ error: 'Bill.com is not set up for this entity yet. Set up the Bill.com connection first, then upload the A/P Detail.' });
+        // The A/P Detail upload only needs somewhere to store the aging lines; it does
+        // not require a live Bill.com connection. If the entity has no billcom_config
+        // row yet (e.g. a GL-native A/P like Banyan), create a minimal placeholder so
+        // the upload persists rather than being rejected.
+        if (!cfg) ctx.db.prepare("INSERT INTO billcom_config (entity_id, api_base_url, username, password_enc, org_id, dev_key_enc) VALUES (?, '', '', '', '', '')").run(eid);
         const asOf = (req.body && /^\d{4}-\d{2}-\d{2}$/.test(String(req.body.as_of || ''))) ? String(req.body.as_of) : null;
         const arr = Array.isArray(req.body && req.body.lines) ? req.body.lines : null;
         if (!arr) return res.status(400).json({ error: 'lines array is required' });

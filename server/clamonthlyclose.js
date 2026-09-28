@@ -342,7 +342,7 @@ function oaBalancesByProject(db, eid, asOf, codes) {
     const c = String(r.code), proj = r.proj || '(No project)';
     if (!byAcct.has(c)) byAcct.set(c, new Map());
     byAcct.get(c).set(proj, r2((byAcct.get(c).get(proj) || 0) + r.amt));
-    if (proj !== '(No project)') projSet.add(proj);
+    if (proj !== '(No project)') { if (Math.abs(r2(r.amt)) >= 0.005) projSet.add(proj); }
     else if (Math.abs(r2(r.amt)) >= 0.005) hasNoProject = true;
   }
   const projects = Array.from(projSet).sort((a, b) => a.localeCompare(b));
