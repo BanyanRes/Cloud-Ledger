@@ -99,9 +99,6 @@ function titleBlock(ws, entityName, leadTitle, m, legendCol) {
   const d4 = ws.getCell('D4');
   d4.value = { formula: 'DATE(YEAR($D$3),12,31)' }; d4.numFmt = DATEFMT; d4.font = F({ bold: true });
   d4.alignment = { horizontal: 'center' }; d4.border = box;
-  const lc = legendCol || 'G';
-  ws.getCell(lc + '3').value = '= Entry Cell'; ws.getCell(lc + '3').font = F();
-  const sw = ws.getCell(lc + '2'); sw.fill = ENTRY_FILL; sw.border = box;
 }
 
 function hdr(ws, rowNum, startCol, titles) {
@@ -989,7 +986,7 @@ function buildApReconTabs(wb, recon, en, m, used) {
 }
 
 // Equity Rollforward: prior year end → monthly activity → ending, by account.
-function buildEquityRollforward(wb, rows, data, en, m, used, leadTab, niRef) {
+function buildEquityRollforward(wb, rows, data, en, m, used, leadTab, niVal) {
   const tab = reserveName('Equity Rollforward', used);
   const ws = wb.addWorksheet(tab, { views: [{ showGridLines: false }] });
   const n = m.monthNum; const endC = colL(5 + n);
@@ -1017,37 +1014,9 @@ function buildEquityRollforward(wb, rows, data, en, m, used, leadTab, niRef) {
   const cols = ['D']; for (let k = 0; k < n; k++) cols.push(colL(5 + k)); cols.push(endC);
   for (const c of cols) totalCell(ws, c + r, last >= first ? 'SUM(' + c + first + ':' + c + last + ')' : null);
   const totRow = r; r += 2;
-  txt(ws, 'C' + r, 'Net income (loss) — fiscal YTD (per Income Statement)'); num(ws, endC + r, { formula: niRef }); const niRow = r; r++;
+  txt(ws, 'C' + r, 'Net income (loss) — fiscal YTD'); num(ws, endC + r, niVal); const niRow = r; r++;
   txt(ws, 'C' + r, 'Total equity including current-year earnings', { font: { bold: true } }); totalCell(ws, endC + r, endC + totRow + '+' + endC + niRow);
   return { tab, refs };
-}
-
-function buildIncomeStatement(wb, en, m, ni, used) {
-  const tab = reserveName('Income Statement', used);
-  const pl = wb.addWorksheet(tab, { views: [{ showGridLines: false }] });
-  pl.getColumn('A').width = 3.4; pl.getColumn('B').width = 14; pl.getColumn('C').width = 52; pl.getColumn('D').width = 16;
-  pl.getCell('C1').value = en; pl.getCell('C1').font = F({ size: 16, bold: true });
-  pl.getCell('C2').value = 'STATEMENT OF OPERATIONS — FISCAL YEAR TO DATE'; pl.getCell('C2').font = F({ size: 12, bold: true });
-  pl.getCell('C3').value = m.yearStart + ' to ' + short(m.end); pl.getCell('C3').font = F({ italic: true });
-  const PHR = 5; hdr(pl, PHR, 2, ['Code', 'Account', 'Amount']);
-  let pr = PHR + 1;
-  txt(pl, 'B' + pr, 'REVENUE', { font: { bold: true } }); pr++;
-  const revFirst = pr;
-  for (const x of ni.end.revenue) { txt(pl, 'B' + pr, x.code); txt(pl, 'C' + pr, x.name); num(pl, 'D' + pr, x.amt); pr++; }
-  const revLast = pr - 1;
-  txt(pl, 'C' + pr, 'Total revenue', { font: { bold: true } });
-  const totRev = 'D' + pr; { const c = num(pl, totRev, revLast >= revFirst ? { formula: 'SUM(D' + revFirst + ':D' + revLast + ')' } : 0, { font: { bold: true } }); c.border = { top: THIN }; }
-  pr += 2;
-  txt(pl, 'B' + pr, 'EXPENSES', { font: { bold: true } }); pr++;
-  const expFirst = pr;
-  for (const x of ni.end.expense) { txt(pl, 'B' + pr, x.code); txt(pl, 'C' + pr, x.name); num(pl, 'D' + pr, x.amt); pr++; }
-  const expLast = pr - 1;
-  txt(pl, 'C' + pr, 'Total expenses', { font: { bold: true } });
-  const totExp = 'D' + pr; { const c = num(pl, totExp, expLast >= expFirst ? { formula: 'SUM(D' + expFirst + ':D' + expLast + ')' } : 0, { font: { bold: true } }); c.border = { top: THIN }; }
-  pr += 2;
-  txt(pl, 'C' + pr, 'NET INCOME (LOSS) — fiscal YTD', { font: { bold: true } });
-  totalCell(pl, 'D' + pr, totRev + '-' + totExp);
-  return ref(tab, 'D' + pr);
 }
 
 // ─── Leadsheets (CLA columns) ─────────────────────────────────────────────────
@@ -1200,7 +1169,7 @@ function otherAssetsLeadsheet(ws, cd, en, m, rows, oaByProject, leadCell) {
 // under each, the specific GL transaction(s) that caused it. No balance-sheet tie
 // and no prior-vs-current comparison — just what disagrees and why.
 function buildSummary(su, en, m, data) {
-  su.getColumn('A').width = 3.4; su.getColumn('B').width = 13; su.getColumn('C').width = 46; su.getColumn('D').width = 30; su.getColumn('E').width = 18; su.getColumn('F').width = 18; su.getColumn('G').width = 18; su.getColumn('H').width = 40;
+  su.getColumn('A').width = 3.4; su.getColumn('B').width = 13; su.getColumn('C').width = 11; su.getColumn('D').width = 10; su.getColumn('E').width = 46; su.getColumn('F').width = 15; su.getColumn('G').width = 16; su.getColumn('H').width = 48;
   su.getCell('C1').value = en; su.getCell('C1').font = F({ size: 16, bold: true });
   su.getCell('C2').value = 'MONTHLY CLOSING WORKPAPERS — SUMMARY'; su.getCell('C2').font = F({ size: 12, bold: true });
   su.getCell('C3').value = 'Month ended ' + spell(m.end); su.getCell('C3').font = F({ italic: true });
@@ -1318,10 +1287,10 @@ function buildWorkbook(data) {
     const sc = buildCategorySchedule(wb, cd, rows, en, m, used, cd.tab);
     catTie[key] = simpleLeadsheet(ws, cd, en, m, rows, sc.refs, leadCell);
   }
-  const niRef = buildIncomeStatement(wb, en, m, data.ni, used);
+  const niVal = r2((data.ni.end.revenue.reduce((a, x) => a + (x.amt || 0), 0)) - (data.ni.end.expense.reduce((a, x) => a + (x.amt || 0), 0)));
   if ((byCat.equity || []).length) {
     const cd = catOf('equity'); const ws = newLead(cd);
-    const eq = buildEquityRollforward(wb, byCat.equity, data, en, m, used, cd.tab, niRef);
+    const eq = buildEquityRollforward(wb, byCat.equity, data, en, m, used, cd.tab, niVal);
     catTie.equity = simpleLeadsheet(ws, cd, en, m, byCat.equity, eq.refs, leadCell);
   }
   buildSummary(su, en, m, data);
