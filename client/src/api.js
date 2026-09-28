@@ -1078,5 +1078,51 @@ export const api = {
     const blob = await res.blob();
     return { blob, filename, subscriptionMissing };
   },
+
+  // ── Banyan Letterhead (fillable PDF generator) ──
+  getLetterheadLogoStatus: () => request('/letterhead/logo/status'),
+  getLetterheadLogoPreview: async () => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/letterhead/logo/preview', {
+      headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    if (!res.ok) return null;
+    return URL.createObjectURL(await res.blob());
+  },
+  uploadLetterheadLogo: async (file) => {
+    const token = getToken();
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(API_BASE + '/letterhead/logo', {
+      method: 'POST',
+      headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: fd,
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    let data = {}; try { data = await res.json(); } catch {}
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    return data;
+  },
+  resetLetterheadLogo: () => request('/letterhead/logo', { method: 'DELETE' }),
+  generateLetterhead: async ({ file, ...fields }) => {
+    const token = getToken();
+    const fd = new FormData();
+    if (file) fd.append('file', file);
+    Object.entries(fields).forEach(([k, v]) => { if (v != null) fd.append(k, v); });
+    const res = await fetch(API_BASE + '/letterhead/generate', {
+      method: 'POST',
+      headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: fd,
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) { let data = {}; try { data = await res.json(); } catch {} throw new Error(data.error || 'Generation failed'); }
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const filename = m ? m[1] : 'Banyan Letterhead.pdf';
+    return { blob: await res.blob(), filename };
+  },
+
   setToken, getToken, clearToken,
 };

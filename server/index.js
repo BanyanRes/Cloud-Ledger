@@ -11429,6 +11429,17 @@ require('./assignments').registerAssignmentRoutes(app, {
   templatesDir: path.join(dataDir, 'templates'),
 });
 
+// ═══ Banyan Residential Letterhead — fillable PDF generator (Administration) ═══
+// Builds a Banyan letterhead as a fillable PDF (logo header + Date/To/Re/Body/
+// signature fields). An uploaded .txt/.docx reflows into the Body. Admins can
+// replace the built-in logo; the custom one is stored on the data volume.
+require('./letterhead').registerLetterheadRoutes(app, {
+  auth,
+  requireRole,
+  memUpload,
+  templatesDir: path.join(dataDir, 'templates'),
+});
+
 // ═══ Financial Statements package generator ═══
 // Generates GL-derived financial statements (Balance Sheet, Operations, Cash
 // Flows, Members' Equity) for an entity as of a date, on a monthly/quarterly/

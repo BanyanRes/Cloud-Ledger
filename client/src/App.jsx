@@ -936,6 +936,7 @@ export default function App(){
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
+      {id:'letterhead',label:'Letterhead',icon:'📄',section:'administration'},
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
       {id:'users',label:'Users',icon:NI.users,section:'all'},
       {id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom'},
@@ -1013,6 +1014,7 @@ export default function App(){
         {page==='external_tb'&&canAccess('intercompany')&&<ExternalTbPage canEdit={canEdit} key={'etb-'+rk}/>}
         {page==='org_structure'&&canAccess('intercompany')&&<OrgStructurePage entities={entities} canEdit={canEdit} key={'org-'+rk}/>}
         {page==='assignment'&&canAccess('administration')&&<AssignmentPage entities={entities} user={user} key={'asg-'+rk}/>}
+        {page==='letterhead'&&canAccess('administration')&&<LetterheadPage user={user} key={'lh-'+rk}/>}
         {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
@@ -9473,6 +9475,117 @@ function UnmappedRow({u,canEdit,onAdd}){
     <td style={S.td}>{canEdit?<select style={S.selectSm} value={tt} onChange={e=>setTt(e.target.value)}>{TYPES.map(t=><option key={t}>{t}</option>)}</select>:''}</td>
     <td style={S.td}>{canEdit?<button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>onAdd(u,tc.trim(),tn.trim(),tt)}>map</button>:''}</td>
   </tr>);
+}
+
+function LetterheadPage({user}){
+  const isAdmin=user&&user.role==='Admin';
+  const MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
+  const longToday=(()=>{const d=new Date();return MONTHS[d.getMonth()]+' '+d.getDate()+', '+d.getFullYear();})();
+  const[date,setDate]=useState(longToday);
+  const[to,setTo]=useState('');
+  const[re,setRe]=useState('');
+  const[body,setBody]=useState('');
+  const[signerName,setSignerName]=useState(user&&user.name?user.name:'');
+  const[signerTitle,setSignerTitle]=useState('');
+  const[fileName,setFileName]=useState('');
+  const fileRef=useRef(null);
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');const[msg,setMsg]=useState('');
+  const[logo,setLogo]=useState(null);
+  const[logoUrl,setLogoUrl]=useState('');
+  const[logoBusy,setLogoBusy]=useState(false);
+
+  const loadLogo=useCallback(async()=>{
+    try{const s=await api.getLetterheadLogoStatus();setLogo(s);
+      const u=await api.getLetterheadLogoPreview();setLogoUrl(u||'');
+    }catch(e){setErr(e.message);}
+  },[]);
+  useEffect(()=>{loadLogo();},[loadLogo]);
+
+  const onFile=e=>{const f=e.target.files&&e.target.files[0];setFileName(f?f.name:'');};
+
+  const generate=async()=>{
+    setErr('');setMsg('');setBusy(true);
+    try{
+      const f=fileRef.current&&fileRef.current.files&&fileRef.current.files[0];
+      const out=await api.generateLetterhead({file:f||undefined,date,to,re,body,signerName,signerTitle});
+      if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
+      setMsg('Generated '+out.filename+' — open it in any PDF viewer to fill in or edit the fields.');
+    }catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+
+  const onLogoPick=async e=>{
+    const f=e.target.files&&e.target.files[0];e.target.value='';
+    if(!f)return;
+    setLogoBusy(true);setErr('');setMsg('');
+    try{await api.uploadLetterheadLogo(f);setMsg('Letterhead logo updated. It is stored on the server and used for every letterhead from now on.');await loadLogo();}
+    catch(e){setErr(e.message);}finally{setLogoBusy(false);}
+  };
+  const resetLogo=async()=>{
+    setLogoBusy(true);setErr('');setMsg('');
+    try{await api.resetLetterheadLogo();setMsg('Reverted to the built-in Banyan logo.');await loadLogo();}
+    catch(e){setErr(e.message);}finally{setLogoBusy(false);}
+  };
+
+  const ta={width:'100%',minHeight:150,padding:'9px 11px',border:'1px solid '+T.border,borderRadius:T.radiusXs,background:T.bgElevated,color:T.text,font:'inherit',fontSize:13,resize:'vertical',boxSizing:'border-box'};
+
+  return(<div>
+    <div style={S.h1}>Letterhead</div>
+    <div style={S.sub}>Generate a Banyan Residential letterhead as a fillable PDF — the logo on top, with Date, To, Re, a Body and a signature block you can type into and save. Upload a .txt or .docx and its text flows into the Body; leave a field blank to fill it in later.</div>
+    {err&&<div style={{...S.card,borderColor:T.red+'40'}}><div style={S.err}>{err}</div></div>}
+    {msg&&<div style={{...S.card,borderColor:T.green+'40',padding:14}}><div style={S.success}>{msg}</div></div>}
+
+    <div style={{...S.card,padding:16,marginBottom:18}}>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+        <div style={{minWidth:220}}><label style={S.label}>Date</label>
+          <input style={{...S.inputSm,minWidth:220}} value={date} onChange={e=>setDate(e.target.value)} placeholder='e.g. September 28, 2026'/></div>
+        <div style={{flex:1,minWidth:240}}><label style={S.label}>To (recipient)</label>
+          <input style={{...S.inputSm,width:'100%'}} value={to} onChange={e=>setTo(e.target.value)} placeholder='Name / company'/></div>
+      </div>
+      <div style={{marginTop:14}}><label style={S.label}>Re (subject)</label>
+        <input style={{...S.inputSm,width:'100%'}} value={re} onChange={e=>setRe(e.target.value)} placeholder='Subject line'/></div>
+
+      <div style={{marginTop:14}}>
+        <label style={S.label}>Body</label>
+        <div style={{fontSize:11.5,color:T.textDim,marginBottom:6}}>Type the letter here, or upload a file below to fill it in automatically. Whatever you upload replaces this box.</div>
+        <textarea style={ta} value={body} onChange={e=>setBody(e.target.value)} placeholder='Dear ...'/>
+      </div>
+
+      <div style={{marginTop:12,display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+        <label style={{...S.btnS,cursor:'pointer',display:'inline-block'}}>
+          Choose .txt / .docx
+          <input ref={fileRef} type='file' accept='.txt,.docx,.md,.csv,text/plain' style={{display:'none'}} onChange={onFile}/></label>
+        {fileName&&<span style={{fontSize:12,color:T.textMuted}}>{fileName} <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{if(fileRef.current)fileRef.current.value='';setFileName('');}}>clear</button></span>}
+      </div>
+
+      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginTop:14}}>
+        <div style={{flex:1,minWidth:240}}><label style={S.label}>Signature — name</label>
+          <input style={{...S.inputSm,width:'100%'}} value={signerName} onChange={e=>setSignerName(e.target.value)} placeholder='Full name'/></div>
+        <div style={{flex:1,minWidth:240}}><label style={S.label}>Signature — title</label>
+          <input style={{...S.inputSm,width:'100%'}} value={signerTitle} onChange={e=>setSignerTitle(e.target.value)} placeholder='e.g. Chief Accounting Officer'/></div>
+      </div>
+
+      <div style={{marginTop:16}}>
+        <button style={S.btnP} onClick={generate} disabled={busy}>{busy?'Generating...':'Generate fillable PDF'}</button>
+      </div>
+    </div>
+
+    <div style={{...S.card,padding:16}}>
+      <div style={{fontWeight:600,marginBottom:6}}>Letterhead logo</div>
+      <div style={{fontSize:11.5,color:T.textDim,marginBottom:10}}>Every letterhead is built from this logo. {isAdmin?'You can replace it with an image (PNG/JPG) or a Word file that contains the logo.':'An administrator manages this.'}</div>
+      <div style={{display:'flex',gap:16,alignItems:'center',flexWrap:'wrap'}}>
+        {logoUrl?<img src={logoUrl} alt='Letterhead logo' style={{maxWidth:240,maxHeight:70,border:'1px solid '+T.border,borderRadius:T.radiusXs,padding:6,background:'#fff'}}/>:<span style={{fontSize:12,color:T.textDim}}>No logo installed</span>}
+        <div style={{fontSize:11.5,color:logo&&logo.installed?T.green:T.textDim}}>
+          {logo?(logo.source==='custom'?'Custom logo (uploaded)':'Built-in Banyan logo'):'…'}
+        </div>
+        {isAdmin&&<label style={{...S.btnS,cursor:'pointer',display:'inline-block',opacity:logoBusy?0.6:1}}>
+          {logoBusy?'Saving...':'Replace logo'}
+          <input type='file' accept='.png,.jpg,.jpeg,.docx,image/*' style={{display:'none'}} disabled={logoBusy} onChange={onLogoPick}/></label>}
+        {isAdmin&&logo&&logo.source==='custom'&&<button style={S.btnS} disabled={logoBusy} onClick={resetLogo}>Reset to Banyan default</button>}
+      </div>
+    </div>
+  </div>);
 }
 
 function AssignmentPage({entities,user}){
