@@ -596,7 +596,7 @@ function buildClaData(ctx, m, eid) {
   // during the month get a drill-down tab behind the prior-vs-current comparison.
   const oaActivity = new Map();
   {
-    const oaCodes = (byCat.otherassets || []).map((a) => String(a.code));
+    const oaCodes = (byCat.otherassets || []).concat(byCat.invest || []).map((a) => String(a.code));
     if (oaCodes.length) {
       const ph = oaCodes.map(() => '?').join(',');
       const arows = db.prepare(`SELECT jl.account_code code, je.date date, je.entry_num entry_num, je.doc_number doc_number,
@@ -1341,8 +1341,7 @@ function buildWorkbook(data) {
   }
   if ((byCat.invest || []).length) {
     const cd = catOf('invest'); const ws = newLead(cd);
-    const sc = buildCategorySchedule(wb, cd, byCat.invest, en, m, used, cd.tab);
-    catTie.invest = simpleLeadsheet(ws, cd, en, m, byCat.invest, sc.refs, leadCell);
+    catTie.invest = otherAssetsLeadsheet(wb, ws, cd, en, m, byCat.invest, data.oaActivity, used, leadCell);
   }
   if ((byCat.ap || []).length) {
     const cd = catOf('ap'); const ws = newLead(cd); const refs = new Map();
