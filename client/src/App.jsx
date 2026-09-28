@@ -852,9 +852,11 @@ export default function App(){
   const isSilsbee = !!(_activeEnt && (_activeEnt.code==='CLRSILSB2' || /^clr\s*silsbee\s*property\s*owner$/i.test((_activeEnt.name||'').trim())));
   // Sabine River & Northern Railroad (SRN) also gets the CLA-format monthly closing workpaper.
   const isSRN = !!(_activeEnt && (_activeEnt.code==='SABINERI' || /sabine\s*river/i.test((_activeEnt.name||'').trim())));
-  // CLRFI Midco I gets the CLA workpapers on a QUARTERLY basis (holding company).
+  // CLRFI Midco I and Banyan SFR GP Investors get the CLA workpapers QUARTERLY.
   const isMidcoCla = !!(_activeEnt && (_activeEnt.code==='CLRFIMID' || /clrfi\s*midco/i.test((_activeEnt.name||'').trim())));
-  const canClaClose = isBanyanRes || isClip || isSilsbee || isSRN || isMidcoCla;
+  const isSFRCla = !!(_activeEnt && (_activeEnt.code==='BANYANSF' || /^banyan\s*sfr\s*gp\s*investors$/i.test((_activeEnt.name||'').trim())));
+  const quarterlyCla = isMidcoCla || isSFRCla;
+  const canClaClose = isBanyanRes || isClip || isSilsbee || isSRN || isMidcoCla || isSFRCla;
   // Odyssey Holdings — the holding company that gets a monthly closing workpaper
   // supporting every balance-sheet account. The generator itself is generic.
   const isOdyssey = !!(_activeEnt && /odyssey/i.test(_activeEnt.name||''));
@@ -934,7 +936,7 @@ export default function App(){
       ...(isCLRF?[{id:'wp_cashflow',label:'Cash Flow Worksheet',icon:'💵',section:'workpapers'}]:[]),
       ...(isCLRF?[{id:'wp_other',label:'Other Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
-      ...(canClaClose?[{id:'wp_cla_monthlyclose',label:(isMidcoCla?'Quarterly':'Monthly')+' Closing Workpapers',icon:'📑',section:'workpapers'}]:[]),
+      ...(canClaClose?[{id:'wp_cla_monthlyclose',label:(quarterlyCla?'Quarterly':'Monthly')+' Closing Workpapers',icon:'📑',section:'workpapers'}]:[]),
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
@@ -1041,7 +1043,7 @@ export default function App(){
         {page==='wp_insalloc'&&activeEntity&&isBanyanRes&&<InsuranceAllocationWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_qtrclose'&&activeEntity&&!isCLRF&&<QuarterlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_monthlyclose'&&activeEntity&&!isCLRF&&<MonthlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='wp_cla_monthlyclose'&&activeEntity&&canClaClose&&<ClaMonthlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} quarterly={isMidcoCla} key={activeEntity+'-'+rk}/>}
+        {page==='wp_cla_monthlyclose'&&activeEntity&&canClaClose&&<ClaMonthlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} quarterly={quarterlyCla} noBillcom={isMidcoCla} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&!isCLRF&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
@@ -5694,7 +5696,7 @@ function MonthlyCloseWorkpaper({entityId,entityName,canEdit=true}){
 // High-fidelity replica of CLA's numbered monthly-close leadsheets (Cash,
 // Receivables, Prepaids, Fixed Assets, Other Assets, Intercompany, Payables,
 // Credit Cards, Debt, Equity), GL-derived with blue input cells and FQ anchors.
-function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true,quarterly=false}){
+function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true,quarterly=false,noBillcom=false}){
   const QEND=['03-31','06-30','09-30','12-31'];
   const defaultDate=()=>{const t=today();
     if(quarterly){const y=Number(t.slice(0,4));const c=[];for(const yy of[y,y-1])for(const mm of QEND)c.push(yy+'-'+mm);const past=c.filter(d=>d<=t).sort();return past.length?past[past.length-1]:(y-1)+'-12-31';}
@@ -5734,7 +5736,7 @@ function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true,quarterly=fa
       <div style={{fontSize:12,marginTop:6,fontWeight:600,color:(result.exceptions?T.orange:'#1E7A34')}}>{result.exceptions?((result.exceptions)+' discrepanc'+(result.exceptions>1?'ies':'y')+' between the GL and the supporting schedules \u2014 see the Summary tab'):'\u2713 Every supporting schedule agrees to the general ledger.'}</div>
     </div>}
   </div>
-  {!quarterly&&valid&&<ClrfApDetailCard entityId={entityId} qe={mon} canEdit={canEdit} apAcct="20000" periodLabel="month end"/>}
+  {!noBillcom&&valid&&<ClrfApDetailCard entityId={entityId} qe={mon} canEdit={canEdit} apAcct="20000" periodLabel={quarterly?'quarter end':'month end'}/>}
   </div>);
 }
 
