@@ -405,11 +405,17 @@ function buildApReconData(db, eid, apCode, asOf, bcfg) {
     if (i >= 0) { pool[i].used = true; recon.push({ vendor: b.vendor, invoice: b.invoice, billcom: b.amount, gl: pool[i].amount, diff: r2(pool[i].amount - b.amount), status: 'matched' }); }
     else recon.push({ vendor: b.vendor, invoice: b.invoice, billcom: b.amount, gl: 0, diff: r2(-b.amount), status: 'billcom_only' });
   }
-  for (const o of pool) if (!o.used) recon.push({ vendor: o.vendor, invoice: o.invoice, billcom: 0, gl: o.amount, diff: r2(o.amount), status: 'gl_only' });
-  const rank = { matched: 0, billcom_only: 1, gl_only: 2 };
-  recon.sort((a, b) => (rank[a.status] - rank[b.status]) || ((b.billcom + b.gl) - (a.billcom + a.gl)) || String(a.vendor).localeCompare(String(b.vendor)));
-  const unvendoredNet = r2(glBal - openVendoredTotal);
-  return { apCode: String(apCode), gl: glBal, openVendoredTotal, unvendoredNet, billcomLines, billcomTotal, billcomAsOf, billcomSource, recon, diff: billcom ? r2(glBal - billcomTotal) : null };
+  // gl_only bills (open in the GL, not in the Bill.com report) are NOT listed as
+  // exceptions: Bill.com payments post to the GL as lump reliefs covering many
+  // bills at once, so the 1:1 matcher leaves already-paid bills looking open. The
+  // GL balance (which ties to the balance sheet) proves they are paid, so they are
+  // folded into a single "not itemized" reconciling line rather than flagged.
+  const recon2 = recon.filter((x) => x.status !== 'gl_only');
+  const rank = { matched: 0, billcom_only: 1 };
+  recon2.sort((a, b) => (rank[a.status] - rank[b.status]) || ((b.billcom + b.gl) - (a.billcom + a.gl)) || String(a.vendor).localeCompare(String(b.vendor)));
+  const matchedOpenTotal = r2(recon2.reduce((sm, x) => sm + (x.status === 'matched' ? x.gl : 0), 0));
+  const notItemized = r2(glBal - matchedOpenTotal);
+  return { apCode: String(apCode), gl: glBal, matchedOpenTotal, notItemized, billcomLines, billcomTotal, billcomAsOf, billcomSource, recon: recon2, diff: billcom ? r2(glBal - billcomTotal) : null };
 }
 
 function buildClaData(ctx, m, eid) {
@@ -568,11 +574,11 @@ function buildClaData(ctx, m, eid) {
   }
   if (apRecon) {
     if (apRecon.billcomSource === 'none') {
-      pushDisc({ code: apPrimary.code, name: 'Accounts Payable — Bill.com recon', schedName: 'AP Recon', schedBal: null, glBal: r2(apRecon.openTotal), diff: null, causes: [], note: 'No Bill.com A/P Detail report has been uploaded, so the GL A/P of ' + fmt(apRecon.openTotal) + ' is not yet independently verified against Bill.com. Upload the Bill.com A/P Detail (Open Items) report as of ' + short(m.end) + ' (card below the report), then regenerate.' });
+      pushDisc({ code: apPrimary.code, name: 'Accounts Payable — Bill.com recon', schedName: 'AP Recon', schedBal: null, glBal: r2(apRecon.gl), diff: null, causes: [], note: 'No Bill.com A/P Detail report has been uploaded, so the GL A/P of ' + fmt(apRecon.gl) + ' is not yet independently verified against Bill.com. Upload the Bill.com A/P Detail (Open Items) report as of ' + short(m.end) + ' (card below the report), then regenerate.' });
     } else if (Math.abs(r2(apRecon.gl - (apRecon.billcomTotal || 0))) >= 0.01) {
       const causes = [];
-      for (const x of (apRecon.recon || [])) { if (x.status !== 'matched' && Math.abs(x.gl - x.billcom) >= 0.005) causes.push({ date: '', num: x.invoice || '', memo: x.vendor + (x.status === 'billcom_only' ? ' — in Bill.com, no open GL bill' : ' — open on GL, not in Bill.com'), amount: r2(x.gl - x.billcom), note: 'Bill.com ' + fmt(x.billcom) + ' vs GL ' + fmt(x.gl) }); }
-      if (Math.abs(apRecon.unvendoredNet) >= 0.005) causes.push({ date: '', num: '', memo: 'Un-vendored A/P activity (migrated opening balances / imports, net)', amount: apRecon.unvendoredNet, note: 'Carries no vendor — not itemizable by invoice on the GL' });
+      for (const x of (apRecon.recon || [])) { if (x.status === 'billcom_only' && Math.abs(x.billcom) >= 0.005) causes.push({ date: '', num: x.invoice || '', memo: x.vendor + ' — in Bill.com, no matching open GL bill', amount: r2(x.gl - x.billcom), note: 'Bill.com ' + fmt(x.billcom) + ' vs GL ' + fmt(x.gl) }); }
+      if (Math.abs(apRecon.notItemized) >= 0.005) causes.push({ date: '', num: '', memo: 'GL A/P relieved by lump Bill.com payments / not itemized by invoice (net)', amount: apRecon.notItemized, note: 'Bills paid via lump Bill.com reliefs cannot be matched per invoice' });
       pushDisc({ code: apPrimary.code, name: 'Accounts Payable — Bill.com recon', schedName: 'AP Recon', schedBal: r2(apRecon.billcomTotal), glBal: r2(apRecon.gl), diff: r2((apRecon.billcomTotal || 0) - apRecon.gl), causes, note: 'Open A/P per Bill.com vs the GL, invoice by invoice — see the AP Recon tab.' });
     }
   }
@@ -964,14 +970,14 @@ function buildApReconTabs(wb, recon, en, m, used) {
   totalCell(ap, 'F' + r, last >= first ? 'SUM(F' + first + ':F' + last + ')' : null);
   const totRow = r; r += 2;
   txt(ap, 'B' + r, 'Reconciliation to the general ledger', { font: { bold: true, size: 12 } }); r++;
-  txt(ap, 'B' + r, 'Open invoices per GL (vendored bills, per the Per GL column above)'); num(ap, 'E' + r, { formula: 'E' + totRow }); r++;
-  txt(ap, 'B' + r, 'Un-vendored A/P activity — migrated opening balances / imports (net)'); num(ap, 'E' + r, recon.unvendoredNet); r++;
+  txt(ap, 'B' + r, 'Bill.com open invoices matched to an open bill on the GL (Per GL above)'); num(ap, 'E' + r, { formula: 'E' + totRow }); r++;
+  txt(ap, 'B' + r, 'GL A/P relieved by lump Bill.com payments / not itemized by invoice (net)'); num(ap, 'E' + r, recon.notItemized); r++;
   txt(ap, 'B' + r, 'Accounts payable per general ledger (' + apAcct + ') at ' + short(m.end), { font: { bold: true } }); num(ap, 'E' + r, recon.gl, { font: { bold: true }, border: { top: THIN } }); const rGl = r; r++;
   txt(ap, 'B' + r, 'Open invoices per Bill.com A/P Detail (as of ' + short(recon.billcomAsOf || m.end) + ')'); num(ap, 'E' + r, recon.billcomTotal); const rBc = r; r++;
   txt(ap, 'B' + r, 'Difference (GL − Bill.com)', { font: { bold: true } }); num(ap, 'E' + r, { formula: 'E' + rGl + '-E' + rBc }, { font: { bold: true }, border: { top: THIN } }); r += 2;
   ap.mergeCells('B' + r + ':G' + r);
-  txt(ap, 'B' + r, 'Matched invoices agree Per Bill.com = Per GL. Highlighted rows are exceptions to investigate: invoices in Bill.com with no open GL bill, or bills open on the GL but not in the Bill.com report (paid in Bill.com but not yet relieved in the GL, or non-Bill.com bills). The un-vendored line is the net of the migrated import activity, which carries no vendor and cannot be itemized by invoice; the GL account balance ties to the balance sheet.', { font: { italic: true, color: { argb: 'FF7F7F7F' } }, align: { wrapText: true, vertical: 'top' } });
-  ap.getRow(r).height = 58;
+  txt(ap, 'B' + r, 'Each Bill.com open invoice is matched 1:1 to an open bill on the general ledger, and matches agree Per Bill.com = Per GL. A highlighted row is an invoice in the Bill.com open report with no matching open GL bill — investigate (paid in CloudLedger, or not synced). Bill.com payments post to the GL as lump reliefs covering many bills at once, so paid bills cannot be relieved per invoice; the "not itemized" line is the net of that lump-relieved and migrated activity, and the GL account balance is the control that ties to the balance sheet.', { font: { italic: true, color: { argb: 'FF7F7F7F' } }, align: { wrapText: true, vertical: 'top' } });
+  ap.getRow(r).height = 72;
 
   // Bill.com AP Detail — the uploaded open-invoice report.
   const bc = wb.addWorksheet(reserveName('Bill.com AP Detail', used), { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
