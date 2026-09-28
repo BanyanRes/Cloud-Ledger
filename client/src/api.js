@@ -657,12 +657,12 @@ export const api = {
     return { blob: await res.blob(), filename: m ? m[1] : 'Monthly_Closing_Workpaper.xlsx', summary };
   },
 
-  claMonthlyClose: async (eid, monthEnd) => {
+  claMonthlyClose: async (eid, monthEnd, quarterly) => {
     const token = getToken();
     const res = await fetch(API_BASE + '/workpapers/cla-monthly-close/' + eid + '/generate', {
       method: 'POST',
       headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
-      body: JSON.stringify({ month_end: monthEnd }),
+      body: JSON.stringify({ month_end: monthEnd, quarterly: !!quarterly }),
     });
     if (res.status === 401) { clearToken(); window.location.reload(); return null; }
     const ctype = res.headers.get('content-type') || '';

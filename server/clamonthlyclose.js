@@ -78,6 +78,25 @@ const colL = (n) => { let s = ''; while (n > 0) { const k = (n - 1) % 26; s = St
 const monthEndOf = (y, mo) => new Date(Date.UTC(y, mo, 0)).toISOString().slice(0, 10); // mo = 1..12
 const ym = (d) => String(d || '').slice(0, 7);
 
+// Quarterly period (same shape as resolveMonth, plus quarterly period columns).
+// end = quarter end, beg = prior quarter end, periodEnds/periodLabels = Q1..current.
+function resolveQuarter(dateInput) {
+  const mm = String(dateInput || '').match(/^(\d{4})-(\d{2})(?:-(\d{2}))?$/);
+  if (!mm) throw new Error('period_end must be a date in YYYY-MM-DD form');
+  const y = Number(mm[1]), mo = Number(mm[2]);
+  if (mo < 1 || mo > 12) throw new Error('period_end must be a valid date');
+  const q = Math.ceil(mo / 3);
+  const end = monthEndOf(y, q * 3);
+  const beg = q === 1 ? monthEndOf(y - 1, 12) : monthEndOf(y, (q - 1) * 3);
+  const periodEnds = [], periodLabels = [];
+  for (let k = 1; k <= q; k++) { periodEnds.push(monthEndOf(y, k * 3)); periodLabels.push('Q' + k); }
+  return {
+    end, beg, year: String(y), quarterly: true, unit: 'Quarter', quarter: q,
+    monthNum: q * 3, monthName: 'Q' + q, periodNum: q, periodEnds, periodLabels,
+    label: 'Q' + q + '-' + y, yearStart: y + '-01-01', yearEnd: y + '-12-31',
+  };
+}
+
 function sheetNameFor(code, used) {
   let base = String(code).replace(/[\[\]\:\*\?\/\\]/g, '_').slice(0, 31) || 'acct';
   let name = base, i = 1;
@@ -91,7 +110,7 @@ function reserveName(name, used) { used.add(String(name).toLowerCase()); return 
 function titleBlock(ws, entityName, leadTitle, m, legendCol) {
   ws.getCell('C1').value = entityName; ws.getCell('C1').font = F({ size: 16, bold: true });
   ws.getCell('C2').value = leadTitle; ws.getCell('C2').font = F({ size: 12, bold: true });
-  ws.getCell('C3').value = 'Month Ended:'; ws.getCell('C3').font = F();
+  ws.getCell('C3').value = (m.unit || 'Month') + ' Ended:'; ws.getCell('C3').font = F();
   const d3 = ws.getCell('D3');
   d3.value = asDate(m.end); d3.numFmt = DATEFMT; d3.font = F({ bold: true, color: { argb: RED } });
   d3.fill = ENTRY_FILL; d3.alignment = { horizontal: 'center' }; d3.border = box;
@@ -568,7 +587,9 @@ function buildClaData(ctx, m, eid) {
     const rows = db.prepare(`SELECT jl.account_code code, CAST(strftime('%m', je.date) AS INTEGER) mo, SUM(jl.credit - jl.debit) amt
       FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
       WHERE je.entity_id = ? AND je.date >= ? AND je.date <= ? GROUP BY jl.account_code, mo`).all(eid, m.yearStart, m.end);
-    for (const r of rows) { const c = String(r.code); if (!eqCodes.has(c)) continue; if (!eqMonthly.has(c)) eqMonthly.set(c, new Array(m.monthNum).fill(0)); if (r.mo >= 1 && r.mo <= m.monthNum) eqMonthly.get(c)[r.mo - 1] = r2(r.amt); }
+    const nB = m.quarterly ? m.periodNum : m.monthNum;
+    const bkt = (mo) => (m.quarterly ? Math.ceil(mo / 3) - 1 : mo - 1);
+    for (const r of rows) { const c = String(r.code); if (!eqCodes.has(c)) continue; if (!eqMonthly.has(c)) eqMonthly.set(c, new Array(nB).fill(0)); const b = bkt(r.mo); if (b >= 0 && b < nB) eqMonthly.get(c)[b] = r2((eqMonthly.get(c)[b] || 0) + r.amt); }
   }
 
   // Other Assets: current-month GL activity per account, so accounts that moved
@@ -639,7 +660,7 @@ function buildCashRecTab(wb, a, en, m, used, leadTab) {
   const sheet = sheetNameFor(a.code, used);
   const ws = wb.addWorksheet(sheet, { views: [{ showGridLines: false }] });
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 52; ws.getColumn('C').width = 18; ws.getColumn('D').width = 3; ws.getColumn('E').width = 40;
-  tabHead(ws, a.code + ' - ' + a.name, en, 'Bank reconciliation — month ended ' + spell(m.end), leadTab);
+  tabHead(ws, a.code + ' - ' + a.name, en, 'Bank reconciliation — ' + (m.unit || 'Month').toLowerCase() + ' ended ' + spell(m.end), leadTab);
   txt(ws, 'B5', 'Register balance per GL — ' + short(m.end), { font: { bold: true } });
   num(ws, 'C5', a.end, { font: { bold: true }, border: { bottom: THIN } });
   txt(ws, 'B7', 'Balance per bank statement — ' + short(m.end) + ' (enter)', { font: { color: { argb: BLUE } } }); blueInput(ws, 'C7');
@@ -658,7 +679,7 @@ function buildCcRecTab(wb, a, en, m, used, leadTab) {
   const sheet = sheetNameFor(a.code, used);
   const ws = wb.addWorksheet(sheet, { views: [{ showGridLines: false }] });
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 56; ws.getColumn('C').width = 18; ws.getColumn('D').width = 3; ws.getColumn('E').width = 40;
-  tabHead(ws, a.code + ' - ' + a.name, en, 'Credit card reconciliation — month ended ' + spell(m.end), leadTab);
+  tabHead(ws, a.code + ' - ' + a.name, en, 'Credit card reconciliation — ' + (m.unit || 'Month').toLowerCase() + ' ended ' + spell(m.end), leadTab);
   txt(ws, 'B5', 'Statement end date (enter)', { font: { color: { argb: BLUE } } }); { const c = blueInput(ws, 'C5'); c.numFmt = DATEFMT; }
   txt(ws, 'B6', 'Month end date'); num(ws, 'C6', asDate(m.end), { fmt: DATEFMT });
   txt(ws, 'B8', 'Statement ending balance as of statement date (enter)', { font: { color: { argb: BLUE } } }); blueInput(ws, 'C8');
@@ -1033,14 +1054,14 @@ function buildApReconTabs(wb, recon, en, m, used) {
 function buildEquityRollforward(wb, rows, data, en, m, used, leadTab, niVal) {
   const tab = reserveName('Equity Rollforward', used);
   const ws = wb.addWorksheet(tab, { views: [{ showGridLines: false }] });
-  const n = m.monthNum; const endC = colL(5 + n);
+  const n = m.quarterly ? m.periodNum : m.monthNum; const endC = colL(5 + n);
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 40; ws.getColumn('D').width = 16;
   for (let k = 0; k < n; k++) ws.getColumn(colL(5 + k)).width = 14;
   ws.getColumn(endC).width = 16;
   tabHead(ws, 'Equity Rollforward', en, 'Fiscal ' + m.year + ' through ' + spell(m.end) + ' — by equity account, per general ledger', leadTab);
   const HR = 5;
   const heads = ['Account No.', 'Account Name', 'Prior Year End ' + short(data.pye)];
-  for (let k = 0; k < n; k++) heads.push(MON3[k] + ' ' + m.year);
+  for (let k = 0; k < n; k++) heads.push((m.quarterly ? m.periodLabels[k] : MON3[k]) + ' ' + m.year);
   heads.push('Ending ' + short(m.end));
   hdr(ws, HR, 2, heads);
   let r = HR + 1; const first = r; const refs = new Map();
@@ -1174,7 +1195,7 @@ function buildOaActivityTab(wb, a, acts, en, m, used, leadTab) {
   const sheet = sheetNameFor(a.code, used);
   const ws = wb.addWorksheet(sheet, { views: [{ showGridLines: false }] });
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 10; ws.getColumn('D').width = 46; ws.getColumn('E').width = 24; ws.getColumn('F').width = 16; ws.getColumn('G').width = 16; ws.getColumn('H').width = 17;
-  tabHead(ws, a.code + ' - ' + a.name, en, 'Current-month activity - ' + spell(m.end), leadTab);
+  tabHead(ws, a.code + ' - ' + a.name, en, 'Current-' + (m.unit || 'Month').toLowerCase() + ' activity - ' + spell(m.end), leadTab);
   txt(ws, 'B5', 'Beginning balance - ' + short(m.beg), { font: { bold: true } });
   num(ws, 'H5', a.begin, { font: { bold: true }, border: { bottom: THIN } });
   const HR = 6;
@@ -1203,9 +1224,10 @@ function otherAssetsLeadsheet(wb, ws, cd, en, m, rows, oaActivity, used, leadCel
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 44;
   ws.getColumn('D').width = 18; ws.getColumn('E').width = 18; ws.getColumn('F').width = 16; ws.getColumn('G').width = 12; ws.getColumn('H').width = 34;
   titleBlock(ws, en, cd.lead, m, 'H');
-  txt(ws, 'C5', 'Prior month (' + short(m.beg) + ') vs current month (' + short(m.end) + '); accounts that moved link to their current-month activity.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
+  const U = (m.unit || 'Month').toLowerCase();
+  txt(ws, 'C5', 'Prior ' + U + ' (' + short(m.beg) + ') vs current ' + U + ' (' + short(m.end) + '); accounts that moved link to their current-' + U + ' activity.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Prior Month ' + short(m.beg), 'Current Month ' + short(m.end), 'Change', 'Activity', 'Comments']);
+  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Prior ' + (m.unit || 'Month') + ' ' + short(m.beg), 'Current ' + (m.unit || 'Month') + ' ' + short(m.end), 'Change', 'Activity', 'Comments']);
   let r = HR + 1; const first = r;
   for (const a of rows) {
     txt(ws, 'B' + r, a.code, { align: { horizontal: 'left' } }); txt(ws, 'C' + r, a.name);
@@ -1229,7 +1251,7 @@ function buildSummary(su, en, m, data) {
   su.getColumn('A').width = 3.4; su.getColumn('B').width = 13; su.getColumn('C').width = 11; su.getColumn('D').width = 10; su.getColumn('E').width = 46; su.getColumn('F').width = 15; su.getColumn('G').width = 16; su.getColumn('H').width = 48;
   su.getCell('C1').value = en; su.getCell('C1').font = F({ size: 16, bold: true });
   su.getCell('C2').value = 'MONTHLY CLOSING WORKPAPERS — SUMMARY'; su.getCell('C2').font = F({ size: 12, bold: true });
-  su.getCell('C3').value = 'Month ended ' + spell(m.end); su.getCell('C3').font = F({ italic: true });
+  su.getCell('C3').value = (m.unit || 'Month') + ' ended ' + spell(m.end); su.getCell('C3').font = F({ italic: true });
   const discs = data.discrepancies || [];
   let sr = 5;
   if (!discs.length) {
@@ -1354,8 +1376,8 @@ function buildWorkbook(data) {
 }
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
-const folderFor = (m) => 'Workpapers/Monthly Closing Workpapers/' + m.year;
-const fileNameFor = (m, dispId) => (dispId ? String(dispId).replace(/[^A-Za-z0-9._-]/g, '') + '_' : '') + 'Monthly_Closing_Workpapers_' + m.label + '.xlsx';
+const folderFor = (m) => 'Workpapers/' + (m.quarterly ? 'Quarterly' : 'Monthly') + ' Closing Workpapers/' + m.year;
+const fileNameFor = (m, dispId) => (dispId ? String(dispId).replace(/[^A-Za-z0-9._-]/g, '') + '_' : '') + (m.quarterly ? 'Quarterly' : 'Monthly') + '_Closing_Workpapers_' + m.label + '.xlsx';
 
 // Post-process the ExcelJS buffer to suppress Excel's cell error indicators (the
 // green triangles on account/JE/invoice numbers stored as text) across every tab.
@@ -1407,7 +1429,7 @@ function registerClaMonthlyCloseRoutes(app, ctx) {
     requireRole('Admin', 'Accountant'), async (req, res) => {
       try {
         const eid = Number(req.params.entity_id);
-        const m = resolveMonth((req.body && req.body.month_end) || '');
+        const m = (req.body && req.body.quarterly) ? resolveQuarter((req.body && req.body.month_end) || '') : resolveMonth((req.body && req.body.month_end) || '');
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         const data = buildClaData(ctx, m, eid);
         const wb = buildWorkbook(data);
