@@ -9486,14 +9486,6 @@ function UnmappedRow({u,canEdit,onAdd}){
 
 function LetterheadPage({user}){
   const isAdmin=user&&user.role==='Admin';
-  const MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
-  const longToday=(()=>{const d=new Date();return MONTHS[d.getMonth()]+' '+d.getDate()+', '+d.getFullYear();})();
-  const[date,setDate]=useState(longToday);
-  const[to,setTo]=useState('');
-  const[re,setRe]=useState('');
-  const[body,setBody]=useState('');
-  const[signerName,setSignerName]=useState(user&&user.name?user.name:'');
-  const[signerTitle,setSignerTitle]=useState('');
   const[fileName,setFileName]=useState('');
   const fileRef=useRef(null);
   const[busy,setBusy]=useState(false);
@@ -9509,16 +9501,17 @@ function LetterheadPage({user}){
   },[]);
   useEffect(()=>{loadLogo();},[loadLogo]);
 
-  const onFile=e=>{const f=e.target.files&&e.target.files[0];setFileName(f?f.name:'');};
+  const onFile=e=>{const f=e.target.files&&e.target.files[0];setFileName(f?f.name:'');setErr('');setMsg('');};
 
-  const generate=async()=>{
+  const addLetterhead=async()=>{
+    const f=fileRef.current&&fileRef.current.files&&fileRef.current.files[0];
+    if(!f){setErr('Choose a Word (.docx) file first.');return;}
     setErr('');setMsg('');setBusy(true);
     try{
-      const f=fileRef.current&&fileRef.current.files&&fileRef.current.files[0];
-      const out=await api.generateLetterhead({file:f||undefined,date,to,re,body,signerName,signerTitle});
+      const out=await api.applyLetterhead(f);
       if(!out)return;
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
-      setMsg('Generated '+out.filename+' — open it in any PDF viewer to fill in or edit the fields.');
+      setMsg('Done — downloaded '+out.filename+'. Same document, with the Banyan logo added to the top of every page.');
     }catch(e){setErr(e.message);}finally{setBusy(false);}
   };
 
@@ -9535,46 +9528,23 @@ function LetterheadPage({user}){
     catch(e){setErr(e.message);}finally{setLogoBusy(false);}
   };
 
-  const ta={width:'100%',minHeight:150,padding:'9px 11px',border:'1px solid '+T.border,borderRadius:T.radiusXs,background:T.bgElevated,color:T.text,font:'inherit',fontSize:13,resize:'vertical',boxSizing:'border-box'};
-
   return(<div>
     <div style={S.h1}>Letterhead</div>
-    <div style={S.sub}>Generate a Banyan Residential letterhead as a fillable PDF — the logo on top, with Date, To, Re, a Body and a signature block you can type into and save. Upload a .txt or .docx and its text flows into the Body; leave a field blank to fill it in later.</div>
+    <div style={S.sub}>Upload a Word (.docx) file and get it back with the Banyan Residential logo added to the top of every page. Your document's content and formatting stay exactly as they are — only the letterhead is added.</div>
     {err&&<div style={{...S.card,borderColor:T.red+'40'}}><div style={S.err}>{err}</div></div>}
     {msg&&<div style={{...S.card,borderColor:T.green+'40',padding:14}}><div style={S.success}>{msg}</div></div>}
 
     <div style={{...S.card,padding:16,marginBottom:18}}>
-      <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
-        <div style={{minWidth:220}}><label style={S.label}>Date</label>
-          <input style={{...S.inputSm,minWidth:220}} value={date} onChange={e=>setDate(e.target.value)} placeholder='e.g. September 28, 2026'/></div>
-        <div style={{flex:1,minWidth:240}}><label style={S.label}>To (recipient)</label>
-          <input style={{...S.inputSm,width:'100%'}} value={to} onChange={e=>setTo(e.target.value)} placeholder='Name / company'/></div>
-      </div>
-      <div style={{marginTop:14}}><label style={S.label}>Re (subject)</label>
-        <input style={{...S.inputSm,width:'100%'}} value={re} onChange={e=>setRe(e.target.value)} placeholder='Subject line'/></div>
-
-      <div style={{marginTop:14}}>
-        <label style={S.label}>Body</label>
-        <div style={{fontSize:11.5,color:T.textDim,marginBottom:6}}>Type the letter here, or upload a file below to fill it in automatically. Whatever you upload replaces this box.</div>
-        <textarea style={ta} value={body} onChange={e=>setBody(e.target.value)} placeholder='Dear ...'/>
-      </div>
-
-      <div style={{marginTop:12,display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+      <div style={{fontWeight:600,marginBottom:6}}>Add letterhead to a Word file</div>
+      <div style={{fontSize:11.5,color:T.textDim,marginBottom:12}}>Choose a .docx file. The Banyan logo is placed in the page header so it appears at the top of every page. You get a new .docx back — your original file is not changed.</div>
+      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
         <label style={{...S.btnS,cursor:'pointer',display:'inline-block'}}>
-          Choose .txt / .docx
-          <input ref={fileRef} type='file' accept='.txt,.docx,.md,.csv,text/plain' style={{display:'none'}} onChange={onFile}/></label>
+          Choose .docx
+          <input ref={fileRef} type='file' accept='.docx' style={{display:'none'}} onChange={onFile}/></label>
         {fileName&&<span style={{fontSize:12,color:T.textMuted}}>{fileName} <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{if(fileRef.current)fileRef.current.value='';setFileName('');}}>clear</button></span>}
       </div>
-
-      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginTop:14}}>
-        <div style={{flex:1,minWidth:240}}><label style={S.label}>Signature — name</label>
-          <input style={{...S.inputSm,width:'100%'}} value={signerName} onChange={e=>setSignerName(e.target.value)} placeholder='Full name'/></div>
-        <div style={{flex:1,minWidth:240}}><label style={S.label}>Signature — title</label>
-          <input style={{...S.inputSm,width:'100%'}} value={signerTitle} onChange={e=>setSignerTitle(e.target.value)} placeholder='e.g. Chief Accounting Officer'/></div>
-      </div>
-
       <div style={{marginTop:16}}>
-        <button style={S.btnP} onClick={generate} disabled={busy}>{busy?'Generating...':'Generate fillable PDF'}</button>
+        <button style={S.btnP} onClick={addLetterhead} disabled={busy||!fileName}>{busy?'Adding letterhead...':'Add letterhead & download'}</button>
       </div>
     </div>
 

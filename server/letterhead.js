@@ -89,6 +89,113 @@ function safeName(s) {
   return String(s || '').replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+async function imageDims(buf, ext) {
+  const d = await PDFDocument.create();
+  const img = ext === 'png' ? await d.embedPng(buf) : await d.embedJpg(buf);
+  return { w: img.width, h: img.height };
+}
+
+// ── Word (.docx) letterhead stamper ──────────────────────────────────────────
+// Insert the Banyan logo into the uploaded .docx's page header so it appears at
+// the top of every page, leaving the document's own content and formatting
+// untouched. Returns the modified .docx as a Buffer.
+const OOXML = {
+  w: 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+  r: 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
+  wp: 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
+  a: 'http://schemas.openxmlformats.org/drawingml/2006/main',
+  pic: 'http://schemas.openxmlformats.org/drawingml/2006/picture',
+};
+
+async function applyLetterheadToDocx(docxBuf, logoBuf, logoExt) {
+  const ext = logoExt === 'png' ? 'png' : 'jpg';
+  let zip;
+  try { zip = await JSZip.loadAsync(docxBuf); }
+  catch { throw new Error('That file is not a readable .docx.'); }
+  const docFile = zip.file('word/document.xml');
+  if (!docFile) throw new Error('That .docx has no document body (word/document.xml missing).');
+  let docXml = await docFile.async('string');
+  if (!/<w:sectPr[\s>]/.test(docXml))
+    throw new Error('That document has no section layout, so a header cannot be added. Open it in Word and re-save it, then try again.');
+
+  // Logo image part (unique name so we never clobber the doc's own media).
+  let mediaPath = 'word/media/lhbanyanlogo.' + ext, k = 1;
+  while (zip.file(mediaPath)) mediaPath = 'word/media/lhbanyanlogo' + (k++) + '.' + ext;
+  const mediaBase = mediaPath.split('/').pop();
+  zip.file(mediaPath, logoBuf);
+
+  // Logo sized to 2" wide, aspect preserved (EMU: 914400 per inch).
+  const cx = 1828800;
+  let cy = 557040;
+  try { const d = await imageDims(logoBuf, ext); cy = Math.round(cx * (d.h / d.w)); } catch {}
+
+  // Header part with a centered inline picture.
+  let headerPath = 'word/lhbanyan_header.xml', j = 1;
+  while (zip.file(headerPath)) headerPath = 'word/lhbanyan_header' + (j++) + '.xml';
+  const headerBase = headerPath.split('/').pop();
+  const headerXml =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<w:hdr xmlns:w="' + OOXML.w + '" xmlns:r="' + OOXML.r + '" xmlns:wp="' + OOXML.wp +
+    '" xmlns:a="' + OOXML.a + '" xmlns:pic="' + OOXML.pic + '">' +
+    '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:drawing>' +
+    '<wp:inline distT="0" distB="0" distL="0" distR="0">' +
+    '<wp:extent cx="' + cx + '" cy="' + cy + '"/>' +
+    '<wp:effectExtent l="0" t="0" r="0" b="0"/>' +
+    '<wp:docPr id="1001" name="Banyan Letterhead"/>' +
+    '<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>' +
+    '<a:graphic><a:graphicData uri="' + OOXML.pic + '">' +
+    '<pic:pic><pic:nvPicPr><pic:cNvPr id="1001" name="banyan-logo"/><pic:cNvPicPr/></pic:nvPicPr>' +
+    '<pic:blipFill><a:blip r:embed="rId1"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>' +
+    '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="' + cx + '" cy="' + cy + '"/></a:xfrm>' +
+    '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic>' +
+    '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:hdr>';
+  zip.file(headerPath, headerXml);
+  zip.file('word/_rels/' + headerBase + '.rels',
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="' + OOXML.r + '/image" Target="media/' + mediaBase + '"/></Relationships>');
+
+  // Register the header part in the document's relationships.
+  const relsPath = 'word/_rels/document.xml.rels';
+  const relsFile = zip.file(relsPath);
+  if (!relsFile) throw new Error('That .docx is missing its relationships part.');
+  let rels = await relsFile.async('string');
+  const ids = [...rels.matchAll(/Id="rId(\d+)"/g)].map(m => parseInt(m[1], 10));
+  const relId = 'rId' + ((ids.length ? Math.max(...ids) : 0) + 1);
+  rels = rels.replace('</Relationships>',
+    '<Relationship Id="' + relId + '" Type="' + OOXML.r + '/header" Target="' + headerBase + '"/></Relationships>');
+  zip.file(relsPath, rels);
+
+  // Content types: image default + header override.
+  const ctPath = '[Content_Types].xml';
+  let ct = await zip.file(ctPath).async('string');
+  if (!new RegExp('Extension="' + ext + '"', 'i').test(ct))
+    ct = ct.replace('</Types>', '<Default Extension="' + ext + '" ContentType="image/' + (ext === 'jpg' ? 'jpeg' : 'png') + '"/></Types>');
+  if (!ct.includes('/word/' + headerBase))
+    ct = ct.replace('</Types>', '<Override PartName="/word/' + headerBase +
+      '" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/></Types>');
+  zip.file(ctPath, ct);
+
+  // Point every section at our header, on every page: drop any existing header
+  // references and the title-page flag so the one default header applies
+  // throughout.
+  docXml = docXml.replace(/<w:headerReference[^>]*\/>/g, '');
+  docXml = docXml.replace(/<w:titlePg[^>]*\/>/g, '');
+  docXml = docXml.replace(/(<w:sectPr[^>]*>)/g,
+    '$1<w:headerReference w:type="default" r:id="' + relId + '"/>');
+  zip.file('word/document.xml', docXml);
+
+  // Even/odd header setting would hide the logo on even pages — remove it.
+  const setFile = zip.file('word/settings.xml');
+  if (setFile) {
+    let s = await setFile.async('string');
+    s = s.replace(/<w:evenAndOddHeaders[^>]*\/>/g, '');
+    zip.file('word/settings.xml', s);
+  }
+
+  return zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+}
+
 // ── PDF builder ─────────────────────────────────────────────────────────────
 
 // Build the fillable letterhead PDF. `fields` pre-fills any of date/to/re/body/
@@ -275,6 +382,34 @@ function registerLetterheadRoutes(app, ctx) {
         res.status(500).json({ error: e.message || 'Generation failed' });
       }
     });
+
+  // Add the Banyan letterhead to an uploaded Word (.docx): the logo goes into
+  // the page header (top of every page); the document's own content is untouched.
+  // Returns the modified .docx.
+  app.post('/api/letterhead/apply', auth, requireRole('Admin', 'Accountant'),
+    memUpload.single('file'), async (req, res) => {
+      try {
+        if (!req.file || !req.file.buffer || !req.file.buffer.length)
+          return res.status(400).json({ error: 'Upload a Word (.docx) file.' });
+        const nm = (req.file.originalname || '').toLowerCase();
+        if (!nm.endsWith('.docx')) {
+          if (nm.endsWith('.doc'))
+            return res.status(422).json({ error: 'Old .doc files are not supported — open it in Word and Save As .docx first.' });
+          return res.status(422).json({ error: 'Please upload a Word .docx file.' });
+        }
+        const logo = resolveLogo(templatesDir);
+        if (!fs.existsSync(logo.path))
+          return res.status(409).json({ error: 'No letterhead logo is installed.' });
+        const ext = /\.png$/i.test(logo.path) ? 'png' : 'jpg';
+        const out = await applyLetterheadToDocx(req.file.buffer, fs.readFileSync(logo.path), ext);
+        const base = safeName((req.file.originalname || 'document.docx').replace(/\.docx$/i, '')) || 'Document';
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+        res.setHeader('Content-Disposition', 'attachment; filename="' + base + ' - Letterhead.docx"');
+        return res.send(out);
+      } catch (e) {
+        res.status(500).json({ error: e.message || 'Failed to add letterhead' });
+      }
+    });
 }
 
-module.exports = { buildLetterheadPdf, docxToText, registerLetterheadRoutes };
+module.exports = { buildLetterheadPdf, docxToText, applyLetterheadToDocx, registerLetterheadRoutes };

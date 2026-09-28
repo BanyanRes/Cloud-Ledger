@@ -1105,6 +1105,23 @@ export const api = {
     return data;
   },
   resetLetterheadLogo: () => request('/letterhead/logo', { method: 'DELETE' }),
+  applyLetterhead: async (file) => {
+    const token = getToken();
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(API_BASE + '/letterhead/apply', {
+      method: 'POST',
+      headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: fd,
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) { let data = {}; try { data = await res.json(); } catch {} throw new Error(data.error || 'Failed to add letterhead'); }
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const filename = m ? m[1] : 'Letterhead.docx';
+    return { blob: await res.blob(), filename };
+  },
   generateLetterhead: async ({ file, ...fields }) => {
     const token = getToken();
     const fd = new FormData();
