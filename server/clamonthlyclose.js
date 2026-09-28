@@ -866,10 +866,17 @@ function buildFixedSchedule(wb, data, en, m, used, leadTab) {
   const n = m.monthNum; const ends = fyMonthEnds(m); const pye = (Number(m.year) - 1) + '-12-31';
   const MC0 = 9; // first month column (I)
   const accumC = colL(MC0 + n), nbvC = colL(MC0 + n + 1), lastMC = colL(MC0 + n - 1);
-  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 46; ws.getColumn('C').width = 11; ws.getColumn('D').width = 13; ws.getColumn('E').width = 13;
-  ws.getColumn('F').width = 18; ws.getColumn('G').width = 15; ws.getColumn('H').width = 16;
-  for (let k = 0; k < n; k++) ws.getColumn(colL(MC0 + k)).width = 15;
-  ws.getColumn(colL(MC0 + n)).width = 18; ws.getColumn(colL(MC0 + n + 1)).width = 18;
+  const nlen = (v) => Math.abs(Number(v) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).length;
+  const fa = data.reg.fixedAssets || [], fs = data.faSched || [];
+  const maxCost = Math.max(10, ...fa.map((x) => nlen(x.cost)), ...fs.map((x) => nlen(x.accumEnd)));
+  const maxMon = Math.max(8, ...fs.map((x) => nlen(x.monthly)));
+  const maxBeg = Math.max(10, ...fa.map((x) => nlen(x.accum_dep_beg)));
+  const maxDesc = Math.max(20, ...fa.map((x) => String(x.description || '').length));
+  const wCost = Math.min(26, maxCost + 4), wMon = Math.min(22, maxMon + 4), wBeg = Math.min(26, maxBeg + 4);
+  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = Math.min(58, Math.max(30, maxDesc + 2)); ws.getColumn('C').width = 11; ws.getColumn('D').width = 13; ws.getColumn('E').width = 13;
+  ws.getColumn('F').width = wCost; ws.getColumn('G').width = wMon; ws.getColumn('H').width = wBeg;
+  for (let k = 0; k < n; k++) ws.getColumn(colL(MC0 + k)).width = wMon;
+  ws.getColumn(colL(MC0 + n)).width = wCost; ws.getColumn(colL(MC0 + n + 1)).width = wCost;
   tabHead(ws, 'Fixed Asset Depreciation Schedule', en, 'Fiscal ' + m.year + ' through ' + spell(m.end) + ' — straight-line, monthly, from the in-service month', leadTab);
   txt(ws, 'H7', 'Accumulated', { font: { bold: true }, align: { horizontal: 'center' } });
   txt(ws, colL(MC0) + '7', 'Depreciation / Amortization Expense', { font: { bold: true } });
@@ -1125,8 +1132,11 @@ function ccLeadsheet(ws, cd, en, m, rows, refByCode, leadCell) {
   return ref(cd.tab, 'G' + r); // period-end (GL) total ties to the balance sheet
 }
 function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell) {
-  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 30; ws.getColumn('D').width = 15;
-  ws.getColumn('E').width = 12; ws.getColumn('F').width = 30; ws.getColumn('G').width = 15; ws.getColumn('H').width = 15; ws.getColumn('I').width = 26;
+  const nlen = (v) => Math.abs(Number(v) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).length;
+  let mxn = 0; for (const p of pairs) { if (p.asset) mxn = Math.max(mxn, nlen(p.asset.end)); if (p.dep) mxn = Math.max(mxn, nlen(p.dep.end)); }
+  const wNum = Math.min(28, Math.max(15, mxn + 4));
+  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 32; ws.getColumn('D').width = wNum;
+  ws.getColumn('E').width = 15; ws.getColumn('F').width = 44; ws.getColumn('G').width = wNum; ws.getColumn('H').width = wNum; ws.getColumn('I').width = 26;
   titleBlock(ws, en, cd.lead, m, 'J');
   txt(ws, 'G3', 'Capitalization Policy:'); txt(ws, 'H3', '>$1,000 for single item');
   const sB = ws.getCell('B7'); sB.value = 'Fixed Asset Account Breakdown'; sB.font = F({ bold: true }); sB.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
