@@ -4970,7 +4970,13 @@ async function buildTtmPL(getBalances, opts) {
     const vals = maps.map(m => { const r = m.get(code); return r ? r2(bal(r)) : 0; });
     const total = r2(vals.reduce((s, v) => s + v, 0));
     if (vals.every(isZero) && isZero(total)) return null;
-    return { code, name: ref.name, type: ref.type, subtype: ref.subtype, vals, total };
+    // Carry the Chart-of-Accounts placement (fs_section / fs_subsection) onto the
+    // line so the T-12 honors user pins exactly like the face statements do:
+    // otherIeRoute() moves pinned lines to Other Income (Expense) / Income Taxes,
+    // and plExpenseCategory() respects pinned operating subsections. Without this,
+    // the T-12 fell back to name heuristics and left moved GLs in their old section.
+    return { code, name: ref.name, type: ref.type, subtype: ref.subtype,
+             fs_section: ref.fs_section, fs_subsection: ref.fs_subsection, vals, total };
   }
   const allLines = allCodes.map(lineFor).filter(Boolean);
 
