@@ -969,14 +969,17 @@ function buildApReconTabs(wb, recon, en, m, used) {
   totalCell(ap, 'E' + r, last >= first ? 'SUM(E' + first + ':E' + last + ')' : null);
   totalCell(ap, 'F' + r, last >= first ? 'SUM(F' + first + ':F' + last + ')' : null);
   const totRow = r; r += 2;
-  txt(ap, 'B' + r, 'Reconciliation to the general ledger', { font: { bold: true, size: 12 } }); r++;
-  txt(ap, 'B' + r, 'Bill.com open invoices matched to an open bill on the GL (Per GL above)'); num(ap, 'E' + r, { formula: 'E' + totRow }); r++;
-  txt(ap, 'B' + r, 'GL A/P relieved by lump Bill.com payments / not itemized by invoice (net)'); num(ap, 'E' + r, recon.notItemized); r++;
-  txt(ap, 'B' + r, 'Accounts payable per general ledger (' + apAcct + ') at ' + short(m.end), { font: { bold: true } }); num(ap, 'E' + r, recon.gl, { font: { bold: true }, border: { top: THIN } }); const rGl = r; r++;
-  txt(ap, 'B' + r, 'Open invoices per Bill.com A/P Detail (as of ' + short(recon.billcomAsOf || m.end) + ')'); num(ap, 'E' + r, recon.billcomTotal); const rBc = r; r++;
-  txt(ap, 'B' + r, 'Difference (GL − Bill.com)', { font: { bold: true } }); num(ap, 'E' + r, { formula: 'E' + rGl + '-E' + rBc }, { font: { bold: true }, border: { top: THIN } }); r += 2;
+  // Explicit bridge: Bill.com open total -> (remove the one un-matched Bill.com
+  // invoice) -> matched open bills -> (add the other GL 20000 A/P not in Bill.com)
+  // -> GL account balance. Both reconciling items are shown as their own line.
+  txt(ap, 'B' + r, 'Reconciliation: Bill.com to the general ledger', { font: { bold: true, size: 12 } }); r++;
+  txt(ap, 'B' + r, 'Open A/P per Bill.com A/P Detail (as of ' + short(recon.billcomAsOf || m.end) + ')'); num(ap, 'E' + r, recon.billcomTotal); r++;
+  txt(ap, 'B' + r, 'Less: Bill.com invoices with no matching open GL bill (highlighted above)'); num(ap, 'E' + r, r2(recon.matchedOpenTotal - recon.billcomTotal)); r++;
+  txt(ap, 'B' + r, 'Bill.com invoices matched to an open GL bill'); num(ap, 'E' + r, { formula: 'E' + totRow }, { border: { top: THIN } }); r++;
+  txt(ap, 'B' + r, 'Add: other A/P on the GL (' + apAcct + ') not in the Bill.com open report (net) — investigate'); num(ap, 'E' + r, recon.notItemized); r++;
+  txt(ap, 'B' + r, 'Accounts payable per general ledger (' + apAcct + ') at ' + short(m.end), { font: { bold: true } }); num(ap, 'E' + r, recon.gl, { font: { bold: true }, border: { top: THIN, bottom: DBL } }); r += 2;
   ap.mergeCells('B' + r + ':G' + r);
-  txt(ap, 'B' + r, 'Each Bill.com open invoice is matched 1:1 to an open bill on the general ledger, and matches agree Per Bill.com = Per GL. A highlighted row is an invoice in the Bill.com open report with no matching open GL bill — investigate (paid in CloudLedger, or not synced). Bill.com payments post to the GL as lump reliefs covering many bills at once, so paid bills cannot be relieved per invoice; the "not itemized" line is the net of that lump-relieved and migrated activity, and the GL account balance is the control that ties to the balance sheet.', { font: { italic: true, color: { argb: 'FF7F7F7F' } }, align: { wrapText: true, vertical: 'top' } });
+  txt(ap, 'B' + r, 'Each Bill.com open invoice is matched 1:1 to an open bill on the general ledger; matches agree Per Bill.com = Per GL, so the one highlighted invoice is the only per-invoice difference. Separately, the GL account balance carries other A/P activity not in the Bill.com open report — a net of migrated "GL detail import" postings and bills paid via lump Bill.com reliefs — which cannot be itemized per invoice because account ' + apAcct + ' holds thousands of same-amount bills and payments. That net residual is the second reconciling item to investigate. The GL account balance ties to the balance sheet.', { font: { italic: true, color: { argb: 'FF7F7F7F' } }, align: { wrapText: true, vertical: 'top' } });
   ap.getRow(r).height = 72;
 
   // Bill.com AP Detail — the uploaded open-invoice report.
