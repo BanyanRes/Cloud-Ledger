@@ -569,8 +569,24 @@ function buildClaData(ctx, m, eid) {
     for (const r of rows) { const c = String(r.code); if (!eqCodes.has(c)) continue; if (!eqMonthly.has(c)) eqMonthly.set(c, new Array(m.monthNum).fill(0)); if (r.mo >= 1 && r.mo <= m.monthNum) eqMonthly.get(c)[r.mo - 1] = r2(r.amt); }
   }
 
-  // Other Assets by project (GL location dimension), as of month end.
-  const oaByProject = oaBalancesByProject(db, eid, m.end, (byCat.otherassets || []).map((a) => String(a.code)));
+  // Other Assets: current-month GL activity per account, so accounts that moved
+  // during the month get a drill-down tab behind the prior-vs-current comparison.
+  const oaActivity = new Map();
+  {
+    const oaCodes = (byCat.otherassets || []).map((a) => String(a.code));
+    if (oaCodes.length) {
+      const ph = oaCodes.map(() => '?').join(',');
+      const arows = db.prepare(`SELECT jl.account_code code, je.date date, je.entry_num entry_num, je.doc_number doc_number,
+          je.vendor vendor, je.memo memo, jl.description description, jl.debit debit, jl.credit credit
+        FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
+        WHERE je.entity_id = ? AND je.date > ? AND je.date <= ? AND jl.account_code IN (${ph})
+        ORDER BY jl.account_code, je.date, je.entry_num, jl.id`).all(eid, m.beg, m.end, ...oaCodes);
+      for (const rr of arows) {
+        const c = String(rr.code); if (!oaActivity.has(c)) oaActivity.set(c, []);
+        oaActivity.get(c).push({ date: rr.date, num: (rr.entry_num != null ? String(rr.entry_num) : '') || String(rr.doc_number || ''), vendor: rr.vendor || '', memo: rr.memo || rr.description || '', debit: r2(rr.debit || 0), credit: r2(rr.credit || 0) });
+      }
+    }
+  }
 
   // AP Recon: Bill.com A/P Detail vs GL open invoices (inception-to-date offsets).
   let apRecon = null;
@@ -611,7 +627,7 @@ function buildClaData(ctx, m, eid) {
       : (': ' + (d.note || 'review'))),
   }));
 
-  return Object.assign({}, base, { flags, discrepancies, byCat, arCur, arPrior, arPrimary, apCur, apPrior, apPrimary, apRecon, reg, prepaidByAcct, prepaidSched, faSched, fixedPairs, pye, pyeBal, eqMonthly, oaByProject });
+  return Object.assign({}, base, { flags, discrepancies, byCat, arCur, arPrior, arPrimary, apCur, apPrior, apPrimary, apRecon, reg, prepaidByAcct, prepaidSched, faSched, fixedPairs, pye, pyeBal, eqMonthly, oaActivity });
 }
 
 // ─── Supporting tabs ──────────────────────────────────────────────────────────
@@ -848,9 +864,10 @@ function buildFixedSchedule(wb, data, en, m, used, leadTab) {
   const n = m.monthNum; const ends = fyMonthEnds(m); const pye = (Number(m.year) - 1) + '-12-31';
   const MC0 = 9; // first month column (I)
   const accumC = colL(MC0 + n), nbvC = colL(MC0 + n + 1), lastMC = colL(MC0 + n - 1);
-  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 46; ws.getColumn('C').width = 14; ws.getColumn('D').width = 14; ws.getColumn('E').width = 14;
-  ws.getColumn('F').width = 13; ws.getColumn('G').width = 11; ws.getColumn('H').width = 13;
-  for (let k = 0; k < n + 2; k++) ws.getColumn(colL(MC0 + k)).width = 12;
+  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 46; ws.getColumn('C').width = 11; ws.getColumn('D').width = 13; ws.getColumn('E').width = 13;
+  ws.getColumn('F').width = 18; ws.getColumn('G').width = 15; ws.getColumn('H').width = 16;
+  for (let k = 0; k < n; k++) ws.getColumn(colL(MC0 + k)).width = 15;
+  ws.getColumn(colL(MC0 + n)).width = 18; ws.getColumn(colL(MC0 + n + 1)).width = 18;
   tabHead(ws, 'Fixed Asset Depreciation Schedule', en, 'Fiscal ' + m.year + ' through ' + spell(m.end) + ' — straight-line, monthly, from the in-service month', leadTab);
   txt(ws, 'H7', 'Accumulated', { font: { bold: true }, align: { horizontal: 'center' } });
   txt(ws, colL(MC0) + '7', 'Depreciation / Amortization Expense', { font: { bold: true } });
@@ -1141,47 +1158,56 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell) {
 // Apache) so the balances are summarized by project and each row's Total ties to
 // the GL. A "(No project)" column is shown only when some line is genuinely
 // untagged. Project columns and the grand total foot with SUM formulas.
-function otherAssetsLeadsheet(ws, cd, en, m, rows, oaByProject, leadCell) {
-  const projects = (oaByProject && oaByProject.projects) || [];
-  const byAcct = (oaByProject && oaByProject.byAcct) || new Map();
-  const hasNoProj = !!(oaByProject && oaByProject.hasNoProject);
-  const cols = projects.concat(hasNoProj ? ['(No project)'] : []); // untagged column only when needed
-  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 40;
-  const firstProjCol = 4; // column D
-  for (let i = 0; i < cols.length; i++) ws.getColumn(colL(firstProjCol + i)).width = 15;
-  const totalCol = colL(firstProjCol + cols.length);
-  const commentCol = colL(firstProjCol + cols.length + 1);
-  ws.getColumn(totalCol).width = 16; ws.getColumn(commentCol).width = 30;
-  titleBlock(ws, en, cd.lead, m, commentCol);
-  txt(ws, 'C5', 'Balances by project as of ' + short(m.end) + ' (Dr positive / Cr in parentheses)', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
+function buildOaActivityTab(wb, a, acts, en, m, used, leadTab) {
+  const sheet = sheetNameFor(a.code, used);
+  const ws = wb.addWorksheet(sheet, { views: [{ showGridLines: false }] });
+  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 10; ws.getColumn('D').width = 46; ws.getColumn('E').width = 24; ws.getColumn('F').width = 16; ws.getColumn('G').width = 16; ws.getColumn('H').width = 17;
+  tabHead(ws, a.code + ' - ' + a.name, en, 'Current-month activity - ' + spell(m.end), leadTab);
+  txt(ws, 'B5', 'Beginning balance - ' + short(m.beg), { font: { bold: true } });
+  num(ws, 'H5', a.begin, { font: { bold: true }, border: { bottom: THIN } });
+  const HR = 6;
+  hdr(ws, HR, 2, ['Date', 'JE #', 'Memo', 'Vendor', 'Debit', 'Credit', 'Balance']);
+  let r = HR + 1; const first = r; let bal = r2(a.begin);
+  for (const x of acts) {
+    bal = r2(bal + (x.debit || 0) - (x.credit || 0));
+    num(ws, 'B' + r, asDate(x.date), { fmt: DATEFMT, align: { horizontal: 'center' } });
+    txt(ws, 'C' + r, x.num || '', { align: { horizontal: 'center' } });
+    txt(ws, 'D' + r, x.memo || ''); txt(ws, 'E' + r, x.vendor || '');
+    num(ws, 'F' + r, x.debit || null); num(ws, 'G' + r, x.credit || null);
+    num(ws, 'H' + r, bal);
+    r++;
+  }
+  const last = r - 1;
+  txt(ws, 'B' + r, 'Net activity / ending balance - ' + short(m.end), { font: { bold: true } });
+  totalCell(ws, 'F' + r, last >= first ? 'SUM(F' + first + ':F' + last + ')' : null);
+  totalCell(ws, 'G' + r, last >= first ? 'SUM(G' + first + ':G' + last + ')' : null);
+  num(ws, 'H' + r, a.end, { font: { bold: true }, border: { top: THIN, bottom: DBL } });
+  return sheet;
+}
+// Other Assets leadsheet: prior-month vs current-month balance per account with
+// the change; accounts that moved during the month link to a per-account tab that
+// lists the current-month GL activity behind the change.
+function otherAssetsLeadsheet(wb, ws, cd, en, m, rows, oaActivity, used, leadCell) {
+  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 44;
+  ws.getColumn('D').width = 18; ws.getColumn('E').width = 18; ws.getColumn('F').width = 16; ws.getColumn('G').width = 12; ws.getColumn('H').width = 34;
+  titleBlock(ws, en, cd.lead, m, 'H');
+  txt(ws, 'C5', 'Prior month (' + short(m.beg) + ') vs current month (' + short(m.end) + '); accounts that moved link to their current-month activity.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name'].concat(cols, ['Total', 'Comments']));
+  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Prior Month ' + short(m.beg), 'Current Month ' + short(m.end), 'Change', 'Activity', 'Comments']);
   let r = HR + 1; const first = r;
   for (const a of rows) {
     txt(ws, 'B' + r, a.code, { align: { horizontal: 'left' } }); txt(ws, 'C' + r, a.name);
-    const projMap = byAcct.get(String(a.code)) || new Map();
-    let allocated = 0;
-    for (let i = 0; i < cols.length; i++) {
-      const v = r2(projMap.get(cols[i]) || 0);
-      if (cols[i] !== '(No project)') allocated = r2(allocated + v);
-      num(ws, colL(firstProjCol + i) + r, v);
-    }
-    // When a "(No project)" column is present, force it to the remainder so the
-    // row Total ties to the GL end balance even if some lines carry no project.
-    if (hasNoProj) {
-      const noProjIdx = cols.length - 1;
-      const explicitNoProj = r2((projMap.get('(No project)') || 0));
-      const impliedNoProj = r2(a.end - allocated);
-      num(ws, colL(firstProjCol + noProjIdx) + r, Math.abs(explicitNoProj) >= 0.005 ? explicitNoProj : impliedNoProj);
-    }
-    num(ws, totalCol + r, { formula: 'SUM(' + colL(firstProjCol) + r + ':' + colL(firstProjCol + cols.length - 1) + r + ')' });
-    leadCell.set(String(a.code), ref(cd.tab, totalCol + r));
+    num(ws, 'D' + r, a.begin); num(ws, 'E' + r, a.end);
+    num(ws, 'F' + r, { formula: 'E' + r + '-D' + r });
+    const acts = (oaActivity && oaActivity.get(String(a.code))) || [];
+    if (acts.length) { const at = buildOaActivityTab(wb, a, acts, en, m, used, cd.tab); wpLink(ws, 'G' + r, at, 'Activity'); }
+    leadCell.set(String(a.code), ref(cd.tab, 'E' + r));
     r++;
   }
   const last = r - 1;
   txt(ws, 'B' + r, cd.total, { font: { bold: true } });
-  for (let i = 0; i <= cols.length; i++) { const c = colL(firstProjCol + i); totalCell(ws, c + r, last >= first ? 'SUM(' + c + first + ':' + c + last + ')' : null); }
-  return ref(cd.tab, totalCol + r);
+  for (const c of ['D', 'E', 'F']) totalCell(ws, c + r, last >= first ? 'SUM(' + c + first + ':' + c + last + ')' : null);
+  return ref(cd.tab, 'E' + r);
 }
 // ─── Summary ──────────────────────────────────────────────────────
 // A list of the discrepancies between the GL and each supporting schedule, and,
@@ -1277,7 +1303,7 @@ function buildWorkbook(data) {
   // Investments keeps the roll-forward schedule.
   if ((byCat.otherassets || []).length) {
     const cd = catOf('otherassets'); const ws = newLead(cd);
-    catTie.otherassets = otherAssetsLeadsheet(ws, cd, en, m, byCat.otherassets, data.oaByProject, leadCell);
+    catTie.otherassets = otherAssetsLeadsheet(wb, ws, cd, en, m, byCat.otherassets, data.oaActivity, used, leadCell);
   }
   if ((byCat.invest || []).length) {
     const cd = catOf('invest'); const ws = newLead(cd);
