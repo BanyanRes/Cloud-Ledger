@@ -322,28 +322,31 @@ function glYtd(db, eid, from, to, codes) {
   return byAcct;
 }
 
-// Other-asset balances as of a date, per account, split by project (the GL
-// location dimension). Signed debit-natural (assets). Returns the project name
-// list and a Map(code -> Map(project -> balance)); '(No project)' collects lines
-// with no location so the row always ties to the GL balance.
+// Other-asset balances as of a date, per account, split by project. Banyan carries
+// the project (e.g. Van Buren, Apache) on journal_lines.project_id -> dim_projects
+// (Bill.com's Department maps to it), NOT on the location dimension. Signed
+// debit-natural (assets). Returns the project name list and a Map(code ->
+// Map(project -> balance)); '(No project)' collects any untagged lines so the row
+// still ties to the GL, but is dropped from the columns when nothing is untagged.
 function oaBalancesByProject(db, eid, asOf, codes) {
   const set = codes.map(String);
-  if (!set.length) return { projects: [], byAcct: new Map() };
+  if (!set.length) return { projects: [], byAcct: new Map(), hasNoProject: false };
   const ph = set.map(() => '?').join(',');
-  const rows = db.prepare(`SELECT jl.account_code code, COALESCE(dl.name, '(No project)') loc, SUM(jl.debit - jl.credit) amt
+  const rows = db.prepare(`SELECT jl.account_code code, COALESCE(dp.name, '(No project)') proj, SUM(jl.debit - jl.credit) amt
     FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
-    LEFT JOIN dim_locations dl ON dl.id = jl.location_id
+    LEFT JOIN dim_projects dp ON dp.id = jl.project_id
     WHERE je.entity_id = ? AND je.date <= ? AND jl.account_code IN (${ph})
-    GROUP BY jl.account_code, loc`).all(eid, asOf, ...set);
-  const byAcct = new Map(); const projSet = new Set();
+    GROUP BY jl.account_code, proj`).all(eid, asOf, ...set);
+  const byAcct = new Map(); const projSet = new Set(); let hasNoProject = false;
   for (const r of rows) {
-    const c = String(r.code), loc = r.loc || '(No project)';
+    const c = String(r.code), proj = r.proj || '(No project)';
     if (!byAcct.has(c)) byAcct.set(c, new Map());
-    byAcct.get(c).set(loc, r2((byAcct.get(c).get(loc) || 0) + r.amt));
-    if (loc !== '(No project)') projSet.add(loc);
+    byAcct.get(c).set(proj, r2((byAcct.get(c).get(proj) || 0) + r.amt));
+    if (proj !== '(No project)') projSet.add(proj);
+    else if (Math.abs(r2(r.amt)) >= 0.005) hasNoProject = true;
   }
   const projects = Array.from(projSet).sort((a, b) => a.localeCompare(b));
-  return { projects, byAcct };
+  return { projects, byAcct, hasNoProject };
 }
 
 // Offset-letter sequence for the AP recon (a..z then A..Z, skipping x/X which
@@ -462,8 +465,7 @@ function buildClaData(ctx, m, eid) {
   try { arCur = buildAging(db, eid, m.end); arPrior = buildAging(db, eid, m.beg); } catch (e) { arCur = null; arPrior = null; }
   const arPrimary = (byCat.ar || []).find((a) => arCur && String(a.code) === String(arCur.ar_account)) || pickPrimary(byCat.ar || [], /^accounts receivable$/i, ['12000', '120000', '11000']);
   if (arCur && Math.abs(arCur.recon_diff || 0) >= 0.01) {
-    const causes = (arCur.gl_rows || []).map((g) => ({ date: g.date, num: g.entry_num || '', memo: g.memo || 'GL entry', amount: r2(g.amount), note: 'On the A/R account but not tied to an open invoice' }));
-    pushDisc({ code: (arCur.ar_accounts || []).join(', '), name: 'Accounts Receivable (aging)', schedName: 'AR Aging', schedBal: r2(arCur.totals.total), glBal: r2(arCur.gl_ar_balance), diff: r2(arCur.recon_diff), causes, note: causes.length ? '' : 'Aging total differs from the GL; no un-aged GL entries were isolated — review the AR Aging detail.' });
+    pushDisc({ code: (arCur.ar_accounts || []).join(', '), name: 'Accounts Receivable (aging)', schedName: 'AR Aging', schedBal: r2(arCur.totals.total), glBal: r2(arCur.gl_ar_balance), diff: r2(arCur.totals.total - arCur.gl_ar_balance), causes: [], note: 'A/R subledger (aging) does not reconcile to the GL control account; the residual below is unexplained — review the AR Aging detail and its un-aged GL entries.' });
   }
 
   // A/P aging (current + prior month): Bill.com bills by vendor + un-aged GL.
@@ -473,8 +475,7 @@ function buildClaData(ctx, m, eid) {
     try { apCur = ctx.buildApAging(eid, m.end, apPrimary.code); apPrior = ctx.buildApAging(eid, m.beg, apPrimary.code); } catch (e) { apCur = null; apPrior = null; }
   }
   if (apCur && Math.abs(apCur.recon_diff || 0) >= 0.01) {
-    const causes = (apCur.gl_rows || []).map((g) => ({ date: g.date, num: g.entry_num || '', memo: g.memo || 'GL entry', amount: r2(g.amount), note: 'On the A/P account but not tied to an open bill' }));
-    pushDisc({ code: apPrimary ? apPrimary.code : (apCur.ap_account || ''), name: 'Accounts Payable (aging)', schedName: 'AP Aging', schedBal: r2(apCur.grand_total.total), glBal: r2(apCur.gl_balance), diff: r2(apCur.recon_diff), causes, note: causes.length ? '' : 'Aging total differs from the GL; no un-aged GL entries were isolated — review the AP Aging detail.' });
+    pushDisc({ code: apPrimary ? apPrimary.code : (apCur.ap_account || ''), name: 'Accounts Payable (aging)', schedName: 'AP Aging', schedBal: r2(apCur.grand_total.total), glBal: r2(apCur.gl_balance), diff: r2(apCur.grand_total.total - apCur.gl_balance), causes: [], note: 'A/P subledger (aging) does not reconcile to the GL control account; the residual below is unexplained — review the AP Aging detail and its un-aged GL entries.' });
   }
 
   // Prepaid + fixed-asset schedules. Pull fiscal-YTD GL detail for those accounts
@@ -511,8 +512,9 @@ function buildClaData(ctx, m, eid) {
       for (let k = 0; k < m.monthNum; k++) {
         if (Math.abs(glAct[k] - schedAct[k]) < 0.01) continue;
         const ls = monthLines(lines, k + 1);
-        if (ls.length) for (const l of ls) causes.push({ date: l.date, num: l.num, memo: l.memo || l.vendor || 'GL entry', amount: r2(l.debit - l.credit), note: MON3[k] + ': schedule expected ' + fmt(schedAct[k]) });
-        else causes.push({ date: monthEndOf(Number(m.year), k + 1), num: '', memo: 'No prepaid activity posted', amount: 0, note: MON3[k] + ': schedule expected ' + fmt(schedAct[k]) + ' but the GL has no entry' });
+        for (const l of ls) causes.push({ date: l.date, num: l.num, memo: l.memo || l.vendor || 'GL entry', amount: r2(l.debit - l.credit), note: MON3[k] + ' — GL posted ' + fmt(l.debit - l.credit) });
+        if (Math.abs(schedAct[k]) >= 0.005) causes.push({ date: monthEndOf(Number(m.year), k + 1), num: '', memo: 'Less: schedule-expected amortization for ' + MON3[k], amount: r2(-schedAct[k]), note: 'What the amortization schedule modeled for ' + MON3[k] });
+        else if (!ls.length) causes.push({ date: monthEndOf(Number(m.year), k + 1), num: '', memo: 'No prepaid activity posted', amount: 0, note: MON3[k] + ': schedule expected ' + fmt(schedAct[k]) });
       }
       pushDisc({ code: a.code, name: a.name, schedName: 'Prepaid amortization', schedBal: tot, glBal: r2(a.end), diff: r2(tot - a.end), causes, note: causes.length ? '' : 'Difference not isolated to a single month — review the schedule inputs (start date / monthly amount).' });
     }
@@ -529,7 +531,8 @@ function buildClaData(ctx, m, eid) {
         const lines = ytd.get(String(p.asset.code)) || [];
         const causes = lines.map((l) => ({ date: l.date, num: l.num, memo: l.memo || l.vendor || 'GL entry', amount: r2(l.debit - l.credit), note: 'Cost account activity this year' }));
         const openGl = r2(pyeBal.get(String(p.asset.code)) || 0);
-        if (!causes.length) causes.push({ date: pye, num: '', memo: 'Opening cost at ' + short(pye), amount: r2(openGl - cost), note: 'Register cost ' + fmt(cost) + ' vs GL cost at ' + short(pye) + ' ' + fmt(openGl) + ' — the difference predates the fiscal year' });
+        const openDiff = r2(openGl - cost);
+        if (Math.abs(openDiff) >= 0.005) causes.push({ date: pye, num: '', memo: 'Cost on the books at ' + short(pye) + ' vs register', amount: openDiff, note: 'Register cost ' + fmt(cost) + ' vs GL cost at ' + short(pye) + ' ' + fmt(openGl) + ' (predates the fiscal year)' });
         pushDisc({ code: p.asset.code, name: p.asset.name + ' (cost)', schedName: 'Fixed asset schedule', schedBal: cost, glBal: r2(p.asset.end), diff: r2(cost - p.asset.end), causes, note: '' });
       }
     }
@@ -550,8 +553,9 @@ function buildClaData(ctx, m, eid) {
           for (let k = 0; k < m.monthNum; k++) {
             if (Math.abs(glAct[k] - schedAct[k]) < 0.01) continue;
             const ls = monthLines(lines, k + 1);
-            if (ls.length) for (const l of ls) causes.push({ date: l.date, num: l.num, memo: l.memo || 'Depreciation', amount: r2(l.credit - l.debit), note: MON3[k] + ': schedule expected ' + fmt(schedAct[k]) + ' depreciation' });
-            else causes.push({ date: monthEndOf(Number(m.year), k + 1), num: '', memo: 'No depreciation posted', amount: 0, note: MON3[k] + ': schedule expected ' + fmt(schedAct[k]) + ' but the GL has no entry' });
+            for (const l of ls) causes.push({ date: l.date, num: l.num, memo: l.memo || 'Depreciation', amount: r2(l.debit - l.credit), note: MON3[k] + ' — GL posted ' + fmt(l.credit - l.debit) + ' depreciation' });
+            if (Math.abs(schedAct[k]) >= 0.005) causes.push({ date: monthEndOf(Number(m.year), k + 1), num: '', memo: 'Less: schedule-expected depreciation for ' + MON3[k], amount: r2(schedAct[k]), note: 'What the depreciation schedule modeled for ' + MON3[k] });
+            else if (!ls.length) causes.push({ date: monthEndOf(Number(m.year), k + 1), num: '', memo: 'No depreciation posted', amount: 0, note: MON3[k] + ': schedule expected ' + fmt(schedAct[k]) });
           }
           pushDisc({ code: p.dep.code, name: p.dep.name + ' (accumulated)', schedName: 'Fixed asset schedule', schedBal, glBal: r2(p.dep.end), diff: r2(schedBal - p.dep.end), causes, note: causes.length ? '' : 'Difference not isolated to a single month — review the depreciation schedule inputs.' });
         }
@@ -585,9 +589,19 @@ function buildClaData(ctx, m, eid) {
     if (apRecon.billcomSource === 'none') {
       pushDisc({ code: apPrimary.code, name: 'Accounts Payable — Bill.com recon', schedName: 'AP Recon', schedBal: null, glBal: r2(apRecon.openTotal), diff: null, causes: [], note: 'No Bill.com A/P Detail report has been uploaded, so the GL A/P of ' + fmt(apRecon.openTotal) + ' is not yet independently verified against Bill.com. Upload the Bill.com A/P Detail (Open Items) report as of ' + short(m.end) + ' (card below the report), then regenerate.' });
     } else if (Math.abs(r2((apRecon.billcomTotal || 0) - apRecon.openTotal)) >= 0.01) {
-      const causes = (apRecon.byVendor || []).filter((v) => Math.abs(v.diff) >= 0.01).map((v) => ({ date: '', num: '', memo: v.vendor, amount: r2(v.diff), note: 'Bill.com ' + fmt(v.billcom) + ' vs GL ' + fmt(v.gl) }));
+      const causes = (apRecon.byVendor || []).filter((v) => Math.abs(v.diff) >= 0.01).map((v) => ({ date: '', num: '', memo: v.vendor, amount: r2(v.gl - v.billcom), note: 'Bill.com ' + fmt(v.billcom) + ' vs GL ' + fmt(v.gl) }));
       pushDisc({ code: apPrimary.code, name: 'Accounts Payable — Bill.com recon', schedName: 'AP Recon', schedBal: r2(apRecon.billcomTotal), glBal: r2(apRecon.openTotal), diff: r2((apRecon.billcomTotal || 0) - apRecon.openTotal), causes, note: causes.length ? 'Open A/P per Bill.com does not agree to the GL by vendor.' : '' });
     }
+  }
+
+  // Make every discrepancy's listed transactions foot to the difference: append a
+  // residual line so the causes sum exactly to (GL - schedule).
+  for (const d of discrepancies) {
+    if (d.schedBal == null || d.glBal == null || d.diff == null) continue;
+    const bridge = r2(d.glBal - d.schedBal);
+    const identified = r2((d.causes || []).reduce((s, c) => s + (Number(c.amount) || 0), 0));
+    const resid = r2(bridge - identified);
+    if (Math.abs(resid) >= 0.01) d.causes.push({ date: '', num: '', memo: 'Unexplained / other difference', amount: resid, note: 'Not traced to a specific transaction' });
   }
 
   // Flags (for the summary banner count and the X-header / client card) are derived
@@ -988,32 +1002,7 @@ function buildApReconTabs(wb, recon, en, m, used) {
   const clLast = clr - 1;
   txt(cld, 'B' + clr, 'Total open invoices per GL', { font: { bold: true } }); totalCell(cld, 'F' + clr, clLast >= clFirst ? 'SUM(F' + clFirst + ':F' + clLast + ')' : null); clr += 2;
   cld.mergeCells('B' + clr + ':F' + clr);
-  txt(cld, 'B' + clr, 'The credits on account ' + apAcct + ' left uncancelled after the offset analysis (AP GL Detail tab). Ties to the A/P balance and to the Bill.com A/P Detail.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
-
-  // 4. AP GL Detail — full A/P account detail with offset-letter tagging + recon.
-  const gld = wb.addWorksheet(reserveName('AP GL Detail', used), { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
-  gld.getColumn('A').width = 3.4; gld.getColumn('B').width = 11; gld.getColumn('C').width = 8; gld.getColumn('D').width = 26; gld.getColumn('E').width = 26; gld.getColumn('F').width = 44; gld.getColumn('G').width = 14; gld.getColumn('H').width = 14; gld.getColumn('I').width = 15; gld.getColumn('J').width = 8;
-  tabHead(gld, 'Accounts Payable (' + apAcct + ') — GL Detail with Offset', en, 'Inception to ' + short(m.end));
-  hdr(gld, 5, 2, ['Date', 'Num', 'Vendor', 'Offset Account', 'Description', 'Debit', 'Credit', 'Balance', 'Offset']);
-  let gr = 6;
-  for (const x of (recon.glRows || [])) {
-    num(gld, 'B' + gr, asDate(x.date), { fmt: DATEFMT }); txt(gld, 'C' + gr, x.num || ''); txt(gld, 'D' + gr, x.vendor || ''); txt(gld, 'E' + gr, x.offset || ''); txt(gld, 'F' + gr, x.memo || '');
-    if (x.debit) num(gld, 'G' + gr, x.debit); if (x.credit) num(gld, 'H' + gr, x.credit); num(gld, 'I' + gr, x.balance);
-    const oc = gld.getCell('J' + gr); oc.value = x.letter || ''; oc.font = (x.letter === 'X') ? F({ bold: true }) : F(); oc.alignment = { horizontal: 'center' };
-    gr++;
-  }
-  txt(gld, 'F' + gr, 'TOTAL', { font: { bold: true } });
-  totalCell(gld, 'G' + gr, recon.glRows && recon.glRows.length ? 'SUM(G6:G' + (gr - 1) + ')' : null);
-  totalCell(gld, 'H' + gr, recon.glRows && recon.glRows.length ? 'SUM(H6:H' + (gr - 1) + ')' : null);
-  num(gld, 'I' + gr, recon.ending, { font: { bold: true }, border: { top: THIN, bottom: DBL } }); gr += 2;
-  txt(gld, 'E' + gr, 'Reconciliation', { font: { bold: true } }); gr++;
-  txt(gld, 'E' + gr, 'Credits (bills booked)'); num(gld, 'I' + gr, recon.totalCredit); const rCr = gr; gr++;
-  txt(gld, 'E' + gr, 'Less: debits (payments / reversals)'); num(gld, 'I' + gr, r2(-recon.totalDebit)); const rDr = gr; gr++;
-  txt(gld, 'E' + gr, 'Ending A/P balance per GL (' + apAcct + ')', { font: { bold: true } }); num(gld, 'I' + gr, { formula: 'I' + rCr + '+I' + rDr }, { font: { bold: true }, border: { top: THIN } }); const rEnd = gr; gr++;
-  txt(gld, 'E' + gr, 'Open invoices remaining after offsets'); num(gld, 'I' + gr, recon.openTotal); const rOpen = gr; gr++;
-  txt(gld, 'E' + gr, 'Difference (should be zero)', { font: { bold: true } }); num(gld, 'I' + gr, { formula: 'I' + rEnd + '-I' + rOpen }, { font: { bold: true }, border: { top: THIN } }); gr += 2;
-  gld.mergeCells('B' + gr + ':J' + gr);
-  txt(gld, 'B' + gr, 'Matched debits and credits carry the same offset letter and net to zero. The unlettered credits that remain are the open invoices, which equal the ending A/P balance.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
+  txt(cld, 'B' + clr, 'The credits on account ' + apAcct + ' left uncancelled after the GL offset analysis. Ties to the A/P balance and to the Bill.com A/P Detail.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
 }
 
 // Equity Rollforward: prior year end → monthly activity → ending, by account.
@@ -1177,13 +1166,15 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell) {
   return ref(cd.tab, 'H' + r);
 }
 // Other Assets leadsheet as an account × project matrix: every Other Assets GL
-// account down the rows, one column per project (GL location) plus a "(No project)"
-// column, so the balances are summarized by project and each row's Total ties to
-// the GL. Project columns and the grand total foot with SUM formulas.
+// account down the rows, one column per project (dim_projects, e.g. Van Buren /
+// Apache) so the balances are summarized by project and each row's Total ties to
+// the GL. A "(No project)" column is shown only when some line is genuinely
+// untagged. Project columns and the grand total foot with SUM formulas.
 function otherAssetsLeadsheet(ws, cd, en, m, rows, oaByProject, leadCell) {
   const projects = (oaByProject && oaByProject.projects) || [];
   const byAcct = (oaByProject && oaByProject.byAcct) || new Map();
-  const cols = projects.concat(['(No project)']); // project columns, then unallocated
+  const hasNoProj = !!(oaByProject && oaByProject.hasNoProject);
+  const cols = projects.concat(hasNoProj ? ['(No project)'] : []); // untagged column only when needed
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 40;
   const firstProjCol = 4; // column D
   for (let i = 0; i < cols.length; i++) ws.getColumn(colL(firstProjCol + i)).width = 15;
@@ -1204,12 +1195,14 @@ function otherAssetsLeadsheet(ws, cd, en, m, rows, oaByProject, leadCell) {
       if (cols[i] !== '(No project)') allocated = r2(allocated + v);
       num(ws, colL(firstProjCol + i) + r, v);
     }
-    // Force the "(No project)" cell so the row Total ties to the GL end balance
-    // even if some lines carry no location.
-    const noProjIdx = cols.length - 1;
-    const explicitNoProj = r2((projMap.get('(No project)') || 0));
-    const impliedNoProj = r2(a.end - allocated);
-    num(ws, colL(firstProjCol + noProjIdx) + r, Math.abs(explicitNoProj) >= 0.005 ? explicitNoProj : impliedNoProj);
+    // When a "(No project)" column is present, force it to the remainder so the
+    // row Total ties to the GL end balance even if some lines carry no project.
+    if (hasNoProj) {
+      const noProjIdx = cols.length - 1;
+      const explicitNoProj = r2((projMap.get('(No project)') || 0));
+      const impliedNoProj = r2(a.end - allocated);
+      num(ws, colL(firstProjCol + noProjIdx) + r, Math.abs(explicitNoProj) >= 0.005 ? explicitNoProj : impliedNoProj);
+    }
     num(ws, totalCol + r, { formula: 'SUM(' + colL(firstProjCol) + r + ':' + colL(firstProjCol + cols.length - 1) + r + ')' });
     leadCell.set(String(a.code), ref(cd.tab, totalCol + r));
     r++;
@@ -1265,6 +1258,11 @@ function buildSummary(su, en, m, data) {
         if (cz.note) { su.mergeCells('G' + sr + ':H' + sr); txt(su, 'G' + sr, cz.note, { align: { wrapText: true } }); }
         sr++;
       }
+      const causeSum = r2((d.causes || []).reduce((s, c) => s + (Number(c.amount) || 0), 0));
+      txt(su, 'C' + sr, 'Total of transactions above (moves Per schedule to Per GL)', { font: { bold: true } });
+      num(su, 'F' + sr, causeSum, { font: { bold: true }, border: { top: THIN } });
+      txt(su, 'G' + sr, '(= Per GL − Per schedule)', { font: { italic: true } });
+      sr++;
     }
     sr += 1;
   }
