@@ -834,7 +834,7 @@ function buildFixedSchedule(wb, data, en, m, used, leadTab) {
   const n = m.monthNum; const ends = fyMonthEnds(m); const pye = (Number(m.year) - 1) + '-12-31';
   const MC0 = 9; // first month column (I)
   const accumC = colL(MC0 + n), nbvC = colL(MC0 + n + 1), lastMC = colL(MC0 + n - 1);
-  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 46; ws.getColumn('C').width = 9; ws.getColumn('D').width = 11; ws.getColumn('E').width = 11;
+  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 46; ws.getColumn('C').width = 14; ws.getColumn('D').width = 14; ws.getColumn('E').width = 14;
   ws.getColumn('F').width = 13; ws.getColumn('G').width = 11; ws.getColumn('H').width = 13;
   for (let k = 0; k < n + 2; k++) ws.getColumn(colL(MC0 + k)).width = 12;
   tabHead(ws, 'Fixed Asset Depreciation Schedule', en, 'Fiscal ' + m.year + ' through ' + spell(m.end) + ' — straight-line, monthly, from the in-service month', leadTab);
