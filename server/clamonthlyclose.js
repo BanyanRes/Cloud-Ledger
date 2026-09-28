@@ -491,7 +491,9 @@ function buildClaData(ctx, m, eid) {
     const tot = r2(sched.reduce((s, x) => s + x.ending, 0));
     if (!items.length && Math.abs(a.end) >= 0.01) {
       pushDisc({ code: a.code, name: a.name, schedName: 'Prepaid amortization', schedBal: 0, glBal: r2(a.end), diff: r2(-a.end), causes: [], note: 'No items in the prepaid register for this account — add the policy(ies) on the Registers screen so the amortization schedule supports the GL balance.' });
-    } else if (items.length && Math.abs(tot - a.end) >= 0.01) {
+    } else if (items.length && Math.abs(tot - a.end) >= Math.max(1.00, items.length * 0.05)) {
+      // straight-line amortization rounds to the cent per policy per month; absorb
+      // that few-cent rounding so it does not surface as a discrepancy.
       const lines = ytd.get(String(a.code)) || [];
       const glAct = monthlyActivity(lines, 'debit');
       const schedAct = new Array(m.monthNum).fill(0);

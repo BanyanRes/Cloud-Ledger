@@ -848,7 +848,9 @@ export default function App(){
   const isBanyanRes = !!(_activeEnt && (_activeEnt.code==='BANYANRE1' || /^banyan\s*residential$/i.test((_activeEnt.name||'').trim())));
   // CLIP Property Owner also gets the CLA-format monthly closing workpaper (generic generator).
   const isClip = !!(_activeEnt && (_activeEnt.code==='CLIPPROP' || /^clip\s*property\s*owner$/i.test((_activeEnt.name||'').trim())));
-  const canClaClose = isBanyanRes || isClip;
+  // CLR Silsbee Property Owner also gets the CLA-format monthly closing workpaper.
+  const isSilsbee = !!(_activeEnt && (_activeEnt.code==='CLRSILSB2' || /^clr\s*silsbee\s*property\s*owner$/i.test((_activeEnt.name||'').trim())));
+  const canClaClose = isBanyanRes || isClip || isSilsbee;
   // Odyssey Holdings — the holding company that gets a monthly closing workpaper
   // supporting every balance-sheet account. The generator itself is generic.
   const isOdyssey = !!(_activeEnt && /odyssey/i.test(_activeEnt.name||''));
