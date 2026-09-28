@@ -850,7 +850,9 @@ export default function App(){
   const isClip = !!(_activeEnt && (_activeEnt.code==='CLIPPROP' || /^clip\s*property\s*owner$/i.test((_activeEnt.name||'').trim())));
   // CLR Silsbee Property Owner also gets the CLA-format monthly closing workpaper.
   const isSilsbee = !!(_activeEnt && (_activeEnt.code==='CLRSILSB2' || /^clr\s*silsbee\s*property\s*owner$/i.test((_activeEnt.name||'').trim())));
-  const canClaClose = isBanyanRes || isClip || isSilsbee;
+  // Sabine River & Northern Railroad (SRN) also gets the CLA-format monthly closing workpaper.
+  const isSRN = !!(_activeEnt && (_activeEnt.code==='SABINERI' || /sabine\s*river/i.test((_activeEnt.name||'').trim())));
+  const canClaClose = isBanyanRes || isClip || isSilsbee || isSRN;
   // Odyssey Holdings — the holding company that gets a monthly closing workpaper
   // supporting every balance-sheet account. The generator itself is generic.
   const isOdyssey = !!(_activeEnt && /odyssey/i.test(_activeEnt.name||''));
