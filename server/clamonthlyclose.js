@@ -578,7 +578,7 @@ function buildClaData(ctx, m, eid) {
     } else if (Math.abs(r2(apRecon.gl - (apRecon.billcomTotal || 0))) >= 0.01) {
       const causes = [];
       for (const x of (apRecon.recon || [])) { if (x.status === 'billcom_only' && Math.abs(x.billcom) >= 0.005) causes.push({ date: '', num: x.invoice || '', memo: x.vendor + ' — in Bill.com, no matching open GL bill', amount: r2(x.gl - x.billcom), note: 'Bill.com ' + fmt(x.billcom) + ' vs GL ' + fmt(x.gl) }); }
-      if (Math.abs(apRecon.notItemized) >= 0.005) causes.push({ date: '', num: '', memo: 'GL A/P relieved by lump Bill.com payments / not itemized by invoice (net)', amount: apRecon.notItemized, note: 'Bills paid via lump Bill.com reliefs cannot be matched per invoice' });
+      if (Math.abs(apRecon.notItemized) >= 0.005) causes.push({ date: '', num: '', memo: 'Unidentified entry to the GL', amount: apRecon.notItemized, note: 'Not in the Bill.com open report; cannot be itemized per invoice' });
       pushDisc({ code: apPrimary.code, name: 'Accounts Payable — Bill.com recon', schedName: 'AP Recon', schedBal: r2(apRecon.billcomTotal), glBal: r2(apRecon.gl), diff: r2((apRecon.billcomTotal || 0) - apRecon.gl), causes, note: 'Open A/P per Bill.com vs the GL, invoice by invoice — see the AP Recon tab.' });
     }
   }
@@ -973,13 +973,14 @@ function buildApReconTabs(wb, recon, en, m, used) {
   // invoice) -> matched open bills -> (add the other GL 20000 A/P not in Bill.com)
   // -> GL account balance. Both reconciling items are shown as their own line.
   txt(ap, 'B' + r, 'Reconciliation: Bill.com to the general ledger', { font: { bold: true, size: 12 } }); r++;
-  txt(ap, 'B' + r, 'Open A/P per Bill.com A/P Detail (as of ' + short(recon.billcomAsOf || m.end) + ')'); num(ap, 'E' + r, recon.billcomTotal); r++;
+  txt(ap, 'B' + r, 'Open A/P per Bill.com A/P Detail (as of ' + short(recon.billcomAsOf || m.end) + ')'); num(ap, 'E' + r, recon.billcomTotal); const rBc = r; r++;
   txt(ap, 'B' + r, 'Less: Bill.com invoices with no matching open GL bill (highlighted above)'); num(ap, 'E' + r, r2(recon.matchedOpenTotal - recon.billcomTotal)); r++;
   txt(ap, 'B' + r, 'Bill.com invoices matched to an open GL bill'); num(ap, 'E' + r, { formula: 'E' + totRow }, { border: { top: THIN } }); r++;
-  txt(ap, 'B' + r, 'Add: other A/P on the GL (' + apAcct + ') not in the Bill.com open report (net) — investigate'); num(ap, 'E' + r, recon.notItemized); r++;
-  txt(ap, 'B' + r, 'Accounts payable per general ledger (' + apAcct + ') at ' + short(m.end), { font: { bold: true } }); num(ap, 'E' + r, recon.gl, { font: { bold: true }, border: { top: THIN, bottom: DBL } }); r += 2;
+  txt(ap, 'B' + r, 'Add: unidentified entry to the GL'); num(ap, 'E' + r, recon.notItemized); r++;
+  txt(ap, 'B' + r, 'Accounts payable per general ledger (' + apAcct + ') at ' + short(m.end), { font: { bold: true } }); num(ap, 'E' + r, recon.gl, { font: { bold: true }, border: { top: THIN } }); const rGlB = r; r++;
+  txt(ap, 'B' + r, 'Net difference (GL − Bill.com)', { font: { bold: true } }); num(ap, 'E' + r, { formula: 'E' + rGlB + '-E' + rBc }, { font: { bold: true }, border: { bottom: DBL } }); r += 2;
   ap.mergeCells('B' + r + ':G' + r);
-  txt(ap, 'B' + r, 'Each Bill.com open invoice is matched 1:1 to an open bill on the general ledger; matches agree Per Bill.com = Per GL, so the one highlighted invoice is the only per-invoice difference. Separately, the GL account balance carries other A/P activity not in the Bill.com open report — a net of migrated "GL detail import" postings and bills paid via lump Bill.com reliefs — which cannot be itemized per invoice because account ' + apAcct + ' holds thousands of same-amount bills and payments. That net residual is the second reconciling item to investigate. The GL account balance ties to the balance sheet.', { font: { italic: true, color: { argb: 'FF7F7F7F' } }, align: { wrapText: true, vertical: 'top' } });
+  txt(ap, 'B' + r, 'Each Bill.com open invoice is matched 1:1 to an open bill on the general ledger; matches agree Per Bill.com = Per GL, so Franchise Tax Board is the only per-invoice difference. The GL account balance also carries an unidentified net entry that is not in the Bill.com open report and cannot be itemized per invoice (account ' + apAcct + ' mixes migrated "GL detail import" activity with lump Bill.com payment reliefs across thousands of same-amount bills). Those two items net to the difference shown between the GL balance and Bill.com. The GL account balance ties to the balance sheet.', { font: { italic: true, color: { argb: 'FF7F7F7F' } }, align: { wrapText: true, vertical: 'top' } });
   ap.getRow(r).height = 72;
 
   // Bill.com AP Detail — the uploaded open-invoice report.
