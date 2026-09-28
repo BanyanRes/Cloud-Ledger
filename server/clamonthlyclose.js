@@ -359,59 +359,20 @@ function apLetterSeq(n) {
 }
 function apGroupSum(rows, keyFn) { const m = new Map(); for (const x of rows) { const k = keyFn(x) || '(unnamed)'; m.set(k, r2((m.get(k) || 0) + (x.amount || 0))); } return m; }
 
-// AP Recon engine (same symmetric offset matcher CLA/Weaver use, adapted for a
-// monthly close on any A/P account): inception-to-date on the A/P account, so all
-// paid bills cancel against their payments and every remaining unmatched credit
-// is a genuinely open invoice, which should equal the GL A/P balance and the
-// Bill.com open-invoice report. Beginning balance is 0 (nothing before inception).
+// AP Recon (balance-anchored). Banyan's A/P account carries migrated "GL detail
+// import" lump entries AND Bill.com payment reliefs that post WITHOUT a vendor, so
+// the balance cannot be itemized into open invoices by offset-matching (that
+// mislabels un-cancelled import credits as "open", e.g. a phantom half-million).
+// The GL account balance IS the open A/P and ties to the balance sheet; the
+// uploaded Bill.com A/P Detail report is the authoritative open-invoice list. The
+// recon compares the GL balance to the Bill.com report total.
 function buildApReconData(db, eid, apCode, asOf, bcfg) {
-  const r2c = (n) => Math.round((Number(n) || 0) * 100);
-  const begin = 0;
-  const lines = db.prepare(
-    'SELECT je.id entry_id, je.date date, je.entry_num entry_num, je.doc_number doc_number, je.vendor vendor, je.memo memo, jl.id line_id, jl.debit debit, jl.credit credit, jl.description description '
+  const row = db.prepare(
+    'SELECT COALESCE(SUM(jl.credit),0) tc, COALESCE(SUM(jl.debit),0) td '
     + 'FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id '
-    + 'WHERE je.entity_id = ? AND je.date <= ? AND jl.account_code = ? '
-    + 'ORDER BY je.date, je.entry_num, jl.id'
-  ).all(eid, asOf, String(apCode));
-  const offStmt = db.prepare('SELECT jl.account_code code, a.name name FROM journal_lines jl LEFT JOIN accounts a ON a.entity_id = ? AND a.code = jl.account_code WHERE jl.entry_id = ? AND jl.account_code <> ?');
-  const offCache = new Map();
-  const offsetFor = (entryId) => {
-    if (offCache.has(entryId)) return offCache.get(entryId);
-    const rs = offStmt.all(eid, entryId, String(apCode));
-    let v; if (!rs.length) v = ''; else if (rs.length === 1) v = rs[0].code + (rs[0].name ? ' ' + rs[0].name : ''); else v = '-Split-';
-    offCache.set(entryId, v); return v;
-  };
-  const vmap = new Map();
-  for (const l of lines) { const cr = r2(l.credit || 0); if (cr > 0 && l.vendor && String(l.vendor).trim()) { const k = r2c(cr); if (!vmap.has(k)) vmap.set(k, { vendor: String(l.vendor).trim(), invoice: l.doc_number != null ? String(l.doc_number) : '', date: l.date, num: l.entry_num != null ? String(l.entry_num) : '', memo: l.memo || l.description || '' }); } }
-  const vlookup = (amt, row) => {
-    const hit = vmap.get(r2c(amt)); if (hit) return hit;
-    const mm = String((row.memo || row.description) || '').match(/^Bill\s*-\s*([^:]+):/i);
-    return { vendor: mm ? mm[1].trim() : (row.vendor || ''), invoice: row.doc_number != null ? String(row.doc_number) : '', date: row.date, num: row.entry_num != null ? String(row.entry_num) : '', memo: row.memo || row.description || '' };
-  };
-  const open = []; const tag = new Array(lines.length).fill(null); let pair = 0;
-  const findOpp = (amtc, sign) => {
-    const want = -sign, pos = [];
-    for (let i = 0; i < open.length; i++) if (open[i].sign === want) pos.push(i);
-    for (const i of pos) if (open[i].amtc === amtc) return [i];
-    for (let a = 0; a < pos.length; a++) for (let b = a + 1; b < pos.length; b++) if (open[pos[a]].amtc + open[pos[b]].amtc === amtc) return [pos[a], pos[b]];
-    for (let a = 0; a < pos.length; a++) for (let b = a + 1; b < pos.length; b++) for (let c = b + 1; c < pos.length; c++) if (open[pos[a]].amtc + open[pos[b]].amtc + open[pos[c]].amtc === amtc) return [pos[a], pos[b], pos[c]];
-    return null;
-  };
-  lines.forEach((l, i) => {
-    const dr = r2(l.debit || 0), cr = r2(l.credit || 0);
-    const sign = cr > 0 ? 1 : -1, amtc = r2c(cr > 0 ? cr : dr);
-    if (amtc === 0) { tag[i] = ''; return; }
-    const mm = findOpp(amtc, sign);
-    if (mm) { const lt = apLetterSeq(pair++); tag[i] = lt; mm.forEach((p) => (tag[open[p].idx] = lt)); mm.sort((a, b) => b - a).forEach((p) => open.splice(p, 1)); }
-    else open.push({ amtc, sign, idx: i });
-  });
-  const openBillIdx = []; let xTotal = 0;
-  for (const o of open) { if (o.sign < 0) { tag[o.idx] = 'X'; xTotal = r2(xTotal + o.amtc / 100); } else { tag[o.idx] = ''; openBillIdx.push(o.idx); } }
-  let bal = begin;
-  const glRows = lines.map((l, i) => { const dr = r2(l.debit || 0), cr = r2(l.credit || 0); bal = r2(bal + cr - dr); return { date: l.date, num: (l.entry_num != null ? String(l.entry_num) : '') || String(l.doc_number || ''), vendor: l.vendor || '', offset: offsetFor(l.entry_id), memo: l.description || l.memo || '', debit: dr, credit: cr, balance: bal, letter: tag[i] }; });
-  const openBills = openBillIdx.map((i) => { const l = lines[i], amt = r2(l.credit || 0), v = vlookup(amt, l); return { vendor: v.vendor, invoice: v.invoice, date: v.date || l.date, num: v.num, amount: amt, memo: v.memo }; });
-  openBills.sort((a, b) => b.amount - a.amount);
-  const openTotal = r2(openBills.reduce((a, x) => a + x.amount, 0));
+    + 'WHERE je.entity_id = ? AND je.date <= ? AND jl.account_code = ?'
+  ).get(eid, asOf, String(apCode));
+  const glBal = r2((row.tc || 0) - (row.td || 0));
   let billcom = null, billcomSource = 'none';
   try {
     if (bcfg && bcfg.ap_aging_lines_json) {
@@ -423,12 +384,9 @@ function buildApReconData(db, eid, apCode, asOf, bcfg) {
   const billcomLines = billcom ? billcom.lines : [];
   const billcomTotal = billcom ? billcom.total : null;
   const billcomAsOf = billcom ? billcom.asOf : asOf;
-  const glByV = apGroupSum(openBills, (x) => String(x.vendor || '').trim());
   const bcByV = apGroupSum(billcomLines, (x) => String(x.vendor || '').trim());
-  const vnames = new Set([...glByV.keys(), ...bcByV.keys()]);
-  const byVendor = [...vnames].map((k) => { const gl = glByV.get(k) || 0, bc = bcByV.get(k) || 0; return { vendor: k, gl, billcom: bc, diff: r2(bc - gl) }; }).sort((a, b) => b.gl - a.gl);
-  const glBal = r2(begin + glRows.reduce((a, r) => a + r.credit - r.debit, 0));
-  return { apCode: String(apCode), gl: glBal, begin, ending: glBal, totalDebit: r2(glRows.reduce((a, r) => a + r.debit, 0)), totalCredit: r2(glRows.reduce((a, r) => a + r.credit, 0)), glRows, openBills, openTotal, xTotal, billcomLines, billcomTotal, billcomAsOf, billcomSource, byVendor };
+  const byVendor = [...bcByV.entries()].map(([vendor, amt]) => ({ vendor, billcom: r2(amt) })).sort((a, b) => b.billcom - a.billcom);
+  return { apCode: String(apCode), gl: glBal, openTotal: glBal, billcomLines, billcomTotal, billcomAsOf, billcomSource, byVendor, diff: billcom ? r2(glBal - billcomTotal) : null };
 }
 
 function buildClaData(ctx, m, eid) {
@@ -588,9 +546,11 @@ function buildClaData(ctx, m, eid) {
   if (apRecon) {
     if (apRecon.billcomSource === 'none') {
       pushDisc({ code: apPrimary.code, name: 'Accounts Payable — Bill.com recon', schedName: 'AP Recon', schedBal: null, glBal: r2(apRecon.openTotal), diff: null, causes: [], note: 'No Bill.com A/P Detail report has been uploaded, so the GL A/P of ' + fmt(apRecon.openTotal) + ' is not yet independently verified against Bill.com. Upload the Bill.com A/P Detail (Open Items) report as of ' + short(m.end) + ' (card below the report), then regenerate.' });
-    } else if (Math.abs(r2((apRecon.billcomTotal || 0) - apRecon.openTotal)) >= 0.01) {
-      const causes = (apRecon.byVendor || []).filter((v) => Math.abs(v.diff) >= 0.01).map((v) => ({ date: '', num: '', memo: v.vendor, amount: r2(v.gl - v.billcom), note: 'Bill.com ' + fmt(v.billcom) + ' vs GL ' + fmt(v.gl) }));
-      pushDisc({ code: apPrimary.code, name: 'Accounts Payable — Bill.com recon', schedName: 'AP Recon', schedBal: r2(apRecon.billcomTotal), glBal: r2(apRecon.openTotal), diff: r2((apRecon.billcomTotal || 0) - apRecon.openTotal), causes, note: causes.length ? 'Open A/P per Bill.com does not agree to the GL by vendor.' : '' });
+    } else if (Math.abs(r2(apRecon.gl - (apRecon.billcomTotal || 0))) >= 0.01) {
+      const d = r2(apRecon.gl - (apRecon.billcomTotal || 0));
+      pushDisc({ code: apPrimary.code, name: 'Accounts Payable — Bill.com recon', schedName: 'AP Recon', schedBal: r2(apRecon.billcomTotal), glBal: r2(apRecon.gl), diff: r2((apRecon.billcomTotal || 0) - apRecon.gl),
+        causes: [{ date: '', num: '', memo: 'GL A/P balance (' + apPrimary.code + ') vs Bill.com A/P Detail total', amount: d, note: 'Timing or unrecorded item — investigate' }],
+        note: 'GL A/P of ' + fmt(apRecon.gl) + ' vs Bill.com open A/P of ' + fmt(apRecon.billcomTotal) + ' — difference of ' + fmt(d) + ' to investigate.' });
     }
   }
 
@@ -947,41 +907,39 @@ function rollBlock(ws, startRow, title, rows, m, tab) {
   return { refs, nextRow: r };
 }
 
-// AP Recon (CLA/Weaver format): 4 tabs proving the Bill.com open-invoice report
-// ties to the GL A/P. Sits alongside the AP Aging + AP Summary. Returns nothing
-// (its own tabs; the AP leadsheet still links to the AP Aging total).
+// AP Recon (balance-anchored): 2 tabs proving the GL A/P balance agrees to the
+// Bill.com A/P Detail report. Sits alongside the AP Aging + AP Summary.
 function buildApReconTabs(wb, recon, en, m, used) {
   const apAcct = recon.apCode;
-  // 1. AP Recon (summary) — Per Bill.com vs Per GL by vendor, tying to the A/P account.
-  const ap = wb.addWorksheet(reserveName('AP Recon', used), { views: [{ showGridLines: false }] });
-  ap.getColumn('A').width = 3.4; ap.getColumn('B').width = 44; ap.getColumn('C').width = 16; ap.getColumn('D').width = 16; ap.getColumn('E').width = 16;
-  tabHead(ap, 'Accounts Payable Reconciliation — Bill.com to GL (' + apAcct + ')', en, 'As of ' + short(m.end));
   const noBc = recon.billcomSource === 'none';
-  hdr(ap, 6, 2, ['Vendor', 'Per Bill.com', 'Per GL', 'Difference']);
+  // 1. AP Recon (summary): Bill.com open A/P by vendor, reconciled to the GL balance.
+  const ap = wb.addWorksheet(reserveName('AP Recon', used), { views: [{ showGridLines: false }] });
+  ap.getColumn('A').width = 3.4; ap.getColumn('B').width = 48; ap.getColumn('C').width = 20; ap.getColumn('D').width = 4;
+  tabHead(ap, 'Accounts Payable Reconciliation — Bill.com to GL (' + apAcct + ')', en, 'As of ' + short(m.end));
+  hdr(ap, 6, 2, ['Vendor', 'Open A/P per Bill.com']);
   let ar = 7; const first = ar;
-  for (const v of (recon.byVendor || [])) {
-    txt(ap, 'B' + ar, v.vendor);
-    if (!noBc) num(ap, 'C' + ar, v.billcom);
-    num(ap, 'D' + ar, v.gl);
-    if (!noBc) num(ap, 'E' + ar, { formula: 'C' + ar + '-D' + ar });
-    ar++;
-  }
+  for (const v of (recon.byVendor || [])) { txt(ap, 'B' + ar, v.vendor); num(ap, 'C' + ar, v.billcom); ar++; }
   const last = ar - 1;
-  txt(ap, 'B' + ar, 'Total accounts payable', { font: { bold: true } });
-  if (!noBc) totalCell(ap, 'C' + ar, last >= first ? 'SUM(C' + first + ':C' + last + ')' : null);
-  totalCell(ap, 'D' + ar, last >= first ? 'SUM(D' + first + ':D' + last + ')' : null);
-  if (!noBc) totalCell(ap, 'E' + ar, 'C' + ar + '-D' + ar);
+  txt(ap, 'B' + ar, 'Total open A/P per Bill.com', { font: { bold: true } });
+  totalCell(ap, 'C' + ar, (!noBc && last >= first) ? 'SUM(C' + first + ':C' + last + ')' : null);
   ar += 2;
-  txt(ap, 'B' + ar, 'Accounts payable per general ledger (' + apAcct + ')'); num(ap, 'D' + ar, recon.gl); const glRow = ar; ar++;
-  txt(ap, 'B' + ar, 'Open invoices remaining per GL detail (offsets applied)'); num(ap, 'D' + ar, recon.openTotal); const openRow = ar; ar++;
-  txt(ap, 'B' + ar, 'Difference', { font: { bold: true } }); num(ap, 'D' + ar, { formula: 'D' + glRow + '-D' + openRow }, { font: { bold: true }, border: { top: THIN } }); ar += 2;
-  ap.mergeCells('B' + ar + ':E' + ar);
+  txt(ap, 'B' + ar, 'Open invoices per Bill.com A/P Detail (as of ' + short(recon.billcomAsOf || m.end) + ')');
+  if (noBc) txt(ap, 'C' + ar, 'n/a', { align: { horizontal: 'right' } }); else num(ap, 'C' + ar, recon.billcomTotal);
+  const rBc = ar; ar++;
+  txt(ap, 'B' + ar, 'Accounts payable per general ledger (' + apAcct + ') at ' + short(m.end), { font: { bold: true } });
+  num(ap, 'C' + ar, recon.gl, { font: { bold: true } }); const rGl = ar; ar++;
+  txt(ap, 'B' + ar, 'Difference (GL − Bill.com)', { font: { bold: true } });
+  if (noBc) txt(ap, 'C' + ar, 'n/a', { align: { horizontal: 'right' } });
+  else num(ap, 'C' + ar, { formula: 'C' + rGl + '-C' + rBc }, { font: { bold: true }, border: { top: THIN } });
+  ar += 2;
+  ap.mergeCells('B' + ar + ':D' + ar);
   txt(ap, 'B' + ar, noBc
-    ? ('Per Bill.com is blank because no Bill.com A/P Detail report has been uploaded, so the GL A/P is not yet independently verified. Upload the Bill.com A/P Detail (Open Items) report as of ' + short(m.end) + ' and regenerate.')
-    : ('Per Bill.com = the uploaded Bill.com A/P Detail as of ' + short(recon.billcomAsOf || m.end) + '. Per GL = open invoices remaining on account ' + apAcct + ' after offsets, which ties to the balance sheet.'),
-    { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
+    ? ('No Bill.com A/P Detail report has been uploaded, so the GL A/P of ' + fmt(recon.gl) + ' is not yet independently verified. Upload the Bill.com A/P Detail report (card under the report) as of ' + short(m.end) + ', then regenerate.')
+    : ('The GL account balance is the open A/P and ties to the balance sheet; the Bill.com A/P Detail report (next tab) is the authoritative open-invoice list. The GL is not itemized by vendor here because payments and migrated opening balances post to A/P without a vendor tag.'),
+    { font: { italic: true, color: { argb: 'FF7F7F7F' } }, align: { wrapText: true, vertical: 'top' } });
+  ap.getRow(ar).height = 44;
 
-  // 2. Bill.com AP Detail — open invoices.
+  // 2. Bill.com AP Detail — open invoices (the itemized support).
   const bc = wb.addWorksheet(reserveName('Bill.com AP Detail', used), { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
   bc.getColumn('A').width = 3.4; bc.getColumn('B').width = 40; bc.getColumn('C').width = 18; bc.getColumn('D').width = 14; bc.getColumn('E').width = 16;
   tabHead(bc, 'Bill.com A/P Detail — Open Invoices', en, 'As of ' + short(recon.billcomAsOf || m.end));
@@ -989,20 +947,8 @@ function buildApReconTabs(wb, recon, en, m, used) {
   let bcr = 6; const bcFirst = bcr;
   for (const b of (recon.billcomLines || [])) { txt(bc, 'B' + bcr, b.vendor); txt(bc, 'C' + bcr, b.invoice || ''); txt(bc, 'D' + bcr, b.date || ''); num(bc, 'E' + bcr, b.amount); bcr++; }
   const bcLast = bcr - 1;
-  if (noBc) { bc.mergeCells('B' + bcr + ':E' + bcr); txt(bc, 'B' + bcr, 'No Bill.com A/P Detail report uploaded. Export the Bill.com A/P Detail (Open Items) report as of ' + short(m.end) + ' and upload it (card under the report) to complete this reconciliation.', { font: { italic: true, color: { argb: 'FF9C4221' } } }); }
+  if (noBc) { bc.mergeCells('B' + bcr + ':E' + bcr); txt(bc, 'B' + bcr, 'No Bill.com A/P Detail report uploaded. Export the Bill.com A/P Detail report as of ' + short(m.end) + ' and upload it (card under the report) to complete this reconciliation.', { font: { italic: true, color: { argb: 'FF9C4221' } } }); }
   else { txt(bc, 'B' + bcr, 'Total open invoices per Bill.com', { font: { bold: true } }); totalCell(bc, 'E' + bcr, bcLast >= bcFirst ? 'SUM(E' + bcFirst + ':E' + bcLast + ')' : null); }
-
-  // 3. CL AP Detail — open invoices per GL (unmatched credits after offsets).
-  const cld = wb.addWorksheet(reserveName('CL AP Detail', used), { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
-  cld.getColumn('A').width = 3.4; cld.getColumn('B').width = 40; cld.getColumn('C').width = 18; cld.getColumn('D').width = 14; cld.getColumn('E').width = 10; cld.getColumn('F').width = 16;
-  tabHead(cld, 'Accounts Payable Detail per GL — Open Invoices', en, 'As of ' + short(m.end));
-  hdr(cld, 5, 2, ['Vendor', 'Invoice #', 'Bill Date', 'JE #', 'Amount']);
-  let clr = 6; const clFirst = clr;
-  for (const b of (recon.openBills || [])) { txt(cld, 'B' + clr, b.vendor); txt(cld, 'C' + clr, b.invoice || ''); txt(cld, 'D' + clr, b.date || ''); txt(cld, 'E' + clr, b.num || ''); num(cld, 'F' + clr, b.amount); clr++; }
-  const clLast = clr - 1;
-  txt(cld, 'B' + clr, 'Total open invoices per GL', { font: { bold: true } }); totalCell(cld, 'F' + clr, clLast >= clFirst ? 'SUM(F' + clFirst + ':F' + clLast + ')' : null); clr += 2;
-  cld.mergeCells('B' + clr + ':F' + clr);
-  txt(cld, 'B' + clr, 'The credits on account ' + apAcct + ' left uncancelled after the GL offset analysis. Ties to the A/P balance and to the Bill.com A/P Detail.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
 }
 
 // Equity Rollforward: prior year end → monthly activity → ending, by account.
