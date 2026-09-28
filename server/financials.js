@@ -3807,7 +3807,13 @@ async function renderStatementsPdf(s, outOffsets) {
     L.sectionTitle('Cash Flows from Operating Activities');
     L.row('Net Income (Loss)', [money(cf.netIncome)], { indent: 16, dollarPrefix: true });
     L.row('Adjustments to reconcile net income to net cash:', [], { indent: 16 });
-    if (!isZero(cf.amortization)) L.row('Amortization and depreciation', [money(cf.amortization)], { indent: 28 });
+    // County Line SRN (Sabine River & Northern Railroad, SABINERI) capitalizes
+    // depreciation, so the only D&A add-back that flows through the P&L is
+    // amortization -- label it accordingly for that entity only (Jimmy, 2026-09-28).
+    const _isSrnEntity = String(m.entityCode || '').toUpperCase() === 'SABINERI'
+      || /sabine|county\s*line\s*srn/i.test(String(m.rawEntityName || m.entityName || ''));
+    const _amortLabel = _isSrnEntity ? 'Amortization' : 'Amortization and depreciation';
+    if (!isZero(cf.amortization)) L.row(_amortLabel, [money(cf.amortization)], { indent: 28 });
     L.space(6);
     L.row('Changes in Operating Assets and Liabilities:', [], { indent: 16 });
     if (!isZero(cf.changeAR)) L.row('(Increase) decrease in accounts receivable', [money(cf.changeAR)], { indent: 28 });

@@ -571,7 +571,12 @@ function buildCashFlow(s) {
   const opFeed = [];
   opFeed.push(sh.row('Net Income (Loss)', one(cf.netIncome), { indent: 16, dollar: true }));
   sh.row('Adjustments to reconcile net income to net cash:', [], { indent: 16 });
-  if (!isZero(cf.amortization)) opFeed.push(sh.row('Amortization and depreciation', one(cf.amortization), { indent: 28 }));
+  // County Line SRN capitalizes depreciation, so only amortization flows through
+  // the P&L add-back -- label it accordingly for that entity only (Jimmy, 2026-09-28).
+  const _isSrnEntity = String(m.entityCode || '').toUpperCase() === 'SABINERI'
+    || /sabine|county\s*line\s*srn/i.test(String(m.rawEntityName || m.entityName || ''));
+  const _amortLabel = _isSrnEntity ? 'Amortization' : 'Amortization and depreciation';
+  if (!isZero(cf.amortization)) opFeed.push(sh.row(_amortLabel, one(cf.amortization), { indent: 28 }));
   sh.blank();
   sh.row('Changes in Operating Assets and Liabilities:', [], { indent: 16 });
   if (!isZero(cf.changeAR)) opFeed.push(sh.row('(Increase) decrease in accounts receivable', one(cf.changeAR), { indent: 28 }));
