@@ -365,6 +365,182 @@ function versionLines(db, versionId) {
   return db.prepare('SELECT * FROM budget_lines WHERE version_id=? ORDER BY seq').all(versionId);
 }
 
+// ── In-app editing: save an edited version ─────────────────────────────────
+// Editing a budget in CloudLedger follows the SAME model as re-uploading a
+// revised workbook: the active version is cloned, the edits are applied to the
+// clone, and the clone is stored as a NEW active version (version_no + 1). The
+// prior version is deactivated but retained as an audit trail, never
+// re-selected — exactly like saveVersion. So a prior month regenerated after an
+// edit uses the latest budget, and nothing about the monthly build changes.
+//
+// `edits` is a batch, applied as one version so a screen full of changes makes
+// ONE new version, not one per cell:
+//   { op:'update', id, label?, note?, section?, group_name?, m1..m12? }
+//   { op:'add',    after_id?, section, group_name?, label, note?, m1..m12? }  // kind 'line'
+//   { op:'delete', id }                                                       // kind 'line' only
+// Only 'line' and 'debt' rows are user-editable; structural rows (section,
+// group, subtotal, total, noi, cashflow) are never edited directly — the
+// subtotal/total/noi/cashflow AMOUNTS are RECOMPUTED from the line rows after
+// the edits so the stored version stays internally consistent (its subtotals
+// tie), the same guarantee the parser's self-check gives an uploaded workbook.
+//
+// Mapping (budget label -> GL account) is keyed by label, per entity, and lives
+// in budget_account_map independent of the version — so a label rename carries
+// its mapping across here; amount edits never touch the map.
+const MCOLS = ['m1','m2','m3','m4','m5','m6','m7','m8','m9','m10','m11','m12'];
+
+function saveEditedVersion(db, { entityId, fiscalYear, edits, who, note }) {
+  ensureSchema(db);
+  const active = activeVersion(db, entityId, fiscalYear);
+  if (!active) {
+    throw new Error('No active budget on file for ' + fiscalYear + ' to edit. Upload a budget workbook first.');
+  }
+  const editList = Array.isArray(edits) ? edits : [];
+
+  // Working copy of the active version's rows, in order.
+  const rows = versionLines(db, active.id).map(r => {
+    const o = { id: r.id, kind: r.kind, section: r.section, group_name: r.group_name, label: r.label, note: r.note };
+    for (const m of MCOLS) o[m] = Number(r[m]) || 0;
+    return o;
+  });
+  const byId = new Map(rows.map(r => [r.id, r]));
+
+  const isNum = (v) => v != null && v !== '' && isFinite(Number(v));
+  const applyAmounts = (target, e) => { for (const m of MCOLS) if (isNum(e[m])) target[m] = Number(e[m]); };
+  const renames = [];   // { oldLabel, newLabel } — mapping migrations to run after the version is written
+
+  // 1) Deletes first, so an add positioned after a deleted row still finds its anchor beforehand.
+  const deletedIds = new Set();
+  for (const e of editList) {
+    if (e.op !== 'delete') continue;
+    const row = byId.get(e.id);
+    if (!row) continue;
+    if (row.kind !== 'line') throw new Error('Only budget line items can be deleted (row "' + row.label + '" is a ' + row.kind + ').');
+    deletedIds.add(e.id);
+  }
+
+  // 2) Updates in place (before deletes are removed, so ids still resolve).
+  for (const e of editList) {
+    if (e.op !== 'update') continue;
+    const row = byId.get(e.id);
+    if (!row) throw new Error('Cannot update line ' + e.id + ' — it is not in the current budget version.');
+    if (row.kind !== 'line' && row.kind !== 'debt') {
+      throw new Error('Row "' + row.label + '" is a ' + row.kind + ' row and its amounts are computed, not edited.');
+    }
+    if (typeof e.label === 'string' && e.label.trim() && e.label.trim() !== row.label) {
+      renames.push({ oldLabel: row.label, newLabel: e.label.trim() });
+      row.label = e.label.trim();
+    }
+    if (e.note !== undefined) row.note = (e.note == null || e.note === '') ? null : String(e.note);
+    if (typeof e.section === 'string' && e.section) row.section = e.section;
+    if (e.group_name !== undefined) row.group_name = e.group_name || null;
+    applyAmounts(row, e);
+  }
+
+  // Build the ordered list with deletes removed, ready to receive adds.
+  let ordered = rows.filter(r => !deletedIds.has(r.id));
+
+  // 3) Adds. A new line is a 'line' row inserted after `after_id` when given,
+  //    otherwise after the last line of its section, otherwise at the end.
+  let addSeq = -1;
+  for (const e of editList) {
+    if (e.op !== 'add') continue;
+    const label = (e.label || '').trim();
+    if (!label) throw new Error('A new budget line needs a name.');
+    const section = e.section || 'Operating Expenses';
+    const row = { id: addSeq--, kind: 'line', section, group_name: e.group_name || null, label, note: e.note ? String(e.note) : null };
+    for (const m of MCOLS) row[m] = isNum(e[m]) ? Number(e[m]) : 0;
+    let at = -1;
+    if (e.after_id != null && !deletedIds.has(e.after_id)) {
+      at = ordered.findIndex(r => r.id === e.after_id);
+    }
+    if (at < 0) {
+      for (let i = 0; i < ordered.length; i++) {
+        if (ordered[i].kind === 'line' && ordered[i].section === section) at = i;
+      }
+    }
+    if (at < 0) ordered.push(row); else ordered.splice(at + 1, 0, row);
+    if (label) renames.push({ oldLabel: null, newLabel: label });   // seed mapping for the new label downstream
+  }
+
+  // 4) Recompute the derived rows (subtotal / total / noi / cashflow) from the
+  //    line rows so the stored version ties, exactly as an uploaded one does.
+  {
+    const zero = () => Array(12).fill(0);
+    const addTo = (dst, src) => { for (let i = 0; i < 12; i++) dst[i] += Number(src[MCOLS[i]]) || 0; };
+    const bySection = { Revenue: zero(), 'Operating Expenses': zero() };
+    const byGroup = {};
+    for (const r of ordered) {
+      if (r.kind !== 'line') continue;
+      const sec = r.section === 'Revenue' ? 'Revenue' : 'Operating Expenses';
+      addTo(bySection[sec], r);
+      if (r.group_name) { const g = norm(r.group_name); (byGroup[g] || (byGroup[g] = zero())); addTo(byGroup[g], r); }
+    }
+    const debt = zero();
+    for (const r of ordered) if (r.kind === 'debt') addTo(debt, r);
+    const setRow = (r, arr) => { for (let i = 0; i < 12; i++) r[MCOLS[i]] = Math.round(arr[i] * 100) / 100; };
+    for (const r of ordered) {
+      if (r.kind === 'subtotal') { const g = norm(String(r.label).replace(/^total\s+/i, '')); if (byGroup[g]) setRow(r, byGroup[g]); }
+      else if (r.kind === 'total') { setRow(r, /revenue/i.test(r.label) ? bySection.Revenue : bySection['Operating Expenses']); }
+      else if (r.kind === 'noi') { const a = zero(); for (let i = 0; i < 12; i++) a[i] = bySection.Revenue[i] - bySection['Operating Expenses'][i]; setRow(r, a); }
+      else if (r.kind === 'cashflow') { const a = zero(); for (let i = 0; i < 12; i++) a[i] = bySection.Revenue[i] - bySection['Operating Expenses'][i] + debt[i]; setRow(r, a); }
+    }
+  }
+
+  // 5) Write the clone as a new active version.
+  const versionNo = (active.version_no || 0) + 1;
+  const tx = db.transaction(() => {
+    db.prepare('UPDATE budget_versions SET is_active=0 WHERE entity_id=? AND fiscal_year=?').run(entityId, fiscalYear);
+    const ins = db.prepare(`
+      INSERT INTO budget_versions
+        (entity_id, fiscal_year, version_no, label, original_name, stored_filename, sheet_name, uploaded_by, is_active, note)
+      VALUES (?,?,?,?,?,?,?,?,1,?)`);
+    const r = ins.run(entityId, fiscalYear, versionNo,
+      'edited in CloudLedger', active.original_name || null, null,
+      active.sheet_name || null, who || null, note || ('Edited from v' + active.version_no));
+    const vid = r.lastInsertRowid;
+    const insL = db.prepare(`
+      INSERT INTO budget_lines
+        (version_id, seq, kind, section, group_name, label, note, m1,m2,m3,m4,m5,m6,m7,m8,m9,m10,m11,m12)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    let seq = 0;
+    for (const row of ordered) {
+      insL.run(vid, seq++, row.kind, row.section, row.group_name, row.label, row.note,
+        ...MCOLS.map(m => Number(row[m]) || 0));
+    }
+    return vid;
+  });
+  const versionId = tx();
+
+  // 6) Carry the mapping across a label rename so a renamed line keeps its GL
+  //    account(s). New labels are left for seedMap/autoMapByName in the caller.
+  for (const { oldLabel, newLabel } of renames) {
+    if (!oldLabel || !newLabel) continue;
+    const from = norm(oldLabel), to = norm(newLabel);
+    if (from === to) continue;
+    const codes = db.prepare('SELECT account_code FROM budget_account_map WHERE entity_id=? AND label_norm=?').all(entityId, from).map(r => r.account_code);
+    if (!codes.length) continue;
+    // If a mapping was already set on the new label (e.g. the user mapped the
+    // renamed line before saving), keep it — just drop the stale old-label rows.
+    const toExisting = db.prepare('SELECT COUNT(*) AS n FROM budget_account_map WHERE entity_id=? AND label_norm=?').get(entityId, to);
+    if (toExisting && toExisting.n > 0) {
+      db.prepare('DELETE FROM budget_account_map WHERE entity_id=? AND label_norm=?').run(entityId, from);
+      continue;
+    }
+    const t2 = db.transaction(() => {
+      db.prepare('DELETE FROM budget_account_map WHERE entity_id=? AND label_norm=?').run(entityId, to);
+      const insM = db.prepare('INSERT OR IGNORE INTO budget_account_map (entity_id, label_norm, label, account_code, source, created_by) VALUES (?,?,?,?,?,?)');
+      for (const c of codes) insM.run(entityId, to, newLabel, c, 'manual', who || null);
+      db.prepare('DELETE FROM budget_account_map WHERE entity_id=? AND label_norm=?').run(entityId, from);
+    });
+    t2();
+  }
+
+  const lineCount = ordered.filter(r => r.kind === 'line').length;
+  const newLabels = renames.filter(x => !x.oldLabel).map(x => x.newLabel);
+  return { versionId, versionNo, fiscalYear, lineCount, newLabels };
+}
+
 // ── Default budget-label -> GL account mapping ─────────────────────────────
 // Applied at upload time and stored. Anything here is only a STARTING POINT:
 // the stored map is what the report uses, and it is editable.
@@ -788,7 +964,7 @@ async function buildBudgetToActual(db, { entityId, asOf, entityName, balancesAt 
 
 module.exports = {
   BUDGET_FOLDER,
-  ensureSchema, parseWorkbook, saveVersion, activeVersion, listVersions, versionLines,
+  ensureSchema, parseWorkbook, saveVersion, saveEditedVersion, activeVersion, listVersions, versionLines,
   seedMap, getMap, setMap, norm, buildBudgetToActual,
   DEFAULT_MAP, NO_DEFAULT,
   _helpers: { priorMonthEnd, priorYearEnd, r2 },
