@@ -12108,6 +12108,76 @@ app.put('/api/workpapers/financial-statements/:entity_id/budget/mapping', auth, 
   }
 });
 
+// ── In-app budget editing ──────────────────────────────────────────────────
+// The active version's full line set (structural rows included so the editor
+// can render the schedule shape), each line carrying its stored monthly amounts,
+// its GL mapping, and the entity's P&L chart + the existing group names for the
+// add-line picker. Editing a budget in CL clones the active version into a new
+// one — the same model as re-uploading a revised workbook — so this GET is the
+// read side of that, and PUT below is the write.
+app.get('/api/workpapers/financial-statements/:entity_id/budget/lines', auth, requireEntityAccess('entity_id'), (req, res) => {
+  try {
+    const eid = Number(req.params.entity_id);
+    const fy = Number(req.query.fiscal_year || String(req.query.as_of || '').slice(0, 4) || new Date().getFullYear());
+    const v = budget.activeVersion(db, eid, fy);
+    if (!v) return res.json({ present: false, fiscal_year: fy, versions: budget.listVersions(db, eid) });
+    const map = budget.getMap(db, eid);
+    const mcols = ['m1','m2','m3','m4','m5','m6','m7','m8','m9','m10','m11','m12'];
+    const rows = budget.versionLines(db, v.id).map(r => {
+      const o = { id: r.id, seq: r.seq, kind: r.kind, section: r.section, group_name: r.group_name, label: r.label, note: r.note };
+      for (const m of mcols) o[m] = Number(r[m]) || 0;
+      o.editable = (r.kind === 'line' || r.kind === 'debt');
+      o.codes = (r.kind === 'line' || r.kind === 'debt') ? (map.get(budget.norm(r.label)) || []) : [];
+      return o;
+    });
+    const groups = rows.filter(r => r.kind === 'group').map(r => r.label);
+    const accounts = chartOf(eid).filter(a => a.type === 'Revenue' || a.type === 'Expense');
+    res.json({
+      present: true, fiscal_year: fy, version_no: v.version_no, version_id: v.id,
+      original_name: v.original_name, uploaded_at: v.uploaded_at,
+      rows, groups, accounts,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Apply a batch of edits (amounts / label / note / add / delete) to the active
+// version. saveEditedVersion clones the active version, applies the edits, and
+// stores the result as a NEW active version — prior version retained as an audit
+// trail, exactly like a re-upload. New line labels are then seeded into the
+// label->GL map (existing mappings, and label renames migrated inside
+// saveEditedVersion, are never overwritten).
+app.put('/api/workpapers/financial-statements/:entity_id/budget/lines', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
+  try {
+    const eid = Number(req.params.entity_id);
+    if (!budgetEligibleEntity(eid)) return res.status(400).json({ error: 'An operating budget can only be edited for rail-asset entities and Turnkey Rail.' });
+    const body = req.body || {};
+    const fy = Number(body.fiscal_year);
+    if (!fy || fy < 2000 || fy > 2100) return res.status(400).json({ error: 'A valid fiscal_year is required.' });
+    const edits = Array.isArray(body.edits) ? body.edits : [];
+    if (!edits.length) return res.status(400).json({ error: 'No edits supplied.' });
+    if (edits.length > 2000) return res.status(400).json({ error: 'Too many edits in one save.' });
+    const who = req.user ? (req.user.name || req.user.email) : 'system';
+
+    const saved = budget.saveEditedVersion(db, { entityId: eid, fiscalYear: fy, edits, who, note: body.note || null });
+
+    // Seed the label -> account map for any brand-new line label, against the
+    // current chart. Existing mappings are never overwritten.
+    let seeded = { added: [], unmapped: [] };
+    if (saved.newLabels && saved.newLabels.length) {
+      seeded = budget.seedMap(db, eid, saved.newLabels, chartOf(eid), who);
+    }
+    res.json({
+      ok: true, fiscal_year: saved.fiscalYear, version_no: saved.versionNo,
+      line_count: saved.lineCount,
+      mapping: { seeded: seeded.added.length, unmapped: seeded.unmapped },
+    });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
 // The Budget-to-Actual schedule as JSON — drives the on-screen preview, and is
 // the same data the PDF renders.
 app.get('/api/workpapers/financial-statements/:entity_id/budget/preview', auth, requireEntityAccess('entity_id'), async (req, res) => {

@@ -853,6 +853,47 @@ export const api = {
     if (!res.ok) throw new Error(data.error || 'Budget-to-Actual preview failed');
     return data;
   },
+  // In-app budget editing. budgetLinesGet returns the active version's rows
+  // (with monthly amounts, GL mapping and the chart) for the editor;
+  // budgetLinesSave applies a batch of edits, which clones the active version
+  // into a new one server-side (same model as re-uploading a revised workbook).
+  budgetLinesGet: async (eid, fiscalYear) => {
+    const token = getToken();
+    const qs = 'fiscal_year=' + encodeURIComponent(fiscalYear);
+    const res = await fetch(API_BASE + '/workpapers/financial-statements/' + eid + '/budget/lines?' + qs, {
+      method: 'GET', headers: token ? { Authorization: 'Bearer ' + token } : {},
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Could not load budget lines');
+    return data;
+  },
+  budgetLinesSave: async (eid, fiscalYear, edits, note) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/financial-statements/' + eid + '/budget/lines', {
+      method: 'PUT',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
+      body: JSON.stringify({ fiscal_year: fiscalYear, edits, note: note || undefined }),
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Budget save failed');
+    return data;
+  },
+  // Set (replace) the GL account mapping for a single budget label. Mapping is
+  // per-entity and version-independent, so this persists immediately.
+  budgetMappingSet: async (eid, label, codes) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/financial-statements/' + eid + '/budget/mapping', {
+      method: 'PUT',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
+      body: JSON.stringify({ label, codes }),
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Mapping update failed');
+    return data;
+  },
   financialStatementsWipStatus: async (eid, asOf) => {
     const token = getToken();
     const qs = 'as_of=' + encodeURIComponent(asOf);

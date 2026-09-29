@@ -1011,7 +1011,7 @@ export default function App(){
         {page==='trial'&&activeEntity&&<TrialBalance entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} isClrf={_activeEnt?.code==='COUNTYLI1'} key={activeEntity+'-'+rk} asOf={tbAsOf} setAsOf={setTbAsOf} canEdit={canEdit}/>}
         {page==='bs'&&activeEntity&&<BalanceSheet entityId={activeEntity} entityName={entityName} asOf={bsAsOf} setAsOf={setBsAsOf} canEdit={canEdit}/>}
         {page==='is'&&activeEntity&&<IncomeStatement entityId={activeEntity} entityName={entityName} from={isFrom} setFrom={setIsFrom} to={isTo} setTo={setIsTo} canEdit={canEdit}/>}
-        {page==='b2a'&&activeEntity&&<BudgetToActualReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
+        {page==='b2a'&&activeEntity&&<BudgetToActualReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='customdetail'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='pivot'&&activeEntity&&dimsEnabled&&<PivotReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='pivot'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='ic_recon'&&canAccess('intercompany')&&<IntercompanyReconciliation entities={entities} activeEntity={activeEntity} setPage={setPage} key={'icr-'+rk}/>}
@@ -4711,6 +4711,186 @@ function isPnlPrior(filter,win,anchor){
   return rptPriorWindow(win);
 }
 const IS_DATE_FILTERS=[['ytd','Year to Date'],['month','Last Month'],['quarter','Last Quarter'],['year','Last Year'],['custom','Custom']];
+// ═══ Budget editor ═══
+// Edit the operating budget inside CloudLedger instead of round-tripping through
+// Excel. The monthly amounts, line names and GL mappings are all editable here.
+// Amount / name / add / delete edits are staged locally and committed as ONE new
+// budget version on Save — the same versioning model as re-uploading a revised
+// workbook (the prior version is retained as an audit trail; every regenerated
+// month, prior ones included, uses the latest). GL mappings are per-entity and
+// version-independent, so a mapping change persists immediately.
+const B_MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const B_MCOLS=['m1','m2','m3','m4','m5','m6','m7','m8','m9','m10','m11','m12'];
+
+function BudgetMappingPicker({entityId,label,codes,accounts,onSaved,onClose}){
+  const[sel,setSel]=useState(()=>new Set((codes||[]).map(String)));
+  const[q,setQ]=useState('');
+  const[busy,setBusy]=useState(false);const[err,setErr]=useState('');
+  const filtered=useMemo(()=>{const s=q.trim().toLowerCase();return (accounts||[]).filter(a=>!s||String(a.code).includes(s)||String(a.name||'').toLowerCase().includes(s));},[accounts,q]);
+  const toggle=(c)=>{setSel(prev=>{const n=new Set(prev);n.has(c)?n.delete(c):n.add(c);return n;});};
+  const save=async()=>{setBusy(true);setErr('');try{const arr=Array.from(sel);await api.budgetMappingSet(entityId,label,arr);onSaved&&onSaved(arr);}catch(e){setErr(e.message);setBusy(false);}};
+  return(<div style={S.modal} onClick={onClose}><div style={{...S.modalBox,width:'min(520px,94vw)',padding:20}} onClick={e=>e.stopPropagation()}>
+    <button style={S.modalClose} onClick={onClose}>&times;</button>
+    <div style={{fontSize:16,fontWeight:700,color:T.textBright,marginBottom:2}}>Map “{label}”</div>
+    <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Pick the GL account(s) whose actual activity this budget line is compared against. Saved immediately.</div>
+    <input placeholder="Search code or name…" value={q} onChange={e=>setQ(e.target.value)} style={{...S.input,marginBottom:8}}/>
+    <div style={{maxHeight:'42vh',overflowY:'auto',border:'1px solid '+T.border,borderRadius:T.radiusSm}}>
+      {filtered.length===0&&<div style={{padding:12,fontSize:12,color:T.textMuted}}>No matching accounts.</div>}
+      {filtered.map(a=>{const c=String(a.code);const on=sel.has(c);return(
+        <label key={c} style={{display:'flex',alignItems:'center',gap:8,padding:'7px 10px',borderBottom:'1px solid '+T.borderLight,cursor:'pointer',background:on?T.accent+'14':'transparent',fontSize:13}}>
+          <input type="checkbox" checked={on} onChange={()=>toggle(c)}/>
+          <span style={{color:T.textBright,fontWeight:600,minWidth:56}}>{c}</span>
+          <span style={{color:T.textMuted}}>{a.name}</span>
+          <span style={{marginLeft:'auto',fontSize:11,color:T.textDim}}>{a.type}</span>
+        </label>);})}
+    </div>
+    {err&&<div style={{marginTop:8,fontSize:12,color:T.red}}>{err}</div>}
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:14}}>
+      <div style={{fontSize:12,color:T.textMuted}}>{sel.size} account{sel.size===1?'':'s'} selected</div>
+      <div style={{display:'flex',gap:8}}>
+        <button style={S.btnS} onClick={onClose} disabled={busy}>Cancel</button>
+        <button style={S.btnP} onClick={save} disabled={busy}>{busy?'Saving…':'Save mapping'}</button>
+      </div>
+    </div>
+  </div></div>);
+}
+
+function BudgetEditor({entityId,entityName,fiscalYear,onClose,onSaved}){
+  const[loading,setLoading]=useState(true);const[err,setErr]=useState('');
+  const[meta,setMeta]=useState(null);       // {version_no, groups, accounts}
+  const[rows,setRows]=useState([]);          // working copy
+  const[saving,setSaving]=useState(false);const[msg,setMsg]=useState('');
+  const[mapRow,setMapRow]=useState(null);    // index of row whose mapping is being edited
+  const tmpId=useRef(-1);
+
+  useEffect(()=>{let ok=true;setLoading(true);setErr('');
+    api.budgetLinesGet(entityId,fiscalYear).then(d=>{if(!ok)return;
+      if(!d||!d.present){setErr('No operating budget is on file for '+fiscalYear+'. Upload one under Financial Statements first, then edit it here.');setLoading(false);return;}
+      const wr=(d.rows||[]).map(r=>({...r,codes:(r.codes||[]).map(String),_amt:B_MCOLS.reduce((o,m)=>{o[m]=String(r[m]||0);return o;},{})}));
+      setRows(wr);setMeta({version_no:d.version_no,groups:d.groups||[],accounts:d.accounts||[]});setLoading(false);
+    }).catch(e=>{if(ok){setErr(e.message);setLoading(false);}});
+    return()=>{ok=false;};},[entityId,fiscalYear]);
+
+  const accByCode=useMemo(()=>{const m={};(meta&&meta.accounts||[]).forEach(a=>{m[String(a.code)]=a;});return m;},[meta]);
+  const setAmt=(i,m,v)=>{if(v!==''&&!/^-?\d*\.?\d*$/.test(v))return;setRows(rs=>rs.map((r,idx)=>idx===i?{...r,_amt:{...r._amt,[m]:v},_dirty:true}:r));};
+  const setLabel=(i,v)=>setRows(rs=>rs.map((r,idx)=>idx===i?{...r,label:v,_dirty:true}:r));
+  const setField=(i,k,v)=>setRows(rs=>rs.map((r,idx)=>idx===i?{...r,[k]:v,_dirty:true}:r));
+  const toggleDel=(i)=>setRows(rs=>rs.map((r,idx)=>idx===i?{...r,_del:!r._del}:r));
+  const annual=(r)=>B_MCOLS.reduce((s,m)=>s+(Number(r._amt[m])||0),0);
+  const addLine=()=>{const id=tmpId.current--;const grp=(meta&&meta.groups[0])||'';
+    setRows(rs=>[...rs,{id,kind:'line',section:'Operating Expenses',group_name:grp,label:'',note:null,editable:true,_new:true,_dirty:true,codes:[],_amt:B_MCOLS.reduce((o,m)=>{o[m]='0';return o;},{})}]);};
+  const onMapped=(i,arr)=>{setRows(rs=>rs.map((r,idx)=>idx===i?{...r,codes:arr.map(String)}:r));setMapRow(null);};
+
+  const dirtyCount=rows.filter(r=>r._new||r._del||(r.editable&&r._dirty)).length;
+
+  const save=async()=>{setSaving(true);setErr('');setMsg('');
+    try{
+      const edits=[];
+      for(const r of rows){
+        if(r._new){
+          if(!(r.label||'').trim())throw new Error('Every new line needs a name — fill it in or remove the blank row.');
+          const e={op:'add',section:r.section,group_name:r.group_name||null,label:r.label.trim()};
+          B_MCOLS.forEach(m=>{e[m]=Number(r._amt[m])||0;});edits.push(e);
+        }else if(r._del){edits.push({op:'delete',id:r.id});}
+        else if(r.editable&&r._dirty){
+          const e={op:'update',id:r.id,label:r.label};
+          B_MCOLS.forEach(m=>{e[m]=Number(r._amt[m])||0;});edits.push(e);
+        }
+      }
+      if(!edits.length){setSaving(false);setMsg('No changes to save.');return;}
+      const out=await api.budgetLinesSave(entityId,fiscalYear,edits);
+      setSaving(false);onSaved&&onSaved(out);
+    }catch(e){setSaving(false);setErr(e.message);}
+  };
+
+  const cell={padding:'2px 3px',borderBottom:'1px solid '+T.borderLight};
+  const amtInput={width:62,textAlign:'right',fontSize:12,padding:'3px 4px',border:'1px solid '+T.border,borderRadius:4,background:T.bgInput||T.bg,color:T.textBright};
+  const stickyL={position:'sticky',left:0,zIndex:1,background:T.bgCard||T.bg,minWidth:180,maxWidth:220};
+
+  return(<div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.55)',zIndex:1000,display:'flex',flexDirection:'column'}} onClick={onClose}>
+    <div style={{background:T.bg,margin:'2vh auto',width:'96vw',maxWidth:1400,height:'96vh',borderRadius:10,display:'flex',flexDirection:'column',overflow:'hidden',border:'1px solid '+T.border}} onClick={e=>e.stopPropagation()}>
+      <div style={{padding:'14px 18px',borderBottom:'1px solid '+T.border,display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:10}}>
+        <div>
+          <div style={{fontSize:17,fontWeight:700,color:T.textBright}}>Edit operating budget — {fiscalYear}</div>
+          <div style={{fontSize:12,color:T.textMuted}}>{entityName}{meta?(' · currently version '+meta.version_no):''} · Saving writes a new version; prior versions are kept.</div>
+        </div>
+        <div style={{display:'flex',gap:8,alignItems:'center'}}>
+          <button style={S.btnS} onClick={onClose} disabled={saving}>Cancel</button>
+          <button style={S.btnP} onClick={save} disabled={saving||loading||!!err&&!rows.length}>{saving?'Saving…':('Save budget'+(dirtyCount?(' ('+dirtyCount+')'):''))}</button>
+        </div>
+      </div>
+      {loading&&<div style={{padding:30,textAlign:'center',color:T.textMuted}}>Loading budget…</div>}
+      {err&&!rows.length&&<div style={{padding:20}}><div style={{padding:16,background:T.red+'12',border:'1px solid '+T.red+'40',borderRadius:8,color:T.red,fontSize:13}}>{err}</div></div>}
+      {!loading&&rows.length>0&&<>
+        {err&&<div style={{margin:'10px 18px 0',padding:'8px 12px',background:T.red+'12',border:'1px solid '+T.red+'40',borderRadius:6,color:T.red,fontSize:12}}>{err}</div>}
+        {msg&&<div style={{margin:'10px 18px 0',fontSize:12,color:T.textMuted}}>{msg}</div>}
+        <div style={{flex:1,overflow:'auto',padding:'8px 12px'}}>
+          <table style={{borderCollapse:'collapse',fontSize:12,width:'max-content',minWidth:'100%'}}>
+            <thead><tr style={{position:'sticky',top:0,zIndex:2,background:T.bgCard||T.bg}}>
+              <th style={{...cell,...stickyL,textAlign:'left',padding:'6px 8px',color:T.textMuted,fontWeight:600}}>Line</th>
+              {B_MONTHS.map(m=><th key={m} style={{...cell,textAlign:'right',padding:'6px 6px',color:T.textMuted,fontWeight:600,minWidth:62}}>{m}</th>)}
+              <th style={{...cell,textAlign:'right',padding:'6px 8px',color:T.textMuted,fontWeight:600,minWidth:84}}>Annual</th>
+              <th style={{...cell,textAlign:'left',padding:'6px 8px',color:T.textMuted,fontWeight:600,minWidth:150}}>GL mapping</th>
+              <th style={{...cell,padding:'6px 6px'}}></th>
+            </tr></thead>
+            <tbody>
+              {rows.map((r,i)=>{
+                if(r.kind==='section')return <tr key={i}><td colSpan={16} style={{padding:'8px 8px 2px',fontWeight:700,color:T.textBright,fontSize:13,textTransform:'uppercase',letterSpacing:0.4}}>{r.label}</td></tr>;
+                if(r.kind==='group')return <tr key={i}><td colSpan={16} style={{padding:'6px 8px 2px 16px',fontWeight:600,color:T.textBright}}>{r.label}</td></tr>;
+                if(r.kind==='subtotal'||r.kind==='total'||r.kind==='noi'||r.kind==='cashflow'){
+                  return <tr key={i} style={{background:T.bgElevated}}>
+                    <td style={{...cell,...stickyL,padding:'5px 8px',fontWeight:600,color:T.textMuted,fontStyle:'italic'}}>{r.label}</td>
+                    {B_MCOLS.map(m=><td key={m} style={{...cell,textAlign:'right',padding:'5px 6px',color:T.textDim}}>{fmt(Number(r[m])||0)}</td>)}
+                    <td style={{...cell,textAlign:'right',padding:'5px 8px',color:T.textDim,fontWeight:600}}>{fmt(annual(r))}</td>
+                    <td style={cell} colSpan={2}><span style={{fontSize:11,color:T.textDim,paddingLeft:6}}>computed</span></td>
+                  </tr>;
+                }
+                // editable line / debt row
+                const isDebt=r.kind==='debt';
+                return <tr key={i} style={r._del?{opacity:0.45,textDecoration:'line-through'}:undefined}>
+                  <td style={{...cell,...stickyL,padding:'3px 6px'}}>
+                    {r._new?(
+                      <div style={{display:'flex',flexDirection:'column',gap:3}}>
+                        <input value={r.label} placeholder="New line name" onChange={e=>setLabel(i,e.target.value)} style={{...amtInput,width:'100%',textAlign:'left'}}/>
+                        <div style={{display:'flex',gap:3}}>
+                          <select value={r.section} onChange={e=>setField(i,'section',e.target.value)} style={{fontSize:11,padding:'2px',flex:1,border:'1px solid '+T.border,borderRadius:4,background:T.bg,color:T.textBright}}>
+                            <option value="Operating Expenses">Op Ex</option><option value="Revenue">Revenue</option>
+                          </select>
+                          <select value={r.group_name||''} onChange={e=>setField(i,'group_name',e.target.value)} style={{fontSize:11,padding:'2px',flex:2,border:'1px solid '+T.border,borderRadius:4,background:T.bg,color:T.textBright}}>
+                            <option value="">(no group)</option>
+                            {(meta&&meta.groups||[]).map(g=><option key={g} value={g}>{g}</option>)}
+                          </select>
+                        </div>
+                      </div>
+                    ):(
+                      <input value={r.label} onChange={e=>setLabel(i,e.target.value)} disabled={isDebt} title={isDebt?'Projected Debt Service':''} style={{...amtInput,width:'100%',textAlign:'left',color:isDebt?T.textMuted:T.textBright,border:'1px solid transparent',background:'transparent'}}/>
+                    )}
+                  </td>
+                  {B_MCOLS.map(m=><td key={m} style={{...cell,padding:'2px 3px'}}><input value={r._amt[m]} onChange={e=>setAmt(i,m,e.target.value)} disabled={r._del} style={amtInput} inputMode="decimal"/></td>)}
+                  <td style={{...cell,textAlign:'right',padding:'3px 8px',color:T.textBright,fontWeight:600}}>{fmt(annual(r))}</td>
+                  <td style={{...cell,padding:'3px 6px'}}>
+                    <button onClick={()=>setMapRow(i)} style={{fontSize:11,padding:'3px 8px',border:'1px solid '+T.border,borderRadius:4,background:T.bg,color:r.codes.length?T.textBright:T.orange,cursor:'pointer',maxWidth:150,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={r.codes.map(c=>c+(accByCode[c]?' '+accByCode[c].name:'')).join(', ')||'Unmapped'}>
+                      {r.codes.length?r.codes.join(', '):'⚠ map…'}
+                    </button>
+                  </td>
+                  <td style={{...cell,padding:'3px 6px',textAlign:'center'}}>
+                    {!isDebt&&<button onClick={()=>{if(r._new){setRows(rs=>rs.filter((_,idx)=>idx!==i));}else{toggleDel(i);}}} title={r._del?'Restore':'Delete line'} style={{fontSize:13,border:'none',background:'transparent',cursor:'pointer',color:r._del?T.green:T.red}}>{r._del?'↺':'🗑'}</button>}
+                  </td>
+                </tr>;
+              })}
+            </tbody>
+          </table>
+          <div style={{marginTop:10}}><button style={S.btnS} onClick={addLine}>+ Add line</button></div>
+          <div style={{marginTop:10,fontSize:11,color:T.textDim,maxWidth:760,lineHeight:1.5}}>
+            Subtotals, totals, Net Operating Income and Cash Flow are recomputed from the lines on save — you edit the lines, CloudLedger re-adds the schedule. Renaming a line carries its GL mapping with it. Interest Expense (Projected Debt Service) amounts are editable; its label is fixed.
+          </div>
+        </div>
+      </>}
+    </div>
+    {mapRow!=null&&rows[mapRow]&&<BudgetMappingPicker entityId={entityId} label={rows[mapRow].label} codes={rows[mapRow].codes} accounts={(meta&&meta.accounts)||[]} onSaved={arr=>onMapped(mapRow,arr)} onClose={()=>setMapRow(null)}/>}
+  </div>);
+}
+
 // ═══ Operating Budget to Actual ═══
 // Standalone Reports view of the same schedule the monthly package appends
 // (server/budget.js buildBudgetToActual → the "Profit and Loss - Actual vs
@@ -4721,12 +4901,13 @@ const IS_DATE_FILTERS=[['ytd','Year to Date'],['month','Last Month'],['quarter',
 // writes every computed cell as a live formula (variances on every row,
 // subtotals via SUM, and the NOI / cash-flow / net-income rows via
 // cross-references), with cached values so the sheet reads before recalc.
-function BudgetToActualReport({entityId,entityName}){
+function BudgetToActualReport({entityId,entityName,canEdit=false,budgetEligible=false}){
   // Default to the most recently completed month-end.
   const defAsOf=useMemo(()=>{const d=new Date();d.setDate(1);d.setDate(0);return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');},[]);
   const[asOf,setAsOf]=useState(defAsOf);
   const[data,setData]=useState(null);const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
   const[rk,setRk]=useState(0);
+  const[editing,setEditing]=useState(false);   // budget editor open
   // Account name/type by code, so a drill-down can hand the modal a full acct.
   const[acctMap,setAcctMap]=useState({});
   useEffect(()=>{let ok=true;api.getAccounts(entityId).then(as=>{if(ok){const m={};(as||[]).forEach(a=>{m[String(a.code)]={code:String(a.code),name:a.name,type:a.type};});setAcctMap(m);}}).catch(()=>{});return()=>{ok=false;};},[entityId]);
@@ -4882,8 +5063,12 @@ function BudgetToActualReport({entityId,entityName}){
       <div style={{display:'flex',gap:16,alignItems:'flex-end',flexWrap:'wrap'}}>
         <div><label style={S.label}>Period end</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
       </div>
-      <div style={{display:'flex',gap:8,alignItems:'center'}}>{present&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div>
+      <div style={{display:'flex',gap:8,alignItems:'center'}}>
+        {budgetEligible&&canEdit&&present&&<button style={S.btnS} onClick={()=>setEditing(true)}>✏️ Edit budget</button>}
+        {present&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}
+      </div>
     </div></div>
+    {editing&&<BudgetEditor entityId={entityId} entityName={entityName} fiscalYear={Number(String(asOf).slice(0,4))} onClose={()=>setEditing(false)} onSaved={()=>{setEditing(false);setRk(k=>k+1);}}/>}
     <div style={S.reportHeader}>{entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}<div style={{fontSize:20,fontWeight:700,color:T.textBright}}>Profit and Loss - Actual vs Budget</div><div style={{fontSize:13,color:T.textMuted}}>{monthsEnded}</div></div>
     {loading&&<div style={{padding:24,textAlign:'center',color:T.textMuted}}>Loading…</div>}
     {err&&!loading&&<div style={{padding:16,background:T.red+'12',border:'1px solid '+T.red+'40',borderRadius:8,color:T.red,fontSize:13}}>{err}</div>}
