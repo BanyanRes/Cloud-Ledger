@@ -5732,7 +5732,7 @@ function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true,quarterly=fa
     {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
     {result&&<div style={{marginTop:16,padding:'12px 14px',background:T.bgAlt||'#f6f8fa',borderRadius:8,border:'1px solid '+T.border}}>
       <div style={{fontSize:13,fontWeight:700,color:T.textBright,marginBottom:6}}>{result.month_name||result.month} \u2014 generated</div>
-      <div style={{fontSize:12,color:T.textMuted}}>Filed to {result.saved_to||'Workpapers'}{result.replaced?' (replaced the prior copy)':''}. {result.accounts||0} balance-sheet accounts.</div>
+      <div style={{fontSize:12,color:T.textMuted}}>Downloaded {result.workbooks||0} section workbook{result.workbooks===1?'':'s'} (one per leadsheet, zipped). {result.accounts||0} balance-sheet accounts.</div>
       <div style={{fontSize:12,marginTop:6,fontWeight:600,color:(result.exceptions?T.orange:'#1E7A34')}}>{result.exceptions?((result.exceptions)+' discrepanc'+(result.exceptions>1?'ies':'y')+' between the GL and the supporting schedules \u2014 see the Summary tab'):'\u2713 Every supporting schedule agrees to the general ledger.'}</div>
     </div>}
   </div>

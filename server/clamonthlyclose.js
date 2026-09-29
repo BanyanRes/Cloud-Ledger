@@ -232,6 +232,15 @@ const CATS = [
   { key: 'otherliab', tab: 'Other Liabilities Leadsheet', lead: 'OTHER LIABILITIES LEADSHEET', total: 'Total Other Liabilities', type: 'Liability', label: 'Other Liabilities', sched: 'Other Liabilities Schedule' },
   { key: 'equity', tab: 'Equity Leadsheet', lead: 'EQUITY LEADSHEET', total: 'Total Equity', type: 'Equity', label: 'Equity' },
 ];
+
+// Per-section export filenames (CLA numbering) for the split workbooks.
+const SECTION_FILE = {
+  summary: '00_Summary', cash: '01_Cash_and_Cash_Equivalents', invest: '02_Investment_Leadsheet',
+  ar: '03_Accounts_Receivable_Leadsheet', prepaid: '05_Prepaid_Expenses_Leadsheet',
+  otherassets: '06_Other_Assets_Leadsheet', fixed: '07_Fixed_Asset_Leadsheet',
+  ap: '08_Accounts_Payable_Leadsheet', cc: '10_Credit_Cards_Leadsheet',
+  otherliab: '11_Other_Liabilities_Leadsheet', debt: '12_Debt_Leadsheet', equity: '15_Equity_Rollforward',
+};
 const catOf = (key) => CATS.find((c) => c.key === key);
 
 // Split fixed-asset accounts into asset vs accumulated-depreciation and pair them,
@@ -1302,76 +1311,82 @@ function buildSummary(su, en, m, data) {
 function buildWorkbook(data) {
   const { entity, month: m, byCat } = data;
   const en = entity.name;
-  const wb = new ExcelJS.Workbook();
-  wb.creator = 'CloudLedger'; wb.created = new Date();
-  const su = wb.addWorksheet('Summary', { views: [{ showGridLines: false }] });
-  const used = new Set(['summary']);
-  for (const cd of CATS) used.add(cd.tab.toLowerCase());
-  const catTie = {}; const leadCell = new Map();
-  const newLead = (cd) => wb.addWorksheet(cd.tab, { views: [{ showGridLines: false }] });
+  const out = [];               // one self-contained workbook per section
+  const LC = new Map();         // leadCell sink (no cross-workbook references exist)
+  const mkWb = () => { const w = new ExcelJS.Workbook(); w.creator = 'CloudLedger'; w.created = new Date(); return w; };
+  const usedFor = (cd) => new Set([cd.tab.toLowerCase()]);
+  const lead = (w, cd) => w.addWorksheet(cd.tab, { views: [{ showGridLines: false }] });
+
+  { const wb = mkWb(); const su = wb.addWorksheet('Summary', { views: [{ showGridLines: false }] }); buildSummary(su, en, m, data); out.push({ file: SECTION_FILE.summary, wb }); }
 
   if ((byCat.cash || []).length) {
-    const cd = catOf('cash'); const ws = newLead(cd); const refs = new Map();
+    const wb = mkWb(), cd = catOf('cash'), used = usedFor(cd), ws = lead(wb, cd), refs = new Map();
     for (const a of byCat.cash) refs.set(String(a.code), buildCashRecTab(wb, a, en, m, used, cd.tab));
-    catTie.cash = cashLeadsheet(ws, cd, en, m, byCat.cash, refs, leadCell);
+    cashLeadsheet(ws, cd, en, m, byCat.cash, refs, LC);
+    out.push({ file: SECTION_FILE.cash, wb });
   }
   if ((byCat.ar || []).length) {
-    const cd = catOf('ar'); const ws = newLead(cd); const refs = new Map();
+    const wb = mkWb(), cd = catOf('ar'), used = usedFor(cd), ws = lead(wb, cd), refs = new Map();
     const t = buildArTabs(wb, data, en, m, used, cd.tab);
     const others = byCat.ar.filter((a) => !data.arPrimary || String(a.code) !== String(data.arPrimary.code));
     if (data.arPrimary) refs.set(String(data.arPrimary.code), { sheet: t.agingTab, endRef: t.totalRef });
     if (others.length) { const ag = wb.getWorksheet(t.agingTab); const rb = rollBlock(ag, ag.rowCount + 3, 'Other receivable accounts (per general ledger)', others, m, t.agingTab); for (const [k, v] of rb.refs) refs.set(k, v); }
-    catTie.ar = simpleLeadsheet(ws, cd, en, m, byCat.ar, refs, leadCell);
+    simpleLeadsheet(ws, cd, en, m, byCat.ar, refs, LC);
+    out.push({ file: SECTION_FILE.ar, wb });
   }
   if ((byCat.prepaid || []).length) {
-    const cd = catOf('prepaid'); const ws = newLead(cd); const refs = new Map();
+    const wb = mkWb(), cd = catOf('prepaid'), used = usedFor(cd), ws = lead(wb, cd), refs = new Map();
     for (const a of byCat.prepaid) refs.set(String(a.code), buildPrepaidTab(wb, a, data.prepaidByAcct.get(String(a.code)) || [], en, m, used, cd.tab));
-    catTie.prepaid = simpleLeadsheet(ws, cd, en, m, byCat.prepaid, refs, leadCell);
+    simpleLeadsheet(ws, cd, en, m, byCat.prepaid, refs, LC);
+    out.push({ file: SECTION_FILE.prepaid, wb });
   }
   if ((byCat.fixed || []).length) {
-    const cd = catOf('fixed'); const ws = newLead(cd);
+    const wb = mkWb(), cd = catOf('fixed'), used = usedFor(cd), ws = lead(wb, cd);
     const fa = buildFixedSchedule(wb, data, en, m, used, cd.tab);
-    catTie.fixed = fixedLeadsheet(ws, cd, en, m, data.fixedPairs, fa.refs, fa.tab, leadCell);
+    fixedLeadsheet(ws, cd, en, m, data.fixedPairs, fa.refs, fa.tab, LC);
+    out.push({ file: SECTION_FILE.fixed, wb });
   }
-  // Other Assets is an account × project matrix (no roll-forward schedule);
-  // Investments keeps the roll-forward schedule.
   if ((byCat.otherassets || []).length) {
-    const cd = catOf('otherassets'); const ws = newLead(cd);
-    catTie.otherassets = otherAssetsLeadsheet(wb, ws, cd, en, m, byCat.otherassets, data.oaActivity, used, leadCell);
+    const wb = mkWb(), cd = catOf('otherassets'), used = usedFor(cd), ws = lead(wb, cd);
+    otherAssetsLeadsheet(wb, ws, cd, en, m, byCat.otherassets, data.oaActivity, used, LC);
+    out.push({ file: SECTION_FILE.otherassets, wb });
   }
   if ((byCat.invest || []).length) {
-    const cd = catOf('invest'); const ws = newLead(cd);
-    catTie.invest = otherAssetsLeadsheet(wb, ws, cd, en, m, byCat.invest, data.oaActivity, used, leadCell);
+    const wb = mkWb(), cd = catOf('invest'), used = usedFor(cd), ws = lead(wb, cd);
+    otherAssetsLeadsheet(wb, ws, cd, en, m, byCat.invest, data.oaActivity, used, LC);
+    out.push({ file: SECTION_FILE.invest, wb });
   }
   if ((byCat.ap || []).length) {
-    const cd = catOf('ap'); const ws = newLead(cd); const refs = new Map();
+    const wb = mkWb(), cd = catOf('ap'), used = usedFor(cd), ws = lead(wb, cd), refs = new Map();
     const t = buildApTabs(wb, data, en, m, used, cd.tab);
     const others = byCat.ap.filter((a) => !data.apPrimary || String(a.code) !== String(data.apPrimary.code));
     if (data.apPrimary) refs.set(String(data.apPrimary.code), { sheet: t.agingTab, endRef: t.totalRef });
     if (others.length) { const ag = wb.getWorksheet(t.agingTab); const rb = rollBlock(ag, ag.rowCount + 3, 'Accrued and other payable accounts (per general ledger)', others, m, t.agingTab); for (const [k, v] of rb.refs) refs.set(k, v); }
-    catTie.ap = simpleLeadsheet(ws, cd, en, m, byCat.ap, refs, leadCell);
-    // Bill.com-to-GL AP Recon (4 tabs) alongside the AP Aging + AP Summary.
+    simpleLeadsheet(ws, cd, en, m, byCat.ap, refs, LC);
     if (data.apRecon) buildApReconTabs(wb, data.apRecon, en, m, used);
+    out.push({ file: SECTION_FILE.ap, wb });
   }
   if ((byCat.cc || []).length) {
-    const cd = catOf('cc'); const ws = newLead(cd); const refs = new Map();
+    const wb = mkWb(), cd = catOf('cc'), used = usedFor(cd), ws = lead(wb, cd), refs = new Map();
     for (const a of byCat.cc) refs.set(String(a.code), buildCcRecTab(wb, a, en, m, used, cd.tab));
-    catTie.cc = ccLeadsheet(ws, cd, en, m, byCat.cc, refs, leadCell);
+    ccLeadsheet(ws, cd, en, m, byCat.cc, refs, LC);
+    out.push({ file: SECTION_FILE.cc, wb });
   }
   for (const key of ['debt', 'otherliab']) {
     const rows = byCat[key] || []; if (!rows.length) continue;
-    const cd = catOf(key); const ws = newLead(cd);
+    const wb = mkWb(), cd = catOf(key), used = usedFor(cd), ws = lead(wb, cd);
     const sc = buildCategorySchedule(wb, cd, rows, en, m, used, cd.tab);
-    catTie[key] = simpleLeadsheet(ws, cd, en, m, rows, sc.refs, leadCell);
+    simpleLeadsheet(ws, cd, en, m, rows, sc.refs, LC);
+    out.push({ file: SECTION_FILE[key], wb });
   }
-  const niVal = r2((data.ni.end.revenue.reduce((a, x) => a + (x.amt || 0), 0)) - (data.ni.end.expense.reduce((a, x) => a + (x.amt || 0), 0)));
   if ((byCat.equity || []).length) {
-    const cd = catOf('equity'); const ws = newLead(cd);
+    const niVal = r2((data.ni.end.revenue.reduce((a, x) => a + (x.amt || 0), 0)) - (data.ni.end.expense.reduce((a, x) => a + (x.amt || 0), 0)));
+    const wb = mkWb(), cd = catOf('equity'), used = usedFor(cd), ws = lead(wb, cd);
     const eq = buildEquityRollforward(wb, byCat.equity, data, en, m, used, cd.tab, niVal);
-    catTie.equity = simpleLeadsheet(ws, cd, en, m, byCat.equity, eq.refs, leadCell);
+    simpleLeadsheet(ws, cd, en, m, byCat.equity, eq.refs, LC);
+    out.push({ file: SECTION_FILE.equity, wb });
   }
-  buildSummary(su, en, m, data);
-  return wb;
+  return out;
 }
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
@@ -1423,6 +1438,13 @@ function saveToWorkpapers(ctx, eid, m, buf, who, dispId) {
 function registerClaMonthlyCloseRoutes(app, ctx) {
   const { db, auth, requireEntityAccess, requireRole } = ctx;
   ensureRegisterSchema(db);
+  // Closing workpapers are export-only now (downloaded as a per-section zip) and are
+  // no longer saved into the CL workpaper folder; remove any previously-saved copies.
+  try {
+    const oldFiles = db.prepare("SELECT id, entity_id, stored_filename FROM entity_files WHERE folder_path LIKE 'Workpapers/%Closing Workpapers%'").all();
+    for (const rf of oldFiles) { try { fs.unlinkSync(path.join(ctx.workpapersDir, String(rf.entity_id), rf.stored_filename)); } catch (e) { /* gone */ } db.prepare('DELETE FROM entity_files WHERE id = ?').run(rf.id); }
+    if (oldFiles.length) console.log('[cla-close] removed ' + oldFiles.length + ' previously-saved closing workpaper file(s) from the workpaper folder');
+  } catch (e) { /* non-fatal */ }
 
   app.post('/api/workpapers/cla-monthly-close/:entity_id/generate', auth, requireEntityAccess('entity_id'),
     requireRole('Admin', 'Accountant'), async (req, res) => {
@@ -1431,19 +1453,22 @@ function registerClaMonthlyCloseRoutes(app, ctx) {
         const m = (req.body && req.body.quarterly) ? resolveQuarter((req.body && req.body.month_end) || '') : resolveMonth((req.body && req.body.month_end) || '');
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         const data = buildClaData(ctx, m, eid);
-        const wb = buildWorkbook(data);
-        const buf = await finalizeWorkbook(wb);
+        const wbs = buildWorkbook(data);
+        const JSZip = require('jszip');
+        const zip = new JSZip();
+        for (const { file, wb } of wbs) { const buf = await finalizeWorkbook(wb); zip.file(file + '.xlsx', buf); }
+        const zipBuf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
         const entRow = db.prepare('SELECT display_id FROM entities WHERE id = ?').get(eid) || {};
-        const saved = saveToWorkpapers(ctx, eid, m, buf, who, entRow.display_id);
-        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-        res.setHeader('Content-Disposition', 'attachment; filename="' + saved.original_name + '"');
+        const disp = entRow.display_id ? String(entRow.display_id).replace(/[^A-Za-z0-9._-]/g, '') + '_' : '';
+        const zipName = disp + (m.quarterly ? 'Quarterly' : 'Monthly') + '_Closing_Workpapers_' + m.label + '.zip';
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', 'attachment; filename="' + zipName + '"');
         res.setHeader('X-ClaClose-Summary', JSON.stringify({
-          month: m.label, month_name: m.monthName + ' ' + m.year,
-          saved_to: saved.folder_path + '/' + saved.original_name, replaced: saved.replaced,
+          month: m.label, month_name: m.monthName + ' ' + m.year, workbooks: wbs.length,
           accounts: data.acctRows.length,
           ties: data.ties, exceptions: (data.flags || []).length, flags: (data.flags || []),
         }).replace(/[^\x20-\x7E]/g, ' '));
-        res.send(buf);
+        res.send(zipBuf);
       } catch (e) {
         res.status(400).json({ error: e.message });
       }
