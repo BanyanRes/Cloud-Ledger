@@ -160,6 +160,8 @@ function num(ws, addr, v, o = {}) {
   if (o.border) c.border = o.border; if (o.fill) c.fill = o.fill; if (o.align) c.alignment = o.align;
   return c;
 }
+// FQ Anchor cell: ="#fq-"&<Account No. cell>, e.g. #fq-19021.
+function fqCell(ws, addr, acctAddr) { const c = ws.getCell(addr); c.value = { formula: '"#fq-"&' + acctAddr }; c.font = F(); return c; }
 function txt(ws, addr, v, o = {}) { const c = ws.getCell(addr); c.value = v; c.font = F(o.font || {}); if (o.fmt) c.numFmt = o.fmt; if (o.align) c.alignment = o.align; return c; }
 function blueInput(ws, addr) { const c = ws.getCell(addr); c.numFmt = ACCT; c.font = F({ color: { argb: BLUE } }); c.fill = INPUT_FILL; c.border = box; return c; }
 function totalCell(ws, addr, formula) { const c = ws.getCell(addr); c.numFmt = ACCT; c.font = F({ bold: true }); c.border = { top: THIN, bottom: DBL }; c.value = formula ? { formula } : 0; return c; }
@@ -1096,16 +1098,17 @@ function buildEquityRollforward(wb, rows, data, en, m, used, leadTab, niVal) {
 // ─── Leadsheets (CLA columns) ─────────────────────────────────────────────────
 function simpleLeadsheet(ws, cd, en, m, rows, refByCode, leadCell) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 40;
-  ws.getColumn('D').width = 16; ws.getColumn('E').width = 16; ws.getColumn('F').width = 40;
-  titleBlock(ws, en, cd.lead, m, 'G');
+  ws.getColumn('D').width = 16; ws.getColumn('E').width = 16; ws.getColumn('F').width = 18; ws.getColumn('G').width = 40;
+  titleBlock(ws, en, cd.lead, m, 'H');
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet', 'Balance', 'Comments']);
+  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet', 'Balance', 'FQ Anchor', 'Comments']);
   let r = HR + 1; const first = r;
   for (const a of rows) {
     const rr = refByCode.get(String(a.code)) || {};
     txt(ws, 'B' + r, a.code, { align: { horizontal: 'left' } }); txt(ws, 'C' + r, a.name);
     wpLink(ws, 'D' + r, rr.sheet, rr.sheet || '');
     num(ws, 'E' + r, rr.endRef ? { formula: rr.endRef } : a.end);
+    fqCell(ws, 'F' + r, 'B' + r);
     leadCell.set(String(a.code), ref(cd.tab, 'E' + r));
     r++;
   }
@@ -1116,10 +1119,10 @@ function simpleLeadsheet(ws, cd, en, m, rows, refByCode, leadCell) {
 }
 function cashLeadsheet(ws, cd, en, m, rows, refByCode, leadCell) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 38;
-  ws.getColumn('D').width = 12; ws.getColumn('E').width = 16; ws.getColumn('F').width = 16; ws.getColumn('G').width = 18; ws.getColumn('H').width = 30;
-  titleBlock(ws, en, cd.lead, m, 'H');
+  ws.getColumn('D').width = 12; ws.getColumn('E').width = 16; ws.getColumn('F').width = 16; ws.getColumn('G').width = 18; ws.getColumn('H').width = 18; ws.getColumn('I').width = 30;
+  titleBlock(ws, en, cd.lead, m, 'I');
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet / Location', 'Cleared Balance', 'Register Balance', 'Bank Statement Ref', 'Comments']);
+  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet / Location', 'Cleared Balance', 'Register Balance', 'FQ Anchor', 'Bank Statement Ref', 'Comments']);
   let r = HR + 1; const first = r;
   for (const a of rows) {
     const rr = refByCode.get(String(a.code)) || {};
@@ -1127,7 +1130,7 @@ function cashLeadsheet(ws, cd, en, m, rows, refByCode, leadCell) {
     wpLink(ws, 'D' + r, rr.sheet, a.code);
     num(ws, 'E' + r, rr.clearedRef ? { formula: rr.clearedRef } : '');
     num(ws, 'F' + r, rr.registerRef ? { formula: rr.registerRef } : a.end);
-    txt(ws, 'G' + r, 'Bank Statement');
+    fqCell(ws, 'G' + r, 'B' + r); txt(ws, 'H' + r, 'Bank Statement');
     leadCell.set(String(a.code), ref(cd.tab, 'F' + r));
     r++;
   }
@@ -1139,11 +1142,11 @@ function cashLeadsheet(ws, cd, en, m, rows, refByCode, leadCell) {
 }
 function ccLeadsheet(ws, cd, en, m, rows, refByCode, leadCell) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 34;
-  ws.getColumn('D').width = 12; ws.getColumn('E').width = 15; ws.getColumn('F').width = 15; ws.getColumn('G').width = 15; ws.getColumn('H').width = 16; ws.getColumn('I').width = 26;
-  titleBlock(ws, en, cd.lead, m, 'I');
+  ws.getColumn('D').width = 12; ws.getColumn('E').width = 15; ws.getColumn('F').width = 15; ws.getColumn('G').width = 15; ws.getColumn('H').width = 18; ws.getColumn('I').width = 16; ws.getColumn('J').width = 26;
+  titleBlock(ws, en, cd.lead, m, 'J');
   txt(ws, 'E6', '(As of Statement Date)', { font: { italic: true, size: 9 } }); txt(ws, 'G6', '(As of Period-End)', { font: { italic: true, size: 9 } });
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet / Location', 'Cleared Balance', 'Register Balance', 'Ending Balance', 'CC Statement Ref', 'Comments']);
+  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet / Location', 'Cleared Balance', 'Register Balance', 'Ending Balance', 'FQ Anchor', 'CC Statement Ref', 'Comments']);
   let r = HR + 1; const first = r;
   for (const a of rows) {
     const rr = refByCode.get(String(a.code)) || {};
@@ -1152,7 +1155,7 @@ function ccLeadsheet(ws, cd, en, m, rows, refByCode, leadCell) {
     num(ws, 'E' + r, rr.clearedRef ? { formula: rr.clearedRef } : '');
     num(ws, 'F' + r, rr.registerRef ? { formula: rr.registerRef } : '');
     num(ws, 'G' + r, rr.endingRef ? { formula: rr.endingRef } : a.end);
-    txt(ws, 'H' + r, 'CC Statement');
+    fqCell(ws, 'H' + r, 'B' + r); txt(ws, 'I' + r, 'CC Statement');
     leadCell.set(String(a.code), ref(cd.tab, 'G' + r));
     r++;
   }
@@ -1166,12 +1169,12 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell) {
   let mxn = 0; for (const p of pairs) { if (p.asset) mxn = Math.max(mxn, nlen(p.asset.end)); if (p.dep) mxn = Math.max(mxn, nlen(p.dep.end)); }
   const wNum = Math.min(28, Math.max(15, mxn + 4));
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 32; ws.getColumn('D').width = wNum;
-  ws.getColumn('E').width = 15; ws.getColumn('F').width = 44; ws.getColumn('G').width = wNum; ws.getColumn('H').width = wNum; ws.getColumn('I').width = 26;
-  titleBlock(ws, en, cd.lead, m, 'J');
+  ws.getColumn('E').width = 15; ws.getColumn('F').width = 44; ws.getColumn('G').width = wNum; ws.getColumn('H').width = wNum; ws.getColumn('I').width = 18; ws.getColumn('J').width = 26;
+  titleBlock(ws, en, cd.lead, m, 'K');
   txt(ws, 'G3', 'Capitalization Policy:'); txt(ws, 'H3', '>$1,000 for single item');
   const sB = ws.getCell('B7'); sB.value = 'Fixed Asset Account Breakdown'; sB.font = F({ bold: true }); sB.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
   const sF = ws.getCell('E7'); sF.value = 'Depreciation Account Breakdown'; sF.font = F({ bold: true }); sF.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
-  hdr(ws, 8, 2, ['Asset Acct. #', 'Asset Acct. Name', 'Asset Cost', 'Depreciation Account #', 'Depreciation Account Name', 'Deprec. Balance', 'Net Asset Amount', 'Comments']);
+  hdr(ws, 8, 2, ['Asset Acct. #', 'Asset Acct. Name', 'Asset Cost', 'Depreciation Account #', 'Depreciation Account Name', 'Deprec. Balance', 'Net Asset Amount', 'FQ Anchor', 'Comments']);
   ws.getCell('E8').alignment = { horizontal: 'center' };
   let r = 9; const first = r;
   for (const p of pairs) {
@@ -1188,6 +1191,7 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell) {
       leadCell.set(String(p.dep.code), ref(cd.tab, 'G' + r));
     } else num(ws, 'G' + r, 0);
     num(ws, 'H' + r, { formula: 'D' + r + '+G' + r });
+    fqCell(ws, 'I' + r, 'B' + r);
     r++;
   }
   const last = r - 1;
@@ -1231,25 +1235,26 @@ function buildOaActivityTab(wb, a, acts, en, m, used, leadTab) {
 // lists the current-month GL activity behind the change.
 function otherAssetsLeadsheet(wb, ws, cd, en, m, rows, oaActivity, used, leadCell) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 44;
-  ws.getColumn('D').width = 18; ws.getColumn('E').width = 18; ws.getColumn('F').width = 16; ws.getColumn('G').width = 12; ws.getColumn('H').width = 34;
-  titleBlock(ws, en, cd.lead, m, 'H');
+  ws.getColumn('D').width = 18; ws.getColumn('E').width = 18; ws.getColumn('F').width = 18; ws.getColumn('G').width = 16; ws.getColumn('H').width = 12; ws.getColumn('I').width = 34;
+  titleBlock(ws, en, cd.lead, m, 'I');
   const U = (m.unit || 'Month').toLowerCase();
   txt(ws, 'C5', 'Prior ' + U + ' (' + short(m.beg) + ') vs current ' + U + ' (' + short(m.end) + '); accounts that moved link to their current-' + U + ' activity.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Prior ' + (m.unit || 'Month') + ' ' + short(m.beg), 'Current ' + (m.unit || 'Month') + ' ' + short(m.end), 'Change', 'Activity', 'Comments']);
+  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Prior ' + (m.unit || 'Month') + ' ' + short(m.beg), 'Current ' + (m.unit || 'Month') + ' ' + short(m.end), 'FQ Anchor', 'Change', 'Activity', 'Comments']);
   let r = HR + 1; const first = r;
   for (const a of rows) {
     txt(ws, 'B' + r, a.code, { align: { horizontal: 'left' } }); txt(ws, 'C' + r, a.name);
     num(ws, 'D' + r, a.begin); num(ws, 'E' + r, a.end);
-    num(ws, 'F' + r, { formula: 'E' + r + '-D' + r });
+    fqCell(ws, 'F' + r, 'B' + r);
+    num(ws, 'G' + r, { formula: 'E' + r + '-D' + r });
     const acts = (oaActivity && oaActivity.get(String(a.code))) || [];
-    if (acts.length) { const at = buildOaActivityTab(wb, a, acts, en, m, used, cd.tab); wpLink(ws, 'G' + r, at, 'Activity'); }
+    if (acts.length) { const at = buildOaActivityTab(wb, a, acts, en, m, used, cd.tab); wpLink(ws, 'H' + r, at, 'Activity'); }
     leadCell.set(String(a.code), ref(cd.tab, 'E' + r));
     r++;
   }
   const last = r - 1;
   txt(ws, 'B' + r, cd.total, { font: { bold: true } });
-  for (const c of ['D', 'E', 'F']) totalCell(ws, c + r, last >= first ? 'SUM(' + c + first + ':' + c + last + ')' : null);
+  for (const c of ['D', 'E', 'G']) totalCell(ws, c + r, last >= first ? 'SUM(' + c + first + ':' + c + last + ')' : null);
   return ref(cd.tab, 'E' + r);
 }
 // ─── Summary ──────────────────────────────────────────────────────
