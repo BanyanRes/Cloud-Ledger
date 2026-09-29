@@ -161,7 +161,7 @@ function num(ws, addr, v, o = {}) {
   return c;
 }
 // FQ Anchor cell: ="#fq-"&<Account No. cell>, e.g. #fq-19021.
-function fqCell(ws, addr, acctAddr) { const c = ws.getCell(addr); c.value = { formula: '"#fq-"&' + acctAddr }; c.font = F(); return c; }
+function fqCell(ws, addr, acctAddr) { const c = ws.getCell(addr); c.value = { formula: '"#fq-"&' + acctAddr }; c.font = F(); c.alignment = { horizontal: 'center', vertical: 'middle' }; return c; }
 function txt(ws, addr, v, o = {}) { const c = ws.getCell(addr); c.value = v; c.font = F(o.font || {}); if (o.fmt) c.numFmt = o.fmt; if (o.align) c.alignment = o.align; return c; }
 function blueInput(ws, addr) { const c = ws.getCell(addr); c.numFmt = ACCT; c.font = F({ color: { argb: BLUE } }); c.fill = INPUT_FILL; c.border = box; return c; }
 function totalCell(ws, addr, formula) { const c = ws.getCell(addr); c.numFmt = ACCT; c.font = F({ bold: true }); c.border = { top: THIN, bottom: DBL }; c.value = formula ? { formula } : 0; return c; }

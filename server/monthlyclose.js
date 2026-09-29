@@ -377,7 +377,7 @@ function buildLeadsheet(wb, cd, entityName, m, rowsForCat, ref) {
     const bcell = ws.getCell('E' + r); bcell.numFmt = ACCT; bcell.font = F();
     if (sheet && rr.endRow) bcell.value = { formula: qn(sheet) + '!$E$' + rr.endRow };
     else bcell.value = a.end;
-    const fq = ws.getCell('F' + r); fq.value = '#fq-' + a.code; fq.font = F({ bold: true, color: { argb: RED } });
+    const fq = ws.getCell('F' + r); fq.value = '#fq-' + a.code; fq.font = F({ bold: true, color: { argb: RED } }); fq.alignment = { horizontal: 'center', vertical: 'middle' };
     if (interco) {
       const oc = ws.getCell('G' + r); oc.numFmt = ACCT; oc.font = F();
       const vc = ws.getCell('H' + r); vc.numFmt = ACCT; vc.font = F();
