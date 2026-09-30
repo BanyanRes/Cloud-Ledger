@@ -280,6 +280,17 @@ function fyMonthEnds(m) { const out = []; for (let k = 1; k <= m.monthNum; k++) 
 // JS mirror of the prepaid schedule (drives the Summary flags; the workbook
 // carries the same logic as live formulas). Amortization starts the month after
 // the policy start month and runs until the balance is exhausted.
+// Pull a coverage period "MM/DD/YYYY-MM/DD/YYYY" out of a bill memo, if present, so an
+// auto-detected prepaid addition can amortize over its real policy term.
+function parsePrepaidPeriod(text) {
+  const mm = String(text || '').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\s*(?:-|\u2013|\u2014|to)\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (!mm) return null;
+  const iso = (mo, d, y) => y + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  const start = iso(mm[1], mm[2], mm[3]), end = iso(mm[4], mm[5], mm[6]);
+  if (end <= start) return null;
+  return { start, end };
+}
+
 function prepaidSchedule(items, m) {
   const ends = fyMonthEnds(m);
   return items.map((it) => {
@@ -517,6 +528,33 @@ function buildClaData(ctx, m, eid) {
   const ytd = glYtd(db, eid, m.yearStart, m.end, detailCodes);
   const monthlyActivity = (lines, natural) => { const a = new Array(m.monthNum).fill(0); for (const l of (lines || [])) { const s = natural === 'debit' ? r2(l.debit - l.credit) : r2(l.credit - l.debit); if (l.mo >= 1 && l.mo <= m.monthNum) a[l.mo - 1] = r2(a[l.mo - 1] + s); } return a; };
   const monthLines = (lines, k) => (lines || []).filter((l) => l.mo === k);
+
+  // Auto-detect prepaid additions: when an account's register falls short of its GL
+  // balance, the gap is one or more policy additions booked to the GL but not yet on
+  // the register. Pull those GL debits (newest first), read each policy's coverage
+  // period from the bill memo, and append them so the schedule ties to the GL and
+  // amortizes going forward. Accounts whose register already ties are left untouched.
+  for (const a of byCat.prepaid || []) {
+    const code = String(a.code);
+    const items = prepaidByAcct.get(code) || [];
+    let diff = r2(r2(a.end) - r2(prepaidSchedule(items, m).reduce((sm, x) => sm + x.ending, 0)));
+    if (diff <= 1.0) continue;
+    const adds = (ytd.get(code) || []).filter((l) => (l.debit || 0) > 0.005)
+      .slice().sort((x, y) => (String(y.date) < String(x.date) ? -1 : String(y.date) > String(x.date) ? 1 : 0));
+    const ey = Number(m.end.slice(0, 4)); let afY = ey, afM = Number(m.end.slice(5, 7)) + 1; if (afM > 12) { afM = 1; afY++; }
+    for (const add of adds) {
+      if (diff <= 0.005) break;
+      const amt = r2(Math.min(add.debit, diff));
+      const per = parsePrepaidPeriod(add.memo || '');
+      let months = 12, endDate = null;
+      if (per) { const pey = Number(per.end.slice(0, 4)), pem = Number(per.end.slice(5, 7)); months = Math.max(1, (pey - afY) * 12 + (pem - afM)); endDate = per.end; }
+      if (!endDate) { let eY = afY, eM = afM + 11; while (eM > 12) { eM -= 12; eY++; } endDate = monthEndOf(eY, eM); }
+      const memo = String(add.memo || '').replace(/^Bill - /, '').replace(/\s+/g, ' ').trim().slice(0, 88);
+      items.push({ account_code: code, vendor: add.vendor || '', expense_account: '', description: (memo || 'GL addition') + ' [auto]', start_date: m.end, end_date: endDate, monthly: r2(amt / months), opening_balance: 0, premium: amt, date_paid: add.date, _auto: true });
+      diff = r2(diff - amt);
+    }
+    prepaidByAcct.set(code, items);
+  }
 
   // Prepaid amortization schedule vs GL.
   for (const a of byCat.prepaid || []) {
