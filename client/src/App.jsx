@@ -852,11 +852,13 @@ export default function App(){
   const isSilsbee = !!(_activeEnt && (_activeEnt.code==='CLRSILSB2' || /^clr\s*silsbee\s*property\s*owner$/i.test((_activeEnt.name||'').trim())));
   // Sabine River & Northern Railroad (SRN) also gets the CLA-format monthly closing workpaper.
   const isSRN = !!(_activeEnt && (_activeEnt.code==='SABINERI' || /sabine\s*river/i.test((_activeEnt.name||'').trim())));
+  // CLR Buna Property Owner also gets the CLA-format monthly closing workpaper.
+  const isBuna = !!(_activeEnt && (_activeEnt.code==='CLRBUNAP' || /^clr\s*buna\s*property\s*owner$/i.test((_activeEnt.name||'').trim())));
   // CLRFI Midco I and Banyan SFR GP Investors get the CLA workpapers QUARTERLY.
   const isMidcoCla = !!(_activeEnt && (_activeEnt.code==='CLRFIMID' || /clrfi\s*midco/i.test((_activeEnt.name||'').trim())));
   const isSFRCla = !!(_activeEnt && (_activeEnt.code==='BANYANSF' || /^banyan\s*sfr\s*gp\s*investors$/i.test((_activeEnt.name||'').trim())));
   const quarterlyCla = isMidcoCla || isSFRCla;
-  const canClaClose = isBanyanRes || isClip || isSilsbee || isSRN || isMidcoCla || isSFRCla;
+  const canClaClose = isBanyanRes || isClip || isSilsbee || isSRN || isBuna || isMidcoCla || isSFRCla;
   // Odyssey Holdings — the holding company that gets a monthly closing workpaper
   // supporting every balance-sheet account. The generator itself is generic.
   const isOdyssey = !!(_activeEnt && /odyssey/i.test(_activeEnt.name||''));
