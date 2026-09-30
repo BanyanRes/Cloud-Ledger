@@ -307,7 +307,12 @@ function edate(d, months) {
 }
 function endOfLife(a) {
   const life = Number(a.life_years) || 0; if (!a.in_service || life <= 0) return null;
-  const t = edate(a.in_service, Math.round(life * 12)); t.setUTCDate(t.getUTCDate() - 1);
+  const months = Math.round(life * 12); if (months <= 0) return null;
+  // Depreciation completes at the month-end of the final month (in-service month + months - 1),
+  // so a short-life asset is fully depreciated by that month-end instead of spilling a few days
+  // into the next month (e.g. a 10-month asset placed 3/4 ends 12/31, not 1/3 of the next year).
+  const t = new Date(a.in_service + 'T00:00:00Z');
+  t.setUTCDate(1); t.setUTCMonth(t.getUTCMonth() + months); t.setUTCDate(0);
   return t.toISOString().slice(0, 10);
 }
 function fixedSchedule(assets, m) {
@@ -603,21 +608,23 @@ function buildClaData(ctx, m, eid) {
     for (const r of rows) { const c = String(r.code); if (!eqCodes.has(c)) continue; if (!eqMonthly.has(c)) eqMonthly.set(c, new Array(nB).fill(0)); const b = bkt(r.mo); if (b >= 0 && b < nB) eqMonthly.get(c)[b] = r2((eqMonthly.get(c)[b] || 0) + r.amt); }
   }
 
-  // Other Assets: current-month GL activity per account, so accounts that moved
-  // during the month get a drill-down tab behind the prior-vs-current comparison.
+  // Other Assets: inception-to-date GL detail per account, so every account with
+  // history gets a full supporting drill-down tab (balance-forward 0 -> grand total).
   const oaActivity = new Map();
   {
     const oaCodes = (byCat.otherassets || []).concat(byCat.invest || []).map((a) => String(a.code));
     if (oaCodes.length) {
       const ph = oaCodes.map(() => '?').join(',');
       const arows = db.prepare(`SELECT jl.account_code code, je.date date, je.entry_num entry_num, je.doc_number doc_number,
-          je.vendor vendor, je.memo memo, jl.description description, jl.debit debit, jl.credit credit
+          je.vendor vendor, je.memo memo, jl.description description, jl.debit debit, jl.credit credit,
+          dp.code project_code, dp.name project_name
         FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
-        WHERE je.entity_id = ? AND je.date > ? AND je.date <= ? AND jl.account_code IN (${ph})
-        ORDER BY jl.account_code, je.date, je.entry_num, jl.id`).all(eid, m.beg, m.end, ...oaCodes);
+        LEFT JOIN dim_projects dp ON dp.id = jl.project_id
+        WHERE je.entity_id = ? AND je.date <= ? AND jl.account_code IN (${ph})
+        ORDER BY jl.account_code, je.date, je.entry_num, jl.id`).all(eid, m.end, ...oaCodes);
       for (const rr of arows) {
         const c = String(rr.code); if (!oaActivity.has(c)) oaActivity.set(c, []);
-        oaActivity.get(c).push({ date: rr.date, num: (rr.entry_num != null ? String(rr.entry_num) : '') || String(rr.doc_number || ''), vendor: rr.vendor || '', memo: rr.memo || rr.description || '', debit: r2(rr.debit || 0), credit: r2(rr.credit || 0) });
+        oaActivity.get(c).push({ date: rr.date, num: (rr.entry_num != null ? String(rr.entry_num) : '') || String(rr.doc_number || ''), vendor: rr.vendor || '', memo: rr.memo || rr.description || '', proj: (rr.project_code ? (rr.project_code + (rr.project_name ? ' \u2014 ' + rr.project_name : '')) : ''), debit: r2(rr.debit || 0), credit: r2(rr.credit || 0) });
       }
     }
   }
@@ -1207,27 +1214,27 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell) {
 function buildOaActivityTab(wb, a, acts, en, m, used, leadTab) {
   const sheet = sheetNameFor(a.code, used);
   const ws = wb.addWorksheet(sheet, { views: [{ showGridLines: false }] });
-  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 10; ws.getColumn('D').width = 46; ws.getColumn('E').width = 24; ws.getColumn('F').width = 16; ws.getColumn('G').width = 16; ws.getColumn('H').width = 17;
-  tabHead(ws, a.code + ' - ' + a.name, en, 'Current-' + (m.unit || 'Month').toLowerCase() + ' activity - ' + spell(m.end), leadTab);
-  txt(ws, 'B5', 'Beginning balance - ' + short(m.beg), { font: { bold: true } });
-  num(ws, 'H5', a.begin, { font: { bold: true }, border: { bottom: THIN } });
+  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 12; ws.getColumn('D').width = 46; ws.getColumn('E').width = 22; ws.getColumn('F').width = 24; ws.getColumn('G').width = 15; ws.getColumn('H').width = 15; ws.getColumn('I').width = 16;
+  tabHead(ws, a.code + ' - ' + a.name, en, 'GL detail (inception to ' + spell(m.end) + ')', leadTab);
+  txt(ws, 'B5', 'Balance forward', { font: { bold: true } });
+  num(ws, 'I5', 0, { font: { bold: true }, border: { bottom: THIN } });
   const HR = 6;
-  hdr(ws, HR, 2, ['Date', 'JE #', 'Memo', 'Vendor', 'Debit', 'Credit', 'Balance']);
-  let r = HR + 1; const first = r; let bal = r2(a.begin);
+  hdr(ws, HR, 2, ['Date', 'Doc / JE #', 'Memo', 'Vendor', 'Project', 'Debit', 'Credit', 'Balance']);
+  let r = HR + 1; const first = r; let bal = 0;
   for (const x of acts) {
     bal = r2(bal + (x.debit || 0) - (x.credit || 0));
     num(ws, 'B' + r, asDate(x.date), { fmt: DATEFMT, align: { horizontal: 'center' } });
     txt(ws, 'C' + r, x.num || '', { align: { horizontal: 'center' } });
-    txt(ws, 'D' + r, x.memo || ''); txt(ws, 'E' + r, x.vendor || '');
-    num(ws, 'F' + r, x.debit || null); num(ws, 'G' + r, x.credit || null);
-    num(ws, 'H' + r, bal);
+    txt(ws, 'D' + r, x.memo || ''); txt(ws, 'E' + r, x.vendor || ''); txt(ws, 'F' + r, x.proj || '');
+    num(ws, 'G' + r, x.debit || null); num(ws, 'H' + r, x.credit || null);
+    num(ws, 'I' + r, bal);
     r++;
   }
   const last = r - 1;
-  txt(ws, 'B' + r, 'Net activity / ending balance - ' + short(m.end), { font: { bold: true } });
-  totalCell(ws, 'F' + r, last >= first ? 'SUM(F' + first + ':F' + last + ')' : null);
+  txt(ws, 'B' + r, 'Grand total - ' + short(m.end), { font: { bold: true } });
   totalCell(ws, 'G' + r, last >= first ? 'SUM(G' + first + ':G' + last + ')' : null);
-  num(ws, 'H' + r, a.end, { font: { bold: true }, border: { top: THIN, bottom: DBL } });
+  totalCell(ws, 'H' + r, last >= first ? 'SUM(H' + first + ':H' + last + ')' : null);
+  num(ws, 'I' + r, a.end, { font: { bold: true }, border: { top: THIN, bottom: DBL } });
   return sheet;
 }
 // Other Assets leadsheet: prior-month vs current-month balance per account with
@@ -1238,9 +1245,9 @@ function otherAssetsLeadsheet(wb, ws, cd, en, m, rows, oaActivity, used, leadCel
   ws.getColumn('D').width = 18; ws.getColumn('E').width = 18; ws.getColumn('F').width = 18; ws.getColumn('G').width = 16; ws.getColumn('H').width = 12; ws.getColumn('I').width = 34;
   titleBlock(ws, en, cd.lead, m, 'I');
   const U = (m.unit || 'Month').toLowerCase();
-  txt(ws, 'C5', 'Prior ' + U + ' (' + short(m.beg) + ') vs current ' + U + ' (' + short(m.end) + '); accounts that moved link to their current-' + U + ' activity.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
+  txt(ws, 'C5', 'Prior ' + U + ' (' + short(m.beg) + ') vs current ' + U + ' (' + short(m.end) + '); each account links to its full inception-to-date GL detail.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
   const HR = 7;
-  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Prior ' + (m.unit || 'Month') + ' ' + short(m.beg), 'Current ' + (m.unit || 'Month') + ' ' + short(m.end), 'FQ Anchor', 'Change', 'Activity', 'Comments']);
+  hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Prior ' + (m.unit || 'Month') + ' ' + short(m.beg), 'Current ' + (m.unit || 'Month') + ' ' + short(m.end), 'FQ Anchor', 'Change', 'Detail', 'Comments']);
   let r = HR + 1; const first = r;
   for (const a of rows) {
     txt(ws, 'B' + r, a.code, { align: { horizontal: 'left' } }); txt(ws, 'C' + r, a.name);
@@ -1248,7 +1255,7 @@ function otherAssetsLeadsheet(wb, ws, cd, en, m, rows, oaActivity, used, leadCel
     fqCell(ws, 'F' + r, 'B' + r);
     num(ws, 'G' + r, { formula: 'E' + r + '-D' + r });
     const acts = (oaActivity && oaActivity.get(String(a.code))) || [];
-    if (acts.length) { const at = buildOaActivityTab(wb, a, acts, en, m, used, cd.tab); wpLink(ws, 'H' + r, at, 'Activity'); }
+    if (acts.length) { const at = buildOaActivityTab(wb, a, acts, en, m, used, cd.tab); wpLink(ws, 'H' + r, at, 'Detail'); }
     leadCell.set(String(a.code), ref(cd.tab, 'E' + r));
     r++;
   }
