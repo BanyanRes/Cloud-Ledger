@@ -5886,6 +5886,67 @@ function MonthlyCloseWorkpaper({entityId,entityName,canEdit=true}){
 // High-fidelity replica of CLA's numbered monthly-close leadsheets (Cash,
 // Receivables, Prepaids, Fixed Assets, Other Assets, Intercompany, Payables,
 // Credit Cards, Debt, Equity), GL-derived with blue input cells and FQ anchors.
+function FixedAdditionsDialog({entityId,entityName,info,onCancel,onSaved}){
+  const[rows,setRows]=useState((info.fixed_additions||[]).map(a=>({...a,life:'',in_service:a.in_service||info.month_end,dep_account:a.dep_account||''})));
+  const[saving,setSaving]=useState(false);
+  const[err,setErr]=useState('');
+  const setRow=(i,patch)=>setRows(rs=>rs.map((r,j)=>j===i?{...r,...patch}:r));
+  const missing=rows.filter(r=>!(Number(r.life)>0)).length;
+  const save=async()=>{
+    if(missing){setErr('Enter a useful life for each asset.');return;}
+    setSaving(true);setErr('');
+    try{
+      const reg=await api.claCloseRegisters(entityId);
+      const news=rows.map(r=>({asset_account:r.asset_account,dep_account:r.dep_account||'',description:r.description,life_years:Number(r.life),in_service:r.in_service,cost:Number(r.cost),accum_dep_beg:0,depr_start:info.depr_start}));
+      await api.claCloseSaveRegisters(entityId,{prepaid:reg.prepaid||[],fixed_assets:(reg.fixed_assets||[]).concat(news)});
+      await onSaved();
+    }catch(e){setErr((e&&e.message)||String(e));setSaving(false);}
+  };
+  const overlay={position:'fixed',inset:0,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'flex-start',justifyContent:'center',zIndex:1000,padding:'40px 20px',overflow:'auto'};
+  return(<div style={overlay} onMouseDown={e=>{if(e.target===e.currentTarget)onCancel();}}>
+    <div style={{...S.card,maxWidth:640,width:'100%',margin:'0 auto'}}>
+      <div style={{display:'flex',alignItems:'flex-start',gap:12,marginBottom:10}}>
+        <div style={{flex:1}}>
+          <div style={{fontSize:17,fontWeight:700,color:T.textBright}}>New additions need your input</div>
+          <div style={{fontSize:13,color:T.textMuted,marginTop:2}}>{entityName} · {info.month_name}</div>
+        </div>
+        <button onClick={onCancel} style={{border:'none',background:'none',cursor:'pointer',fontSize:20,lineHeight:1,color:T.textMuted}}>×</button>
+      </div>
+      <div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,marginBottom:14}}>{rows.length} fixed-asset {rows.length===1?'purchase was':'purchases were'} found in the GL that {rows.length===1?"isn't":"aren't"} on the depreciation schedule yet. Cost, account, and date came from the journal entry — set each one's useful life and they'll be saved to the register before the workpapers finish.</div>
+      {rows.map((r,i)=>(<div key={i} style={{border:'1px solid '+T.border,borderRadius:10,padding:'12px 14px',marginBottom:10}}>
+        <div style={{display:'flex',justifyContent:'space-between',gap:10,alignItems:'flex-start'}}>
+          <div>
+            <span style={{background:T.bgAlt||'#eef2ff',color:T.textBright,fontSize:12,padding:'2px 8px',borderRadius:6}}>{r.asset_account} · {r.asset_name}</span>
+            <div style={{fontSize:14,fontWeight:600,marginTop:6,color:T.textBright}}>{r.description}</div>
+            <div style={{fontSize:12,color:T.textMuted,marginTop:2}}>JE #{r.je_num} · {r.in_service}{r.has_bill?(' · bill from '+r.vendor):' · manual entry, no bill'}</div>
+          </div>
+          <div style={{textAlign:'right',flex:'none'}}>
+            <div style={{fontSize:18,fontWeight:700,color:T.textBright}}>{fmt(r.cost)}</div>
+            <div style={{fontSize:12,color:T.textMuted}}>cost, from GL</div>
+          </div>
+        </div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginTop:10}}>
+          <div><label style={S.label}>In-service date · JE date</label><input style={S.inputSm} type="date" value={r.in_service} onChange={e=>setRow(i,{in_service:e.target.value})}/></div>
+          <div><label style={S.label}>Depreciation account</label><input style={S.inputSm} value={r.dep_account} placeholder="e.g. 15100" onChange={e=>setRow(i,{dep_account:e.target.value})}/></div>
+          <div><label style={S.label}>Useful life (years) · <span style={{color:T.orange}}>required</span></label><input style={{...S.inputSm,borderColor:Number(r.life)>0?T.border:T.orange}} type="number" min="0" step="0.5" value={r.life} placeholder="e.g. 15" onChange={e=>{setRow(i,{life:e.target.value});setErr('');}}/></div>
+        </div>
+        <div style={{display:'flex',justifyContent:'space-between',borderTop:'1px solid '+T.border,marginTop:10,paddingTop:8,fontSize:13}}>
+          <span style={{color:T.textMuted}}>Monthly depreciation</span>
+          <span style={{color:Number(r.life)>0?T.textBright:T.textMuted}}>{Number(r.life)>0?(fmt(r.cost/(Number(r.life)*12))+' / mo · first charge '+info.depr_start):'enter a life to preview'}</span>
+        </div>
+      </div>))}
+      {err&&<div style={{fontSize:12,color:T.red,fontWeight:600,marginBottom:8}}>{err}</div>}
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',borderTop:'1px solid '+T.border,paddingTop:12,marginTop:4}}>
+        <span style={{fontSize:13,fontWeight:600,color:missing?T.orange:T.green}}>{missing?(missing+' of '+rows.length+' need a useful life'):'✓ Ready — all assets have a life'}</span>
+        <div style={{display:'flex',gap:8}}>
+          <button style={{...S.inputSm,cursor:'pointer',width:'auto',padding:'0 14px'}} onClick={onCancel} disabled={saving}>Cancel</button>
+          <button style={{...S.btnP,opacity:saving?0.6:1}} onClick={save} disabled={saving}>{saving?'Saving…':'Save and finish workpapers'}</button>
+        </div>
+      </div>
+    </div>
+  </div>);
+}
+
 function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true,quarterly=false,noBillcom=false}){
   const QEND=['03-31','06-30','09-30','12-31'];
   const defaultDate=()=>{const t=today();
@@ -5895,13 +5956,15 @@ function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true,quarterly=fa
   const[busy,setBusy]=useState(false);
   const[err,setErr]=useState('');
   const[result,setResult]=useState(null);
+  const[needFixed,setNeedFixed]=useState(null);
   const valid=/^\d{4}-\d{2}-\d{2}$/.test(mon)&&(!quarterly||QEND.includes(mon.slice(5)));
-  const run=async()=>{
+  const run=async(proceed)=>{
     if(!valid)return;
     setBusy(true);setErr('');setResult(null);
     try{
-      const r=await api.claMonthlyClose(entityId,mon,quarterly);
+      const r=await api.claMonthlyClose(entityId,mon,quarterly,proceed);
       if(!r)return;
+      if(r.needsInput){setNeedFixed(r.info);setBusy(false);return;}
       const url=URL.createObjectURL(r.blob);
       const a=document.createElement('a');a.href=url;a.download=r.filename;
       document.body.appendChild(a);a.click();document.body.removeChild(a);
@@ -5916,7 +5979,7 @@ function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true,quarterly=fa
     <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
       <div><label style={S.label}>{quarterly?'Quarter End Date':'Month End Date'}</label>
         <input style={S.inputSm} type="date" value={mon} onChange={e=>{setMon(e.target.value);setErr('');setResult(null);}}/></div>
-      <button style={{...S.btnP,opacity:(!valid||busy||!canEdit)?0.5:1}} disabled={!valid||busy||!canEdit} onClick={run}>
+      <button style={{...S.btnP,opacity:(!valid||busy||!canEdit)?0.5:1}} disabled={!valid||busy||!canEdit} onClick={()=>run()}>
         {busy?'Running\u2026':'Run Report'}</button>
     </div>
     {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
@@ -5927,6 +5990,7 @@ function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true,quarterly=fa
     </div>}
   </div>
   {!noBillcom&&valid&&<ClrfApDetailCard entityId={entityId} qe={mon} canEdit={canEdit} apAcct="20000" periodLabel={quarterly?'quarter end':'month end'}/>}
+  {needFixed&&<FixedAdditionsDialog entityId={entityId} entityName={entityName} info={needFixed} onCancel={()=>setNeedFixed(null)} onSaved={async()=>{setNeedFixed(null);await run();}}/>}
   </div>);
 }
 

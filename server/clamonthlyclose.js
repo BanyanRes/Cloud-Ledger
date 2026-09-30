@@ -179,9 +179,10 @@ function ensureRegisterSchema(db) {
     CREATE TABLE IF NOT EXISTS cla_fixed_assets (
       id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id INTEGER NOT NULL, asset_account TEXT NOT NULL, dep_account TEXT,
       description TEXT, life_years REAL, in_service TEXT, cost REAL DEFAULT 0, accum_dep_beg REAL DEFAULT 0,
-      sort_order INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')));
+      depr_start TEXT, sort_order INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')));
     CREATE INDEX IF NOT EXISTS idx_cla_fa_ent ON cla_fixed_assets(entity_id);
   `);
+  try { db.exec('ALTER TABLE cla_fixed_assets ADD COLUMN depr_start TEXT'); } catch (e) { /* already there */ }
 }
 function ensureSeed(db, ent) {
   if (!SEED.entityMatch.test(String(ent.name || '').trim())) return;
@@ -211,8 +212,8 @@ function replaceRegisters(db, eid, body) {
     }
     if (Array.isArray(body.fixed_assets)) {
       db.prepare('DELETE FROM cla_fixed_assets WHERE entity_id = ?').run(eid);
-      const ins = db.prepare('INSERT INTO cla_fixed_assets (entity_id, asset_account, dep_account, description, life_years, in_service, cost, accum_dep_beg, sort_order) VALUES (?,?,?,?,?,?,?,?,?)');
-      body.fixed_assets.forEach((a, i) => ins.run(eid, String(a.asset_account || ''), a.dep_account == null ? null : String(a.dep_account), a.description || '', Number(a.life_years) || 0, a.in_service || null, Number(a.cost) || 0, Number(a.accum_dep_beg) || 0, i));
+      const ins = db.prepare('INSERT INTO cla_fixed_assets (entity_id, asset_account, dep_account, description, life_years, in_service, cost, accum_dep_beg, depr_start, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?)');
+      body.fixed_assets.forEach((a, i) => ins.run(eid, String(a.asset_account || ''), a.dep_account == null ? null : String(a.dep_account), a.description || '', Number(a.life_years) || 0, a.in_service || null, Number(a.cost) || 0, Number(a.accum_dep_beg) || 0, a.depr_start || null, i));
     }
   });
   tx();
@@ -317,12 +318,13 @@ function edate(d, months) {
   return new Date(Date.UTC(ty, tm, Math.min(dd, dim)));
 }
 function endOfLife(a) {
-  const life = Number(a.life_years) || 0; if (!a.in_service || life <= 0) return null;
+  const life = Number(a.life_years) || 0; const startD = a.depr_start || a.in_service;
+  if (!startD || life <= 0) return null;
   const months = Math.round(life * 12); if (months <= 0) return null;
   // Depreciation completes at the month-end of the final month (in-service month + months - 1),
   // so a short-life asset is fully depreciated by that month-end instead of spilling a few days
   // into the next month (e.g. a 10-month asset placed 3/4 ends 12/31, not 1/3 of the next year).
-  const t = new Date(a.in_service + 'T00:00:00Z');
+  const t = new Date(startD + 'T00:00:00Z');
   t.setUTCDate(1); t.setUTCMonth(t.getUTCMonth() + months); t.setUTCDate(0);
   return t.toISOString().slice(0, 10);
 }
@@ -332,9 +334,10 @@ function fixedSchedule(assets, m) {
     const life = Number(a.life_years) || 0, cost = r2(a.cost), beg = r2(a.accum_dep_beg);
     const monthly = life > 0 ? r2(cost / (life * 12)) : 0;
     const eol = endOfLife(a);
+    const startD = a.depr_start || a.in_service;
     let accum = beg; const dep = [];
     for (const e of ends) {
-      const d = (a.in_service && e >= a.in_service && (!eol || e <= eol) && monthly > 0) ? Math.min(monthly, Math.max(0, r2(cost - accum))) : 0;
+      const d = (startD && e >= startD && (!eol || e <= eol) && monthly > 0) ? Math.min(monthly, Math.max(0, r2(cost - accum))) : 0;
       accum = r2(accum + d); dep.push(r2(d));
     }
     return { asset: a, monthly, dep, accumEnd: accum, nbv: r2(cost - accum), endOfLife: eol };
@@ -1485,6 +1488,45 @@ function saveToWorkpapers(ctx, eid, m, buf, who, dispId) {
   return { folder_path: folder, original_name: original, replaced: prior.length };
 }
 
+// New fixed-asset additions: GL debits to a fixed-asset account beyond what the
+// register accounts for. Cost + account come from the GL line, in-service + doc #
+// from the journal entry; the depreciation account is inferred from the account's
+// existing pairing. Useful life is left blank for the user to supply.
+function detectNewFixedAdditions(db, eid, m, data) {
+  const reg = data.reg, byCat = data.byCat;
+  const isDep = (a) => /accumulated\s+(dep|amort)|acc\.?\s*dep|acc\s+depreciation|amortization/i.test(a.name) || a.end < 0;
+  const assets = (byCat.fixed || []).filter((a) => !isDep(a));
+  const depByAsset = new Map(); const depCounts = {};
+  for (const fa of reg.fixedAssets || []) {
+    if (fa.asset_account && fa.dep_account && !depByAsset.has(String(fa.asset_account))) depByAsset.set(String(fa.asset_account), String(fa.dep_account));
+    if (fa.dep_account) depCounts[fa.dep_account] = (depCounts[fa.dep_account] || 0) + 1;
+  }
+  const commonDep = Object.keys(depCounts).sort((x, y) => depCounts[y] - depCounts[x])[0] || '';
+  const out = [];
+  for (const a of assets) {
+    const code = String(a.code);
+    const regCost = r2((reg.fixedAssets || []).filter((f) => String(f.asset_account) === code).reduce((sm, f) => sm + (Number(f.cost) || 0), 0));
+    let diff = r2(r2(a.end) - regCost);
+    if (diff <= 1.0) continue;
+    const rows = db.prepare(`SELECT je.date date, je.entry_num entry_num, je.doc_number doc_number, je.memo memo, je.vendor vendor, jl.description description, jl.debit debit
+      FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id
+      WHERE je.entity_id = ? AND je.date <= ? AND jl.account_code = ? AND jl.debit > 0.005
+      ORDER BY je.date DESC, jl.id DESC`).all(eid, m.end, code);
+    for (const rr of rows) {
+      if (diff <= 0.005) break;
+      const amt = r2(Math.min(rr.debit, diff));
+      out.push({
+        asset_account: code, asset_name: a.name, dep_account: depByAsset.get(code) || commonDep || '',
+        description: (String(rr.memo || rr.description || '').replace(/^Bill - /, '').replace(/\s+/g, ' ').trim().slice(0, 90)) || a.name,
+        cost: amt, in_service: rr.date, je_num: (rr.entry_num != null ? String(rr.entry_num) : '') || String(rr.doc_number || ''),
+        vendor: rr.vendor || '', has_bill: !!(rr.vendor && String(rr.vendor).trim()),
+      });
+      diff = r2(diff - amt);
+    }
+  }
+  return out;
+}
+
 function registerClaMonthlyCloseRoutes(app, ctx) {
   const { db, auth, requireEntityAccess, requireRole } = ctx;
   ensureRegisterSchema(db);
@@ -1503,6 +1545,15 @@ function registerClaMonthlyCloseRoutes(app, ctx) {
         const m = (req.body && req.body.quarterly) ? resolveQuarter((req.body && req.body.month_end) || '') : resolveMonth((req.body && req.body.month_end) || '');
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         const data = buildClaData(ctx, m, eid);
+        if (!(req.body && req.body.proceed)) {
+          const newFixed = detectNewFixedAdditions(db, eid, m, data);
+          if (newFixed.length) {
+            const cn = new Date(m.end + 'T00:00:00Z'); cn.setUTCDate(cn.getUTCDate() + 1);
+            return res.json({ needs_input: true, kind: 'fixed_additions', entity_id: eid,
+              month_end: m.end, month_label: m.label, month_name: m.monthName + ' ' + m.year,
+              depr_start: cn.toISOString().slice(0, 10), fixed_additions: newFixed });
+          }
+        }
         const wbs = buildWorkbook(data);
         const JSZip = require('jszip');
         const zip = new JSZip();
