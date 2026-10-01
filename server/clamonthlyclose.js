@@ -45,6 +45,9 @@ const ExcelJS = require('exceljs');
 const { buildData, resolveMonth } = require('./monthlyclose');
 const { buildAging } = require('./ar');
 const SEED = require('./seeds/cla_banyan_seed');
+// CLA logo shown at the top-left of every leadsheet (and the Summary cover).
+let CLA_LOGO = null;
+try { CLA_LOGO = fs.readFileSync(path.join(__dirname, 'assets', 'cla-logo.png')); } catch (e) { CLA_LOGO = null; }
 
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const MON3 = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -106,8 +109,18 @@ function sheetNameFor(code, used) {
 }
 function reserveName(name, used) { used.add(String(name).toLowerCase()); return name; }
 
+// Float the CLA logo in the top-left corner (columns A-B), to the left of the
+// title block in column C. One-cell-anchored at A1 with a fixed pixel size.
+function placeLogo(ws) {
+  if (!CLA_LOGO || !ws.workbook) return;
+  try {
+    const id = ws.workbook.addImage({ buffer: CLA_LOGO, extension: 'png' });
+    ws.addImage(id, { tl: { col: 0, row: 0 }, ext: { width: 70, height: 67 } });
+  } catch (e) { /* non-fatal */ }
+}
 // CLA title block: entity, "<X> LEADSHEET", Month/Year Ended entry cells + legend.
 function titleBlock(ws, entityName, leadTitle, m, legendCol) {
+  placeLogo(ws);
   ws.getCell('C1').value = entityName; ws.getCell('C1').font = F({ size: 16, bold: true });
   ws.getCell('C2').value = leadTitle; ws.getCell('C2').font = F({ size: 12, bold: true });
   ws.getCell('C3').value = (m.unit || 'Month') + ' Ended:'; ws.getCell('C3').font = F();
@@ -1385,6 +1398,7 @@ function otherAssetsLeadsheet(wb, ws, cd, en, m, rows, oaActivity, used, leadCel
 // and no prior-vs-current comparison — just what disagrees and why.
 function buildSummary(su, en, m, data) {
   su.getColumn('A').width = 3.4; su.getColumn('B').width = 13; su.getColumn('C').width = 11; su.getColumn('D').width = 10; su.getColumn('E').width = 46; su.getColumn('F').width = 15; su.getColumn('G').width = 16; su.getColumn('H').width = 48;
+  placeLogo(su);
   su.getCell('C1').value = en; su.getCell('C1').font = F({ size: 16, bold: true });
   su.getCell('C2').value = 'MONTHLY CLOSING WORKPAPERS — SUMMARY'; su.getCell('C2').font = F({ size: 12, bold: true });
   su.getCell('C3').value = (m.unit || 'Month') + ' ended ' + spell(m.end); su.getCell('C3').font = F({ italic: true });
