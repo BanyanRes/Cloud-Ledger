@@ -6010,6 +6010,11 @@ function TaxPackageWorkpaper({entityId,entityName,canEdit=true}){
   const[busy,setBusy]=useState(false);
   const[err,setErr]=useState('');
   const[result,setResult]=useState(null);
+  const[ref,setRef]=useState(null);
+  const[refBusy,setRefBusy]=useState(false);
+  const[refErr,setRefErr]=useState('');
+  const fileRef=useRef(null);
+  useEffect(()=>{let live=true;(async()=>{try{const r=await api.taxPackageReferenceGet(entityId);if(live)setRef(r);}catch(e){if(live)setRef({has_reference:false});}})();return()=>{live=false;};},[entityId]);
   const yearOk=/^\d{4}$/.test(year)&&Number(year)>=2000&&Number(year)<=Number(today().slice(0,4));
   const monOk=/^\d{4}-\d{2}-\d{2}$/.test(mon);
   const valid=mode==='annual'?yearOk:monOk;
@@ -6029,11 +6034,27 @@ function TaxPackageWorkpaper({entityId,entityName,canEdit=true}){
     }catch(e){ setErr(e.message||String(e)); }
     finally{ setBusy(false); }
   };
+  const onRefFile=async(e)=>{
+    const f=e.target.files&&e.target.files[0];if(f){
+      setRefBusy(true);setRefErr('');
+      try{ const r=await api.taxPackageReferenceUpload(entityId,f); setRef(r); }
+      catch(ex){ setRefErr(ex.message||String(ex)); }
+      finally{ setRefBusy(false); }
+    }
+    if(fileRef.current)fileRef.current.value='';
+  };
+  const removeRef=async()=>{
+    setRefBusy(true);setRefErr('');
+    try{ await api.taxPackageReferenceDelete(entityId); setRef({has_reference:false}); }
+    catch(ex){ setRefErr(ex.message||String(ex)); }
+    finally{ setRefBusy(false); }
+  };
   const seg=(k,lab)=>(<button onClick={()=>{setMode(k);reset();}}
     style={{...S.btnS,padding:'7px 16px',fontWeight:600,
       background:mode===k?T.accent:'transparent',color:mode===k?'#fff':T.textMuted,
       border:'1px solid '+(mode===k?T.accent:T.border),borderRadius:0,
       ...(k==='annual'?{borderTopLeftRadius:T.radiusXs,borderBottomLeftRadius:T.radiusXs,borderRight:'none'}:{borderTopRightRadius:T.radiusXs,borderBottomRightRadius:T.radiusXs})}}>{lab}</button>);
+  const carried=(ref&&ref.carried)||[];
   return(<div><div style={S.card}>
     {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
     <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Tax Packages</div>
@@ -6059,10 +6080,37 @@ function TaxPackageWorkpaper({entityId,entityName,canEdit=true}){
     {result&&<div style={{marginTop:16,padding:'12px 14px',background:T.bgAlt||'#f6f8fa',borderRadius:8,border:'1px solid '+T.border}}>
       <div style={{fontSize:13,fontWeight:700,color:T.textBright,marginBottom:6}}>{(result.title||'')+' tax package'} {result.label} &mdash; generated</div>
       <div style={{fontSize:12,color:T.textMuted}}>Trial balance as of {result.as_of} &middot; {result.accounts||0} account{result.accounts===1?'':'s'} on the TB &middot; {result.gl_accounts||0} GL account{result.gl_accounts===1?'':'s'} &middot; {result.supporting||0} supporting tab{result.supporting===1?'':'s'}.</div>
+      {result.carried_count>0&&<div style={{fontSize:12,color:T.textMuted,marginTop:4}}>Carried forward {result.carried_count} tab{result.carried_count===1?'':'s'} from the reference package{Array.isArray(result.carried)&&result.carried.length?': '+result.carried.join(', '):''}.</div>}
       {result.folder&&<div style={{fontSize:12,color:T.textMuted,marginTop:4}}>Filed under <strong>{result.folder}</strong>{result.replaced>0?' (replaced the previous copy)':''}.</div>}
     </div>}
+  </div>
+  <div style={S.card}>
+    <div style={{fontSize:15,fontWeight:700,color:T.textBright,marginBottom:4}}>Carry-forward reference</div>
+    <div style={{fontSize:13,color:T.textMuted,marginBottom:14,maxWidth:760,lineHeight:1.5}}>
+      Upload a prior tax package and its non-ledger tabs &mdash; <strong>Equity Rollforward</strong>, <strong>Contributed Capital</strong>,
+      the <strong>Org Chart</strong> diagram, cap tables and joinders &mdash; are carried into every package generated above, unchanged.
+      The <strong>TB</strong>, <strong>GL</strong> and per-account tabs are always regenerated from the ledger, so they stay current.
+    </div>
+    <input ref={fileRef} type="file" accept=".xlsx" style={{display:'none'}} onChange={onRefFile}/>
+    {ref&&ref.has_reference
+      ?(<div style={{padding:'12px 14px',background:T.bgAlt||'#f6f8fa',borderRadius:8,border:'1px solid '+T.border}}>
+          <div style={{fontSize:13,fontWeight:600,color:T.textBright}}>📎 {ref.original_name}</div>
+          {carried.length>0&&<div style={{fontSize:12,color:T.textMuted,marginTop:6}}>Carries forward: {carried.join(', ')}.</div>}
+          {!carried.length&&<div style={{fontSize:12,color:T.textMuted,marginTop:6}}>No non-ledger tabs detected in this workbook — only TB and GL will be produced.</div>}
+          {ref.uploaded_at&&<div style={{fontSize:11,color:T.textMuted,marginTop:6}}>Uploaded {String(ref.uploaded_at).replace('T',' ').slice(0,16)}{ref.uploaded_by?(' by '+ref.uploaded_by):''}.</div>}
+          {canEdit&&<div style={{display:'flex',gap:10,marginTop:12}}>
+            <button style={{...S.btnS,opacity:refBusy?0.5:1}} disabled={refBusy} onClick={()=>fileRef.current&&fileRef.current.click()}>{refBusy?'Working\u2026':'Replace'}</button>
+            <button style={{...S.btnS,color:T.red,opacity:refBusy?0.5:1}} disabled={refBusy} onClick={removeRef}>Remove</button>
+          </div>}
+        </div>)
+      :(<div>
+          <button style={{...S.btnP,opacity:(refBusy||!canEdit)?0.5:1}} disabled={refBusy||!canEdit} onClick={()=>fileRef.current&&fileRef.current.click()}>{refBusy?'Uploading\u2026':'Upload reference package'}</button>
+          <div style={{fontSize:12,color:T.textMuted,marginTop:8}}>Without a reference, the package is TB + GL + supporting tabs + an empty Org Chart placeholder.</div>
+        </div>)}
+    {refErr&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{refErr}</div>}
   </div></div>);
 }
+
 
 function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,description}){
   const QUARTER_ENDS=['03-31','06-30','09-30','12-31'];

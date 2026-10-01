@@ -34,6 +34,7 @@
 const path = require('path');
 const fs = require('fs');
 const ExcelJS = require('exceljs');
+const multer = require('multer');
 
 // ── Display constants (match the delivered TB & GL packages) ──────────────────
 const FONT = 'Verdana';
@@ -279,12 +280,70 @@ function buildSupportTabs(wb, d, used) {
 function buildWorkbook(d) {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'CloudLedger';
-  const used = new Set(['tb', 'gl', 'org chart']);
+  addGlDerivedSheets(wb, d, true);
+  return wb;
+}
+
+// Add the GL-derived sheets (TB, GL, supporting tabs, optional Org Chart) into a
+// workbook — either a fresh one (standalone) or a loaded reference (carry).
+function addGlDerivedSheets(wb, d, includeOrgChart) {
+  const used = new Set(wb.worksheets.map((w) => String(w.name).toLowerCase()));
+  used.add('tb'); used.add('gl');
   buildTB(wb, d);
   buildGL(wb, d);
   buildSupportTabs(wb, d, used);
-  wb.addWorksheet('Org Chart'); // placeholder — diagram pasted in by hand
+  if (includeOrgChart && !used.has('org chart')) wb.addWorksheet('Org Chart'); // placeholder — diagram pasted in by hand
+}
+
+// A sheet in the reference is "GL-derived" (owned by this generator, regenerated
+// each run) when it is the current TB/GL or a numeric per-account tab. Everything
+// else — Equity Rollforward, Contributed Capital, Org Chart, cap tables,
+// joinders, a prior-year TB like "TB 2023" — is bespoke and carried verbatim.
+function isGlDerivedSheet(name, year) {
+  const n = String(name || '').trim();
+  if (/^(tb|gl|trial balance|general ledger)$/i.test(n)) return true;
+  if (/^\d+$/.test(n)) return true;
+  if (new RegExp('^(tb|trial balance)\\s*' + year + '$', 'i').test(n)) return true;
+  if (new RegExp('^' + year + '\\s*(tb|trial balance)$', 'i').test(n)) return true;
+  return false;
+}
+function bespokeSheetNames(names, year) { return (names || []).filter((n) => !isGlDerivedSheet(n, year)); }
+
+// Carry mode: load the reference as the base, drop its GL-derived sheets, and add
+// freshly-built TB/GL/supporting tabs. The bespoke tabs (and their embedded
+// images) pass through untouched.
+async function buildCarriedWorkbook(d, refBuf) {
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(refBuf);
+  for (const name of wb.worksheets.map((w) => w.name)) {
+    if (isGlDerivedSheet(name, d.p.year)) { const ws = wb.getWorksheet(name); if (ws) wb.removeWorksheet(ws.id); }
+  }
+  addGlDerivedSheets(wb, d, false); // keep the reference's Org Chart, don't add a placeholder
   return wb;
+}
+
+// Tab order after a carry: TB, GL, numeric supporting tabs (ascending), then the
+// bespoke tabs in their original order. Reorders the <sheet> entries in
+// workbook.xml only — parts, relationships and drawings are left untouched.
+async function reorderSheets(buf) {
+  let JSZip; try { JSZip = require('jszip'); } catch (e) { return buf; }
+  try {
+    const zip = await JSZip.loadAsync(buf);
+    const f = zip.file('xl/workbook.xml'); if (!f) return buf;
+    let xml = await f.async('string');
+    const m = xml.match(/<sheets>([\s\S]*?)<\/sheets>/);
+    if (!m) return buf;
+    const els = m[1].match(/<sheet\b[^>]*\/>/g) || [];
+    if (els.length < 2) return buf;
+    const nameOf = (el) => { const mm = el.match(/name="([^"]*)"/); return mm ? mm[1].trim() : ''; };
+    const rank = (el) => { const n = nameOf(el); if (/^tb$/i.test(n)) return [0, 0]; if (/^gl$/i.test(n)) return [1, 0]; if (/^\d+$/.test(n)) return [2, Number(n)]; return [3, 0]; };
+    const ordered = els.map((el, i) => ({ el, i, r: rank(el) }))
+      .sort((a, b) => (a.r[0] - b.r[0]) || (a.r[1] - b.r[1]) || (a.i - b.i))
+      .map((x) => x.el).join('');
+    xml = xml.replace(/<sheets>[\s\S]*?<\/sheets>/, '<sheets>' + ordered + '</sheets>');
+    zip.file('xl/workbook.xml', xml);
+    return Buffer.from(await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+  } catch (e) { return buf; }
 }
 
 // ── Filing to the Workpapers folder ───────────────────────────────────────────
@@ -315,8 +374,21 @@ function saveToWorkpapers(ctx, eid, ent, p, buf, who) {
   return { folder_path: folder, original_name: original, replaced: prior.length };
 }
 
+function ensureRefSchema(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS taxpkg_reference (
+    entity_id INTEGER PRIMARY KEY,
+    original_name TEXT,
+    data BLOB,
+    sheet_names TEXT,
+    uploaded_by TEXT,
+    created_at TEXT
+  )`);
+}
+
 function registerTaxPackageRoutes(app, ctx) {
-  const { auth, requireEntityAccess, requireRole } = ctx;
+  const { db, auth, requireEntityAccess, requireRole } = ctx;
+  ensureRefSchema(db);
+  const refUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
   app.post('/api/workpapers/tax-package/:entity_id/generate', auth, requireEntityAccess('entity_id'),
     requireRole('Admin', 'Accountant'), async (req, res) => {
@@ -326,8 +398,17 @@ function registerTaxPackageRoutes(app, ctx) {
         const p = resolvePeriod((req.body && req.body.period_end) || '', mode);
         const who = (req.user && (req.user.email || req.user.name)) || 'system';
         const d = buildData(ctx, eid, p);
-        const wb = buildWorkbook(d);
-        const buf = Buffer.from(await wb.xlsx.writeBuffer());
+        const ref = db.prepare('SELECT data, sheet_names FROM taxpkg_reference WHERE entity_id = ?').get(eid);
+        let buf; let carried = null;
+        if (ref && ref.data && ref.data.length) {
+          const wb = await buildCarriedWorkbook(d, ref.data);
+          buf = await reorderSheets(Buffer.from(await wb.xlsx.writeBuffer()));
+          let names = []; try { names = JSON.parse(ref.sheet_names || '[]'); } catch (e) { names = []; }
+          carried = bespokeSheetNames(names, p.year);
+        } else {
+          const wb = buildWorkbook(d);
+          buf = Buffer.from(await wb.xlsx.writeBuffer());
+        }
         let filed = null;
         try { filed = saveToWorkpapers(ctx, eid, d.ent, p, buf, who); } catch (e) { console.error('[tax-package] filing failed:', e.message); }
         const fname = fileNameFor(d.ent, p);
@@ -336,6 +417,7 @@ function registerTaxPackageRoutes(app, ctx) {
         res.setHeader('X-TaxPackage-Summary', JSON.stringify({
           mode: p.mode, title: p.title, label: p.label, as_of: p.tbAsOf,
           accounts: d.tb.length, gl_accounts: d.blocks.length, supporting: d.support.length,
+          carried: carried || null, carried_count: carried ? carried.length : 0,
           folder: filed ? filed.folder_path : null, replaced: filed ? filed.replaced : 0,
         }).replace(/[^\x20-\x7E]/g, ' '));
         res.send(buf);
@@ -343,6 +425,49 @@ function registerTaxPackageRoutes(app, ctx) {
         res.status(400).json({ error: e.message });
       }
     });
+
+  // Reference package: a prior tax package whose bespoke tabs (Equity Rollforward,
+  // Contributed Capital, Org Chart, cap tables, …) are carried into every generated
+  // package. TB, GL and the per-account tabs are always regenerated from the ledger.
+  app.get('/api/workpapers/tax-package/:entity_id/reference', auth, requireEntityAccess('entity_id'),
+    requireRole('Admin', 'Accountant'), (req, res) => {
+      try {
+        const eid = Number(req.params.entity_id);
+        const row = db.prepare('SELECT original_name, sheet_names, uploaded_by, created_at FROM taxpkg_reference WHERE entity_id = ?').get(eid);
+        if (!row) return res.json({ has_reference: false });
+        let names = []; try { names = JSON.parse(row.sheet_names || '[]'); } catch (e) { names = []; }
+        res.json({ has_reference: true, original_name: row.original_name, uploaded_by: row.uploaded_by, uploaded_at: row.created_at, sheets: names, carried: bespokeSheetNames(names, '') });
+      } catch (e) { res.status(400).json({ error: e.message }); }
+    });
+
+  app.post('/api/workpapers/tax-package/:entity_id/reference', auth, requireEntityAccess('entity_id'),
+    requireRole('Admin', 'Accountant'), refUpload.single('file'), async (req, res) => {
+      try {
+        const eid = Number(req.params.entity_id);
+        if (!req.file || !req.file.buffer || !req.file.buffer.length) return res.status(400).json({ error: 'No file uploaded' });
+        const buf = req.file.buffer;
+        if (buf.slice(0, 2).toString('latin1') !== 'PK') return res.status(400).json({ error: 'The reference must be an .xlsx workbook' });
+        let sheetNames = [];
+        try { const wb = new ExcelJS.Workbook(); await wb.xlsx.load(buf); sheetNames = wb.worksheets.map((w) => w.name); }
+        catch (e) { return res.status(400).json({ error: 'Could not read the workbook: ' + e.message }); }
+        const who = (req.user && (req.user.email || req.user.name)) || 'system';
+        db.prepare(`INSERT INTO taxpkg_reference (entity_id, original_name, data, sheet_names, uploaded_by, created_at)
+          VALUES (?, ?, ?, ?, ?, datetime('now'))
+          ON CONFLICT(entity_id) DO UPDATE SET original_name = excluded.original_name, data = excluded.data,
+            sheet_names = excluded.sheet_names, uploaded_by = excluded.uploaded_by, created_at = datetime('now')`)
+          .run(eid, req.file.originalname || 'reference.xlsx', buf, JSON.stringify(sheetNames), who);
+        res.json({ has_reference: true, original_name: req.file.originalname || 'reference.xlsx', sheets: sheetNames, carried: bespokeSheetNames(sheetNames, '') });
+      } catch (e) { res.status(400).json({ error: e.message }); }
+    });
+
+  app.delete('/api/workpapers/tax-package/:entity_id/reference', auth, requireEntityAccess('entity_id'),
+    requireRole('Admin', 'Accountant'), (req, res) => {
+      try {
+        const eid = Number(req.params.entity_id);
+        db.prepare('DELETE FROM taxpkg_reference WHERE entity_id = ?').run(eid);
+        res.json({ ok: true, has_reference: false });
+      } catch (e) { res.status(400).json({ error: e.message }); }
+    });
 }
 
-module.exports = { registerTaxPackageRoutes, buildData, buildWorkbook, resolvePeriod };
+module.exports = { registerTaxPackageRoutes, buildData, buildWorkbook, buildCarriedWorkbook, reorderSheets, resolvePeriod };

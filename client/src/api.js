@@ -698,6 +698,15 @@ export const api = {
     const m = cd.match(/filename=\"?([^\"]+)\"?/);
     return { blob: await res.blob(), filename: m ? m[1] : 'Tax_Package.xlsx', summary };
   },
+  // Tax package reference: a prior package whose bespoke tabs (Equity Rollforward,
+  // Contributed Capital, Org Chart, …) are carried into every generated package.
+  taxPackageReferenceGet: (eid) => request('/workpapers/tax-package/' + eid + '/reference'),
+  taxPackageReferenceUpload: (eid, file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return request('/workpapers/tax-package/' + eid + '/reference', { method: 'POST', body: fd });
+  },
+  taxPackageReferenceDelete: (eid) => request('/workpapers/tax-package/' + eid + '/reference', { method: 'DELETE' }),
 
   clrfApDetailGet: async (eid) => {
     const token = getToken();
