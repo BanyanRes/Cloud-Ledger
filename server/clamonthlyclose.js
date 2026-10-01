@@ -1335,7 +1335,7 @@ function buildOaOpenItemsTab(wb, a, acts, en, m, used, leadTab) {
   txt(ws, 'B' + r, 'Balance - ' + short(m.end), { font: { bold: true } });
   if (last >= first) num(ws, 'G' + r, { formula: 'SUM(G' + first + ':G' + last + ')' }, { font: { bold: true }, border: { top: THIN, bottom: DBL } });
   else num(ws, 'G' + r, a.end, { font: { bold: true }, border: { top: THIN, bottom: DBL } });
-  return sheet;
+  return { sheet, endRef: ref(sheet, 'G' + r) };
 }
 // Inception-to-date GL detail per account (balance-forward 0 -> grand total); used
 // for Investments, where the full roll is more meaningful than open items.
@@ -1362,8 +1362,8 @@ function buildOaActivityTab(wb, a, acts, en, m, used, leadTab) {
   txt(ws, 'B' + r, 'Grand total - ' + short(m.end), { font: { bold: true } });
   totalCell(ws, 'G' + r, last >= first ? 'SUM(G' + first + ':G' + last + ')' : null);
   totalCell(ws, 'H' + r, last >= first ? 'SUM(H' + first + ':H' + last + ')' : null);
-  num(ws, 'I' + r, a.end, { font: { bold: true }, border: { top: THIN, bottom: DBL } });
-  return sheet;
+  num(ws, 'I' + r, last >= first ? { formula: 'I' + last } : a.end, { font: { bold: true }, border: { top: THIN, bottom: DBL } });
+  return { sheet, endRef: ref(sheet, 'I' + r) };
 }
 // Other Assets leadsheet: prior-month vs current-month balance per account with
 // the change; accounts that moved during the month link to a per-account tab that
@@ -1379,11 +1379,13 @@ function otherAssetsLeadsheet(wb, ws, cd, en, m, rows, oaActivity, used, leadCel
   let r = HR + 1; const first = r;
   for (const a of rows) {
     txt(ws, 'B' + r, a.code, { align: { horizontal: 'left' } }); txt(ws, 'C' + r, a.name);
-    num(ws, 'D' + r, a.begin); num(ws, 'E' + r, a.end);
+    num(ws, 'D' + r, a.begin);
+    const acts = (oaActivity && oaActivity.get(String(a.code))) || [];
+    let oaRef = null;
+    if (acts.length) { const at = (openItems ? buildOaOpenItemsTab : buildOaActivityTab)(wb, a, acts, en, m, used, cd.tab); wpLink(ws, 'H' + r, at.sheet, 'Detail'); oaRef = at.endRef; }
+    num(ws, 'E' + r, oaRef ? { formula: oaRef } : a.end);
     fqCell(ws, 'F' + r, 'B' + r);
     num(ws, 'G' + r, { formula: 'E' + r + '-D' + r });
-    const acts = (oaActivity && oaActivity.get(String(a.code))) || [];
-    if (acts.length) { const at = (openItems ? buildOaOpenItemsTab : buildOaActivityTab)(wb, a, acts, en, m, used, cd.tab); wpLink(ws, 'H' + r, at, 'Detail'); }
     leadCell.set(String(a.code), ref(cd.tab, 'E' + r));
     r++;
   }
