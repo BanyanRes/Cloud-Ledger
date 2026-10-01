@@ -112,7 +112,7 @@ function reserveName(name, used) { used.add(String(name).toLowerCase()); return 
 // Float the CLA logo in the top-left corner (columns A-B), to the left of the
 // title block in column C. One-cell-anchored at A1 with a fixed pixel size.
 function placeLogo(ws) {
-  if (!CLA_LOGO || !ws.workbook) return;
+  if (!CLA_LOGO || !ws.workbook || !ws.workbook._claShowLogo) return;
   try {
     const id = ws.workbook.addImage({ buffer: CLA_LOGO, extension: 'png' });
     ws.addImage(id, { tl: { col: 0, row: 0 }, ext: { width: 70, height: 67 } });
@@ -480,11 +480,25 @@ function buildApReconData(db, eid, apCode, asOf, bcfg) {
   return { apCode: String(apCode), gl: glBal, matchedOpenTotal, notItemized, billcomLines, billcomTotal, billcomAsOf, billcomSource, recon: recon2, diff: billcom ? r2(glBal - billcomTotal) : null };
 }
 
+// The CLA logo belongs on leadsheets for entities the CLA team actually works on.
+// A CLA user is identified by a @claconnect.com email; access is either direct
+// (user_entity_access) or via a group (user_group_entity_access). Weaver and other
+// firms are not CLA, so their entities get no logo. Fails open (keeps the logo) if
+// the access tables aren't shaped as expected.
+function claHasAccess(db, eid) {
+  try {
+    const d = db.prepare("SELECT 1 FROM user_entity_access uea JOIN users u ON u.id = uea.user_id WHERE uea.entity_id = ? AND lower(u.email) LIKE '%@claconnect.com' LIMIT 1").get(eid);
+    if (d) return true;
+    const g = db.prepare("SELECT 1 FROM user_group_entity_access ugea JOIN user_group_members mm ON mm.group_id = ugea.group_id JOIN users u ON u.id = mm.user_id WHERE ugea.entity_id = ? AND lower(u.email) LIKE '%@claconnect.com' LIMIT 1").get(eid);
+    return !!g;
+  } catch (e) { return true; }
+}
 function buildClaData(ctx, m, eid) {
   const { db, computeBalances } = ctx;
   const base = buildData(ctx, m, eid);
   ensureRegisterSchema(db); ensureSeed(db, base.entity);
   const reg = loadRegisters(db, eid);
+  const showLogo = claHasAccess(db, eid);
   // Categorization overrides on top of the generic rules: the fixed-asset register
   // is the source of truth for depreciating fixed assets. Any account carried in
   // the register (asset or accumulated side) is a fixed asset; any account the
@@ -726,7 +740,7 @@ function buildClaData(ctx, m, eid) {
       : (': ' + (d.note || 'review'))),
   }));
 
-  return Object.assign({}, base, { flags, discrepancies, byCat, arCur, arPrior, arPrimary, apCur, apPrior, apPrimary, apRecon, reg, prepaidByAcct, prepaidSched, faSched, fixedPairs, pye, pyeBal, eqMonthly, oaActivity, oaByProject });
+  return Object.assign({}, base, { flags, discrepancies, byCat, arCur, arPrior, arPrimary, apCur, apPrior, apPrimary, apRecon, reg, prepaidByAcct, prepaidSched, faSched, fixedPairs, pye, pyeBal, eqMonthly, oaActivity, oaByProject, showLogo });
 }
 
 // ─── Supporting tabs ──────────────────────────────────────────────────────────
@@ -1456,7 +1470,7 @@ function buildWorkbook(data) {
   const en = entity.name;
   const out = [];               // one self-contained workbook per section
   const LC = new Map();         // leadCell sink (no cross-workbook references exist)
-  const mkWb = () => { const w = new ExcelJS.Workbook(); w.creator = 'CloudLedger'; w.created = new Date(); return w; };
+  const mkWb = () => { const w = new ExcelJS.Workbook(); w.creator = 'CloudLedger'; w.created = new Date(); w._claShowLogo = !!data.showLogo; return w; };
   const usedFor = (cd) => new Set([cd.tab.toLowerCase()]);
   const lead = (w, cd) => w.addWorksheet(cd.tab, { views: [{ showGridLines: false }] });
 
