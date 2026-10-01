@@ -11320,6 +11320,19 @@ require('./clamonthlyclose').registerClaMonthlyCloseRoutes(app, {
   buildApAging: (eid, asOf, apAcct) => buildApAging(eid, asOf, apAcct),
 });
 
+// Tax Packages (TB & GL) — the year-end package delivered to the tax preparer,
+// available monthly or annually. TB, GL, per-account supporting tabs and an Org
+// Chart placeholder, all GL-derived (mirrors computeBalances, so it ties to the
+// books). Filed under Workpapers > Tax Packages > Annual|Monthly by year.
+require('./taxpackage').registerTaxPackageRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLRF workpaper: Preferred Return (fund-level 8% XIRR) ═══
 // Quarterly. Reproduces Weaver's fund-level preferred-return calculation: the
 // dated equalized LP net cash-flow schedule, Return of Capital, and the Preferred

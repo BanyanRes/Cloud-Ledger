@@ -680,6 +680,25 @@ export const api = {
   claCloseRegisters: (eid) => request('/workpapers/cla-monthly-close/' + eid + '/registers'),
   claCloseSaveRegisters: (eid, body) => request('/workpapers/cla-monthly-close/' + eid + '/registers', { method: 'PUT', body }),
 
+  // Tax Packages (TB & GL) — mode is 'annual' or 'monthly'; periodEnd is a
+  // YYYY-MM-DD date within the target year/month. Returns { blob, filename, summary }.
+  taxPackage: async (eid, mode, periodEnd) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/workpapers/tax-package/' + eid + '/generate', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { Authorization: 'Bearer ' + token } : {}),
+      body: JSON.stringify({ mode, period_end: periodEnd }),
+    });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (ctype.includes('application/json')) { let data = {}; try { data = await res.json(); } catch {} throw new Error(data.error || 'Report failed'); }
+    if (!res.ok) throw new Error('Report failed');
+    let summary = {}; try { summary = JSON.parse(res.headers.get('x-taxpackage-summary') || '{}'); } catch {}
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename=\"?([^\"]+)\"?/);
+    return { blob: await res.blob(), filename: m ? m[1] : 'Tax_Package.xlsx', summary };
+  },
+
   clrfApDetailGet: async (eid) => {
     const token = getToken();
     const res = await fetch(API_BASE + '/workpapers/other/' + eid + '/ap-detail', { headers: token ? { Authorization: 'Bearer ' + token } : {} });

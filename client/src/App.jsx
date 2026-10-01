@@ -942,6 +942,7 @@ export default function App(){
       ...(isCLRF?[{id:'wp_other',label:'Other Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
       ...(canClaClose?[{id:'wp_cla_monthlyclose',label:(quarterlyCla?'Quarterly':'Monthly')+' Closing Workpapers',icon:'📑',section:'workpapers'}]:[]),
+      ...(!isShellEntity?[{id:'wp_taxpackage',label:'Tax Packages',icon:'🧾',section:'workpapers'}]:[]),
     ]}]:[]),
     {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
       {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
@@ -1049,6 +1050,7 @@ export default function App(){
         {page==='wp_qtrclose'&&activeEntity&&!isCLRF&&<QuarterlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_monthlyclose'&&activeEntity&&!isCLRF&&<MonthlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_cla_monthlyclose'&&activeEntity&&canClaClose&&<ClaMonthlyCloseWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} quarterly={quarterlyCla} noBillcom={isMidcoCla} key={activeEntity+'-'+rk}/>}
+        {page==='wp_taxpackage'&&activeEntity&&<TaxPackageWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&!isCLRF&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
@@ -5992,6 +5994,74 @@ function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true,quarterly=fa
   {!noBillcom&&valid&&<ClrfApDetailCard entityId={entityId} qe={mon} canEdit={canEdit} apAcct="20000" periodLabel={quarterly?'quarter end':'month end'}/>}
   {needFixed&&<FixedAdditionsDialog entityId={entityId} entityName={entityName} info={needFixed} onCancel={()=>setNeedFixed(null)} onSaved={async()=>{setNeedFixed(null);await run();}}/>}
   </div>);
+}
+
+// ─── Workpapers › Tax Packages (TB & GL) ──────────────────────────────────────
+// The year-end TB & GL package delivered to the tax preparer, available Annually
+// or Monthly. Every tab is GL-derived (TB, GL, per-account supporting tabs, Org
+// Chart placeholder) and ties to the books. A copy is filed under Workpapers ›
+// Tax Packages › Annual|Monthly › <year>.
+function TaxPackageWorkpaper({entityId,entityName,canEdit=true}){
+  const priorMonthEnd=()=>{const t=today();const d=new Date(t.slice(0,4),Number(t.slice(5,7))-1,1);d.setDate(0);return d.toISOString().slice(0,10);};
+  const defaultYear=()=>{const t=today();const y=Number(t.slice(0,4));return String(t.slice(5)>='12-31'?y:y-1);};
+  const[mode,setMode]=useState('annual');
+  const[year,setYear]=useState(defaultYear());
+  const[mon,setMon]=useState(priorMonthEnd());
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const[result,setResult]=useState(null);
+  const yearOk=/^\d{4}$/.test(year)&&Number(year)>=2000&&Number(year)<=Number(today().slice(0,4));
+  const monOk=/^\d{4}-\d{2}-\d{2}$/.test(mon);
+  const valid=mode==='annual'?yearOk:monOk;
+  const periodEnd=mode==='annual'?(year+'-12-31'):mon;
+  const reset=()=>{setErr('');setResult(null);};
+  const run=async()=>{
+    if(!valid)return;
+    setBusy(true);setErr('');setResult(null);
+    try{
+      const r=await api.taxPackage(entityId,mode,periodEnd);
+      if(!r)return;
+      const url=URL.createObjectURL(r.blob);
+      const a=document.createElement('a');a.href=url;a.download=r.filename;
+      document.body.appendChild(a);a.click();document.body.removeChild(a);
+      setTimeout(()=>URL.revokeObjectURL(url),4000);
+      setResult(r.summary||{});
+    }catch(e){ setErr(e.message||String(e)); }
+    finally{ setBusy(false); }
+  };
+  const seg=(k,lab)=>(<button onClick={()=>{setMode(k);reset();}}
+    style={{...S.btnS,padding:'7px 16px',fontWeight:600,
+      background:mode===k?T.accent:'transparent',color:mode===k?'#fff':T.textMuted,
+      border:'1px solid '+(mode===k?T.accent:T.border),borderRadius:0,
+      ...(k==='annual'?{borderTopLeftRadius:T.radiusXs,borderBottomLeftRadius:T.radiusXs,borderRight:'none'}:{borderTopRightRadius:T.radiusXs,borderBottomRightRadius:T.radiusXs})}}>{lab}</button>);
+  return(<div><div style={S.card}>
+    {entityName&&<div style={{fontSize:14,fontWeight:600,color:T.textMuted,marginBottom:4}}>{entityName}</div>}
+    <div style={{fontSize:20,fontWeight:700,color:T.textBright,marginBottom:4}}>Tax Packages</div>
+    <div style={{fontSize:13,color:T.textMuted,marginBottom:18,maxWidth:760,lineHeight:1.5}}>
+      The TB &amp; GL package for the tax preparer, built straight from the general ledger so it ties to the books.
+      Each workbook holds the <strong>Trial Balance</strong>, the full <strong>General Ledger</strong>, a supporting tab
+      for every balance-sheet account (the &ldquo;See &hellip;&rdquo; references), and an <strong>Org Chart</strong> placeholder.
+      Choose <strong>Annual</strong> for the full tax year or <strong>Monthly</strong> for a single month.
+      A copy is filed under Workpapers &rsaquo; Tax Packages &rsaquo; {mode==='annual'?'Annual':'Monthly'} by year.
+    </div>
+    <div style={{display:'flex',marginBottom:14}}>{seg('annual','Annual')}{seg('monthly','Monthly')}</div>
+    <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
+      {mode==='annual'
+        ?(<div><label style={S.label}>Tax Year</label>
+            <input style={{...S.inputSm,width:110}} type="number" min="2000" max={today().slice(0,4)} value={year}
+              onChange={e=>{setYear(e.target.value);reset();}} placeholder="2025"/></div>)
+        :(<div><label style={S.label}>Month End Date</label>
+            <input style={S.inputSm} type="date" value={mon} onChange={e=>{setMon(e.target.value);reset();}}/></div>)}
+      <button style={{...S.btnP,opacity:(!valid||busy||!canEdit)?0.5:1}} disabled={!valid||busy||!canEdit} onClick={run}>
+        {busy?'Running\u2026':'Run Report'}</button>
+    </div>
+    {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
+    {result&&<div style={{marginTop:16,padding:'12px 14px',background:T.bgAlt||'#f6f8fa',borderRadius:8,border:'1px solid '+T.border}}>
+      <div style={{fontSize:13,fontWeight:700,color:T.textBright,marginBottom:6}}>{(result.title||'')+' tax package'} {result.label} &mdash; generated</div>
+      <div style={{fontSize:12,color:T.textMuted}}>Trial balance as of {result.as_of} &middot; {result.accounts||0} account{result.accounts===1?'':'s'} on the TB &middot; {result.gl_accounts||0} GL account{result.gl_accounts===1?'':'s'} &middot; {result.supporting||0} supporting tab{result.supporting===1?'':'s'}.</div>
+      {result.folder&&<div style={{fontSize:12,color:T.textMuted,marginTop:4}}>Filed under <strong>{result.folder}</strong>{result.replaced>0?' (replaced the previous copy)':''}.</div>}
+    </div>}
+  </div></div>);
 }
 
 function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,description}){
