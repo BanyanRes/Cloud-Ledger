@@ -1554,6 +1554,17 @@ async function finalizeWorkbook(wb) {
       else xml = xml.replace('</worksheet>', inject + '</worksheet>');
       zip.file(f, xml);
     }
+    // ExcelJS writes one-cell-anchored images with a zero-size picture extent
+    // (<a:ext cx="0" cy="0"/>): Excel sizes the frame from <xdr:ext> but draws the
+    // picture fill at 0x0, so the image is present but invisible. Copy each anchor's
+    // ext into the picture's shape extent so the logo actually renders.
+    const drawings = Object.keys(zip.files).filter((f) => /^xl\/drawings\/drawing\d+\.xml$/.test(f));
+    for (const f of drawings) {
+      let xml = await zip.file(f).async('string');
+      if (xml.indexOf('<a:ext cx="0" cy="0"/>') === -1) continue;
+      const am = xml.match(/<xdr:ext cx="(\d+)" cy="(\d+)"\/>/);
+      if (am) { xml = xml.split('<a:ext cx="0" cy="0"/>').join('<a:ext cx="' + am[1] + '" cy="' + am[2] + '"/>'); zip.file(f, xml); }
+    }
     return Buffer.from(await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
   } catch (e) { return buf0; }
 }
