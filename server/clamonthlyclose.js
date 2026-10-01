@@ -670,6 +670,10 @@ function buildClaData(ctx, m, eid) {
     }
   }
 
+  // Other Assets split by project — feeds the account x project matrix tab (Banyan
+  // tags the development on journal_lines.project_id). Built only when real projects exist.
+  const oaByProject = oaBalancesByProject(db, eid, m.end, (byCat.otherassets || []).map((a) => String(a.code)));
+
   // AP Recon: Bill.com A/P Detail vs GL open invoices (inception-to-date offsets).
   let apRecon = null;
   if (apPrimary) {
@@ -709,7 +713,7 @@ function buildClaData(ctx, m, eid) {
       : (': ' + (d.note || 'review'))),
   }));
 
-  return Object.assign({}, base, { flags, discrepancies, byCat, arCur, arPrior, arPrimary, apCur, apPrior, apPrimary, apRecon, reg, prepaidByAcct, prepaidSched, faSched, fixedPairs, pye, pyeBal, eqMonthly, oaActivity });
+  return Object.assign({}, base, { flags, discrepancies, byCat, arCur, arPrior, arPrimary, apCur, apPrior, apPrimary, apRecon, reg, prepaidByAcct, prepaidSched, faSched, fixedPairs, pye, pyeBal, eqMonthly, oaActivity, oaByProject });
 }
 
 // ─── Supporting tabs ──────────────────────────────────────────────────────────
@@ -1247,11 +1251,81 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell) {
   for (const c of ['D', 'G', 'H']) totalCell(ws, c + r, last >= first ? 'SUBTOTAL(109,' + c + first + ':' + c + last + ')' : null);
   return ref(cd.tab, 'H' + r);
 }
-// Other Assets leadsheet as an account × project matrix: every Other Assets GL
+// Other Assets by project — an account × project matrix: every Other Assets GL
 // account down the rows, one column per project (dim_projects, e.g. Van Buren /
-// Apache) so the balances are summarized by project and each row's Total ties to
-// the GL. A "(No project)" column is shown only when some line is genuinely
-// untagged. Project columns and the grand total foot with SUM formulas.
+// Apache). Each row's Total foots the project columns and ties to the GL; a
+// "(No project)" column appears only when some line is genuinely untagged.
+function buildOaByProjectTab(wb, cd, en, m, rows, proj, used, leadTab) {
+  const name = reserveName('Other Assets by Project', used);
+  const ws = wb.addWorksheet(name, { views: [{ showGridLines: false }] });
+  const cols = ((proj && proj.projects) || []).slice();
+  if (proj && proj.hasNoProject) cols.push('(No project)');
+  const colLetter = (n) => { let t = ''; while (n > 0) { t = String.fromCharCode(65 + ((n - 1) % 26)) + t; n = Math.floor((n - 1) / 26); } return t; };
+  const firstProjCol = 4, totalCol = firstProjCol + cols.length;
+  ws.getColumn(1).width = 3.4; ws.getColumn(2).width = 13; ws.getColumn(3).width = 42;
+  for (let i = 0; i < cols.length; i++) ws.getColumn(firstProjCol + i).width = 17;
+  ws.getColumn(totalCol).width = 16;
+  tabHead(ws, 'Other Assets by Project', en, 'Balances by project as of ' + spell(m.end), leadTab);
+  const HR = 6;
+  hdr(ws, HR, 2, ['Account No.', 'Account Name'].concat(cols, ['Total']));
+  let r = HR + 1; const first = r;
+  for (const a of rows) {
+    txt(ws, 'B' + r, a.code, { align: { horizontal: 'left' } });
+    txt(ws, 'C' + r, a.name);
+    const pm = (proj.byAcct && proj.byAcct.get(String(a.code))) || new Map();
+    for (let i = 0; i < cols.length; i++) { const v = pm.get(cols[i]); num(ws, colLetter(firstProjCol + i) + r, (v == null || Math.abs(v) < 0.005) ? null : r2(v)); }
+    const c1 = colLetter(firstProjCol), c2 = colLetter(firstProjCol + cols.length - 1);
+    num(ws, colLetter(totalCol) + r, cols.length ? { formula: 'SUM(' + c1 + r + ':' + c2 + r + ')' } : r2(a.end), { font: { bold: true } });
+    r++;
+  }
+  const last = r - 1;
+  txt(ws, 'B' + r, cd.total, { font: { bold: true } });
+  for (let i = 0; i <= cols.length; i++) { const cl = colLetter(firstProjCol + i); totalCell(ws, cl + r, last >= first ? 'SUM(' + cl + first + ':' + cl + last + ')' : null); }
+  return name;
+}
+// Open items that make up an Other Assets balance: credits are relieved against the
+// oldest open debits (FIFO), leaving only the unrelieved transactions that compose
+// the ending balance. The open amounts always foot to the inception-to-date net.
+function oaOpenItems(acts) {
+  const open = [];
+  for (const x of acts) {
+    let a = r2((x.debit || 0) - (x.credit || 0));
+    if (Math.abs(a) < 0.005) continue;
+    while (Math.abs(a) >= 0.005 && open.length && Math.sign(open[0].amt) !== Math.sign(a)) {
+      const o = open[0];
+      if (Math.abs(o.amt) > Math.abs(a) + 0.005) { o.amt = r2(o.amt + a); a = 0; break; }
+      a = r2(a + o.amt); open.shift();
+    }
+    if (Math.abs(a) >= 0.005) open.push({ date: x.date, num: x.num, memo: x.memo, vendor: x.vendor, proj: x.proj, amt: a });
+  }
+  return open;
+}
+// Other Assets drill-down: only the open items that make up the ending balance.
+function buildOaOpenItemsTab(wb, a, acts, en, m, used, leadTab) {
+  const sheet = sheetNameFor(a.code, used);
+  const ws = wb.addWorksheet(sheet, { views: [{ showGridLines: false }] });
+  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 12; ws.getColumn('C').width = 12; ws.getColumn('D').width = 50; ws.getColumn('E').width = 24; ws.getColumn('F').width = 26; ws.getColumn('G').width = 16;
+  tabHead(ws, a.code + ' - ' + a.name, en, 'Open items that make up the ' + spell(m.end) + ' balance', leadTab);
+  const items = oaOpenItems(acts);
+  const HR = 6;
+  hdr(ws, HR, 2, ['Date', 'Doc / JE #', 'Memo', 'Vendor', 'Project', 'Amount']);
+  let r = HR + 1; const first = r;
+  for (const x of items) {
+    num(ws, 'B' + r, asDate(x.date), { fmt: DATEFMT, align: { horizontal: 'center' } });
+    txt(ws, 'C' + r, x.num || '', { align: { horizontal: 'center' } });
+    txt(ws, 'D' + r, x.memo || ''); txt(ws, 'E' + r, x.vendor || ''); txt(ws, 'F' + r, x.proj || '');
+    num(ws, 'G' + r, x.amt);
+    r++;
+  }
+  if (!items.length) { txt(ws, 'C' + r, 'No open items — the balance is nil.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } }); r++; }
+  const last = r - 1;
+  txt(ws, 'B' + r, 'Balance - ' + short(m.end), { font: { bold: true } });
+  if (last >= first) num(ws, 'G' + r, { formula: 'SUM(G' + first + ':G' + last + ')' }, { font: { bold: true }, border: { top: THIN, bottom: DBL } });
+  else num(ws, 'G' + r, a.end, { font: { bold: true }, border: { top: THIN, bottom: DBL } });
+  return sheet;
+}
+// Inception-to-date GL detail per account (balance-forward 0 -> grand total); used
+// for Investments, where the full roll is more meaningful than open items.
 function buildOaActivityTab(wb, a, acts, en, m, used, leadTab) {
   const sheet = sheetNameFor(a.code, used);
   const ws = wb.addWorksheet(sheet, { views: [{ showGridLines: false }] });
@@ -1281,12 +1355,12 @@ function buildOaActivityTab(wb, a, acts, en, m, used, leadTab) {
 // Other Assets leadsheet: prior-month vs current-month balance per account with
 // the change; accounts that moved during the month link to a per-account tab that
 // lists the current-month GL activity behind the change.
-function otherAssetsLeadsheet(wb, ws, cd, en, m, rows, oaActivity, used, leadCell) {
+function otherAssetsLeadsheet(wb, ws, cd, en, m, rows, oaActivity, used, leadCell, openItems) {
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 44;
   ws.getColumn('D').width = 18; ws.getColumn('E').width = 18; ws.getColumn('F').width = 18; ws.getColumn('G').width = 16; ws.getColumn('H').width = 12; ws.getColumn('I').width = 34;
   titleBlock(ws, en, cd.lead, m, 'I');
   const U = (m.unit || 'Month').toLowerCase();
-  txt(ws, 'C5', 'Prior ' + U + ' (' + short(m.beg) + ') vs current ' + U + ' (' + short(m.end) + '); each account links to its full inception-to-date GL detail.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
+  txt(ws, 'C5', 'Prior ' + U + ' (' + short(m.beg) + ') vs current ' + U + ' (' + short(m.end) + '); each account links to ' + (openItems ? 'the open items that make up its balance' : 'its full inception-to-date GL detail') + '.', { font: { italic: true, color: { argb: 'FF7F7F7F' } } });
   const HR = 7;
   hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Prior ' + (m.unit || 'Month') + ' ' + short(m.beg), 'Current ' + (m.unit || 'Month') + ' ' + short(m.end), 'FQ Anchor', 'Change', 'Detail', 'Comments']);
   let r = HR + 1; const first = r;
@@ -1296,7 +1370,7 @@ function otherAssetsLeadsheet(wb, ws, cd, en, m, rows, oaActivity, used, leadCel
     fqCell(ws, 'F' + r, 'B' + r);
     num(ws, 'G' + r, { formula: 'E' + r + '-D' + r });
     const acts = (oaActivity && oaActivity.get(String(a.code))) || [];
-    if (acts.length) { const at = buildOaActivityTab(wb, a, acts, en, m, used, cd.tab); wpLink(ws, 'H' + r, at, 'Detail'); }
+    if (acts.length) { const at = (openItems ? buildOaOpenItemsTab : buildOaActivityTab)(wb, a, acts, en, m, used, cd.tab); wpLink(ws, 'H' + r, at, 'Detail'); }
     leadCell.set(String(a.code), ref(cd.tab, 'E' + r));
     r++;
   }
@@ -1401,7 +1475,8 @@ function buildWorkbook(data) {
   }
   if ((byCat.otherassets || []).length) {
     const wb = mkWb(), cd = catOf('otherassets'), used = usedFor(cd), ws = lead(wb, cd);
-    otherAssetsLeadsheet(wb, ws, cd, en, m, byCat.otherassets, data.oaActivity, used, LC);
+    if (data.oaByProject && data.oaByProject.projects.length) buildOaByProjectTab(wb, cd, en, m, byCat.otherassets, data.oaByProject, used, cd.tab);
+    otherAssetsLeadsheet(wb, ws, cd, en, m, byCat.otherassets, data.oaActivity, used, LC, true);
     out.push({ file: SECTION_FILE.otherassets, wb });
   }
   if ((byCat.invest || []).length) {
