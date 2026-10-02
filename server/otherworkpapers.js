@@ -750,9 +750,9 @@ async function buildPrepaidItems(ctx, eid, quarter) {
     for (const it of items) {
       const asOfEnd = straightLineAmort(it.premium, it.start, it.end, quarter.end);
       const asOfPrior = straightLineAmort(it.premium, it.start, it.end, qPriorDay);
-      if (asOfEnd == null) { it.coverageKnown = false; it.accumAmort = null; it.periodAmort = null; it.remaining = r2(it.premium); needCoverage += 1; }
+      if (asOfEnd == null) { it.coverageKnown = false; it.accumAmort = null; it.periodAmort = null; it.remaining = null; needCoverage += 1; }
       else { it.coverageKnown = true; it.accumAmort = asOfEnd; it.periodAmort = r2(asOfEnd - (asOfPrior || 0)); it.remaining = r2(it.premium - asOfEnd); }
-      modelRemaining = r2(modelRemaining + it.remaining);
+      modelRemaining = r2(modelRemaining + (it.remaining || 0));
       allItems.push(it);
     }
     const diff = r2(endBal - modelRemaining);
@@ -1226,17 +1226,21 @@ function buildWorkbook(data) {
         pp.getCell('D' + pr).value = (it.start && it.end) ? (it.start + ' to ' + it.end) : '(enter on Prepaid Register)'; pp.getCell('D' + pr).font = it.coverageKnown ? F() : SMALLI;
         if (it.accumAmort != null) setMoney(pp, 'E' + pr, it.accumAmort);
         if (it.periodAmort != null) setMoney(pp, 'F' + pr, it.periodAmort);
-        setMoney(pp, 'G' + pr, it.remaining);
+        if (it.remaining != null) setMoney(pp, 'G' + pr, it.remaining); else { const _rc = pp.getCell('G' + pr); _rc.value = '—'; _rc.alignment = { horizontal: 'right' }; _rc.font = SMALLI; }
         pr += 1;
       }
       const last = pr - 1;
-      pp.getCell('A' + pr).value = 'Total ' + acct.label; pp.getCell('A' + pr).font = F({ bold: true });
+      pp.getCell('A' + pr).value = 'Total ' + acct.label + (acct.needCoverage > 0 ? ' (modeled, covered items)' : ''); pp.getCell('A' + pr).font = F({ bold: true });
       { const c = pp.getCell('C' + pr); c.value = last >= first ? { formula: 'SUM(C' + first + ':C' + last + ')', result: r2(acct.items.reduce((s, x) => s + (x.premium || 0), 0)) } : 0; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
       { const c = pp.getCell('G' + pr); c.value = last >= first ? { formula: 'SUM(G' + first + ':G' + last + ')', result: acct.modelRemaining } : acct.modelRemaining; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
       pr += 1;
       pp.getCell('A' + pr).value = 'Balance per general ledger (' + acct.code + ')'; pp.getCell('A' + pr).font = F(); setMoney(pp, 'G' + pr, acct.endBal); const glR = pr; pr += 1;
-      pp.getCell('A' + pr).value = 'Difference (schedule vs GL)'; pp.getCell('A' + pr).font = F({ bold: Math.abs(acct.diff) >= 0.01 });
-      { const c = pp.getCell('G' + pr); c.value = { formula: 'G' + glR + '-G' + (glR - 1), result: r2(acct.endBal - acct.modelRemaining) }; c.numFmt = MONEY; c.font = F({ bold: Math.abs(acct.diff) >= 0.01, color: { argb: Math.abs(acct.diff) >= 0.01 ? 'FFC00000' : 'FF008000' } }); c.border = { top: THIN }; }
+      if (acct.needCoverage > 0) {
+        pp.getCell('A' + pr).value = acct.needCoverage + ' item(s) need coverage dates; enter them on the Prepaid Register to complete the reconciliation.'; pp.getCell('A' + pr).font = F({ color: { argb: 'FFB45309' } }); pp.mergeCells('A' + pr + ':G' + pr);
+      } else {
+        pp.getCell('A' + pr).value = 'Difference (schedule vs GL)'; pp.getCell('A' + pr).font = F({ bold: Math.abs(acct.diff) >= 0.01 });
+        { const c = pp.getCell('G' + pr); c.value = { formula: 'G' + glR + '-G' + (glR - 1), result: r2(acct.endBal - acct.modelRemaining) }; c.numFmt = MONEY; c.font = F({ bold: Math.abs(acct.diff) >= 0.01, color: { argb: Math.abs(acct.diff) >= 0.01 ? 'FFC00000' : 'FF008000' } }); c.border = { top: THIN }; }
+      }
       pr += 2;
     }
     pp.getCell('A' + pr).value = 'Amortization is straight-line over each item’s coverage period (premium × days elapsed ÷ total days). Remaining = premium − amortization to date. Where the modeled remaining does not tie to the GL, the amortization booked differs from this schedule (for example a period not yet amortized) — see the Summary exceptions. Items and coverage dates are maintained on the Prepaid Register.'; pp.getCell('A' + pr).font = SMALLI; pp.mergeCells('A' + pr + ':G' + pr);

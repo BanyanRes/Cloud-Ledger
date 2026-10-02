@@ -7133,6 +7133,54 @@ app.post('/api/billcom/backfill-memos/:entity_id', auth, requireEntityAccess('en
  }
 });
 
+// Backfill the vendor on Bill.com payment ("relieve bill") JEs. A payment JE is
+// booked with an opaque memo and no vendor; resolve the vendor locally from the
+// bill it relieved (the bill JE already carries the vendor), fill it in, and add
+// the vendor name to the memo so a Bill.com payment is identifiable on review.
+// Purely local — no Bill.com round trip. Idempotent and cheap to re-run.
+function backfillPaymentVendors(entityId) {
+  const rows = db.prepare(
+    "SELECT id, memo, vendor FROM journal_entries WHERE entity_id = ? AND memo LIKE 'Bill.com payment %relieve bill %'"
+  ).all(entityId);
+  if (!rows.length) return { scanned: 0, updated: 0 };
+  const billEntryByBillcomId = new Map();
+  try {
+    const bl = db.prepare("SELECT billcom_id, cl_entry_id FROM billcom_sync_log WHERE entity_id = ? AND sync_type = 'bill' AND status = 'success' AND cl_entry_id IS NOT NULL").all(entityId);
+    for (const r of bl) billEntryByBillcomId.set(String(r.billcom_id), r.cl_entry_id);
+  } catch (e) { /* sync log optional */ }
+  const vendorOfEntry = db.prepare('SELECT vendor FROM journal_entries WHERE id = ? AND entity_id = ?');
+  const setBoth = db.prepare('UPDATE journal_entries SET vendor = ?, memo = ? WHERE id = ? AND entity_id = ?');
+  let scanned = 0, updated = 0;
+  for (const je of rows) {
+    scanned++;
+    const m = /relieve bill (\S+)/.exec(je.memo || '');
+    if (!m) continue;
+    const billId = m[1];
+    const billEntryId = billEntryByBillcomId.get(String(billId));
+    if (!billEntryId) continue;
+    const be = vendorOfEntry.get(billEntryId, entityId);
+    const vendor = be && be.vendor ? String(be.vendor).trim() : '';
+    if (!vendor) continue;
+    const hasVendor = !!(je.vendor && String(je.vendor).trim());
+    const tail = ' \u2014 ' + vendor + ' \u2014 relieve bill ' + billId;
+    const memoHasVendor = (je.memo || '').indexOf(tail) >= 0;
+    if (hasVendor && memoHasVendor) continue;
+    let newMemo = je.memo || '';
+    if (!memoHasVendor) newMemo = newMemo.replace(' \u2014 relieve bill ' + billId, tail);
+    setBoth.run(vendor, newMemo, je.id, entityId);
+    updated++;
+  }
+  return { scanned, updated };
+}
+app.post('/api/billcom/backfill-payment-vendors/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), (req, res) => {
+  try {
+    const eid = parseInt(req.params.entity_id);
+    if (!eid) return res.status(400).json({ error: 'Invalid entity_id' });
+    const r = backfillPaymentVendors(eid);
+    res.json({ ok: true, scanned: r.scanned, updated: r.updated });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Phase 5: Push CloudLedger COA to Bill.com and auto-create mappings.
 app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), async (req, res) => {
   const entityId = parseInt(req.params.entity_id);
@@ -7633,7 +7681,7 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
       } else {
         try {
           const je = db.transaction(() => {
-            const created = insertJE(processDate, memo, lines);
+            const created = insertJE(processDate, memo, lines, billVendor);
             logSync.run(entityId, 'payment', dedupId, created.id, 'success', 'relieved bill ' + billId + ' (JE #' + created.num + ')', now, null);
             return created;
           })();
@@ -7684,6 +7732,7 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
 
   result.leg1.amount = Math.round(result.leg1.amount * 100) / 100;
   result.leg2.amount = Math.round(result.leg2.amount * 100) / 100;
+  try { if (!dryRun) backfillPaymentVendors(entityId); } catch (e) { /* vendor labels are cosmetic; never fail a sync over them */ }
   return result;
 }
 
