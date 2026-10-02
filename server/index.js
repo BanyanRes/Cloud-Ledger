@@ -9588,8 +9588,8 @@ app.post('/api/requisition/:entity_id/draft/roll', ...reqGuards(), requireRole('
     );
 
     const _multiStream = reqDraft.countStreams(db, eid) > 1;
-    const _entRow = db.prepare('SELECT display_id FROM entities WHERE id=?').get(eid) || {};
-    const outName = reqDraft.phasedFilename(buildRollforwardFilename(reqDraft.cleanReportBaseName(draft.base_name || 'Requisition_Report.xlsx', _entRow.display_id), reqNumber, asOfDate), draft.phase, { multiStream: _multiStream });
+    const _entRow = db.prepare('SELECT display_id, name FROM entities WHERE id=?').get(eid) || {};
+    const outName = reqDraft.phasedFilename(buildRollforwardFilename(reqDraft.cleanReportBaseName(draft.base_name || 'Requisition_Report.xlsx', _entRow.display_id), reqNumber, asOfDate, _entRow.name), draft.phase, { multiStream: _multiStream });
     const reconSummary = verification && verification.finalResult ? JSON.stringify({
       ok: !!verification.ok,
       summary: verification.finalResult.summary,
@@ -9730,8 +9730,8 @@ app.post('/api/requisition/:entity_id/draft/finalize', ...reqGuards(), requireRo
     }
 
     const _multiStreamF = reqDraft.countStreams(db, eid) > 1;
-    const _entRowF = db.prepare('SELECT display_id FROM entities WHERE id=?').get(eid) || {};
-    const fname = reqDraft.phasedFilename(buildRollforwardFilename(reqDraft.cleanReportBaseName(draft.base_name || 'Requisition_Report.xlsx', _entRowF.display_id), reqNumber, asOfDate), draft.phase, { multiStream: _multiStreamF });
+    const _entRowF = db.prepare('SELECT display_id, name FROM entities WHERE id=?').get(eid) || {};
+    const fname = reqDraft.phasedFilename(buildRollforwardFilename(reqDraft.cleanReportBaseName(draft.base_name || 'Requisition_Report.xlsx', _entRowF.display_id), reqNumber, asOfDate, _entRowF.name), draft.phase, { multiStream: _multiStreamF });
     const who = (req.user && (req.user.name || req.user.email)) || 'system';
     // Phase-scoped purge predicate: only sweep files belonging to THIS phase, so
     // Phase 2a's finalize never deletes Phase 2's filed copy in the same folder.
@@ -9982,8 +9982,26 @@ app.post('/api/requisition/:entity_id/read-invoice', ...reqGuards(), requireRole
 // The embedded date is matched with the same separator used in the prior name
 // (".", "/", "-", or "_") and the same 2- vs 4-digit year width.
 // Returns a safe generic name only if no requisition-number anchor is found.
-function buildRollforwardFilename(originalName, reqNumber, asOfDate) {
+// Braker and HP requisition reports use a fixed short-name file convention,
+// independent of the prior workbook's name: "<HP|Braker> Requisition Report
+// #<n> MM.DD.YYYY.xlsx" (Jimmy). Returns 'HP' | 'Braker' | null.
+function reqShortEntityName(entityName) {
+  const n = String(entityName || '');
+  if (/braker/i.test(n)) return 'Braker';
+  if (/\bhp\b|high\s*point|bridge\s+banyan\s+hp/i.test(n)) return 'HP';
+  return null;
+}
+function buildRollforwardFilename(originalName, reqNumber, asOfDate, entityName) {
   const fallback = 'Requisition_Report' + (reqNumber ? '_' + String(reqNumber) : '') + '.xlsx';
+  const _short = reqShortEntityName(entityName);
+  if (_short && reqNumber != null && reqNumber !== '') {
+    let datePart = '';
+    if (asOfDate) {
+      const d = new Date(asOfDate + 'T00:00:00');
+      if (!isNaN(d)) datePart = ' ' + String(d.getMonth() + 1).padStart(2, '0') + '.' + String(d.getDate()).padStart(2, '0') + '.' + String(d.getFullYear());
+    }
+    return _short + ' Requisition Report #' + String(reqNumber) + datePart + '.xlsx';
+  }
   if (!originalName || typeof originalName !== 'string') return fallback;
   let base = originalName.replace(/\.[^.]+$/, '');// strip extension
 
@@ -10310,7 +10328,8 @@ app.post('/api/requisition/:entity_id/rollforward', ...reqGuards(), requireRole(
     // Falls back to the generic name if the prior name can't be parsed.
     // Derived up front so the Workpapers auto-save uses the SAME name as the
     // download (otherwise the save fell back to a bare "Req N Report.xlsx").
-    const fname = buildRollforwardFilename(req.file.originalname, meta.reqNumber, meta.asOfDate);
+    const _rfEntName = (db.prepare('SELECT name FROM entities WHERE id=?').get(parseInt(req.params.entity_id)) || {}).name;
+    const fname = buildRollforwardFilename(req.file.originalname, meta.reqNumber, meta.asOfDate, _rfEntName);
 
     // Auto-save the workbook + a merged invoice packet into the entity's
     // Workpapers under "<year>/Requisition Reports/<Month year>" (best-effort:
