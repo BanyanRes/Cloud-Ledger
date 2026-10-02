@@ -98,6 +98,11 @@ let _activeEntityCode = null;
 let _activeEntityFileTag = '';
 const CLASS_DIM_LABELS = { TURNKEYR: 'Pay Application' };
 const classTerm = () => CLASS_DIM_LABELS[_activeEntityCode] || 'Class';
+// Per-entity relabel of the Location dimension. County Line Rail Fund (COUNTYLI1)
+// is an LP fund whose "locations" are its portfolio investments, so the Dimensions
+// module, the line-tagging dropdowns and the reports label them "Investment".
+const LOCATION_DIM_LABELS = { COUNTYLI1: 'Investment' };
+const locationTerm = () => LOCATION_DIM_LABELS[_activeEntityCode] || 'Location';
 // `opts.style` routes the build through the server (ExcelJS) so the workbook can
 // carry real underlines: a rule under the last amount in each account, a rule
 // under every subtotal, a double rule under the grand total. The community
@@ -453,7 +458,7 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
   const projOpts=useDimProjects
     ?dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}))
     :projects.map(pr=>({v:'project:'+pr.turnkey_project_id,label:'Project — '+pr.project_code+' — '+pr.project_name}));
-  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
+  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:locationTerm()+' — '+(loc.code?loc.code+' — ':'')+loc.name}));
   const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
   const _dimId=v=>{const s=String(v);const m=/^(\d+)\.0+$/.exec(s);return m?m[1]:s;};
   const lineDimValue=l=>l.project_id?'project:'+_dimId(l.project_id):l.location_id?'location:'+_dimId(l.location_id):l.class_id?'class:'+_dimId(l.class_id):'';
@@ -2332,7 +2337,7 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
   const projOpts=useDimProjects
     ?dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}))
     :projects.map(pr=>({v:'project:'+pr.turnkey_project_id,label:'Project — '+pr.project_code+' — '+pr.project_name}));
-  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
+  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:locationTerm()+' — '+(loc.code?loc.code+' — ':'')+loc.name}));
   const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
   const _dimId=v=>{const s=String(v);const m=/^(\d+)\.0+$/.exec(s);return m?m[1]:s;};
   const lineDimValue=l=>l.project_id?'project:'+_dimId(l.project_id):l.location_id?'location:'+_dimId(l.location_id):l.class_id?'class:'+_dimId(l.class_id):'';
@@ -2465,7 +2470,7 @@ function RecurringTemplatesModal({entityId,entityName,dimsEnabled=true,onClose,o
   const showLocation=dimsEnabled&&locations.length>0;const showClass=dimsEnabled&&classes.length>0;
   const showDims=showProject||showLocation||showClass;
   const projOpts=useDimProjects?dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)})):tkProjects.map(pr=>({v:'project:'+pr.turnkey_project_id,label:'Project — '+pr.project_code+' — '+pr.project_name}));
-  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
+  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:locationTerm()+' — '+(loc.code?loc.code+' — ':'')+loc.name}));
   const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
   const _dimId=v=>{const s=String(v);const m=/^(\d+)\.0+$/.exec(s);return m?m[1]:s;};
   const lineDimValue=l=>l.project_id?'project:'+_dimId(l.project_id):l.location_id?'location:'+_dimId(l.location_id):l.class_id?'class:'+_dimId(l.class_id):'';
@@ -2772,7 +2777,7 @@ function DimensionsManager({entityId,entityName,canEdit}){
   useEffect(()=>{load();},[load]);
   return(<div><div style={{marginBottom:20}}><div style={S.h1}>Dimensions</div><div style={S.sub}>{entityName} — dimensions you can tag on journal-entry lines and filter reports by</div></div>
     <div style={{display:'flex',gap:24,flexWrap:'wrap',alignItems:'flex-start'}}>
-      <DimList title="Locations" subtitle={(locations.length)+' location'+(locations.length===1?'':'s')+' (deals / properties)'} items={locations} canEdit={canEdit}
+      <DimList title={locationTerm()==='Location'?'Locations':locationTerm()+'s'} subtitle={(locations.length)+' '+(locations.length===1?locationTerm().toLowerCase():locationTerm().toLowerCase()+'s')+(locationTerm()==='Location'?' (deals / properties)':' (portfolio investments)')} items={locations} canEdit={canEdit}
         onCreate={async d=>{await api.createLocation(entityId,d);await load();}}
         onUpdate={async(id,d)=>{await api.updateLocation(entityId,id,d);await load();}}
         onDelete={async id=>{await api.deleteLocation(entityId,id);await load();}}/>
@@ -2892,7 +2897,7 @@ function ArLines({lines,setLines,revAccts,classes,locations,projects,dimsEnabled
     <div style={{overflowX:'auto'}}><table style={S.table}><thead><tr>
       <th style={S.th}>Description</th><th style={{...S.th,width:190}}>Revenue account</th>
       {projDim&&<th style={{...S.th,width:220}}>Dimension</th>}
-      {!projDim&&dimsEnabled&&<th style={{...S.th,width:130}}>Location</th>}
+      {!projDim&&dimsEnabled&&<th style={{...S.th,width:130}}>{locationTerm()}</th>}
       {!projDim&&dimsEnabled&&<th style={{...S.th,width:130}}>{classTerm()}</th>}
       <th style={{...S.thR,width:70}}>Qty</th><th style={{...S.thR,width:110}}>Rate</th><th style={{...S.thR,width:110}}>Amount</th><th style={{...S.th,width:28}}></th></tr></thead>
       <tbody>{lines.map((l,i)=><tr key={i}>
@@ -3655,7 +3660,7 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
   const reset=()=>{setForm(blank);setEditId(null);setStagedFiles([]);};
   // One tagged dimension per note (Project / Location / Class), mirroring the coding grid.
   const projOpts=dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}));
-  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
+  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:locationTerm()+' — '+(loc.code?loc.code+' — ':'')+loc.name}));
   const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
   const dimOpts=[...projOpts,...locOpts,...clsOpts];const showDims=dimsEnabled&&dimOpts.length>0;
   const dimFromNote=n=>n.project_id?'project:'+n.project_id:n.location_id?'location:'+n.location_id:n.class_id?'class:'+n.class_id:'';
@@ -3860,7 +3865,7 @@ function SplitBankTransactionModal({txn, accounts, excludeCode, entityId, dimsEn
   useEffect(() => { api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>{}); api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>{}); api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>{}); }, [entityId]);
   const dimOpts = [
     ...dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)})),
-    ...locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name})),
+    ...locations.map(loc=>({v:'location:'+loc.id,label:locationTerm()+' — '+(loc.code?loc.code+' — ':'')+loc.name})),
     ...classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name})),
   ];
   const showDims = dimsEnabled && dimOpts.length > 0;
@@ -4007,7 +4012,7 @@ function BankTransactions({entityId,canEdit=true,dimsEnabled=true,bankSelAcct:se
     setTxns(prev=>prev.map(t=>t.id===id?{...t,account_code:acct_code,memo:memo,...d,status:acct_code?'coded':'pending'}:t));};
   // One tagged dimension per transaction (Project / Location / Class), mirroring JEs.
   const projOpts=dimProjects.map(pr=>({v:'project:'+pr.id,label:'Project — '+(pr.code&&pr.code!==pr.name?pr.code+' — '+pr.name:pr.name)}));
-  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:'Location — '+(loc.code?loc.code+' — ':'')+loc.name}));
+  const locOpts=locations.map(loc=>({v:'location:'+loc.id,label:locationTerm()+' — '+(loc.code?loc.code+' — ':'')+loc.name}));
   const clsOpts=classes.map(c=>({v:'class:'+c.id,label:classTerm()+' — '+(c.code?c.code+' — ':'')+c.name}));
   const dimOpts=[...projOpts,...locOpts,...clsOpts];const showDims=dimsEnabled&&dimOpts.length>0;
   const txnDimValue=t=>t.project_id?'project:'+t.project_id:t.location_id?'location:'+t.location_id:t.class_id?'class:'+t.class_id:'';
@@ -4433,7 +4438,7 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
       const _ln=r.lines||[];
       const _hasCls=_ln.some(l=>l.class_name),_hasLoc=_ln.some(l=>l.location_name);
       const _projLbl=l=>l.project_code&&l.project_code!==l.project_name?(l.project_code+(l.project_name?' — '+l.project_name:'')):(l.project_name||'');
-      const _dimHdr=['Project',...(_hasLoc?['Location']:[]),...(_hasCls?[classTerm()]:[])];
+      const _dimHdr=['Project',...(_hasLoc?[locationTerm()]:[]),...(_hasCls?[classTerm()]:[])];
       const _dimOf=l=>[_projLbl(l),...(_hasLoc?[l.location_name||'']:[]),...(_hasCls?[l.class_name||'']:[])];
       const nD=_dimHdr.length;               // 1..3 dimension columns
       const cDr=6+nD,cCr=7+nD,cBal=8+nD;     // 6 fixed columns, then dims, then amounts
@@ -4455,7 +4460,7 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
     <div style={S.filterBar}><div><label style={S.label}>Format</label><select style={S.inputSm} value={format} onChange={e=>setFormat(e.target.value)}><option value="balances">Balances (Debit / Credit)</option><option value="activity">Activity (Beginning → Ending)</option></select></div>
       {isActivity?<><div><label style={S.label}>From date</label><input style={S.inputSm} type="date" value={fromDate} onChange={e=>setFromDate(e.target.value)}/></div><div><label style={S.label}>To date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div></>:<><div><label style={S.label}>As of Date</label><input style={S.inputSm} type="date" value={asOf} onChange={e=>setAsOf(e.target.value)}/></div><ReportControls dateFilter={dateFilter} setDateFilter={setDateFilter} colMode={colMode} setColMode={setColMode} compare={compare} setCompare={setCompare}/></>}
       {showProj&&<div><label style={S.label}>Project</label><select style={S.inputSm} value={projId} onChange={e=>setProjId(e.target.value)}><option value="">All (whole entity)</option>{projects.map(p=><option key={p.id} value={p.id}>{p.code&&p.code!==p.name?p.code+' — '+p.name:p.name}{p.line_count!=null?(' ('+p.line_count+')'):''}</option>)}</select></div>}
-      {showLocInv&&<div><label style={S.label}>Location</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>}
+      {showLocInv&&<div><label style={S.label}>{locationTerm()}</label><select style={S.inputSm} value={locId} onChange={e=>setLocId(e.target.value)}><option value="">All (whole entity)</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}{l.line_count!=null?(' ('+l.line_count+')'):''}</option>)}</select></div>}
       {showLocInv&&<div><label style={S.label}>Investor (Class)</label><select style={S.inputSm} value={classId} onChange={e=>setClassId(e.target.value)}><option value="">All investors</option>{classes.map(c=><option key={c.id} value={c.id}>{c.name}{c.line_count!=null?(' ('+c.line_count+')'):''}</option>)}</select></div>}
       <div><label style={S.label}>&nbsp;</label><label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,color:T.textMuted,cursor:'pointer',height:28}} title="Show accounts that had activity in the period but net to a zero balance"><input type="checkbox" checked={showZero} onChange={e=>setShowZero(e.target.checked)} style={{cursor:'pointer'}}/>Show zero-balance accounts</label></div></div>
     <div style={{display:'flex',gap:8,alignItems:'center'}}><MemorizeBar entityId={entityId} reportType='trial' currentConfig={{asOf,dateFilter,colMode,compare,format,fromDate,showZero}} onApply={(c)=>{if(c.asOf)setAsOf(c.asOf);if(c.dateFilter)setDateFilter(c.dateFilter);if(c.colMode)setColMode(c.colMode);if(typeof c.compare==='boolean')setCompare(c.compare);if(c.format)setFormat(c.format);if(c.fromDate)setFromDate(c.fromDate);if(typeof c.showZero==='boolean')setShowZero(c.showZero);}} canEdit={canEdit}/><button style={S.btnExport} onClick={doExportGL} title="Export flat GL detail (dimension-tagged only when a location/investor is selected)">Export GL Detail</button><button style={S.btnExport} onClick={isActivity?doExportActivity:doExport}>Export TB</button></div></div>
@@ -4547,7 +4552,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
     // two dead columns (CLA, 8/19/2026). Amount positions and the running-balance
     // formula letters are derived from the column count rather than hardcoded.
     const hasCls=lines.some(l=>l.class_name),hasLoc=lines.some(l=>l.location_name);
-    const dimHdr=[...(hasCls?[classTerm()]:[]),...(hasLoc?['Location']:[]),'Project'];
+    const dimHdr=[...(hasCls?[classTerm()]:[]),...(hasLoc?[locationTerm()]:[]),'Project'];
     const dimOf=l=>[...(hasCls?[l.class_name||'']:[]),...(hasLoc?[l.location_name||'']:[]),l.project_name||''];
     const nD=dimHdr.length;
     const cDr=7+nD,cCr=8+nD,cBal=9+nD;      // 4 fixed, dims, Memo/Offset/Vendor, amounts
@@ -5364,7 +5369,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
           <div style={{marginBottom:10,display:'flex',gap:6,flexWrap:'wrap'}}>{PRESETS.map(([k,lbl])=><button key={k} onClick={()=>{const r=presetRange(k);setFrom(r.from);setTo(r.to);}} style={{background:'none',border:'1px solid '+T.border,borderRadius:6,color:T.textMuted,fontSize:11,padding:'5px 9px',cursor:'pointer'}}>{lbl}</button>)}</div>
           <div style={{marginBottom:10}}><label style={S.label}>Columns</label><select style={{...S.inputSm,width:'100%'}} value={colMode} onChange={e=>setColMode(e.target.value)}>{COL_MODES.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div>
           <label style={{display:'flex',alignItems:'center',gap:6,fontSize:12,marginBottom:10,cursor:'pointer',color:T.textMuted}}><input type="checkbox" checked={compare} onChange={e=>setCompare(e.target.checked)}/>Compare to prior period</label>
-          {dimsEnabled&&<div><label style={S.label}>Group by</label><select style={{...S.inputSm,width:'100%'}} value={groupBy} onChange={e=>setGroupBy(e.target.value)}><option value="none">No grouping</option><option value="class">{classTerm()==='Class'?'Class / Investor':classTerm()}</option><option value="location">Location</option><option value="project">Project</option></select></div>}
+          {dimsEnabled&&<div><label style={S.label}>Group by</label><select style={{...S.inputSm,width:'100%'}} value={groupBy} onChange={e=>setGroupBy(e.target.value)}><option value="none">No grouping</option><option value="class">{classTerm()==='Class'?'Class / Investor':classTerm()}</option><option value="location">{locationTerm()}</option><option value="project">Project</option></select></div>}
           {projects.length>0&&<div style={{marginTop:10}}><label style={S.label}>Project</label><select style={{...S.inputSm,width:'100%'}} value={projFilter} onChange={e=>setProjFilter(e.target.value)}><option value="">All projects</option>{projects.map(p=><option key={p.id} value={p.id}>{p.code?p.code+' — '+p.name:p.name}</option>)}</select></div>}
         </div>
       </div>
@@ -5418,7 +5423,7 @@ function PivotReport({entityId,entityName,canEdit=true,pendingConfig,clearPendin
   };
   const doExport=()=>{
     if(!data)return;
-    const head=[dim==='class'?(classTerm()==='Class'?'Class / Investor':classTerm()):dim==='location'?'Location':'Project',...data.columns.map(c=>c.code+' '+c.name),'Total'];
+    const head=[dim==='class'?(classTerm()==='Class'?'Class / Investor':classTerm()):dim==='location'?locationTerm():'Project',...data.columns.map(c=>c.code+' '+c.name),'Total'];
     const d=[[entityName||'Pivot Report'],['Pivot Summary by '+(dim==='class'?classTerm():dim)],['Period: '+(from||'Begin')+' to '+(to||today())],[],head];
     const F=[];const nC=data.columns.length;const totC=1+nC;const dataCols=[];for(let k=1;k<=nC;k++)dataCols.push(k);
     const first=d.length;
@@ -5441,7 +5446,7 @@ function PivotReport({entityId,entityName,canEdit=true,pendingConfig,clearPendin
           <div style={{marginTop:4,display:'flex',gap:10}}><button style={{...S.btnGhost,fontSize:11,color:T.accent}} onClick={()=>setSel(filteredAccts.map(a=>a.code))}>Select all shown</button><button style={{...S.btnGhost,fontSize:11,color:T.textMuted}} onClick={()=>setSel([])}>Clear</button></div>
         </div>
         <div style={{flex:'0 0 200px'}}>
-          <div style={{marginBottom:10}}><label style={S.label}>Pivot by</label><select style={{...S.inputSm,width:'100%'}} value={dim} onChange={e=>setDim(e.target.value)}><option value="class">{classTerm()==='Class'?'Class / Investor':classTerm()}</option><option value="location">Location</option><option value="project">Project</option></select></div>
+          <div style={{marginBottom:10}}><label style={S.label}>Pivot by</label><select style={{...S.inputSm,width:'100%'}} value={dim} onChange={e=>setDim(e.target.value)}><option value="class">{classTerm()==='Class'?'Class / Investor':classTerm()}</option><option value="location">{locationTerm()}</option><option value="project">Project</option></select></div>
           <div style={{marginBottom:10}}><label style={S.label}>From</label><input style={{...S.inputSm,width:'100%'}} type="date" value={from} onChange={e=>setFrom(e.target.value)}/></div>
           <div><label style={S.label}>To</label><input style={{...S.inputSm,width:'100%'}} type="date" value={to} onChange={e=>setTo(e.target.value)}/></div>
         </div>
@@ -5451,7 +5456,7 @@ function PivotReport({entityId,entityName,canEdit=true,pendingConfig,clearPendin
     </div>
     {data&&<div className="cl-scroll" style={scrollBox()}>
       {data.rows.length===0?<div style={{padding:24,color:T.textDim}}>No activity for the selected accounts/period.</div>:
-      <table style={S.table}><thead><tr><th style={{...S.th,position:'sticky',left:0,background:T.bgCard}}>{dim==='class'?(classTerm()==='Class'?'Class / Investor':classTerm()):dim==='location'?'Location':'Project'}</th>{data.columns.map(c=><th key={c.code} style={S.thR} title={c.code+' '+c.name}>{c.name||c.code}</th>)}<th style={S.thR}>Total</th></tr></thead>
+      <table style={S.table}><thead><tr><th style={{...S.th,position:'sticky',left:0,background:T.bgCard}}>{dim==='class'?(classTerm()==='Class'?'Class / Investor':classTerm()):dim==='location'?locationTerm():'Project'}</th>{data.columns.map(c=><th key={c.code} style={S.thR} title={c.code+' '+c.name}>{c.name||c.code}</th>)}<th style={S.thR}>Total</th></tr></thead>
       <tbody>{data.rows.map(r=><tr key={r.id}><td style={{...S.td,position:'sticky',left:0,background:T.bgCard,fontWeight:500}}>{r.name}</td>{data.columns.map(c=><td key={c.code} style={S.tdR}>{r.cells[c.code]?fmt(r.cells[c.code]):''}</td>)}<td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(r.total)}</td></tr>)}
         <tr style={S.grandTotalRow}><td style={{...S.tdBold,position:'sticky',left:0,background:T.bgCard}}>Total</td>{data.columns.map(c=><td key={c.code} style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(data.column_totals[c.code]||0)}</td>)}<td style={{...S.tdBold,textAlign:'right',color:T.textBright}}>{fmt(data.grand_total)}</td></tr>
       </tbody></table>}
@@ -5783,6 +5788,71 @@ function ClrfApDetailCard({ entityId, qe, canEdit, apAcct = '202000', periodLabe
       <label style={{ ...S.btnS, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1 }}>{busy ? 'Uploading…' : 'Choose file…'}<input type="file" accept=".xlsx,.xls,.csv" disabled={busy} style={{ display: 'none' }} onChange={onFile} /></label>
     </div>}
     {preview && preview.error && <div style={{ fontSize: 12, color: T.red, marginTop: 8 }}>{preview.error}</div>}
+    {msg && <div style={{ fontSize: 12, color: msg.startsWith('Error') ? T.red : T.green, marginTop: 10, fontWeight: 600 }}>{msg}</div>}
+  </div>);
+}
+
+function ClrfPrepaidRegisterCard({ entityId, canEdit }) {
+  const PP_ACCTS = [
+    { code: '150200', label: 'Prepaid Advisory Fees' },
+    { code: '150300', label: 'Prepaid Insurance' },
+    { code: '150400', label: 'Prepaid Subscription' },
+  ];
+  const [items, setItems] = useState([]);
+  const [fixed, setFixed] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const load = async () => {
+    try { const r = await api.claCloseRegisters(entityId); setItems((r.prepaid || []).map((p) => ({ ...p }))); setFixed(r.fixed_assets || []); } catch (e) { /* ignore */ }
+  };
+  useEffect(() => { load(); }, [entityId]);
+  const set = (i, k, v) => setItems((rows) => rows.map((r, j) => (j === i ? { ...r, [k]: v } : r)));
+  const addRow = () => setItems((rows) => rows.concat([{ account_code: '150300', vendor: '', description: '', date_paid: '', premium: '', start_date: '', end_date: '' }]));
+  const delRow = (i) => setItems((rows) => rows.filter((r, j) => j !== i));
+  const save = async () => {
+    setBusy(true); setMsg('');
+    try {
+      const prepaid = items.map((r, i) => ({
+        account_code: String(r.account_code || '150300'), vendor: (r.vendor || '').trim(), description: (r.description || '').trim(),
+        date_paid: r.date_paid || null, start_date: r.start_date || null, end_date: r.end_date || null,
+        premium: (r.premium === '' || r.premium == null) ? null : Number(r.premium), monthly: Number(r.monthly) || 0,
+        opening_balance: Number(r.opening_balance) || 0, expense_account: r.expense_account == null ? null : String(r.expense_account), sort_order: i,
+      }));
+      await api.claCloseSaveRegisters(entityId, { prepaid, fixed_assets: fixed });
+      setMsg('Saved ' + prepaid.length + ' prepaid item(s). Run the report to refresh the Prepaid Expenses schedule.');
+      await load();
+    } catch (e) { setMsg('Error: ' + (e.message || e)); } finally { setBusy(false); }
+  };
+  const inp = { padding: '4px 6px', border: '1px solid #cbd5e1', borderRadius: 4, fontSize: 12, width: '100%', boxSizing: 'border-box', background: '#fff', color: '#0f172a' };
+  return (<div style={{ ...S.card, marginTop: 14, background: '#f8fafc' }}>
+    <div style={{ fontSize: 15, fontWeight: 700, color: T.textBright, marginBottom: 4 }}>Prepaid Register — item-level amortization schedule</div>
+    <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 12, maxWidth: 820, lineHeight: 1.5 }}>
+      Maintain each prepaid item (advisory 150200, insurance 150300, subscription 150400) with its premium and coverage period. The Prepaid Expenses tab amortizes each item straight-line over its coverage dates and reconciles the remaining balance to the general ledger. Additions are auto-detected from the GL when the report runs; enter the coverage dates here so amortization can be scheduled and verified.</div>
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ ...S.table, minWidth: 900 }}>
+        <thead><tr>
+          <th style={S.th}>Account</th><th style={S.th}>Vendor</th><th style={S.th}>Description</th>
+          <th style={S.th}>Date Paid</th><th style={S.thR}>Premium</th><th style={S.th}>Coverage Start</th><th style={S.th}>Coverage End</th><th style={S.th}></th>
+        </tr></thead>
+        <tbody>
+          {items.map((r, i) => (<tr key={i}>
+            <td style={S.td}><select disabled={!canEdit} value={String(r.account_code || '150300')} onChange={(e) => set(i, 'account_code', e.target.value)} style={inp}>{PP_ACCTS.map((a) => <option key={a.code} value={a.code}>{a.code} — {a.label}</option>)}</select></td>
+            <td style={S.td}><input disabled={!canEdit} value={r.vendor || ''} onChange={(e) => set(i, 'vendor', e.target.value)} style={inp} /></td>
+            <td style={S.td}><input disabled={!canEdit} value={r.description || ''} onChange={(e) => set(i, 'description', e.target.value)} style={inp} /></td>
+            <td style={S.td}><input disabled={!canEdit} type="date" value={r.date_paid || ''} onChange={(e) => set(i, 'date_paid', e.target.value)} style={inp} /></td>
+            <td style={S.td}><input disabled={!canEdit} type="number" value={r.premium == null ? '' : r.premium} onChange={(e) => set(i, 'premium', e.target.value)} style={{ ...inp, textAlign: 'right' }} /></td>
+            <td style={S.td}><input disabled={!canEdit} type="date" value={r.start_date || ''} onChange={(e) => set(i, 'start_date', e.target.value)} style={inp} /></td>
+            <td style={S.td}><input disabled={!canEdit} type="date" value={r.end_date || ''} onChange={(e) => set(i, 'end_date', e.target.value)} style={inp} /></td>
+            <td style={S.td}>{canEdit && <button style={S.btnS} onClick={() => delRow(i)}>✕</button>}</td>
+          </tr>))}
+          {!items.length && <tr><td style={{ ...S.td, color: T.textMuted }} colSpan={8}>No prepaid items yet. Additions are auto-detected from GL debits when the report runs; add rows here to set coverage dates.</td></tr>}
+        </tbody>
+      </table>
+    </div>
+    {canEdit && <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 12 }}>
+      <button style={S.btnS} disabled={busy} onClick={addRow}>+ Add item</button>
+      <button style={S.btnS} disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save register'}</button>
+    </div>}
     {msg && <div style={{ fontSize: 12, color: msg.startsWith('Error') ? T.red : T.green, marginTop: 10, fontWeight: 600 }}>{msg}</div>}
   </div>);
 }
@@ -6156,6 +6226,7 @@ function QuarterWorkpaper({entityId,entityName,canEdit=true,kind,title,descripti
       Enter a quarter end date: March 31, June 30, September 30 or December 31.</div>}
     {err&&<div style={{fontSize:12,color:T.red,marginTop:12,fontWeight:600}}>{err}</div>}
     {kind==='other'&&<ClrfApDetailCard entityId={entityId} qe={qe} canEdit={canEdit}/>}
+    {kind==='other'&&<ClrfPrepaidRegisterCard entityId={entityId} canEdit={canEdit}/>}
     {result&&<div style={{...S.card,marginTop:18,padding:14,background:'#f3faf5'}}>
       <div style={{fontWeight:700,color:T.green,marginBottom:8}}>
         {s.quarter} workpaper downloaded{s.replaced>0?' · replaced the previous copy':''}</div>
