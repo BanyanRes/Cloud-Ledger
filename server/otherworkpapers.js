@@ -35,6 +35,7 @@ const ACCT = {
   intRecv:    (c) => /^12001/.test(c),                      // 120010 Interest Receivable
   prepaidAdv: (c) => /^1502/.test(c),                       // 150200 Prepaid Advisory Fees
   prepaidIns: (c) => /^1503/.test(c),                       // 150300 Prepaid Insurance
+  prepaidSub: (c) => /^1504/.test(c),                       // 150400 Prepaid Subscription
   otherAsset: (c) => /^1801/.test(c) || /^1800/.test(c),    // 180100 Other Assets
   ap:         (c) => /^(2020|2100|2101|2102|2103|2104|2105|2107|2109|211[2-9])/.test(c),
   tradeAP:    (c) => /^2020/.test(c),                       // 202000 Accounts Payable (Bill.com trade AP)
@@ -166,14 +167,16 @@ async function buildData(ctx, quarter, opts = {}) {
   const interestTie = { gl: intBal, tied: Math.abs(intBal) < 0.005 };
   if (!interestTie.tied) flags.push({ severity: 'review', wp: 'Interest Receivable', message: 'Interest receivable ' + fmt(intBal) + ' — confirm it agrees to the portfolio company book (Silsbee).' });
 
-  // 3. Prepaid Expenses — roll-forward (advisory + insurance).
+  // 3. Prepaid Expenses — item-level roll-forward (advisory + insurance + subscription).
   const prepaid = {
     advBeg: sumWhere(bBeg, ACCT.prepaidAdv), advEnd: sumWhere(bEnd, ACCT.prepaidAdv),
     insBeg: sumWhere(bBeg, ACCT.prepaidIns), insEnd: sumWhere(bEnd, ACCT.prepaidIns),
+    subBeg: sumWhere(bBeg, ACCT.prepaidSub), subEnd: sumWhere(bEnd, ACCT.prepaidSub),
   };
   prepaid.advAmort = r2(prepaid.advEnd - prepaid.advBeg);
   prepaid.insAmort = r2(prepaid.insEnd - prepaid.insBeg);
-  const _pp = await buildPrepaidSchedule(ctx, quarter, prepaid); prepaid.schedule = _pp.policies; for (const f of _pp.flags) flags.push(f);
+  prepaid.subAmort = r2(prepaid.subEnd - prepaid.subBeg);
+  const _ppi = await buildPrepaidItems(ctx, eid, quarter); prepaid.items = _ppi.items; prepaid.itemsByAcct = _ppi.byAcct; for (const f of _ppi.flags) flags.push(f);
 
   // 4. Other Assets — inception-to-date detail, grouped by location (falls back to
   // one "Other Assets" group for untagged lines).
@@ -224,7 +227,7 @@ async function buildData(ctx, quarter, opts = {}) {
     ties: {
       due_to_portfolio: sumWhere(bEnd, ACCT.dueToPort), due_from_portfolio: sumWhere(bEnd, ACCT.dueFrom),
       due_net: r2(sumWhere(bEnd, ACCT.dueFrom) - sumWhere(bEnd, ACCT.dueToPort)),
-      interest_receivable: intBal, prepaid_advisory: prepaid.advEnd, prepaid_insurance: prepaid.insEnd,
+      interest_receivable: intBal, prepaid_advisory: prepaid.advEnd, prepaid_insurance: prepaid.insEnd, prepaid_subscription: prepaid.subEnd,
       other_assets: oaTotal, accounts_payable: apGl, accrued_expenses: accruedBal,
       management_fees_payable: mgmtPayBal, distributions_payable: distBal,
       contribution_receivable: contrib.balance, due_to_mgmt: dueMgmtBal, due_to_affiliates: affiliatesBal,
@@ -388,19 +391,43 @@ async function buildApRecon(ctx, eid, q, apGlBal) {
     const dr = r2(l.debit || 0), cr = r2(l.credit || 0);
     bal = r2(bal + cr - dr);
     return {
-      date: l.date, num: (l.entry_num != null ? String(l.entry_num) : '') || String(l.doc_number || ''),
+      line_id: l.line_id, date: l.date, num: (l.entry_num != null ? String(l.entry_num) : '') || String(l.doc_number || ''),
       vendor: l.vendor || '', offset: offsetFor(l.entry_id), memo: l.description || l.memo || '',
       debit: dr, credit: cr, balance: bal, letter: tag[i],
     };
   });
 
   // Open invoices per GL (unmatched credits) with vendor/invoice detail.
-  const openBills = openBillIdx.map((i) => {
+  let openBills = openBillIdx.map((i) => {
     const l = lines[i], amt = r2(l.credit || 0), v = vlookup(amt, l);
     return { vendor: v.vendor, invoice: v.invoice, date: v.date || l.date, num: v.num, amount: amt, memo: v.memo };
   });
   openBills.sort((a, b) => b.amount - a.amount);
-  const openTotal = r2(openBills.reduce((a, x) => a + x.amount, 0));
+  let openTotal = r2(openBills.reduce((a, x) => a + x.amount, 0));
+  let apSource = 'matcher';
+
+  // Open A/P is sourced from the GL-native A/P aging (the same report shown in the
+  // app under A/P Aging): it nets each Bill.com payment against the SPECIFIC bill it
+  // settled and carries unapplied debits forward, so it ties to the 202000 GL
+  // balance by construction. The quarter-window amount-matcher above can overstate
+  // open A/P when a payment does not exact-amount-match a single bill inside the
+  // quarter (a combined or cross-period payment). When the aging is available and
+  // agrees to this account's GL balance, use it so the workpaper matches the CL A/P
+  // Aging report and the Balance Sheet.
+  try {
+    const aging = (typeof ctx.buildApAging === 'function') ? ctx.buildApAging(eid, q.end, '202000') : null;
+    if (aging && aging.grand_total && Math.abs(r2(aging.gl_balance) - r2(apGlBal)) < 0.01) {
+      const ob = [];
+      for (const v of (aging.vendors || [])) for (const r of (v.rows || [])) ob.push({ vendor: v.vendor, invoice: r.num || '', date: r.date, num: String(r.entry_num || ''), amount: r2(r.amount), memo: '' });
+      for (const g of (aging.gl_rows || [])) ob.push({ vendor: '', invoice: '', date: g.date, num: String(g.entry_num || ''), amount: r2(g.amount), memo: g.memo || '' });
+      ob.sort((a, b) => b.amount - a.amount);
+      openBills = ob;
+      openTotal = r2(aging.grand_total.total);
+      apSource = 'aging';
+      const openSet = new Set((aging.open_items || []).map((o) => o.line_id).filter((x) => x != null));
+      for (const r of glRows) r.letter = openSet.has(r.line_id) ? 'O' : '';
+    }
+  } catch (e) { /* fall back to the amount-matcher result */ }
 
   // Independent Bill.com A/P detail. The whole point of this recon is to agree
   // the GL A/P to Bill.com's OWN open-invoice report, so the Bill.com side must
@@ -451,7 +478,7 @@ async function buildApRecon(ctx, eid, q, apGlBal) {
     ending: r2(begin + glRows.reduce((a, r) => a + r.credit - r.debit, 0)),
     totalDebit: r2(glRows.reduce((a, r) => a + r.debit, 0)),
     totalCredit: r2(glRows.reduce((a, r) => a + r.credit, 0)),
-    glRows, openBills, openTotal, xTotal,
+    glRows, openBills, openTotal, xTotal, apSource,
     billcomLines, billcomTotal, billcomAsOf, billcomSource,
     byVendor,
   };
@@ -657,6 +684,85 @@ async function buildPrepaidSchedule(ctx, quarter, prepaid) {
   return { policies, flags };
 }
 
+// ── Item-level prepaid schedule (Weaver request): each prepaid item with its
+//    premium, coverage period, expected straight-line amortization and remaining
+//    balance, so a reviewer can independently recompute amortization and tie the
+//    total back to the GL. Items are user-maintained on the Prepaid Register
+//    (reuses cla_prepaid_items); when an account has no register items we derive
+//    them from the GL (prior-year opening balance + current-year additions) with
+//    best-effort coverage from the amortization memo or the attached invoice.
+const PP_ACCTS = [
+  { code: '150200', label: 'Prepaid Advisory Fees', match: ACCT.prepaidAdv },
+  { code: '150300', label: 'Prepaid Insurance', match: ACCT.prepaidIns },
+  { code: '150400', label: 'Prepaid Subscription', match: ACCT.prepaidSub },
+];
+function daysBetween(a, b) { return Math.round((Date.parse(b) - Date.parse(a)) / 86400000); }
+function addDays(dateStr, n) { const [y, m, d] = String(dateStr).split('-').map(Number); const dt = new Date(Date.UTC(y, m - 1, d + n)); return dt.toISOString().slice(0, 10); }
+function straightLineAmort(premium, start, end, asOf) {
+  if (!(premium > 0) || !isDate(start) || !isDate(end)) return null;
+  const total = daysBetween(start, end); if (total <= 0) return null;
+  const elapsed = Math.max(0, Math.min(total, daysBetween(start, asOf)));
+  return r2(premium * elapsed / total);
+}
+async function buildPrepaidItems(ctx, eid, quarter) {
+  const { db, uploadDir } = ctx;
+  const flags = [];
+  let reg = [];
+  try { reg = db.prepare('SELECT * FROM cla_prepaid_items WHERE entity_id = ? ORDER BY account_code, sort_order, id').all(eid) || []; } catch (e) { reg = []; }
+  const regByAcct = new Map();
+  for (const it of reg) { const k = String(it.account_code); if (!regByAcct.has(k)) regByAcct.set(k, []); regByAcct.get(k).push(it); }
+  const qPriorDay = addDays(quarter.qs, -1);
+  const byAcct = [];
+  const allItems = [];
+  for (const a of PP_ACCTS) {
+    const rows = glDetail(db, eid, { to: quarter.end, match: a.match });
+    const regItems = regByAcct.get(a.code) || [];
+    const preRows = rows.filter((r) => r.date < quarter.ys);
+    const begBal = preRows.length ? preRows[preRows.length - 1].balance : 0;
+    const endBal = rows.length ? rows[rows.length - 1].balance : 0;
+    if (!regItems.length && Math.abs(endBal) < 0.005 && Math.abs(begBal) < 0.005) continue;
+    const amortLines = rows.filter((r) => r.credit > 0 && r.date >= quarter.ys);
+    const additions = rows.filter((r) => r.debit > 0 && r.date >= quarter.ys);
+    let memoF = null;
+    for (const r of amortLines) { const f = parseAmortMemo(r.memo) || parseAmortMemo(r.description); if (f) { memoF = f; break; } }
+    let items = [];
+    if (regItems.length) {
+      items = regItems.map((it) => ({
+        account_code: a.code, account_label: a.label,
+        vendor: it.vendor || '', description: it.description || '',
+        date_paid: it.date_paid || '', premium: (it.premium != null ? r2(it.premium) : r2(it.opening_balance || 0)),
+        start: it.start_date || '', end: it.end_date || '', source: 'register',
+      }));
+    } else {
+      if (begBal > 0.005) items.push({ account_code: a.code, account_label: a.label, vendor: '', description: 'Prior-year prepaid balance', date_paid: quarter.prior_ye, premium: r2(begBal), start: '', end: '', source: 'opening' });
+      for (const add of additions) {
+        let start = add.date, end = '';
+        let cov = null;
+        try { cov = await readInvoiceCoverage(uploadDir, db, add.entry_id); } catch (e) { cov = null; }
+        if (cov && cov.start && cov.end) { start = cov.start; end = cov.end; }
+        else if (memoF && memoF.basis) { end = addDays(start, memoF.basis); }
+        else { end = addDays(start, 365); }
+        const desc = String(add.memo || add.description || 'Prepaid addition').replace(/^Bill\s*-\s*/i, '').slice(0, 80);
+        items.push({ account_code: a.code, account_label: a.label, vendor: add.vendor || '', description: desc, date_paid: add.date, premium: r2(add.debit), start, end, source: 'gl' });
+      }
+    }
+    let modelRemaining = 0, needCoverage = 0;
+    for (const it of items) {
+      const asOfEnd = straightLineAmort(it.premium, it.start, it.end, quarter.end);
+      const asOfPrior = straightLineAmort(it.premium, it.start, it.end, qPriorDay);
+      if (asOfEnd == null) { it.coverageKnown = false; it.accumAmort = null; it.periodAmort = null; it.remaining = r2(it.premium); needCoverage += 1; }
+      else { it.coverageKnown = true; it.accumAmort = asOfEnd; it.periodAmort = r2(asOfEnd - (asOfPrior || 0)); it.remaining = r2(it.premium - asOfEnd); }
+      modelRemaining = r2(modelRemaining + it.remaining);
+      allItems.push(it);
+    }
+    const diff = r2(endBal - modelRemaining);
+    if (needCoverage > 0) flags.push({ severity: 'review', wp: 'Prepaid Expenses', message: a.label + ': ' + needCoverage + ' item(s) have no coverage period \u2014 enter start/end dates on the Prepaid Register so amortization can be scheduled and the balance verified.' });
+    else if (Math.abs(diff) >= 0.01) flags.push({ severity: 'exception', wp: 'Prepaid Expenses', message: a.label + ': modeled remaining prepaid ' + fmt(modelRemaining) + ' does not tie to the GL balance ' + fmt(endBal) + ' (off by ' + fmt(diff) + ') \u2014 the amortization booked differs from the straight-line schedule (e.g. a period not yet amortized).' });
+    byAcct.push({ code: a.code, label: a.label, items, begBal: r2(begBal), endBal: r2(endBal), modelRemaining, diff, needCoverage });
+  }
+  return { items: allItems, byAcct, flags };
+}
+
 // ── Accrual: mgmt-fee ITD roll, subsequent cash disbursement, flux analysis ──
 function buildMgmtItd(db, quarter) {
   const rows = glDetail(db, FUND_EID, { to: quarter.end, match: ACCT.mgmtPay });
@@ -776,7 +882,7 @@ function buildWorkbook(data) {
   const idx = [
     ['Due Fr (To) Port Co', 'Due from (to) portfolio investments (net)', '101100 / 211100', data.ties.due_net],
     ['Interest Receivable', 'Interest receivable', '120010', data.ties.interest_receivable],
-    ['Prepaid Expenses', 'Prepaid insurance / advisory', '150300 / 150200', r2(data.ties.prepaid_insurance + data.ties.prepaid_advisory)],
+    ['Prepaid Expenses', 'Prepaid advisory / insurance / subscription', '150200 / 150300 / 150400', r2(data.ties.prepaid_insurance + data.ties.prepaid_advisory + data.ties.prepaid_subscription)],
     ['Other Assets', 'Other assets', '180100', data.ties.other_assets],
     ['AP Recon', 'Accounts payable and accrued expenses', '202000 + 210000', r2(data.ties.accounts_payable + data.ties.accrued_expenses)],
     ['Accrual & Sub Cash Disbursement', 'Management fees payable', '210600', data.ties.management_fees_payable],
@@ -866,16 +972,16 @@ function buildWorkbook(data) {
 
   // ── 3. Prepaid Expenses ───────────────────────────────────────────────────
   const pp = wb.addWorksheet('Prepaid Expenses', { views: [{ showGridLines: false }] });
-  pp.getColumn(1).width = 34; [2, 3, 4].forEach((c) => (pp.getColumn(c).width = 18));
-  titleBlock(pp, en, 'Schedule for Prepaid Expenses & Prepaid Insurance', 'As of ' + short(q.end));
-  hdrRow(pp, 5, ['', 'Prepaid Advisory (150200)', 'Prepaid Insurance (150300)', 'Total'], [34, 20, 22, 16]);
+  pp.getColumn(1).width = 34; [2, 3, 4, 5].forEach((c) => (pp.getColumn(c).width = 20));
+  titleBlock(pp, en, 'Schedule for Prepaid Expenses', 'As of ' + short(q.end));
+  hdrRow(pp, 5, ['', 'Prepaid Advisory (150200)', 'Prepaid Insurance (150300)', 'Prepaid Subscription (150400)', 'Total'], [34, 20, 22, 24, 16]);
   pp.getCell('A6').value = 'Balance at ' + short(q.prior_ye); pp.getCell('A6').font = F();
-  setMoney(pp, 'B6', data.prepaid.advBeg); setMoney(pp, 'C6', data.prepaid.insBeg); setMoney(pp, 'D6', r2(data.prepaid.advBeg + data.prepaid.insBeg));
-  pp.getCell('A7').value = 'Additions / (amortization) in ' + q.label; pp.getCell('A7').font = F();
-  setMoney(pp, 'B7', data.prepaid.advAmort); setMoney(pp, 'C7', data.prepaid.insAmort); setMoney(pp, 'D7', r2(data.prepaid.advAmort + data.prepaid.insAmort));
+  setMoney(pp, 'B6', data.prepaid.advBeg); setMoney(pp, 'C6', data.prepaid.insBeg); setMoney(pp, 'D6', data.prepaid.subBeg); setMoney(pp, 'E6', r2(data.prepaid.advBeg + data.prepaid.insBeg + data.prepaid.subBeg));
+  pp.getCell('A7').value = 'Net additions / (amortization), year to date'; pp.getCell('A7').font = F();
+  setMoney(pp, 'B7', data.prepaid.advAmort); setMoney(pp, 'C7', data.prepaid.insAmort); setMoney(pp, 'D7', data.prepaid.subAmort); setMoney(pp, 'E7', r2(data.prepaid.advAmort + data.prepaid.insAmort + data.prepaid.subAmort));
   pp.getCell('A8').value = 'Balance at ' + short(q.end); pp.getCell('A8').font = F({ bold: true });
-  ['B', 'C', 'D'].forEach((col, i) => { const vals = [data.prepaid.advEnd, data.prepaid.insEnd, r2(data.prepaid.advEnd + data.prepaid.insEnd)]; const c = setMoney(pp, col + '8', vals[i], { bold: true }); c.border = { top: THIN }; });
-  pp.getCell('A10').value = 'Tied to Balance Sheet.'; pp.getCell('A10').font = SMALLI;
+  ['B', 'C', 'D', 'E'].forEach((col, i) => { const vals = [data.prepaid.advEnd, data.prepaid.insEnd, data.prepaid.subEnd, r2(data.prepaid.advEnd + data.prepaid.insEnd + data.prepaid.subEnd)]; const c = setMoney(pp, col + '8', vals[i], { bold: true }); c.border = { top: THIN }; });
+  pp.getCell('A10').value = 'Tied to Balance Sheet. Item-level detail with coverage periods and remaining balances is below.'; pp.getCell('A10').font = SMALLI;
 
   // ── 4. Other Assets (grouped detail) ──────────────────────────────────────
   const oa = wb.addWorksheet('Other Assets', { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
@@ -943,15 +1049,15 @@ function buildWorkbook(data) {
   ar += 2;
   ap.getCell('A' + ar).value = 'Accounts payable per general ledger (202000)'; ap.getCell('A' + ar).font = F();
   setMoney(ap, 'C' + ar, AP.gl); const apGlRow = ar; ar++;
-  ap.getCell('A' + ar).value = 'Open invoices remaining per GL detail (offsets applied)'; ap.getCell('A' + ar).font = F();
+  ap.getCell('A' + ar).value = 'Open invoices per A/P aging (ties to CL A/P Aging report)'; ap.getCell('A' + ar).font = F();
   setMoney(ap, 'C' + ar, AP.openTotal); const apOpenRow = ar; ar++;
   ap.getCell('A' + ar).value = 'Difference'; ap.getCell('A' + ar).font = F({ bold: true });
   { const c = ap.getCell('C' + ar); c.value = { formula: 'C' + apGlRow + '-C' + apOpenRow, result: r2(AP.gl - AP.openTotal) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
   ar += 2;
   ap.getCell('A' + ar).value = AP.billcomSource === 'live'
-    ? ('Per Bill.com = the Bill.com open-invoice report pulled live from the Bill.com API as of ' + (AP.billcomAsOf || short(q.end)) + ' (bills less payments applied by that date). Per GL = open invoices remaining on account 202000 after offsets, which ties to the Balance Sheet.')
+    ? ('Per Bill.com = the Bill.com open-invoice report pulled live from the Bill.com API as of ' + (AP.billcomAsOf || short(q.end)) + ' (bills less payments applied by that date). Per GL = open invoices on account 202000 per the A/P aging (payments netted against their bills), which ties to the Balance Sheet and the CL A/P Aging report.')
     : AP.billcomSource === 'aging'
-    ? ('Per Bill.com = the uploaded Bill.com A/P aging as of ' + (AP.billcomAsOf || short(q.end)) + '. Per GL = open invoices remaining on account 202000 after offsets, which ties to the Balance Sheet.')
+    ? ('Per Bill.com = the uploaded Bill.com A/P aging as of ' + (AP.billcomAsOf || short(q.end)) + '. Per GL = open invoices on account 202000 per the A/P aging (payments netted against their bills), which ties to the Balance Sheet and the CL A/P Aging report.')
     : ('Per Bill.com is blank because no Bill.com A/P Detail report has been uploaded, so the GL A/P is NOT yet independently verified. Export the Bill.com A/P Detail (Open Items) report as of ' + short(q.end) + ' and upload it, then regenerate. See the Exceptions block on the Summary tab.');
   ap.getCell('A' + ar).font = SMALLI; ap.mergeCells('A' + ar + ':D' + ar);
 
@@ -995,7 +1101,7 @@ function buildWorkbook(data) {
   const clLast = clr - 1;
   cld.getCell('A' + clr).value = 'Total open invoices per GL'; cld.getCell('A' + clr).font = F({ bold: true });
   { const c = cld.getCell('E' + clr); c.value = clLast >= clFirst ? { formula: 'SUM(E' + clFirst + ':E' + clLast + ')', result: AP.openTotal } : AP.openTotal; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
-  cld.getCell('A' + (clr + 2)).value = 'These are the credits on account 202000 left uncancelled after the offset analysis (AP GL Detail tab). Ties to the A/P balance and to the Bill.com A/P Detail.';
+  cld.getCell('A' + (clr + 2)).value = 'Open invoices per the A/P aging as of ' + short(q.end) + ' (each bill net of the Bill.com payments applied against it). Ties to the 202000 A/P balance, the CL A/P Aging report, and the Bill.com A/P Detail.';
   cld.getCell('A' + (clr + 2)).font = SMALLI; cld.mergeCells('A' + (clr + 2) + ':E' + (clr + 2));
 
   // 5c. AP GL Detail — 202000 detail with offset-letter tagging + bottom recon.
@@ -1003,11 +1109,11 @@ function buildWorkbook(data) {
   gld.getColumn(1).width = 11; gld.getColumn(2).width = 8; gld.getColumn(3).width = 26; gld.getColumn(4).width = 26;
   gld.getColumn(5).width = 46; gld.getColumn(6).width = 14; gld.getColumn(7).width = 14; gld.getColumn(8).width = 15; gld.getColumn(9).width = 8;
   titleBlock(gld, en, 'Accounts Payable (202000) — GL Detail with Offset', q.qs + ' to ' + short(q.end));
-  hdrRow(gld, 6, ['Date', 'Num', 'Vendor', 'Offset Account', 'Description', 'Debit', 'Credit', 'Balance', 'Offset'], [11, 8, 26, 26, 46, 14, 14, 15, 8]);
+  hdrRow(gld, 6, ['Date', 'Num', 'Vendor', 'Offset Account', 'Description', 'Debit', 'Credit', 'Balance', 'Open'], [11, 8, 26, 26, 46, 14, 14, 15, 8]);
   let gr = 7;
   gld.getCell('A' + gr).value = 'Beginning balance ' + short(q.prior_ye); gld.getCell('A' + gr).font = F({ bold: true }); gld.mergeCells('A' + gr + ':E' + gr);
   setMoney(gld, 'H' + gr, AP.begin, { bold: true });
-  { const c = gld.getCell('I' + gr); c.value = 'X'; c.font = F({ bold: true }); c.alignment = { horizontal: 'center' }; }
+  { const c = gld.getCell('I' + gr); c.value = ''; c.alignment = { horizontal: 'center' }; }
   gr++;
   for (const x of AP.glRows) {
     gld.getCell('A' + gr).value = x.date; gld.getCell('A' + gr).font = F();
@@ -1033,11 +1139,11 @@ function buildWorkbook(data) {
   const rEnd = gr;  gld.getCell('E' + gr).value = 'Ending A/P balance per GL (202000)'; gld.getCell('E' + gr).font = F({ bold: true });
   { const c = gld.getCell('H' + gr); c.value = { formula: 'H' + rBeg + '+H' + rCr + '+H' + rDr, result: AP.gl }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
   gr += 2;
-  const rOpen = gr; gld.getCell('E' + gr).value = 'Open invoices remaining after offsets'; gld.getCell('E' + gr).font = F(); setMoney(gld, 'H' + gr, AP.openTotal); gr++;
+  const rOpen = gr; gld.getCell('E' + gr).value = 'Open invoices per A/P aging'; gld.getCell('E' + gr).font = F(); setMoney(gld, 'H' + gr, AP.openTotal); gr++;
   gld.getCell('E' + gr).value = 'Difference (should be zero)'; gld.getCell('E' + gr).font = F({ bold: true });
   { const c = gld.getCell('H' + gr); c.value = { formula: 'H' + rEnd + '-H' + rOpen, result: r2(AP.gl - AP.openTotal) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
   gr += 2;
-  gld.getCell('A' + gr).value = 'Matched debits and credits carry the same offset letter and net to zero. Items tagged X relieve the beginning A/P balance (payments of prior-period bills, total ' + fmt(AP.xTotal) + '). The unlettered credits that remain are the open invoices, which equal the ending A/P balance.';
+  gld.getCell('A' + gr).value = 'Lines marked O are the open invoices per the A/P aging as of ' + short(q.end) + '. The aging nets each Bill.com payment against the specific bill it settled and carries unapplied payments forward, so open A/P (' + fmt(AP.openTotal) + ') equals the ending 202000 balance and ties to the CL A/P Aging report and Bill.com. Full open-invoice detail is on the CL A/P Detail tab.';
   gld.getCell('A' + gr).font = SMALLI; gld.mergeCells('A' + gr + ':I' + gr);
 
   // ── 6. Accrual & Subsequent Cash Disbursement ─────────────────────────────
@@ -1103,24 +1209,37 @@ function buildWorkbook(data) {
 
   // ═══ Phase 2-4 supporting schedules ═══════════════════════════════════════
 
-  // Prepaid amortization schedule (appended to the Prepaid tab).
+  // Prepaid items — item-level amortization schedule (appended to the Prepaid tab).
   {
+    pp.getColumn(1).width = 30; pp.getColumn(2).width = 30; [3, 4, 5, 6, 7].forEach((c) => (pp.getColumn(c).width = 15)); pp.getColumn(4).width = 22;
     let pr = 12;
-    for (const pol of (data.prepaid.schedule || [])) {
-      pp.getCell('A' + pr).value = pol.label + (pol.premium != null ? ('  —  amortizing ' + fmt(pol.premium)) : ''); pp.getCell('A' + pr).font = F({ bold: true }); pr += 1;
-      if (pol.invoice && pol.invoice.start) { pp.getCell('A' + pr).value = 'Policy period per invoice: ' + pol.invoice.start + ' to ' + pol.invoice.end + ' (' + pol.invoice.source + ')'; pp.getCell('A' + pr).font = SMALLI; pr += 1; }
-      hdrRow(pp, pr, ['Period', 'Days', 'Amortization booked', 'Per formula', 'Check'], null); pr += 1;
-      for (const c of pol.checkRows) {
-        pp.getCell('A' + pr).value = c.date + '  ' + (c.num || ''); pp.getCell('A' + pr).font = F();
-        pp.getCell('B' + pr).value = c.days; pp.getCell('B' + pr).font = F();
-        setMoney(pp, 'C' + pr, c.booked);
-        if (c.premium != null && c.basis && c.days) { const dc = pp.getCell('D' + pr); dc.value = { formula: c.premium + '/' + c.basis + '*' + c.days, result: c.expected }; dc.numFmt = MONEY; dc.font = F(); } else if (c.expected != null) setMoney(pp, 'D' + pr, c.expected);
-        const cc = pp.getCell('E' + pr); cc.value = c.ok == null ? 'n/a' : (c.ok ? 'OK' : 'DIFF'); cc.font = F({ bold: c.ok === false, color: { argb: c.ok === false ? 'FFC00000' : 'FF008000' } });
+    pp.getCell('A' + pr).value = 'Prepaid items — amortization schedule'; pp.getCell('A' + pr).font = F({ bold: true }); pr += 2;
+    const HH = ['Vendor / Description', 'Date Paid', 'Premium', 'Coverage period', 'Amort to date', 'Amort ' + q.quarter, 'Remaining'];
+    for (const acct of (data.prepaid.itemsByAcct || [])) {
+      pp.getCell('A' + pr).value = acct.code + ' — ' + acct.label; pp.getCell('A' + pr).font = F({ bold: true }); pr += 1;
+      hdrRow(pp, pr, HH, null); pr += 1;
+      const first = pr;
+      for (const it of acct.items) {
+        pp.getCell('A' + pr).value = (it.vendor ? it.vendor + ' — ' : '') + (it.description || ''); pp.getCell('A' + pr).font = F();
+        pp.getCell('B' + pr).value = it.date_paid || ''; pp.getCell('B' + pr).font = F();
+        setMoney(pp, 'C' + pr, it.premium);
+        pp.getCell('D' + pr).value = (it.start && it.end) ? (it.start + ' to ' + it.end) : '(enter on Prepaid Register)'; pp.getCell('D' + pr).font = it.coverageKnown ? F() : SMALLI;
+        if (it.accumAmort != null) setMoney(pp, 'E' + pr, it.accumAmort);
+        if (it.periodAmort != null) setMoney(pp, 'F' + pr, it.periodAmort);
+        setMoney(pp, 'G' + pr, it.remaining);
         pr += 1;
       }
+      const last = pr - 1;
+      pp.getCell('A' + pr).value = 'Total ' + acct.label; pp.getCell('A' + pr).font = F({ bold: true });
+      { const c = pp.getCell('C' + pr); c.value = last >= first ? { formula: 'SUM(C' + first + ':C' + last + ')', result: r2(acct.items.reduce((s, x) => s + (x.premium || 0), 0)) } : 0; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+      { const c = pp.getCell('G' + pr); c.value = last >= first ? { formula: 'SUM(G' + first + ':G' + last + ')', result: acct.modelRemaining } : acct.modelRemaining; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
       pr += 1;
+      pp.getCell('A' + pr).value = 'Balance per general ledger (' + acct.code + ')'; pp.getCell('A' + pr).font = F(); setMoney(pp, 'G' + pr, acct.endBal); const glR = pr; pr += 1;
+      pp.getCell('A' + pr).value = 'Difference (schedule vs GL)'; pp.getCell('A' + pr).font = F({ bold: Math.abs(acct.diff) >= 0.01 });
+      { const c = pp.getCell('G' + pr); c.value = { formula: 'G' + glR + '-G' + (glR - 1), result: r2(acct.endBal - acct.modelRemaining) }; c.numFmt = MONEY; c.font = F({ bold: Math.abs(acct.diff) >= 0.01, color: { argb: Math.abs(acct.diff) >= 0.01 ? 'FFC00000' : 'FF008000' } }); c.border = { top: THIN }; }
+      pr += 2;
     }
-    if ((data.prepaid.schedule || []).length) { pp.getCell('A' + pr).value = 'Each period amortization is checked against the booking-memo formula (premium / basis × days). A DIFF is flagged on the Summary tab.'; pp.getCell('A' + pr).font = SMALLI; pp.mergeCells('A' + pr + ':E' + pr); }
+    pp.getCell('A' + pr).value = 'Amortization is straight-line over each item’s coverage period (premium × days elapsed ÷ total days). Remaining = premium − amortization to date. Where the modeled remaining does not tie to the GL, the amortization booked differs from this schedule (for example a period not yet amortized) — see the Summary exceptions. Items and coverage dates are maintained on the Prepaid Register.'; pp.getCell('A' + pr).font = SMALLI; pp.mergeCells('A' + pr + ':G' + pr);
   }
 
   // Mgmt Fee Accrual — inception-to-date roll-forward.
@@ -1210,7 +1329,7 @@ function buildWorkbook(data) {
     // result is a net due-FROM (asset), shown positive to match the Balance Sheet.
     { f: 'SUM(' + sq('Due Fr (To) Port Co') + 'E' + dueEndRow + ':K' + dueEndRow + ')', v: data.ties.due_net },
     { f: sq('Interest Receivable') + 'G' + intTotalRow, v: data.ties.interest_receivable },
-    { f: sq('Prepaid Expenses') + 'D8', v: r2(data.ties.prepaid_insurance + data.ties.prepaid_advisory) },
+    { f: sq('Prepaid Expenses') + 'E8', v: r2(data.ties.prepaid_insurance + data.ties.prepaid_advisory + data.ties.prepaid_subscription) },
     { f: sq('Other Assets') + 'F' + oaTotalRow, v: data.ties.other_assets },
     // Accounts payable & accrued expenses = trade AP (202000, AP Recon) + accrued
     // (210000, Accrual tab), tying to the single Balance Sheet line.

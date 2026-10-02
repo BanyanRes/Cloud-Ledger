@@ -7549,14 +7549,14 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
   };
 
   const transferByDate = new Map(); // processDate -> NEW disbursed amount this run
-  const insertJE = (date, memo, lines) => {
+  const insertJE = (date, memo, lines, vendor) => {
     // `actor` is the caller-supplied user label; there is no `req` in this
     // module-level function (referencing one threw ReferenceError on every
     // payment JE, which the per-payment catch turned into "req is not defined").
     periods.assertPostable(db, entityId, date, { userEmail: actor || 'billcom-payment-reconcile', source: 'billcom-payment-reconcile' });
     const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
-    const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, created_by) VALUES (?,?,?,?,?)')
-      .run(entityId, num, date, memo, 'Bill.com sync');
+    const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, vendor, created_by) VALUES (?,?,?,?,?,?)')
+      .run(entityId, num, date, memo, vendor || null, 'Bill.com sync');
     for (const l of lines) {
       db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit) VALUES (?,?,?,?)')
         .run(r.lastInsertRowid, l.account_code, l.debit, l.credit);
@@ -7611,15 +7611,16 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
       // CL payable whose payment relieves it, even when the invoice predates the
       // cutoff. (Previously gated on invoice date, which wrongly skipped payments
       // for pre-cutoff invoices that posted after the cutoff.)
-      const billPostRow = db.prepare('SELECT date FROM journal_entries WHERE id = ? AND entity_id = ?').get(billEntryId, entityId);
+      const billPostRow = db.prepare('SELECT date, vendor FROM journal_entries WHERE id = ? AND entity_id = ?').get(billEntryId, entityId);
       const billPostDate = billPostRow ? String(billPostRow.date) : null;
+      const billVendor = billPostRow && billPostRow.vendor ? String(billPostRow.vendor).trim() : '';
       if (billPostDate && billPostDate < cutoffDate) {
         result.leg1.skipped++;
         result.leg1.details.push({ id: dedupId, status: 'skip', reason: 'bill posted pre-conversion (' + billPostDate + ' < ' + cutoffDate + ')' });
         continue;
       }
 
-      const memo = 'Bill.com payment ' + payNum + ' \u2014 relieve bill ' + billId;
+      const memo = 'Bill.com payment ' + payNum + (billVendor ? ' \u2014 ' + billVendor : '') + ' \u2014 relieve bill ' + billId;
       const lines = [
         { account_code: apAccount, debit: amount, credit: 0 },
         { account_code: clearingAccount, debit: 0, credit: amount },
@@ -9040,6 +9041,7 @@ function buildApAging(entityId, asOf, apAccountOverride) {
     recon_diff: reconDiff,
     bill_count: vendorsOut.reduce((n, g) => n + g.rows.length, 0),
     gl_entry_count: glRows.length,
+    open_items: openItems.map(o => ({ line_id: o.line_id, entry_id: o.entry_id, entry_num: o.entry_num, date: o.date, amount: o.amount, vendor: o.vendor || '', memo: o.memo || '', is_billcom: syncedEntryIds.has(o.entry_id) })),
     billcom_error: billcomError,
   };
 }
@@ -11275,6 +11277,7 @@ require('./otherworkpapers').registerOtherWorkpapersRoutes(app, {
     } catch (e) { console.error('[billcomOpenAsOf]', e && e.message); return null; }
   },
   computeBalances: (eid, opts) => computeBalances(eid, opts),
+  buildApAging: (eid, asOf, apAcct) => buildApAging(eid, asOf, apAcct),
 });
 
 // ═══ Quarterly Closing Workpaper (generic balance-sheet support) ═══
