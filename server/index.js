@@ -3528,13 +3528,19 @@ function jeInsertReversal(eid, source, sourceLines, reverseDate, userName) {
   const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id=?').get(eid).m || 0) + 1;
   const jeNo = 'JE-' + String(source.entry_num).padStart(4, '0');
   const memo = 'Reversal of ' + jeNo + (source.memo ? ' — ' + source.memo : '');
-  const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, doc_number, created_by, reverses_entry_id) VALUES (?,?,?,?,?,?,?)')
-    .run(eid, num, reverseDate, memo, source.doc_number || null, userName, source.id);
+  const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, doc_number, vendor, created_by, reverses_entry_id) VALUES (?,?,?,?,?,?,?,?)')
+    .run(eid, num, reverseDate, memo, source.doc_number || null, source.vendor || null, userName, source.id);
   const ins = db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?,?)');
   for (const l of sourceLines) ins.run(r.lastInsertRowid, l.account_code, +(l.credit || 0), +(l.debit || 0), l.description || '', l.project_id || null, l.class_id || null, l.location_id || null);
   db.prepare('UPDATE journal_entries SET reversal_entry_id=? WHERE id=?').run(r.lastInsertRowid, source.id);
   return { id: r.lastInsertRowid, entry_num: num };
 }
+// Distinct vendor/payee names already used on this entity's journal entries
+// (Bill.com-synced bills/payments and manual JEs), for the JE window's Vendor picker.
+app.get('/api/entities/:eid/je-vendors', auth, requireEntityAccess(), (req, res) => {
+  const rows = db.prepare("SELECT vendor, COUNT(*) AS n FROM journal_entries WHERE entity_id=? AND vendor IS NOT NULL AND TRIM(vendor)<>'' GROUP BY vendor ORDER BY vendor COLLATE NOCASE").all(req.params.eid);
+  res.json(rows.map(r => r.vendor));
+});
 app.get('/api/entities/:eid/entries', auth, requireEntityAccess(), (req, res) => {
   const { from, to } = req.query; let sql = 'SELECT * FROM journal_entries WHERE entity_id = ?'; const params = [req.params.eid];
   if (from) { sql += ' AND date >= ?'; params.push(from); } if (to) { sql += ' AND date <= ?'; params.push(to); }
@@ -3687,6 +3693,7 @@ app.get('/api/entities/:eid/gl-detail', auth, requireEntityAccess(), (req, res) 
 
 app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
   const { date, memo, lines, doc_number } = req.body; if (!date||!memo||!lines||lines.length<2) return res.status(400).json({ error: 'Invalid' });
+  const vendor = String(req.body.vendor || '').trim() || null;
   const tDr = lines.reduce((s,l) => s+(l.debit||0), 0); const tCr = lines.reduce((s,l) => s+(l.credit||0), 0);
   if (Math.abs(tDr-tCr) > 0.005) return res.status(400).json({ error: 'Must balance' });
   // Optional auto-reversing: when auto_reverse is set, a mirror entry (debits and
@@ -3701,11 +3708,11 @@ app.post('/api/entities/:eid/entries', auth, requireEntityAccess(), requireRole(
   catch (e) { if (periods.sendPeriodError(res, e)) return; throw e; }
   const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id=?').get(req.params.eid).m||0)+1;
   const result = db.transaction(() => {
-    const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, doc_number, created_by) VALUES (?,?,?,?,?,?)').run(req.params.eid, num, date, memo, (doc_number || '').trim() || null, req.user.name);
+    const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, doc_number, vendor, created_by) VALUES (?,?,?,?,?,?,?)').run(req.params.eid, num, date, memo, (doc_number || '').trim() || null, vendor, req.user.name);
     for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?,?)').run(r.lastInsertRowid, l.account_code, l.debit||0, l.credit||0, l.description||'', l.project_id||null, l.class_id||null, l.location_id||null);
     let reversal = null;
     if (autoReverse) {
-      const src = { id: r.lastInsertRowid, entry_num: num, memo, doc_number: (doc_number || '').trim() || null };
+      const src = { id: r.lastInsertRowid, entry_num: num, memo, doc_number: (doc_number || '').trim() || null, vendor };
       reversal = jeInsertReversal(req.params.eid, src, lines, reverseDate, req.user.name);
     }
     return { id: r.lastInsertRowid, reversal };
@@ -4113,6 +4120,10 @@ app.put('/api/entities/:eid/entries/:id', auth, requireEntityAccess(), requireRo
     } else {
       db.prepare("UPDATE journal_entries SET date=?, memo=?, updated_by=?, updated_at=datetime('now') WHERE id=?")
         .run(date, memo, req.user.name || req.user.email, req.params.id);
+    }
+    // Same key-presence rule for vendor: only clients that send it can change it.
+    if (Object.prototype.hasOwnProperty.call(req.body, 'vendor')) {
+      db.prepare('UPDATE journal_entries SET vendor=? WHERE id=?').run(String(req.body.vendor || '').trim() || null, req.params.id);
     }
     db.prepare('DELETE FROM journal_lines WHERE entry_id=?').run(req.params.id);
     for (const l of lines) db.prepare('INSERT INTO journal_lines (entry_id, account_code, debit, credit, description, project_id, class_id, location_id) VALUES (?,?,?,?,?,?,?,?)').run(req.params.id, l.account_code, l.debit || 0, l.credit || 0, l.description || '', l.project_id || null, l.class_id || null, l.location_id || null);

@@ -200,6 +200,8 @@ async function buildData(ctx, quarter, opts = {}) {
   const accruedBal = sumWhere(bEnd, ACCT.accrued);
   const affiliatesBal = sumWhere(bEnd, (c) => /^2110/.test(c));
   const mgmtItd = buildMgmtItd(db, quarter);
+  const accrualItems = buildAccrualItems(db, eid, quarter, bEnd);
+  for (const g of accrualItems.groups) if (Math.abs(g.schedule - g.gl) >= 0.01) flags.push({ severity: 'exception', wp: 'Accrual & Sub Cash Disb', message: g.label + ': accrual schedule net outstanding ' + fmt(g.schedule) + ' does not tie to the GL balance ' + fmt(g.gl) + '.' });
   const subDisb = buildSubsequentDisb(db, quarter);
   const flux = buildFlux(db, quarter);
   for (const f of flux.flags) flags.push(f);
@@ -220,7 +222,7 @@ async function buildData(ctx, quarter, opts = {}) {
     prepaid,
     otherAssets: { groups: oaGroups, total: oaTotal, begin: sumWhere(bBeg, ACCT.otherAsset) },
     ap: apRecon,
-    accrual: { rows: accrRows, mgmtPay: mgmtPayBal, accrued: accruedBal, affiliates: affiliatesBal, mgmtItd, subDisb, flux },
+    accrual: { rows: accrRows, items: accrualItems.items, groups: accrualItems.groups, mgmtPay: mgmtPayBal, accrued: accruedBal, affiliates: affiliatesBal, mgmtItd, subDisb, flux },
     contrib,
     distSplit,
     dist: { rows: distRows, balance: distBal },
@@ -763,6 +765,65 @@ async function buildPrepaidItems(ctx, eid, quarter) {
   return { items: allItems, byAcct, flags };
 }
 
+// ── Accrual open-item schedule (Weaver request 10/2026): every accrual credit to
+//    the accrued-liability accounts with the amount since reversed / paid, the
+//    reversal date and JE, and the net amount still outstanding at quarter end.
+//    Debits are matched to the accrual they relieve in this order: (1) a reversing
+//    JE that points at the accrual (journal_entries.reverses_entry_id), (2) same
+//    amount and vendor, (3) same amount, (4) oldest open accrual first (FIFO).
+//    Debits left over after matching are listed as unapplied, so the schedule's
+//    net outstanding equals the GL balance by construction.
+const ACCR_GROUPS = [
+  { code: '210600', prefix: '2106', label: 'Management fees payable', bsLine: 'Management fees payable', match: (c) => ACCT.mgmtPay(c) },
+  { code: '210000', prefix: '2100', label: 'Accrued expenses', bsLine: 'within Accounts payable & accrued expenses', match: (c) => ACCT.accrued(c) },
+  { code: '211000', prefix: '2110', label: 'Due to affiliates', bsLine: 'Due to affiliates', match: (c) => /^2110/.test(c) },
+];
+function buildAccrualItems(db, eid, quarter, bEnd) {
+  const normV = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const revOf = new Map();
+  for (const r of db.prepare('SELECT id, reverses_entry_id FROM journal_entries WHERE entity_id = ? AND reverses_entry_id IS NOT NULL').all(eid)) revOf.set(r.id, r.reverses_entry_id);
+  const items = [], groups = [];
+  for (const g of ACCR_GROUPS) {
+    const rows = glDetail(db, eid, { to: quarter.end, match: g.match });
+    const credits = rows.filter((r) => r.credit > 0).map((r) => ({ ...r, open: r2(r.credit), allocs: [] }));
+    const unapplied = [];
+    for (const d of rows.filter((r) => r.debit > 0)) {
+      let rem = r2(d.debit);
+      const take = (c) => { if (!c || rem <= 0.004) return; const a = r2(Math.min(c.open, rem)); if (a <= 0.004) return; c.open = r2(c.open - a); rem = r2(rem - a); c.allocs.push({ amount: a, date: d.date, je: d.entry_num }); };
+      const open = (c) => c.open > 0.004;
+      const src = revOf.get(d.entry_id);
+      if (src) take(credits.find((c) => open(c) && c.entry_id === src && c.account_code === d.account_code));
+      if (rem > 0.004 && d.vendor) take(credits.find((c) => open(c) && c.date <= d.date && Math.abs(c.open - rem) < 0.005 && normV(c.vendor) === normV(d.vendor)));
+      if (rem > 0.004) take(credits.find((c) => open(c) && c.date <= d.date && Math.abs(c.open - rem) < 0.005));
+      for (const c of credits) { if (rem <= 0.004) break; if (open(c) && c.date <= d.date) take(c); }
+      for (const c of credits) { if (rem <= 0.004) break; if (open(c)) take(c); }
+      if (rem > 0.004) unapplied.push({ ...d, amount: rem });
+    }
+    const shown = credits.filter((c) => c.date >= quarter.qs || c.open > 0.004 || c.allocs.some((a) => a.date >= quarter.qs));
+    for (const c of shown) {
+      const reversed = r2(c.credit - c.open);
+      const last = c.allocs.length ? c.allocs[c.allocs.length - 1] : null;
+      items.push({
+        kind: 'accrual', group: g.code, date: c.date, vendor: c.vendor, entry_num: c.entry_num, doc_number: c.doc_number,
+        description: c.description || c.memo, account_code: c.account_code, account_name: c.account_name,
+        accrued: r2(c.credit), reversed, reversal_date: last ? last.date : '', reversal_je: [...new Set(c.allocs.map((a) => a.je))].join(', '), net: c.open,
+      });
+    }
+    for (const u of unapplied) {
+      items.push({
+        kind: 'unapplied', group: g.code, date: u.date, vendor: u.vendor, entry_num: u.entry_num, doc_number: u.doc_number,
+        description: 'Debit not matched to a specific accrual — ' + (u.description || u.memo), account_code: u.account_code, account_name: u.account_name,
+        accrued: 0, reversed: u.amount, reversal_date: u.date, reversal_je: String(u.entry_num || ''), net: r2(-u.amount),
+      });
+    }
+    const schedule = r2(credits.reduce((a, c) => a + c.open, 0) - unapplied.reduce((a, u) => a + u.amount, 0));
+    groups.push({ ...g, match: undefined, schedule, gl: sumWhere(bEnd, g.match), unappliedCount: unapplied.length });
+  }
+  const order = new Map(ACCR_GROUPS.map((g, i) => [g.code, i]));
+  items.sort((a, b) => (order.get(a.group) - order.get(b.group)) || String(a.date).localeCompare(String(b.date)) || (Number(a.entry_num) || 0) - (Number(b.entry_num) || 0));
+  return { items, groups };
+}
+
 // ── Accrual: mgmt-fee ITD roll, subsequent cash disbursement, flux analysis ──
 function buildMgmtItd(db, quarter) {
   const rows = glDetail(db, FUND_EID, { to: quarter.end, match: ACCT.mgmtPay });
@@ -867,11 +928,16 @@ function titleBlock(ws, name, subtitle, dateLine) {
   ws.getCell('A3').value = dateLine; ws.getCell('A3').font = SMALLI;
 }
 const setMoney = (ws, ref, v, o = {}) => { const c = ws.getCell(ref); c.value = v; c.numFmt = MONEY; c.font = F(o); return c; };
+// Formula cell with its cached result (so the file shows values before Excel recalculates).
+const fx = (ws, ref, formula, result, o = {}) => { const c = ws.getCell(ref); c.value = { formula, result: typeof result === 'number' ? r2(result) : result }; c.numFmt = MONEY; c.font = F(o); return c; };
+// Real Excel date cell (so coverage-day and aging formulas can do date math).
+const setDate = (ws, ref, s, o = {}) => { const c = ws.getCell(ref); if (isDate(s)) { const [y, m, dd] = String(s).split('-').map(Number); c.value = new Date(Date.UTC(y, m - 1, dd)); c.numFmt = 'm/d/yyyy'; } else c.value = s || ''; c.font = F(o); return c; };
 
 function buildWorkbook(data) {
   const q = data.quarter, en = data.entity_name;
   const wb = new ExcelJS.Workbook();
   wb.creator = 'CloudLedger'; wb.created = new Date();
+  wb.calcProperties = { fullCalcOnLoad: true };
 
   // ── Summary / index ──────────────────────────────────────────────────────
   const su = wb.addWorksheet('Summary', { views: [{ showGridLines: false }] });
@@ -923,6 +989,8 @@ function buildWorkbook(data) {
   }
 
   // ── 1. Due Fr (To) Port Co ────────────────────────────────────────────────
+  // Beginning balances and JE activity are GL inputs; the ending row SUMs each
+  // property column, and the intercompany recon links to that ending row.
   const du = wb.addWorksheet('Due Fr (To) Port Co', { views: [{ showGridLines: false }] });
   du.getColumn(2).width = 40; du.getColumn(3).width = 14; [5, 7, 9, 11].forEach((c) => (du.getColumn(c).width = 14)); du.getColumn(12).width = 54;
   titleBlock(du, en, 'Due From/To Port Co reconciliation', spellDate(q.end));
@@ -931,7 +999,7 @@ function buildWorkbook(data) {
   du.getCell('L5').value = 'Journal entry description'; du.getCell('L5').font = F({ bold: true });
   P.forEach((p, i) => { const c = du.getCell(String.fromCharCode(69 + i * 2) + '5'); c.value = p; c.font = F({ bold: true }); c.alignment = { horizontal: 'center' }; });
   const propCol = (i) => String.fromCharCode(69 + i * 2); // E,G,I,K
-  let R = 6;
+  let R = 6; const dueFirst = R;
   du.getCell('B' + R).value = 'Due From (To) Port Co at ' + short(q.prior_ye); du.getCell('B' + R).font = F();
   P.forEach((p, i) => setMoney(du, propCol(i) + R, data.due.beg[p]));
   R++;
@@ -942,9 +1010,9 @@ function buildWorkbook(data) {
     R++;
   }
   du.getCell('B' + R).value = 'Due From (To) Port Co at ' + short(q.end); du.getCell('B' + R).font = F({ bold: true });
-  P.forEach((p, i) => { const c = setMoney(du, propCol(i) + R, data.due.end[p], { bold: true }); c.border = { top: THIN }; });
-  const dueEndRow = R; // ending row — Summary links to -SUM(E:K) here
-  du.getCell('B' + (R + 2)).value = 'Net Due From (To) Portfolio Company ties to the Balance Sheet: due-from asset (101100) less due-to liability (211100).';
+  P.forEach((p, i) => { const col = propCol(i); const c = fx(du, col + R, 'SUM(' + col + dueFirst + ':' + col + (R - 1) + ')', data.due.end[p], { bold: true }); c.border = { top: THIN }; });
+  const dueEndRow = R; // ending row — Summary links to SUM(E:K) here
+  du.getCell('B' + (R + 2)).value = 'Net Due From (To) Portfolio Company ties to the Balance Sheet: due-from asset (101100) less due-to liability (211100). Ending row = beginning balance + each JE (SUM formula).';
   du.getCell('B' + (R + 2)).font = SMALLI; du.mergeCells('B' + (R + 2) + ':K' + (R + 2));
   {
     const rec = data.due.recon;
@@ -958,7 +1026,10 @@ function buildWorkbook(data) {
       du.getCell('K' + rr).value = 'Status'; du.getCell('K' + rr).font = F({ bold: true }); rr += 1;
       for (const row of rec.rows) {
         du.getCell('B' + rr).value = row.prop + ' — ' + row.cpName; du.getCell('B' + rr).font = F();
-        setMoney(du, 'E' + rr, row.fundDue); setMoney(du, 'G' + rr, row.cpNet); setMoney(du, 'I' + rr, row.diff);
+        const pi = P.indexOf(row.prop);
+        if (pi >= 0) fx(du, 'E' + rr, propCol(pi) + dueEndRow, row.fundDue); else setMoney(du, 'E' + rr, row.fundDue);
+        setMoney(du, 'G' + rr, row.cpNet);
+        fx(du, 'I' + rr, 'E' + rr + '-G' + rr, row.diff);
         const st = row.status === 'matched' ? 'Tied' : (row.status === 'one_sided' ? 'One-sided' : 'Mismatch');
         const cc = du.getCell('K' + rr); cc.value = st; cc.font = F({ bold: row.status !== 'matched', color: { argb: row.status === 'matched' ? 'FF008000' : 'FFC00000' } });
         rr += 1;
@@ -971,46 +1042,61 @@ function buildWorkbook(data) {
   const intTotalRow = detailSheet(wb, 'Interest Receivable', en, 'Interest Receivable (120010)', q, data.interest.rows, data.interest.balance);
 
   // ── 3. Prepaid Expenses ───────────────────────────────────────────────────
+  // Roll-forward: beginning + YTD activity (GL inputs) = ending (formula); the
+  // Total column SUMs the three accounts. Item schedule below recomputes the
+  // straight-line amortization from premium and coverage dates with formulas.
   const pp = wb.addWorksheet('Prepaid Expenses', { views: [{ showGridLines: false }] });
-  pp.getColumn(1).width = 34; [2, 3, 4, 5].forEach((c) => (pp.getColumn(c).width = 20));
   titleBlock(pp, en, 'Schedule for Prepaid Expenses', 'As of ' + short(q.end));
-  hdrRow(pp, 5, ['', 'Prepaid Advisory (150200)', 'Prepaid Insurance (150300)', 'Prepaid Subscription (150400)', 'Total'], [34, 20, 22, 24, 16]);
+  hdrRow(pp, 5, ['', 'Prepaid Advisory (150200)', 'Prepaid Insurance (150300)', 'Prepaid Subscription (150400)', 'Total'], null);
+  pp.getRow(5).height = 30;
   pp.getCell('A6').value = 'Balance at ' + short(q.prior_ye); pp.getCell('A6').font = F();
-  setMoney(pp, 'B6', data.prepaid.advBeg); setMoney(pp, 'C6', data.prepaid.insBeg); setMoney(pp, 'D6', data.prepaid.subBeg); setMoney(pp, 'E6', r2(data.prepaid.advBeg + data.prepaid.insBeg + data.prepaid.subBeg));
+  setMoney(pp, 'B6', data.prepaid.advBeg); setMoney(pp, 'C6', data.prepaid.insBeg); setMoney(pp, 'D6', data.prepaid.subBeg);
   pp.getCell('A7').value = 'Net additions / (amortization), year to date'; pp.getCell('A7').font = F();
-  setMoney(pp, 'B7', data.prepaid.advAmort); setMoney(pp, 'C7', data.prepaid.insAmort); setMoney(pp, 'D7', data.prepaid.subAmort); setMoney(pp, 'E7', r2(data.prepaid.advAmort + data.prepaid.insAmort + data.prepaid.subAmort));
+  setMoney(pp, 'B7', data.prepaid.advAmort); setMoney(pp, 'C7', data.prepaid.insAmort); setMoney(pp, 'D7', data.prepaid.subAmort);
   pp.getCell('A8').value = 'Balance at ' + short(q.end); pp.getCell('A8').font = F({ bold: true });
-  ['B', 'C', 'D', 'E'].forEach((col, i) => { const vals = [data.prepaid.advEnd, data.prepaid.insEnd, data.prepaid.subEnd, r2(data.prepaid.advEnd + data.prepaid.insEnd + data.prepaid.subEnd)]; const c = setMoney(pp, col + '8', vals[i], { bold: true }); c.border = { top: THIN }; });
+  const ppEnd = { B: data.prepaid.advEnd, C: data.prepaid.insEnd, D: data.prepaid.subEnd };
+  ['B', 'C', 'D'].forEach((col) => { fx(pp, col + '8', col + '6+' + col + '7', ppEnd[col], { bold: true }).border = { top: THIN }; });
+  fx(pp, 'E6', 'SUM(B6:D6)', r2(data.prepaid.advBeg + data.prepaid.insBeg + data.prepaid.subBeg));
+  fx(pp, 'E7', 'SUM(B7:D7)', r2(data.prepaid.advAmort + data.prepaid.insAmort + data.prepaid.subAmort));
+  fx(pp, 'E8', 'SUM(B8:D8)', r2(data.prepaid.advEnd + data.prepaid.insEnd + data.prepaid.subEnd), { bold: true }).border = { top: THIN };
   pp.getCell('A10').value = 'Tied to Balance Sheet. Item-level detail with coverage periods and remaining balances is below.'; pp.getCell('A10').font = SMALLI;
 
   // ── 4. Other Assets (grouped detail) ──────────────────────────────────────
   const oa = wb.addWorksheet('Other Assets', { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
   titleBlock(oa, en, 'Other Assets (180100) — transaction detail', 'As of ' + short(q.end));
   hdrRow(oa, 5, ['Group', 'Date', 'Type', 'Num', 'Description', 'Amount', 'Balance'], [22, 12, 14, 16, 52, 16, 16]);
-  let orow = 6;
+  let orow = 6; const oaGroupTotals = [];
   for (const g of data.otherAssets.groups) {
     oa.getCell('A' + orow).value = g.name; oa.getCell('A' + orow).font = F({ bold: true }); orow++;
-    let run = 0;
+    const gFirst = orow; let run = 0;
     for (const r of g.rows) {
       run = r2(run + r.signed);
-      oa.getCell('B' + orow).value = r.date; oa.getCell('B' + orow).font = F();
+      setDate(oa, 'B' + orow, r.date);
       oa.getCell('C' + orow).value = ''; // type
       oa.getCell('D' + orow).value = r.entry_num || r.doc_number; oa.getCell('D' + orow).font = F();
       oa.getCell('E' + orow).value = r.description || r.memo; oa.getCell('E' + orow).font = F();
-      setMoney(oa, 'F' + orow, r.signed); setMoney(oa, 'G' + orow, run);
+      setMoney(oa, 'F' + orow, r.signed);
+      fx(oa, 'G' + orow, orow === gFirst ? 'F' + orow : 'G' + (orow - 1) + '+F' + orow, run);
       orow++;
     }
     oa.getCell('E' + orow).value = 'Total for ' + g.name; oa.getCell('E' + orow).font = F({ bold: true });
-    const c = setMoney(oa, 'F' + orow, g.total, { bold: true }); c.border = { top: THIN }; orow += 1;
+    const c = orow > gFirst ? fx(oa, 'F' + orow, 'SUM(F' + gFirst + ':F' + (orow - 1) + ')', g.total, { bold: true }) : setMoney(oa, 'F' + orow, 0, { bold: true });
+    c.border = { top: THIN }; oaGroupTotals.push(orow); orow += 1;
   }
   oa.getCell('E' + orow).value = 'TOTAL Other Assets'; oa.getCell('E' + orow).font = F({ bold: true });
-  const oc = setMoney(oa, 'F' + orow, data.otherAssets.total, { bold: true }); oc.border = { top: THIN, bottom: THIN };
+  const oc = oaGroupTotals.length ? fx(oa, 'F' + orow, 'SUM(' + oaGroupTotals.map((r) => 'F' + r).join(',') + ')', data.otherAssets.total, { bold: true }) : setMoney(oa, 'F' + orow, 0, { bold: true });
+  oc.border = { top: THIN, bottom: THIN };
   const oaTotalRow = orow; // Summary links to F here
   orow += 2;
-  oa.getCell('D' + orow).value = 'Beginning balance at ' + short(q.prior_ye); oa.getCell('D' + orow).font = F(); setMoney(oa, 'F' + orow, data.otherAssets.begin); orow += 1;
-  oa.getCell('D' + orow).value = 'Net activity in ' + q.label; oa.getCell('D' + orow).font = F(); setMoney(oa, 'F' + orow, r2(data.otherAssets.total - data.otherAssets.begin)); orow += 1;
-  oa.getCell('D' + orow).value = 'Ending balance at ' + short(q.end); oa.getCell('D' + orow).font = F({ bold: true }); setMoney(oa, 'F' + orow, data.otherAssets.total, { bold: true }).border = { top: THIN }; orow += 2;
-  oa.getCell('A' + orow).value = 'Ending balance agrees to the Balance Sheet other assets line (180100).'; oa.getCell('A' + orow).font = SMALLI; oa.mergeCells('A' + orow + ':G' + orow);
+  const oaBeg = orow; oa.getCell('D' + orow).value = 'Beginning balance at ' + short(q.prior_ye); oa.getCell('D' + orow).font = F(); setMoney(oa, 'F' + orow, data.otherAssets.begin); orow += 1;
+  const oaAct = orow; oa.getCell('D' + orow).value = 'Net activity in ' + q.label; oa.getCell('D' + orow).font = F(); orow += 1;
+  const oaEnd = orow; oa.getCell('D' + orow).value = 'Ending balance at ' + short(q.end); oa.getCell('D' + orow).font = F({ bold: true });
+  fx(oa, 'F' + oaEnd, 'F' + oaTotalRow, data.otherAssets.total, { bold: true }).border = { top: THIN };
+  fx(oa, 'F' + oaAct, 'F' + oaEnd + '-F' + oaBeg, r2(data.otherAssets.total - data.otherAssets.begin));
+  orow += 1;
+  const oaGl = orow; oa.getCell('D' + orow).value = 'Balance per general ledger (180100)'; oa.getCell('D' + orow).font = F(); setMoney(oa, 'F' + orow, data.ties.other_assets); orow += 1;
+  oa.getCell('D' + orow).value = 'Difference (should be zero)'; oa.getCell('D' + orow).font = F({ bold: true }); fx(oa, 'F' + orow, 'F' + oaEnd + '-F' + oaGl, r2(data.otherAssets.total - data.ties.other_assets), { bold: true }).border = { top: THIN }; orow += 2;
+  oa.getCell('A' + orow).value = 'Running balance and totals are formulas over the GL transaction lines; the ending balance agrees to the Balance Sheet other assets line (180100).'; oa.getCell('A' + orow).font = SMALLI; oa.mergeCells('A' + orow + ':G' + orow);
 
   // ── 5. AP Recon (summary + supporting schedules) ──────────────────────────
   // Purpose: show that the open-invoice report per Bill.com ties to the GL A/P
@@ -1025,7 +1111,6 @@ function buildWorkbook(data) {
   titleBlock(ap, en, 'Accounts Payable Reconciliation — Bill.com to GL (202000)', 'As of ' + short(q.end));
   hdrRow(ap, 6, ['Vendor', 'Per Bill.com', 'Per GL', 'Difference'], [44, 16, 16, 16]);
   let ar = 7;
-  const apFirst = ar;
   // Per Bill.com links to the Bill.com AP Detail tab; Per GL links to the CL AP
   // Detail tab, so each figure traces to its supporting schedule.
   const bcN = (AP.billcomLines || []).length, clN = (AP.openBills || []).length;
@@ -1047,12 +1132,14 @@ function buildWorkbook(data) {
   { const c = ap.getCell('D' + ar); if (AP.billcomSource !== 'none') c.value = { formula: 'B' + ar + '-C' + ar, result: r2((AP.billcomTotal || 0) - AP.openTotal) }; money(c).font = F({ bold: true }); c.border = { top: THIN }; }
   const apTotalRow = ar; // Summary links to C here (Per GL open invoices = 202000)
   ar += 2;
+  // The two rows below are linked to the AP GL Detail / CL AP Detail tabs once
+  // those tabs are built (cells filled in after section 5c).
   ap.getCell('A' + ar).value = 'Accounts payable per general ledger (202000)'; ap.getCell('A' + ar).font = F();
-  setMoney(ap, 'C' + ar, AP.gl); const apGlRow = ar; ar++;
+  const apGlRow = ar; ar++;
   ap.getCell('A' + ar).value = 'Open invoices per A/P aging (ties to CL A/P Aging report)'; ap.getCell('A' + ar).font = F();
-  setMoney(ap, 'C' + ar, AP.openTotal); const apOpenRow = ar; ar++;
+  const apOpenRow = ar; ar++;
   ap.getCell('A' + ar).value = 'Difference'; ap.getCell('A' + ar).font = F({ bold: true });
-  { const c = ap.getCell('C' + ar); c.value = { formula: 'C' + apGlRow + '-C' + apOpenRow, result: r2(AP.gl - AP.openTotal) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  fx(ap, 'C' + ar, 'C' + apGlRow + '-C' + apOpenRow, r2(AP.gl - AP.openTotal), { bold: true }).border = { top: THIN };
   ar += 2;
   ap.getCell('A' + ar).value = AP.billcomSource === 'live'
     ? ('Per Bill.com = the Bill.com open-invoice report pulled live from the Bill.com API as of ' + (AP.billcomAsOf || short(q.end)) + ' (bills less payments applied by that date). Per GL = open invoices on account 202000 per the A/P aging (payments netted against their bills), which ties to the Balance Sheet and the CL A/P Aging report.')
@@ -1063,14 +1150,13 @@ function buildWorkbook(data) {
 
   // 5a. Bill.com A/P Detail — open invoices.
   const bc = wb.addWorksheet('Bill.com AP Detail', { views: [{ state: 'frozen', ySplit: 6, showGridLines: false }] });
-  bc.getColumn(1).width = 40; bc.getColumn(2).width = 18; bc.getColumn(3).width = 14; bc.getColumn(4).width = 16;
   titleBlock(bc, en, 'Bill.com A/P Detail — Open Invoices', 'As of ' + short(AP.billcomAsOf || q.end));
   hdrRow(bc, 6, ['Vendor', 'Invoice #', 'Bill Date', 'Amount'], [40, 18, 14, 16]);
   let bcr = 7; const bcFirst = bcr;
   for (const b of (AP.billcomLines || [])) {
     bc.getCell('A' + bcr).value = b.vendor; bc.getCell('A' + bcr).font = F();
     bc.getCell('B' + bcr).value = b.invoice || ''; bc.getCell('B' + bcr).font = F();
-    bc.getCell('C' + bcr).value = b.date || ''; bc.getCell('C' + bcr).font = F();
+    setDate(bc, 'C' + bcr, b.date || '');
     setMoney(bc, 'D' + bcr, b.amount); bcr++;
   }
   const bcLast = bcr - 1;
@@ -1078,7 +1164,7 @@ function buildWorkbook(data) {
     bc.getCell('A' + bcr).value = 'No Bill.com A/P Detail report uploaded. Export the Bill.com A/P Detail (Open Items) report as of ' + short(AP.billcomAsOf || q.end) + ' and upload it (Bill.com settings → A/P aging) to complete this reconciliation.'; bc.getCell('A' + bcr).font = SMALLI; bc.mergeCells('A' + bcr + ':D' + bcr);
   } else {
     bc.getCell('A' + bcr).value = 'Total open invoices per Bill.com'; bc.getCell('A' + bcr).font = F({ bold: true });
-    { const c = bc.getCell('D' + bcr); c.value = bcLast >= bcFirst ? { formula: 'SUM(D' + bcFirst + ':D' + bcLast + ')', result: AP.billcomTotal } : AP.billcomTotal; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+    { const c = bcLast >= bcFirst ? fx(bc, 'D' + bcr, 'SUM(D' + bcFirst + ':D' + bcLast + ')', AP.billcomTotal, { bold: true }) : setMoney(bc, 'D' + bcr, AP.billcomTotal, { bold: true }); c.border = { top: THIN }; }
     bc.getCell('A' + (bcr + 2)).value = AP.billcomSource === 'live'
       ? ('Source: pulled live from the Bill.com API as of ' + short(AP.billcomAsOf || q.end) + ' (bills less payments applied by that date). Ties to account 202000 and to the CL AP Detail tab.')
       : 'Source: uploaded Bill.com A/P aging detail. Ties to account 202000 and to the CL AP Detail tab.';
@@ -1087,103 +1173,129 @@ function buildWorkbook(data) {
 
   // 5b. CL A/P Detail — open invoices per GL.
   const cld = wb.addWorksheet('CL AP Detail', { views: [{ state: 'frozen', ySplit: 6, showGridLines: false }] });
-  cld.getColumn(1).width = 40; cld.getColumn(2).width = 18; cld.getColumn(3).width = 14; cld.getColumn(4).width = 10; cld.getColumn(5).width = 16;
   titleBlock(cld, en, 'Accounts Payable Detail per GL — Open Invoices', 'As of ' + short(q.end));
   hdrRow(cld, 6, ['Vendor', 'Invoice #', 'Bill Date', 'JE #', 'Amount'], [40, 18, 14, 10, 16]);
   let clr = 7; const clFirst = clr;
   for (const b of (AP.openBills || [])) {
     cld.getCell('A' + clr).value = b.vendor; cld.getCell('A' + clr).font = F();
     cld.getCell('B' + clr).value = b.invoice || ''; cld.getCell('B' + clr).font = F();
-    cld.getCell('C' + clr).value = b.date || ''; cld.getCell('C' + clr).font = F();
+    setDate(cld, 'C' + clr, b.date || '');
     cld.getCell('D' + clr).value = b.num || ''; cld.getCell('D' + clr).font = F();
     setMoney(cld, 'E' + clr, b.amount); clr++;
   }
   const clLast = clr - 1;
   cld.getCell('A' + clr).value = 'Total open invoices per GL'; cld.getCell('A' + clr).font = F({ bold: true });
-  { const c = cld.getCell('E' + clr); c.value = clLast >= clFirst ? { formula: 'SUM(E' + clFirst + ':E' + clLast + ')', result: AP.openTotal } : AP.openTotal; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  { const c = clLast >= clFirst ? fx(cld, 'E' + clr, 'SUM(E' + clFirst + ':E' + clLast + ')', AP.openTotal, { bold: true }) : setMoney(cld, 'E' + clr, AP.openTotal, { bold: true }); c.border = { top: THIN }; }
+  const clTotalRow = clr;
   cld.getCell('A' + (clr + 2)).value = 'Open invoices per the A/P aging as of ' + short(q.end) + ' (each bill net of the Bill.com payments applied against it). Ties to the 202000 A/P balance, the CL A/P Aging report, and the Bill.com A/P Detail.';
   cld.getCell('A' + (clr + 2)).font = SMALLI; cld.mergeCells('A' + (clr + 2) + ':E' + (clr + 2));
 
   // 5c. AP GL Detail — 202000 detail with offset-letter tagging + bottom recon.
+  // Running balance = prior balance + credit − debit (formula); totals are SUMs;
+  // the reconciliation block links to those totals.
   const gld = wb.addWorksheet('AP GL Detail', { views: [{ state: 'frozen', ySplit: 6, showGridLines: false }] });
-  gld.getColumn(1).width = 11; gld.getColumn(2).width = 8; gld.getColumn(3).width = 26; gld.getColumn(4).width = 26;
-  gld.getColumn(5).width = 46; gld.getColumn(6).width = 14; gld.getColumn(7).width = 14; gld.getColumn(8).width = 15; gld.getColumn(9).width = 8;
   titleBlock(gld, en, 'Accounts Payable (202000) — GL Detail with Offset', q.qs + ' to ' + short(q.end));
   hdrRow(gld, 6, ['Date', 'Num', 'Vendor', 'Offset Account', 'Description', 'Debit', 'Credit', 'Balance', 'Open'], [11, 8, 26, 26, 46, 14, 14, 15, 8]);
   let gr = 7;
+  const gBegRow = gr;
   gld.getCell('A' + gr).value = 'Beginning balance ' + short(q.prior_ye); gld.getCell('A' + gr).font = F({ bold: true }); gld.mergeCells('A' + gr + ':E' + gr);
   setMoney(gld, 'H' + gr, AP.begin, { bold: true });
   { const c = gld.getCell('I' + gr); c.value = ''; c.alignment = { horizontal: 'center' }; }
   gr++;
+  const gFirst = gr; let gRun = r2(AP.begin);
   for (const x of AP.glRows) {
-    gld.getCell('A' + gr).value = x.date; gld.getCell('A' + gr).font = F();
+    setDate(gld, 'A' + gr, x.date);
     gld.getCell('B' + gr).value = x.num; gld.getCell('B' + gr).font = F();
     gld.getCell('C' + gr).value = x.vendor; gld.getCell('C' + gr).font = F();
     gld.getCell('D' + gr).value = x.offset; gld.getCell('D' + gr).font = F();
     gld.getCell('E' + gr).value = x.memo; gld.getCell('E' + gr).font = F();
     if (x.debit) setMoney(gld, 'F' + gr, x.debit);
     if (x.credit) setMoney(gld, 'G' + gr, x.credit);
-    setMoney(gld, 'H' + gr, x.balance);
+    gRun = r2(gRun + (x.credit || 0) - (x.debit || 0));
+    fx(gld, 'H' + gr, 'H' + (gr - 1) + '+G' + gr + '-F' + gr, gRun);
     { const c = gld.getCell('I' + gr); c.value = x.letter || ''; c.font = (x.letter === 'X') ? F({ bold: true }) : F(); c.alignment = { horizontal: 'center' }; }
     gr++;
   }
+  const gLast = gr - 1, gTot = gr;
   gld.getCell('E' + gr).value = 'TOTAL'; gld.getCell('E' + gr).font = F({ bold: true });
-  setMoney(gld, 'F' + gr, AP.totalDebit, { bold: true }).border = { top: THIN };
-  setMoney(gld, 'G' + gr, AP.totalCredit, { bold: true }).border = { top: THIN };
-  setMoney(gld, 'H' + gr, AP.ending, { bold: true }).border = { top: THIN };
+  (gLast >= gFirst ? fx(gld, 'F' + gr, 'SUM(F' + gFirst + ':F' + gLast + ')', AP.totalDebit, { bold: true }) : setMoney(gld, 'F' + gr, 0, { bold: true })).border = { top: THIN };
+  (gLast >= gFirst ? fx(gld, 'G' + gr, 'SUM(G' + gFirst + ':G' + gLast + ')', AP.totalCredit, { bold: true }) : setMoney(gld, 'G' + gr, 0, { bold: true })).border = { top: THIN };
+  fx(gld, 'H' + gr, 'H' + gBegRow + '+G' + gr + '-F' + gr, AP.ending, { bold: true }).border = { top: THIN };
   gr += 2;
   gld.getCell('E' + gr).value = 'Reconciliation'; gld.getCell('E' + gr).font = F({ bold: true }); gr++;
-  const rBeg = gr;  gld.getCell('E' + gr).value = 'Beginning A/P balance (tagged X)'; gld.getCell('E' + gr).font = F(); setMoney(gld, 'H' + gr, AP.begin); gr++;
-  const rCr = gr;   gld.getCell('E' + gr).value = 'Add: credits (bills booked) in period'; gld.getCell('E' + gr).font = F(); setMoney(gld, 'H' + gr, AP.totalCredit); gr++;
-  const rDr = gr;   gld.getCell('E' + gr).value = 'Less: debits (payments / reversals) in period'; gld.getCell('E' + gr).font = F(); setMoney(gld, 'H' + gr, r2(-AP.totalDebit)); gr++;
-  const rEnd = gr;  gld.getCell('E' + gr).value = 'Ending A/P balance per GL (202000)'; gld.getCell('E' + gr).font = F({ bold: true });
-  { const c = gld.getCell('H' + gr); c.value = { formula: 'H' + rBeg + '+H' + rCr + '+H' + rDr, result: AP.gl }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  const rBeg = gr;  gld.getCell('E' + gr).value = 'Beginning A/P balance (tagged X)'; gld.getCell('E' + gr).font = F(); fx(gld, 'H' + gr, 'H' + gBegRow, AP.begin); gr++;
+  const rCr = gr;   gld.getCell('E' + gr).value = 'Add: credits (bills booked) in period'; gld.getCell('E' + gr).font = F(); fx(gld, 'H' + gr, 'G' + gTot, AP.totalCredit); gr++;
+  const rDr = gr;   gld.getCell('E' + gr).value = 'Less: debits (payments / reversals) in period'; gld.getCell('E' + gr).font = F(); fx(gld, 'H' + gr, '-F' + gTot, r2(-AP.totalDebit)); gr++;
+  const rEnd = gr;  gld.getCell('E' + gr).value = 'Ending A/P balance per GL detail'; gld.getCell('E' + gr).font = F({ bold: true });
+  fx(gld, 'H' + gr, 'H' + rBeg + '+H' + rCr + '+H' + rDr, AP.ending, { bold: true }).border = { top: THIN };
+  gr += 1;
+  const rTb = gr;   gld.getCell('E' + gr).value = 'Balance per trial balance (202000)'; gld.getCell('E' + gr).font = F(); setMoney(gld, 'H' + gr, AP.gl); gr++;
+  gld.getCell('E' + gr).value = 'Difference (should be zero)'; gld.getCell('E' + gr).font = F(); fx(gld, 'H' + gr, 'H' + rEnd + '-H' + rTb, r2(AP.ending - AP.gl)).border = { top: THIN };
   gr += 2;
-  const rOpen = gr; gld.getCell('E' + gr).value = 'Open invoices per A/P aging'; gld.getCell('E' + gr).font = F(); setMoney(gld, 'H' + gr, AP.openTotal); gr++;
-  gld.getCell('E' + gr).value = 'Difference (should be zero)'; gld.getCell('E' + gr).font = F({ bold: true });
-  { const c = gld.getCell('H' + gr); c.value = { formula: 'H' + rEnd + '-H' + rOpen, result: r2(AP.gl - AP.openTotal) }; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
+  const rOpen = gr; gld.getCell('E' + gr).value = 'Open invoices per A/P aging (CL AP Detail tab)'; gld.getCell('E' + gr).font = F(); fx(gld, 'H' + gr, CL + 'E' + clTotalRow, AP.openTotal); gr++;
+  gld.getCell('E' + gr).value = 'Difference vs ending balance (should be zero)'; gld.getCell('E' + gr).font = F({ bold: true });
+  fx(gld, 'H' + gr, 'H' + rEnd + '-H' + rOpen, r2(AP.ending - AP.openTotal), { bold: true }).border = { top: THIN };
   gr += 2;
   gld.getCell('A' + gr).value = 'Lines marked O are the open invoices per the A/P aging as of ' + short(q.end) + '. The aging nets each Bill.com payment against the specific bill it settled and carries unapplied payments forward, so open A/P (' + fmt(AP.openTotal) + ') equals the ending 202000 balance and ties to the CL A/P Aging report and Bill.com. Full open-invoice detail is on the CL A/P Detail tab.';
   gld.getCell('A' + gr).font = SMALLI; gld.mergeCells('A' + gr + ':I' + gr);
+  // Back-fill the AP Recon tie rows now that the supporting rows are known.
+  fx(ap, 'C' + apGlRow, "'AP GL Detail'!H" + rEnd, AP.ending);
+  fx(ap, 'C' + apOpenRow, CL + 'E' + clTotalRow, AP.openTotal);
 
   // ── 6. Accrual & Subsequent Cash Disbursement ─────────────────────────────
-  const ac = wb.addWorksheet('Accrual & Sub Cash Disb', { views: [{ showGridLines: false }] });
+  // Open-item accrual schedule: each accrual with the amount reversed / paid,
+  // the reversal date and JE, and the net outstanding (formula). The net column
+  // is SUMIF'd by account and tied to each account's GL balance.
+  const ac = wb.addWorksheet('Accrual & Sub Cash Disb', { views: [{ state: 'frozen', ySplit: 6, showGridLines: false }] });
   titleBlock(ac, en, 'Accrual & Subsequent Cash Disbursement', 'As of ' + short(q.end));
-  hdrRow(ac, 6, ['Date', 'Vendor', 'JE#', 'Description', 'Accrual Account', 'Amount'], [12, 22, 16, 46, 26, 16]);
-  ac.getColumn(7).width = 42;
-  ac.getCell('A4').value = 'Substantiates the fund’s accrued liabilities: the accruals booked this quarter (below), then each account’s ending balance tied to its own Balance Sheet line. Supporting detail is on the Mgmt Fee Accrual, Subsequent Cash Disb, and Flux Analysis tabs.'; ac.getCell('A4').font = SMALLI; ac.mergeCells('A4:G4');
-  let cr = 7;
-  for (const r of data.accrual.rows) {
-    ac.getCell('A' + cr).value = r.date; ac.getCell('A' + cr).font = F();
-    ac.getCell('B' + cr).value = r.vendor; ac.getCell('B' + cr).font = F();
-    ac.getCell('C' + cr).value = r.entry_num || r.doc_number; ac.getCell('C' + cr).font = F();
-    ac.getCell('D' + cr).value = r.description || r.memo; ac.getCell('D' + cr).font = F();
-    ac.getCell('E' + cr).value = r.account_code + ' ' + r.account_name; ac.getCell('E' + cr).font = F();
-    setMoney(ac, 'F' + cr, r.credit); cr++;
+  hdrRow(ac, 6, ['Date', 'Vendor', 'JE#', 'Description', 'Accrual Account', 'Accrued Amount', 'Reversed / Paid', 'Reversal Date', 'Reversal JE#', 'Net Outstanding'], [12, 22, 9, 46, 28, 15, 15, 12, 12, 16]);
+  ac.getRow(6).height = 30; ac.getColumn(11).width = 40;
+  ac.getCell('A4').value = 'Accruals booked this quarter, plus earlier accruals still open or reversed during the quarter. Reversed / Paid is matched to each accrual (reversing JE first, then same amount, then oldest first); Net Outstanding = Accrued − Reversed and ties to the GL by account below.'; ac.getCell('A4').font = SMALLI; ac.mergeCells('A4:J4');
+  let cr = 7; const acFirst = cr;
+  const AI = data.accrual.items || [];
+  for (const it of AI) {
+    setDate(ac, 'A' + cr, it.date);
+    ac.getCell('B' + cr).value = it.vendor || ''; ac.getCell('B' + cr).font = F();
+    ac.getCell('C' + cr).value = it.entry_num || it.doc_number || ''; ac.getCell('C' + cr).font = F();
+    ac.getCell('D' + cr).value = it.description || ''; ac.getCell('D' + cr).font = it.kind === 'unapplied' ? F({ italic: true }) : F();
+    ac.getCell('E' + cr).value = String(it.account_code) + ' ' + (it.account_name || ''); ac.getCell('E' + cr).font = F();
+    if (it.kind !== 'unapplied') setMoney(ac, 'F' + cr, it.accrued);
+    setMoney(ac, 'G' + cr, it.reversed);
+    if (it.reversal_date) setDate(ac, 'H' + cr, it.reversal_date);
+    ac.getCell('I' + cr).value = it.reversal_je || ''; ac.getCell('I' + cr).font = F();
+    fx(ac, 'J' + cr, 'F' + cr + '-G' + cr, it.net);
+    cr++;
   }
-  ac.getCell('D' + cr).value = 'Total accruals booked in period'; ac.getCell('D' + cr).font = F({ bold: true });
-  setMoney(ac, 'F' + cr, r2(data.accrual.rows.reduce((a, x) => a + x.credit, 0)), { bold: true }).border = { top: THIN };
-  // Ending balances. Each agrees to its OWN Balance Sheet line — they are not
-  // summed (management fees payable and due to affiliates are their own lines;
-  // accrued expenses is part of the AP & accrued line). The Summary tab links to
-  // the mgmt-fee cell (accEnd1) and the accrued cell (accEnd2).
-  ac.getCell('D' + (cr + 1)).value = 'Ending balances — each agrees to its own Balance Sheet line:'; ac.getCell('D' + (cr + 1)).font = F({ bold: true });
-  const accEnd1 = cr + 2, accEnd2 = cr + 3, accEnd3 = cr + 4;
-  ac.getCell('D' + accEnd1).value = 'Management fees payable (210600)'; ac.getCell('D' + accEnd1).font = F();
-  setMoney(ac, 'F' + accEnd1, data.accrual.mgmtPay);
-  ac.getCell('G' + accEnd1).value = 'agrees to BS: Management fees payable'; ac.getCell('G' + accEnd1).font = SMALLI;
-  ac.getCell('D' + accEnd2).value = 'Accrued expenses (210000)'; ac.getCell('D' + accEnd2).font = F();
-  setMoney(ac, 'F' + accEnd2, data.accrual.accrued);
-  ac.getCell('G' + accEnd2).value = 'agrees to BS: within Accounts payable & accrued expenses'; ac.getCell('G' + accEnd2).font = SMALLI;
-  ac.getCell('D' + accEnd3).value = 'Due to affiliates (211000)'; ac.getCell('D' + accEnd3).font = F();
-  setMoney(ac, 'F' + accEnd3, data.accrual.affiliates);
-  ac.getCell('G' + accEnd3).value = 'agrees to BS: Due to affiliates'; ac.getCell('G' + accEnd3).font = SMALLI;
+  const acLast = cr - 1;
+  if (!AI.length) { ac.getCell('D' + cr).value = 'No accruals booked or open for this period.'; ac.getCell('D' + cr).font = SMALLI; cr++; }
+  ac.getCell('D' + cr).value = 'Total'; ac.getCell('D' + cr).font = F({ bold: true });
+  ['F', 'G', 'J'].forEach((col) => {
+    const tot = r2(AI.reduce((a, x) => a + (col === 'F' ? x.accrued : col === 'G' ? x.reversed : x.net), 0));
+    (acLast >= acFirst ? fx(ac, col + cr, 'SUM(' + col + acFirst + ':' + col + acLast + ')', tot, { bold: true }) : setMoney(ac, col + cr, 0, { bold: true })).border = { top: THIN };
+  });
+  cr += 2;
+  ac.getCell('D' + cr).value = 'Net outstanding by account — ties to the general ledger'; ac.getCell('D' + cr).font = F({ bold: true });
+  [['F', 'Per schedule'], ['G', 'Per GL'], ['H', 'Difference']].forEach(([col, t]) => { const c = ac.getCell(col + cr); c.value = t; c.font = F({ bold: true }); c.alignment = { horizontal: 'right' }; });
+  cr += 1;
+  const accRowFor = {};
+  for (const g of (data.accrual.groups || [])) {
+    ac.getCell('D' + cr).value = g.label + ' (' + g.code + ')'; ac.getCell('D' + cr).font = F();
+    if (acLast >= acFirst) fx(ac, 'F' + cr, 'SUMIF($E$' + acFirst + ':$E$' + acLast + ',"' + g.prefix + '*",$J$' + acFirst + ':$J$' + acLast + ')', g.schedule);
+    else setMoney(ac, 'F' + cr, 0);
+    setMoney(ac, 'G' + cr, g.gl);
+    const dc = fx(ac, 'H' + cr, 'F' + cr + '-G' + cr, r2(g.schedule - g.gl)); dc.font = F({ bold: Math.abs(g.schedule - g.gl) >= 0.01, color: { argb: Math.abs(g.schedule - g.gl) >= 0.01 ? 'FFC00000' : 'FF008000' } });
+    ac.getCell('K' + cr).value = 'agrees to BS: ' + g.bsLine; ac.getCell('K' + cr).font = SMALLI;
+    accRowFor[g.code] = cr; cr += 1;
+  }
+  // Summary links: mgmt fees (accEnd1), accrued (accEnd2), due to affiliates (accEnd3).
+  const accEnd1 = accRowFor['210600'], accEnd2 = accRowFor['210000'], accEnd3 = accRowFor['211000'];
+  cr += 1;
+  ac.getCell('A' + cr).value = 'Subsequent payment support for the open accruals is on the Subsequent Cash Disb tab; the management-fee roll-forward is on the Mgmt Fee Accrual tab.'; ac.getCell('A' + cr).font = SMALLI; ac.mergeCells('A' + cr + ':J' + cr);
 
-  // ── 7. Distributions Payable ──────────────────────────────────────────────
   // ── 7. Distributions Payable & Due to Management Company ──────────────────
-  // Clear roll-forward by account (beginning -> activity -> ending) with the open
-  // balance by investor. Each ending balance agrees to the Balance Sheet.
-  let distTotalRow;
+  // Roll-forward by account: beginning + net activity (GL inputs) = ending
+  // (formula); open balance by investor is SUMmed and tied to the ending.
+  let distTotalRow, dueMgmtRow;
   {
     const dd = wb.addWorksheet('Distributions Payable', { views: [{ showGridLines: false }] });
     dd.getColumn(1).width = 48; [2, 3, 4, 5, 6].forEach((c) => (dd.getColumn(c).width = 15)); dd.getColumn(7).width = 16;
@@ -1192,77 +1304,108 @@ function buildWorkbook(data) {
     let r = 6;
     for (const grp of (data.distSplit || [])) {
       dd.getCell('A' + r).value = grp.label + ' (' + grp.code + ')'; dd.getCell('A' + r).font = F({ bold: true }); r += 1;
-      dd.getCell('A' + r).value = 'Beginning balance at ' + short(q.prior_ye); dd.getCell('A' + r).font = F(); setMoney(dd, 'G' + r, grp.begin); r += 1;
-      dd.getCell('A' + r).value = 'Net activity in ' + q.label; dd.getCell('A' + r).font = F(); setMoney(dd, 'G' + r, r2(grp.balance - grp.begin)); r += 1;
-      dd.getCell('A' + r).value = 'Ending balance at ' + short(q.end); dd.getCell('A' + r).font = F({ bold: true }); setMoney(dd, 'G' + r, grp.balance, { bold: true }).border = { top: THIN };
+      const bRow = r; dd.getCell('A' + r).value = 'Beginning balance at ' + short(q.prior_ye); dd.getCell('A' + r).font = F(); setMoney(dd, 'G' + r, grp.begin); r += 1;
+      const aRow = r; dd.getCell('A' + r).value = 'Net activity in ' + q.label; dd.getCell('A' + r).font = F(); setMoney(dd, 'G' + r, r2(grp.balance - grp.begin)); r += 1;
+      const eRow = r; dd.getCell('A' + r).value = 'Ending balance at ' + short(q.end); dd.getCell('A' + r).font = F({ bold: true });
+      fx(dd, 'G' + r, 'G' + bRow + '+G' + aRow, grp.balance, { bold: true }).border = { top: THIN };
       if (grp.code === '230100') distTotalRow = r;
+      if (grp.code === '210800') dueMgmtRow = r;
       r += 1;
       dd.getCell('A' + r).value = 'Open balance by investor:'; dd.getCell('A' + r).font = F({ italic: true }); r += 1;
-      if (grp.investors.length) { for (const inv of grp.investors) { dd.getCell('A' + r).value = '   ' + inv.name; dd.getCell('A' + r).font = F(); setMoney(dd, 'G' + r, inv.amt); r += 1; } }
+      if (grp.investors.length) {
+        const iFirst = r;
+        for (const inv of grp.investors) { dd.getCell('A' + r).value = '   ' + inv.name; dd.getCell('A' + r).font = F(); setMoney(dd, 'G' + r, inv.amt); r += 1; }
+        const iLast = r - 1;
+        dd.getCell('A' + r).value = '   Total by investor'; dd.getCell('A' + r).font = F({ bold: true });
+        fx(dd, 'G' + r, 'SUM(G' + iFirst + ':G' + iLast + ')', r2(grp.investors.reduce((a, x) => a + x.amt, 0)), { bold: true }).border = { top: THIN }; r += 1;
+        dd.getCell('A' + r).value = '   Difference vs ending balance (should be zero)'; dd.getCell('A' + r).font = F();
+        fx(dd, 'G' + r, 'G' + (r - 1) + '-G' + eRow, r2(grp.investors.reduce((a, x) => a + x.amt, 0) - grp.balance)); r += 1;
+      }
       else { dd.getCell('A' + r).value = '   (GL lines carry no investor/class tag; the ending balance still ties to the account)'; dd.getCell('A' + r).font = SMALLI; r += 1; }
       r += 1;
     }
     dd.getCell('A' + r).value = 'Due to Affiliates (211000) ' + fmt(data.ties.due_to_affiliates) + ' is a separate Balance Sheet line, supported on the Accrual & Sub Cash Disb tab.'; dd.getCell('A' + r).font = SMALLI; dd.mergeCells('A' + r + ':G' + r); r += 1;
     dd.getCell('A' + r).value = 'Each ending balance above agrees to the Balance Sheet.'; dd.getCell('A' + r).font = SMALLI;
-    if (distTotalRow == null) distTotalRow = 6;
   }
 
   // ═══ Phase 2-4 supporting schedules ═══════════════════════════════════════
 
   // Prepaid items — item-level amortization schedule (appended to the Prepaid tab).
+  // Every amortization figure is a formula: days in coverage = end − start; days
+  // elapsed = MAX(0, MIN(days, as-of − start)); amort to date = ROUND(premium ×
+  // elapsed ÷ days, 2); quarter amort = to-date less to-date at the prior quarter
+  // end; remaining = premium − amort to date.
   {
-    pp.getColumn(1).width = 30; pp.getColumn(2).width = 30; [3, 4, 5, 6, 7].forEach((c) => (pp.getColumn(c).width = 15)); pp.getColumn(4).width = 22;
+    [34, 22, 22, 24, 16, 11, 11, 14, 14, 14].forEach((w, i) => (pp.getColumn(i + 1).width = w));
     let pr = 12;
-    pp.getCell('A' + pr).value = 'Prepaid items — amortization schedule'; pp.getCell('A' + pr).font = F({ bold: true }); pr += 2;
-    const HH = ['Vendor / Description', 'Date Paid', 'Premium', 'Coverage period', 'Amort to date', 'Amort ' + q.quarter, 'Remaining'];
+    pp.getCell('A' + pr).value = 'Prepaid items — amortization schedule'; pp.getCell('A' + pr).font = F({ bold: true }); pr += 1;
+    pp.getCell('A' + pr).value = 'Schedule as of'; pp.getCell('A' + pr).font = F(); setDate(pp, 'B' + pr, q.end, { bold: true }); const asOfRef = '$B$' + pr; pr += 1;
+    const qPrior = addDays(q.qs, -1);
+    pp.getCell('A' + pr).value = 'Prior quarter end'; pp.getCell('A' + pr).font = F(); setDate(pp, 'B' + pr, qPrior); const priorRef = '$B$' + pr; pr += 2;
+    const HH = ['Vendor / Description', 'Date Paid', 'Premium', 'Coverage start', 'Coverage end', 'Days in coverage', 'Days elapsed', 'Amort to date', 'Amort ' + q.quarter, 'Remaining'];
     for (const acct of (data.prepaid.itemsByAcct || [])) {
       pp.getCell('A' + pr).value = acct.code + ' — ' + acct.label; pp.getCell('A' + pr).font = F({ bold: true }); pr += 1;
-      hdrRow(pp, pr, HH, null); pr += 1;
+      hdrRow(pp, pr, HH, null); pp.getRow(pr).height = 30; pr += 1;
       const first = pr;
       for (const it of acct.items) {
         pp.getCell('A' + pr).value = (it.vendor ? it.vendor + ' — ' : '') + (it.description || ''); pp.getCell('A' + pr).font = F();
-        pp.getCell('B' + pr).value = it.date_paid || ''; pp.getCell('B' + pr).font = F();
+        setDate(pp, 'B' + pr, it.date_paid || '');
         setMoney(pp, 'C' + pr, it.premium);
-        pp.getCell('D' + pr).value = (it.start && it.end) ? (it.start + ' to ' + it.end) : '(enter on Prepaid Register)'; pp.getCell('D' + pr).font = it.coverageKnown ? F() : SMALLI;
-        if (it.accumAmort != null) setMoney(pp, 'E' + pr, it.accumAmort);
-        if (it.periodAmort != null) setMoney(pp, 'F' + pr, it.periodAmort);
-        if (it.remaining != null) setMoney(pp, 'G' + pr, it.remaining); else { const _rc = pp.getCell('G' + pr); _rc.value = '—'; _rc.alignment = { horizontal: 'right' }; _rc.font = SMALLI; }
+        if (it.coverageKnown) {
+          setDate(pp, 'D' + pr, it.start); setDate(pp, 'E' + pr, it.end);
+          const days = daysBetween(it.start, it.end), el = Math.max(0, Math.min(days, daysBetween(it.start, q.end)));
+          { const c = pp.getCell('F' + pr); c.value = { formula: 'E' + pr + '-D' + pr, result: days }; c.numFmt = '0'; c.font = F(); }
+          { const c = pp.getCell('G' + pr); c.value = { formula: 'MAX(0,MIN(F' + pr + ',' + asOfRef + '-D' + pr + '))', result: el }; c.numFmt = '0'; c.font = F(); }
+          fx(pp, 'H' + pr, 'ROUND(C' + pr + '*G' + pr + '/F' + pr + ',2)', it.accumAmort);
+          fx(pp, 'I' + pr, 'H' + pr + '-ROUND(C' + pr + '*MAX(0,MIN(F' + pr + ',' + priorRef + '-D' + pr + '))/F' + pr + ',2)', it.periodAmort);
+          fx(pp, 'J' + pr, 'C' + pr + '-H' + pr, it.remaining);
+        } else {
+          pp.getCell('D' + pr).value = '(enter coverage on Prepaid Register)'; pp.getCell('D' + pr).font = SMALLI; pp.mergeCells('D' + pr + ':E' + pr);
+          const _rc = pp.getCell('J' + pr); _rc.value = '—'; _rc.alignment = { horizontal: 'right' }; _rc.font = SMALLI;
+        }
         pr += 1;
       }
       const last = pr - 1;
       pp.getCell('A' + pr).value = 'Total ' + acct.label + (acct.needCoverage > 0 ? ' (modeled, covered items)' : ''); pp.getCell('A' + pr).font = F({ bold: true });
-      { const c = pp.getCell('C' + pr); c.value = last >= first ? { formula: 'SUM(C' + first + ':C' + last + ')', result: r2(acct.items.reduce((s, x) => s + (x.premium || 0), 0)) } : 0; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
-      { const c = pp.getCell('G' + pr); c.value = last >= first ? { formula: 'SUM(G' + first + ':G' + last + ')', result: acct.modelRemaining } : acct.modelRemaining; c.numFmt = MONEY; c.font = F({ bold: true }); c.border = { top: THIN }; }
-      pr += 1;
-      pp.getCell('A' + pr).value = 'Balance per general ledger (' + acct.code + ')'; pp.getCell('A' + pr).font = F(); setMoney(pp, 'G' + pr, acct.endBal); const glR = pr; pr += 1;
+      const sumCol = (col, v) => { const c = last >= first ? fx(pp, col + pr, 'SUM(' + col + first + ':' + col + last + ')', v, { bold: true }) : setMoney(pp, col + pr, 0, { bold: true }); c.border = { top: THIN }; };
+      sumCol('C', r2(acct.items.reduce((s, x) => s + (x.premium || 0), 0)));
+      sumCol('H', r2(acct.items.reduce((s, x) => s + (x.accumAmort || 0), 0)));
+      sumCol('I', r2(acct.items.reduce((s, x) => s + (x.periodAmort || 0), 0)));
+      sumCol('J', acct.modelRemaining);
+      const totR = pr; pr += 1;
+      pp.getCell('A' + pr).value = 'Balance per general ledger (' + acct.code + ')'; pp.getCell('A' + pr).font = F(); setMoney(pp, 'J' + pr, acct.endBal); const glR = pr; pr += 1;
       if (acct.needCoverage > 0) {
-        pp.getCell('A' + pr).value = acct.needCoverage + ' item(s) need coverage dates; enter them on the Prepaid Register to complete the reconciliation.'; pp.getCell('A' + pr).font = F({ color: { argb: 'FFB45309' } }); pp.mergeCells('A' + pr + ':G' + pr);
+        pp.getCell('A' + pr).value = acct.needCoverage + ' item(s) need coverage dates; enter them on the Prepaid Register to complete the reconciliation.'; pp.getCell('A' + pr).font = F({ color: { argb: 'FFB45309' } }); pp.mergeCells('A' + pr + ':I' + pr);
       } else {
-        pp.getCell('A' + pr).value = 'Difference (schedule vs GL)'; pp.getCell('A' + pr).font = F({ bold: Math.abs(acct.diff) >= 0.01 });
-        { const c = pp.getCell('G' + pr); c.value = { formula: 'G' + glR + '-G' + (glR - 1), result: r2(acct.endBal - acct.modelRemaining) }; c.numFmt = MONEY; c.font = F({ bold: Math.abs(acct.diff) >= 0.01, color: { argb: Math.abs(acct.diff) >= 0.01 ? 'FFC00000' : 'FF008000' } }); c.border = { top: THIN }; }
+        pp.getCell('A' + pr).value = 'Difference (GL vs schedule)'; pp.getCell('A' + pr).font = F({ bold: Math.abs(acct.diff) >= 0.01 });
+        const c = fx(pp, 'J' + pr, 'J' + glR + '-J' + totR, r2(acct.endBal - acct.modelRemaining)); c.font = F({ bold: Math.abs(acct.diff) >= 0.01, color: { argb: Math.abs(acct.diff) >= 0.01 ? 'FFC00000' : 'FF008000' } }); c.border = { top: THIN };
       }
       pr += 2;
     }
-    pp.getCell('A' + pr).value = 'Amortization is straight-line over each item’s coverage period (premium × days elapsed ÷ total days). Remaining = premium − amortization to date. Where the modeled remaining does not tie to the GL, the amortization booked differs from this schedule (for example a period not yet amortized) — see the Summary exceptions. Items and coverage dates are maintained on the Prepaid Register.'; pp.getCell('A' + pr).font = SMALLI; pp.mergeCells('A' + pr + ':G' + pr);
+    pp.getCell('A' + pr).value = 'Amortization is straight-line over each item’s coverage period and every figure above is a live formula (change a date or premium and the schedule recalculates). Where the schedule does not tie to the GL, the amortization booked differs from the straight-line schedule (for example a period not yet amortized) — see the Summary exceptions. Items and coverage dates are maintained on the Prepaid Register.'; pp.getCell('A' + pr).font = SMALLI; pp.mergeCells('A' + pr + ':J' + pr); pp.getRow(pr).height = 42; pp.getCell('A' + pr).alignment = { wrapText: true, vertical: 'top' };
   }
 
-  // Mgmt Fee Accrual — inception-to-date roll-forward.
+  // Mgmt Fee Accrual — inception-to-date roll-forward (running balance formula).
   {
     const mi = data.accrual.mgmtItd;
     const ws = wb.addWorksheet('Mgmt Fee Accrual', { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
     titleBlock(ws, en, 'Management Fees Payable (210600) — inception-to-date roll-forward', 'As of ' + short(q.end));
     hdrRow(ws, 5, ['Date', 'JE#', 'Description', 'Accrual (+)', 'Payment (-)', 'Balance'], [12, 10, 46, 16, 16, 16]);
-    let r = 6;
+    let r = 6; const first = r; let run = 0;
     for (const x of mi.rows) {
-      ws.getCell('A' + r).value = x.date; ws.getCell('A' + r).font = F();
+      setDate(ws, 'A' + r, x.date);
       ws.getCell('B' + r).value = x.entry_num || x.doc_number; ws.getCell('B' + r).font = F();
       ws.getCell('C' + r).value = x.memo || x.description; ws.getCell('C' + r).font = F();
       if (x.credit) setMoney(ws, 'D' + r, x.credit); if (x.debit) setMoney(ws, 'E' + r, x.debit);
-      setMoney(ws, 'F' + r, x.balance); r += 1;
+      run = r2(run + (x.credit || 0) - (x.debit || 0));
+      fx(ws, 'F' + r, (r === first ? '' : 'F' + (r - 1) + '+') + 'D' + r + '-E' + r, run); r += 1;
     }
+    const endR = r;
     ws.getCell('C' + r).value = 'Ending management fees payable'; ws.getCell('C' + r).font = F({ bold: true });
-    setMoney(ws, 'F' + r, mi.end, { bold: true }).border = { top: THIN };
-    ws.getCell('A' + (r + 2)).value = 'Ties to the Balance Sheet management fees payable line.'; ws.getCell('A' + (r + 2)).font = SMALLI;
+    (r > first ? fx(ws, 'F' + r, 'F' + (r - 1), run, { bold: true }) : setMoney(ws, 'F' + r, 0, { bold: true })).border = { top: THIN }; r += 1;
+    ws.getCell('C' + r).value = 'Balance per general ledger (210600)'; ws.getCell('C' + r).font = F(); setMoney(ws, 'F' + r, data.ties.management_fees_payable); r += 1;
+    ws.getCell('C' + r).value = 'Difference (should be zero)'; ws.getCell('C' + r).font = F({ bold: true }); fx(ws, 'F' + r, 'F' + endR + '-F' + (r - 1), r2(run - data.ties.management_fees_payable), { bold: true }).border = { top: THIN };
+    ws.getCell('A' + (r + 2)).value = 'Balance = prior balance + accrual − payment (formula). Ties to the Balance Sheet management fees payable line.'; ws.getCell('A' + (r + 2)).font = SMALLI;
   }
 
   // Subsequent Cash Disbursement — accruals paid in the following period.
@@ -1271,56 +1414,62 @@ function buildWorkbook(data) {
     const ws = wb.addWorksheet('Subsequent Cash Disb', { views: [{ showGridLines: false }] });
     titleBlock(ws, en, 'Subsequent Cash Disbursement — accruals paid after quarter end', sd.from + ' to ' + sd.to);
     hdrRow(ws, 5, ['Date', 'JE#', 'Vendor', 'Description', 'Accrual account', 'Amount'], [12, 10, 22, 40, 24, 16]);
-    let r = 6;
+    let r = 6; const first = r;
     if (!sd.rows.length) { ws.getCell('A' + r).value = 'No subsequent-period disbursements are posted yet for this window — subsequent-payment support is incomplete until the next month is booked.'; ws.getCell('A' + r).font = SMALLI; ws.mergeCells('A' + r + ':F' + r); r += 1; }
     for (const x of sd.rows) {
-      ws.getCell('A' + r).value = x.date; ws.getCell('A' + r).font = F();
+      setDate(ws, 'A' + r, x.date);
       ws.getCell('B' + r).value = x.entry_num || x.doc_number; ws.getCell('B' + r).font = F();
       ws.getCell('C' + r).value = x.vendor; ws.getCell('C' + r).font = F();
       ws.getCell('D' + r).value = x.memo || x.description; ws.getCell('D' + r).font = F();
       ws.getCell('E' + r).value = x.account_code + ' ' + x.account_name; ws.getCell('E' + r).font = F();
       setMoney(ws, 'F' + r, x.debit); r += 1;
     }
-    if (sd.rows.length) { ws.getCell('E' + r).value = 'Total subsequent disbursements'; ws.getCell('E' + r).font = F({ bold: true }); setMoney(ws, 'F' + r, r2(sd.rows.reduce((a, x) => a + x.debit, 0)), { bold: true }).border = { top: THIN }; }
+    if (sd.rows.length) { ws.getCell('E' + r).value = 'Total subsequent disbursements'; ws.getCell('E' + r).font = F({ bold: true }); fx(ws, 'F' + r, 'SUM(F' + first + ':F' + (r - 1) + ')', r2(sd.rows.reduce((a, x) => a + x.debit, 0)), { bold: true }).border = { top: THIN }; }
     ws.getCell('A' + (r + 2)).value = 'Confirms the period-end accruals (accrued expenses, management fees payable, due to affiliates) were relieved by actual payments in the following period.'; ws.getCell('A' + (r + 2)).font = SMALLI; ws.mergeCells('A' + (r + 2) + ':F' + (r + 2));
   }
 
   // Flux Analysis — quarter-over-quarter income statement variance.
   {
-    const fx = data.accrual.flux;
+    const fxa = data.accrual.flux;
     const ws = wb.addWorksheet('Flux Analysis', { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
-    titleBlock(ws, en, 'Flux Analysis — quarter-over-quarter income statement', 'Prior ' + fx.priFrom + ' to ' + fx.priTo + '   vs   current ' + fx.curFrom + ' to ' + fx.curTo);
+    titleBlock(ws, en, 'Flux Analysis — quarter-over-quarter income statement', 'Prior ' + fxa.priFrom + ' to ' + fxa.priTo + '   vs   current ' + fxa.curFrom + ' to ' + fxa.curTo);
     hdrRow(ws, 5, ['Account', 'Prior quarter', 'Current quarter', 'Difference', '% change'], [40, 16, 16, 16, 12]);
     let r = 6;
-    for (const x of fx.rows) {
+    for (const x of fxa.rows) {
       ws.getCell('A' + r).value = x.name || x.code; ws.getCell('A' + r).font = F();
-      setMoney(ws, 'B' + r, x.prior); setMoney(ws, 'C' + r, x.cur); setMoney(ws, 'D' + r, x.diff);
-      const pc = ws.getCell('E' + r); pc.value = x.pct == null ? '' : (Math.round(x.pct * 1000) / 10 + '%'); pc.font = F({ bold: Math.abs(x.diff) >= 50000, color: { argb: Math.abs(x.diff) >= 50000 ? 'FFC00000' : 'FF000000' } });
+      setMoney(ws, 'B' + r, x.prior); setMoney(ws, 'C' + r, x.cur); fx(ws, 'D' + r, 'C' + r + '-B' + r, x.diff);
+      const pc = ws.getCell('E' + r); pc.value = { formula: 'IF(B' + r + '=0,"",D' + r + '/ABS(B' + r + '))', result: x.pct == null ? '' : x.pct }; pc.numFmt = '0.0%';
+      pc.font = F({ bold: Math.abs(x.diff) >= 50000, color: { argb: Math.abs(x.diff) >= 50000 ? 'FFC00000' : 'FF000000' } });
       r += 1;
     }
     ws.getCell('A' + (r + 1)).value = 'Large quarter-over-quarter movements (>= $50,000) are flagged for review on the Summary tab.'; ws.getCell('A' + (r + 1)).font = SMALLI; ws.mergeCells('A' + (r + 1) + ':E' + (r + 1));
   }
 
   // Contribution Receivable (120020) — by investor.
+  let contribTotRow;
   {
-    const cr = data.contrib;
+    const crv = data.contrib;
     const ws = wb.addWorksheet('Contribution Receivable', { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
     titleBlock(ws, en, 'Contribution Receivable (120020)', 'As of ' + short(q.end));
     hdrRow(ws, 5, ['Date', 'JE#', 'Investor', 'Description', 'Amount', 'Balance'], [12, 10, 26, 40, 16, 16]);
-    let r = 6;
-    for (const x of cr.rows) {
-      ws.getCell('A' + r).value = x.date; ws.getCell('A' + r).font = F();
+    let r = 6; const first = r; let run = 0;
+    for (const x of crv.rows) {
+      setDate(ws, 'A' + r, x.date);
       ws.getCell('B' + r).value = x.entry_num || x.doc_number; ws.getCell('B' + r).font = F();
       ws.getCell('C' + r).value = x.class_name || ''; ws.getCell('C' + r).font = F();
       ws.getCell('D' + r).value = x.memo || x.description; ws.getCell('D' + r).font = F();
-      setMoney(ws, 'E' + r, x.signed); setMoney(ws, 'F' + r, x.balance); r += 1;
+      setMoney(ws, 'E' + r, x.signed); run = r2(run + x.signed);
+      fx(ws, 'F' + r, r === first ? 'E' + r : 'F' + (r - 1) + '+E' + r, run); r += 1;
     }
     ws.getCell('D' + r).value = 'TOTAL'; ws.getCell('D' + r).font = F({ bold: true });
-    setMoney(ws, 'F' + r, cr.balance, { bold: true }).border = { top: THIN }; r += 2;
-    if (cr.investors.length) {
+    (r > first ? fx(ws, 'F' + r, 'SUM(E' + first + ':E' + (r - 1) + ')', run, { bold: true }) : setMoney(ws, 'F' + r, 0, { bold: true })).border = { top: THIN };
+    contribTotRow = r; r += 2;
+    if (crv.investors.length) {
       ws.getCell('A' + r).value = 'Open receivable by investor'; ws.getCell('A' + r).font = F({ bold: true }); r += 1;
-      for (const inv of cr.investors) { ws.getCell('A' + r).value = inv.name; ws.getCell('A' + r).font = F(); setMoney(ws, 'E' + r, inv.amt); r += 1; }
-      r += 1;
+      const iFirst = r;
+      for (const inv of crv.investors) { ws.getCell('A' + r).value = inv.name; ws.getCell('A' + r).font = F(); setMoney(ws, 'E' + r, inv.amt); r += 1; }
+      ws.getCell('A' + r).value = 'Total by investor'; ws.getCell('A' + r).font = F({ bold: true });
+      fx(ws, 'E' + r, 'SUM(E' + iFirst + ':E' + (r - 1) + ')', r2(crv.investors.reduce((a, x) => a + x.amt, 0)), { bold: true }).border = { top: THIN }; r += 2;
     }
     ws.getCell('A' + r).value = 'Ties to the Balance Sheet capital contributions receivable line.'; ws.getCell('A' + r).font = SMALLI;
   }
@@ -1328,6 +1477,7 @@ function buildWorkbook(data) {
 
   // ── Link each Summary balance to the total cell on its supporting schedule ──
   const sq = (t) => "'" + t + "'!";
+  const ACS = sq('Accrual & Sub Cash Disb');
   const sumRefs = [
     // Net Due From (To): SUM of the property columns on the ending row. A positive
     // result is a net due-FROM (asset), shown positive to match the Balance Sheet.
@@ -1337,13 +1487,14 @@ function buildWorkbook(data) {
     { f: sq('Other Assets') + 'F' + oaTotalRow, v: data.ties.other_assets },
     // Accounts payable & accrued expenses = trade AP (202000, AP Recon) + accrued
     // (210000, Accrual tab), tying to the single Balance Sheet line.
-    { f: sq('AP Recon') + 'C' + apTotalRow + '+' + sq('Accrual & Sub Cash Disb') + 'F' + accEnd2, v: r2(data.ties.accounts_payable + data.ties.accrued_expenses) },
-    { f: sq('Accrual & Sub Cash Disb') + 'F' + accEnd1, v: data.ties.management_fees_payable },
+    { f: accEnd2 ? sq('AP Recon') + 'C' + apTotalRow + '+' + ACS + 'F' + accEnd2 : null, v: r2(data.ties.accounts_payable + data.ties.accrued_expenses) },
+    { f: accEnd1 ? ACS + 'F' + accEnd1 : null, v: data.ties.management_fees_payable },
     { f: sq('Distributions Payable') + 'G' + distTotalRow, v: data.ties.distributions_payable },
-    { v: data.ties.contribution_receivable },
-    { v: data.ties.due_to_mgmt },
-    { v: data.ties.due_to_affiliates },
+    { f: contribTotRow ? sq('Contribution Receivable') + 'F' + contribTotRow : null, v: data.ties.contribution_receivable },
+    { f: dueMgmtRow ? sq('Distributions Payable') + 'G' + dueMgmtRow : null, v: data.ties.due_to_mgmt },
+    { f: accEnd3 ? ACS + 'F' + accEnd3 : null, v: data.ties.due_to_affiliates },
   ];
+  if (!distTotalRow) sumRefs[6].f = null;
   sumRefs.forEach((x, i) => { const c = su.getCell('D' + (6 + i)); c.value = x.f ? { formula: x.f, result: x.v } : x.v; c.numFmt = MONEY; c.font = F(); });
 
   return wb;
@@ -1352,25 +1503,36 @@ function buildWorkbook(data) {
 const fmt = (n) => '$' + (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 // Generic "Account QuickReport" transaction-detail sheet (Weaver's GL layout).
+// Beginning balance (GL input) + each transaction = running balance (formula);
+// TOTAL SUMs the amounts, and the ending balance is checked against the GL.
 function detailSheet(wb, tabName, en, subtitle, q, rows, balance, itd) {
   const ws = wb.addWorksheet(tabName, { views: [{ state: 'frozen', ySplit: 5, showGridLines: false }] });
   titleBlock(ws, en, 'Account QuickReport — ' + subtitle, (itd ? 'Inception to ' : q.ys + ' to ') + short(q.end));
   hdrRow(ws, 5, ['Location', 'Date', 'Type', 'Num', 'Description', 'Amount', 'Balance'], [16, 12, 14, 16, 52, 16, 16]);
-  let r = 6;
+  const act = r2(rows.reduce((a, x) => a + x.signed, 0));
+  const begin = itd ? 0 : r2(balance - act);
+  let r = 6; const begRow = r;
+  ws.getCell('E' + r).value = 'Beginning balance' + (itd ? '' : ' at ' + short(q.prior_ye)); ws.getCell('E' + r).font = F({ italic: true });
+  setMoney(ws, 'G' + r, begin); r++;
+  const first = r; let run = begin;
   for (const x of rows) {
     ws.getCell('A' + r).value = x.location_name || x.class_name || ''; ws.getCell('A' + r).font = F();
-    ws.getCell('B' + r).value = x.date; ws.getCell('B' + r).font = F();
+    setDate(ws, 'B' + r, x.date);
     ws.getCell('C' + r).value = ''; // transaction type not stored
     ws.getCell('D' + r).value = x.entry_num || x.doc_number; ws.getCell('D' + r).font = F();
     ws.getCell('E' + r).value = x.description || x.memo; ws.getCell('E' + r).font = F();
-    setMoney(ws, 'F' + r, x.signed); setMoney(ws, 'G' + r, x.balance);
+    setMoney(ws, 'F' + r, x.signed); run = r2(run + x.signed);
+    fx(ws, 'G' + r, 'G' + (r - 1) + '+F' + r, run);
     r++;
   }
+  const totR = r;
   ws.getCell('E' + r).value = 'TOTAL'; ws.getCell('E' + r).font = F({ bold: true });
-  setMoney(ws, 'F' + r, r2(rows.reduce((a, x) => a + x.signed, 0)), { bold: true }).border = { top: THIN };
-  setMoney(ws, 'G' + r, balance, { bold: true }).border = { top: THIN };
-  ws.getCell('E' + (r + 2)).value = 'Ties to the Balance Sheet.'; ws.getCell('E' + (r + 2)).font = SMALLI;
-  return r; // TOTAL row — Summary links to G here
+  (r > first ? fx(ws, 'F' + r, 'SUM(F' + first + ':F' + (r - 1) + ')', act, { bold: true }) : setMoney(ws, 'F' + r, 0, { bold: true })).border = { top: THIN };
+  fx(ws, 'G' + r, 'G' + begRow + '+F' + r, r2(begin + act), { bold: true }).border = { top: THIN };
+  ws.getCell('E' + (r + 1)).value = 'Balance per general ledger'; ws.getCell('E' + (r + 1)).font = F(); setMoney(ws, 'G' + (r + 1), balance);
+  ws.getCell('E' + (r + 2)).value = 'Difference (should be zero)'; ws.getCell('E' + (r + 2)).font = F({ bold: true }); fx(ws, 'G' + (r + 2), 'G' + totR + '-G' + (r + 1), r2(begin + act - balance), { bold: true }).border = { top: THIN };
+  ws.getCell('E' + (r + 4)).value = 'Ties to the Balance Sheet.'; ws.getCell('E' + (r + 4)).font = SMALLI;
+  return totR; // TOTAL row — Summary links to G here
 }
 
 // ── Persistence (same shape as the other CLRF workpapers). ────────────────────

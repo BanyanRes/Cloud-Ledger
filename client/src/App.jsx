@@ -135,12 +135,12 @@ const sumCols = (F, tr, dcols, first, last) => { if (last < first || tr == null)
 // Push SUM() formulas that add a specific, explicit set of rows (e.g. a grand total
 // that sums subtotal rows rather than a contiguous block). `rows` = 0-based row idxs.
 const sumRows = (F, tr, dcols, rows) => { if (!rows || !rows.length || tr == null) return; for (const c of dcols) { const L = XLC(c); F.push({ r: tr, c, f: 'SUM(' + rows.map(r => L + (r + 1)).join(',') + ')' }); } };
-const BLANK_JE = () => ({date:today(),memo:'',lines:[{account_code:'',debit:'',credit:'',description:''},{account_code:'',debit:'',credit:'',description:''}]});
+const BLANK_JE = () => ({date:today(),memo:'',vendor:'',doc_number:'',lines:[{account_code:'',debit:'',credit:'',description:''},{account_code:'',debit:'',credit:'',description:''}]});
 // First day of the month AFTER the given ISO date (default auto-reversal date).
 const firstOfNextMonth = (dateStr) => { const s=String(dateStr||'').slice(0,10); const m=/^(\d{4})-(\d{2})-(\d{2})$/.exec(s); const b=m?new Date(+m[1],+m[2]-1,+m[3]):new Date(); const d=new Date(b.getFullYear(),b.getMonth()+1,1); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-01'; };
 // Build a New-JE form (dated today, memo suffixed "(copy)") from an existing entry
 // so it can be duplicated into an editable, not-yet-posted draft.
-const jeFromEntry = (entry) => { const f2=n=>Number(n)>0?Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''; return {date:today(),memo:((entry&&entry.memo)||'')+' (copy)',lines:((entry&&entry.lines)||[]).map(l=>({account_code:l.account_code,debit:f2(l.debit),credit:f2(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null}))}; };
+const jeFromEntry = (entry) => { const f2=n=>Number(n)>0?Number(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''; return {date:today(),memo:((entry&&entry.memo)||'')+' (copy)',vendor:(entry&&entry.vendor)||'',doc_number:'',copiedFrom:entry&&entry.entry_num?'JE-'+String(entry.entry_num).padStart(4,'0'):'',lines:((entry&&entry.lines)||[]).map(l=>({account_code:l.account_code,debit:f2(l.debit),credit:f2(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null}))}; };
 const SIDEBAR_KEY = 'cl_sidebar';
 
 // ─── Cloud Ledger Logo SVG ───
@@ -431,6 +431,13 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
   const[projects,setProjects]=useState([]);
   const[dimProjects,setDimProjects]=useState([]);
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
+  // Vendor picker + "Copy from existing JE" (Weaver/CLRF request 10/2026).
+  const[vendorList,setVendorList]=useState([]);
+  const[showCopy,setShowCopy]=useState(false);const[copyQ,setCopyQ]=useState('');const[copySrc,setCopySrc]=useState(null);
+  useEffect(()=>{api.getJeVendors(entityId).then(v=>setVendorList(v||[])).catch(()=>setVendorList([]));},[entityId]);
+  useEffect(()=>{if(showCopy&&copySrc===null){setCopySrc([]);api.getEntries(entityId).then(e=>setCopySrc((e||[]).slice().sort((a,b)=>b.entry_num-a.entry_num))).catch(()=>setCopySrc([]));}},[showCopy,copySrc,entityId]);
+  const copyMatches=(copySrc||[]).filter(e=>{const t=copyQ.trim().toLowerCase();if(!t)return true;const n=String(e.entry_num);const qn=t.replace(/^je[-\s]?/,'').replace(/^0+(?=\d)/,'');return n===qn||n.includes(qn)&&/^\d+$/.test(qn)||(e.memo||'').toLowerCase().includes(t)||(e.vendor||'').toLowerCase().includes(t)||(e.date||'').includes(t);}).slice(0,12);
+  const applyCopy=e=>{if(hasContent&&!window.confirm('Replace the entry you have in progress with a copy of JE-'+String(e.entry_num).padStart(4,'0')+'?'))return;setForm(jeFromEntry(e));setShowCopy(false);setCopyQ('');};
   useEffect(()=>{api.getAccounts(entityId).then(setAccounts);api.getTurnkeyProjects().then(setProjects).catch(()=>setProjects([]));api.getProjects(entityId).then(d=>setDimProjects(d||[])).catch(()=>setDimProjects([]));api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
   // Turnkey entities use the Turnkey project picker; all other (non-shell) entities
   // use the project dimension, and the field is always shown with an inline add.
@@ -475,7 +482,7 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
   const onFilesSelected=e=>{const files=Array.from(e.target.files);if(files.length>0)setPendingFiles(p=>[...p,...files]);e.target.value='';};
   const post=async()=>{if(!form.date||!form.memo.trim()){setErr('Date and memo required');return;}if(form.lines.some(l=>!l.account_code)){setErr('All lines need an account');return;}if(!bal){setErr('Entry must balance');return;}
     setPosting(true);setErr('');
-    const _basePayload=override=>({date:form.date,memo:form.memo.trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null})),...(autoReverse?{auto_reverse:true,reverse_date:reverseDate||firstOfNextMonth(form.date)}:{}),...(override||{})});
+    const _basePayload=override=>({date:form.date,memo:form.memo.trim(),vendor:(form.vendor||'').trim(),doc_number:(form.doc_number||'').trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null})),...(autoReverse?{auto_reverse:true,reverse_date:reverseDate||firstOfNextMonth(form.date)}:{}),...(override||{})});
     const _doPost=async override=>{
       const r=await api.createEntry(entityId,_basePayload(override));
       let msg='JE-'+String(r.entry_num).padStart(4,'0')+' posted';
@@ -495,18 +502,33 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
       else setErr(e.message);
     }
     finally{setPosting(false);}};
-  const hasContent=form.memo||form.lines.some(l=>l.account_code||l.debit||l.credit)||pendingFiles.length>0;
+  const hasContent=form.memo||form.vendor||form.lines.some(l=>l.account_code||l.debit||l.credit)||pendingFiles.length>0;
 
   return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,width:'min(1200px, 96vw)',maxWidth:'96vw',height:'auto',maxHeight:'92vh',resize:'both',overflow:'auto',minWidth:'min(560px, 96vw)',minHeight:360}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
-      <div style={{fontSize:18,fontWeight:700,color:T.textBright}}>New Journal Entry</div>
+      <div><div style={{fontSize:18,fontWeight:700,color:T.textBright}}>New Journal Entry</div>
+        {form.copiedFrom&&<div style={{fontSize:11,color:T.accent,marginTop:2}}>Copied from {form.copiedFrom} — review the date, amounts and memo before posting.</div>}</div>
       <div style={{display:'flex',alignItems:'center',gap:12}}>
+        <button style={{...S.btnS,fontSize:12,padding:'6px 12px',color:T.accent,borderColor:T.accent+'40'}} onClick={()=>setShowCopy(v=>!v)} title="Start this entry from a copy of an existing journal entry">Copy from existing JE</button>
         {hasContent&&<span style={{fontSize:11,color:T.orange,fontWeight:500}}>In progress</span>}
         {hasContent&&<button style={{...S.btnGhost,color:T.red,fontSize:12}} onClick={discard}>Discard</button>}
       </div></div>
+    {showCopy&&<div style={{border:'1px solid '+T.accent+'40',borderRadius:T.radiusSm,padding:12,marginBottom:16,background:'#fff'}}>
+      <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:8}}>
+        <input autoFocus style={{...S.input,flex:1}} placeholder="Find the JE to copy — JE #, memo, vendor or date…" value={copyQ} onChange={e=>setCopyQ(e.target.value)}/>
+        <button style={S.btnGhost} onClick={()=>{setShowCopy(false);setCopyQ('');}}>Close</button></div>
+      {copySrc===null||(copySrc.length===0&&!copyQ)?<div style={{fontSize:12,color:T.textDim,padding:6}}>Loading entries…</div>:
+       copyMatches.length===0?<div style={{fontSize:12,color:T.textDim,padding:6}}>No matching entries</div>:
+       <div style={{maxHeight:260,overflowY:'auto'}}><table style={S.table}><tbody>{copyMatches.map(e=>{const amt=(e.lines||[]).reduce((s,l)=>s+(Number(l.debit)||0),0);return<tr key={e.id} style={{cursor:'pointer'}} onClick={()=>applyCopy(e)} title="Copy this entry into the form">
+         <td style={{...S.td,fontWeight:600,color:T.accent,whiteSpace:'nowrap'}}>JE-{String(e.entry_num).padStart(4,'0')}</td><td style={{...S.td,color:T.textMuted,whiteSpace:'nowrap'}}>{e.date}</td>
+         <td style={S.td}>{e.memo}</td><td style={{...S.td,color:T.textMuted}}>{e.vendor||''}</td><td style={{...S.tdR,whiteSpace:'nowrap'}}>{fmt(amt)}</td><td style={{...S.td,color:T.textDim,fontSize:11}}>{(e.lines||[]).length} lines</td></tr>;})}</tbody></table></div>}
+      <div style={{fontSize:11,color:T.textDim,marginTop:6}}>The copy keeps the accounts, amounts, line descriptions, dimensions and vendor. It's dated today and isn't posted until you click Post Entry.</div>
+    </div>}
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
+        <div style={{...S.col,maxWidth:150}}><label style={S.label}>Doc / Invoice #</label><input style={S.input} placeholder="optional" value={form.doc_number||''} onChange={e=>setForm(f=>({...f,doc_number:e.target.value}))}/></div>
+        <div style={{...S.col,flex:2}}><label style={S.label}>Vendor</label><input style={S.input} list="je-vendor-list" placeholder="optional — use for A/P entries" value={form.vendor||''} onChange={e=>setForm(f=>({...f,vendor:e.target.value}))}/><datalist id="je-vendor-list">{vendorList.map(v=><option key={v} value={v}/>)}</datalist></div>
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo / Description</label><input style={S.input} placeholder="What is this entry for?" value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div>
       <div style={{display:'flex',alignItems:'center',gap:14,marginTop:14,flexWrap:'wrap'}}>
         <label style={{display:'flex',alignItems:'center',gap:8,fontSize:13,color:T.textBright,cursor:'pointer'}}>
@@ -2324,7 +2346,9 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
   useEffect(()=>{api.getLocations(entityId).then(d=>setLocations(d||[])).catch(()=>setLocations([]));api.getClasses(entityId).then(d=>setClasses(d||[])).catch(()=>setClasses([]));},[entityId]);
   const showLocation=(dimsEnabled&&locations.length>0)||(entry.lines||[]).some(l=>l.location_id);const showClass=(dimsEnabled&&classes.length>0)||(entry.lines||[]).some(l=>l.class_id);
-  const[form,setForm]=useState({date:entry.date,memo:entry.memo,doc_number:entry.doc_number||'',lines:(entry.lines||[]).map(l=>({account_code:l.account_code,project_id:l.project_id||'',location_id:l.location_id||'',class_id:l.class_id||'',description:l.description||'',debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
+  const[vendorList,setVendorList]=useState([]);
+  useEffect(()=>{api.getJeVendors(entityId).then(v=>setVendorList(v||[])).catch(()=>setVendorList([]));},[entityId]);
+  const[form,setForm]=useState({date:entry.date,memo:entry.memo,doc_number:entry.doc_number||'',vendor:entry.vendor||'',lines:(entry.lines||[]).map(l=>({account_code:l.account_code,project_id:l.project_id||'',location_id:l.location_id||'',class_id:l.class_id||'',description:l.description||'',debit:l.debit>0?l.debit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):'',credit:l.credit>0?l.credit.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}):''}))});
   const[attachments,setAttachments]=useState(entry.attachments||[]);
   const[attUploading,setAttUploading]=useState(false);
   const attInputRef=useRef(null);
@@ -2352,7 +2376,7 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
   const tDr=form.lines.reduce((s,l)=>s+parseAmt(l.debit),0);const tCr=form.lines.reduce((s,l)=>s+parseAmt(l.credit),0);const bal=Math.abs(tDr-tCr)<0.005&&tDr>0;
   const save=async()=>{if(!form.date||!form.memo.trim()){setErr('Date and memo required');return;}if(form.lines.some(l=>!l.account_code)){setErr('All lines need an account');return;}if(!bal){setErr('Must balance');return;}
     setSaving(true);setErr('');
-    const _basePayload=override=>({date:form.date,memo:form.memo.trim(),doc_number:(form.doc_number||'').trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null})),...(override||{})});
+    const _basePayload=override=>({date:form.date,memo:form.memo.trim(),doc_number:(form.doc_number||'').trim(),vendor:(form.vendor||'').trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null})),...(override||{})});
     const _doSave=async override=>{await api.updateEntry(entityId,entry.id,_basePayload(override));onSaved();onClose();};
     try{await _doSave();}
     catch(e){
@@ -2403,6 +2427,7 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
     <div style={{background:T.bgElevated,border:'1px solid '+T.border,borderRadius:T.radiusSm,padding:18,marginBottom:16}}>
       <div style={S.row}><div style={{...S.col,maxWidth:170}}><label style={S.label}>Date</label><input style={S.input} type="date" value={form.date} onChange={e=>setForm(f=>({...f,date:e.target.value}))}/></div>
         <div style={{...S.col,maxWidth:170}}><label style={S.label}>Doc / Invoice #</label><input style={S.input} value={form.doc_number} placeholder="optional" onChange={e=>setForm(f=>({...f,doc_number:e.target.value}))}/></div>
+        <div style={{...S.col,flex:2}}><label style={S.label}>Vendor</label><input style={S.input} list="je-edit-vendor-list" value={form.vendor} placeholder="optional" onChange={e=>setForm(f=>({...f,vendor:e.target.value}))}/><datalist id="je-edit-vendor-list">{vendorList.map(v=><option key={v} value={v}/>)}</datalist></div>
         <div style={{...S.col,flex:4}}><label style={S.label}>Memo</label><input style={S.input} value={form.memo} onChange={e=>setForm(f=>({...f,memo:e.target.value}))}/></div></div></div>
     <div style={{...S.cardFlush,marginBottom:16,maxHeight:'52vh',overflowY:'auto'}}><table className="cl-colresize" style={S.table}><thead style={{position:'sticky',top:0,zIndex:2,background:T.bgElevated}}><tr><th style={{...S.th,minWidth:300}}>Account</th>{showDims&&<th style={{...S.th,width:140}}>Dimension</th>}<th style={S.th}>Description</th><th style={{...S.thR,width:140}}>Debit</th><th style={{...S.thR,width:140}}>Credit</th><th style={{...S.th,width:36}}></th></tr></thead>
       <tbody>{form.lines.map((l,i)=><tr key={i}><td style={{padding:'6px 8px',borderBottom:'1px solid '+T.borderLight}}>
@@ -2697,10 +2722,12 @@ function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry,on
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
           <div style={{display:'flex',alignItems:'center',gap:14}}><span style={{fontWeight:700,color:T.accent,fontSize:14}}>JE-{String(e.entry_num).padStart(4,'0')}</span>
             <span style={{color:T.textMuted}}>{e.date}</span><span style={{fontWeight:500}}>{e.memo}</span>
+            {e.vendor&&<span style={{fontSize:12,color:T.textMuted}}>· {e.vendor}</span>}
             {e.attachments?.length>0&&<span style={{fontSize:11,color:T.teal,fontWeight:500}}>({e.attachments.length} file{e.attachments.length>1?'s':''})</span>}</div>
           <div style={{display:'flex',alignItems:'center',gap:8}}>
             <span style={{fontSize:12,color:T.textDim}}>{e.created_by}</span>
             {canEdit&&<button style={{...S.btnS,padding:'5px 12px',fontSize:11}} onClick={()=>setEditEntry(e)}>Edit</button>}
+            {canEdit&&onDuplicate&&<button style={{...S.btnS,padding:'5px 12px',fontSize:11,color:T.accent,borderColor:T.accent+'40'}} title="Copy this entry into a new JE as a template" onClick={()=>onDuplicate(e)}>Copy</button>}
             {canEdit&&<button style={{...S.btnD,padding:'5px 12px',fontSize:11}} onClick={()=>del(e.id)}>Delete</button>}</div></div>
         <div style={{overflowX:'auto'}}><table style={{...S.table,tableLayout:'fixed',width:colW.acct+colW.desc+colW.debit+colW.credit}}>
           <colgroup><col style={{width:colW.acct}}/><col style={{width:colW.desc}}/><col style={{width:colW.debit}}/><col style={{width:colW.credit}}/></colgroup>
