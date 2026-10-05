@@ -9355,6 +9355,47 @@ app.get('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin'
       finClient.file_missing = !hasFile;
       finalized.push(finClient);
     }
+    // Roll-forward from a FILED report that has no finalized draft row. The page
+    // decides first-time vs roll-forward from the finalized ROWS above, but seeding
+    // and the upload-guard read the filed FILE in Workpapers. When a report is on
+    // file with no row (a report filed under the legacy one-shot path, a discarded
+    // finalized row that left its filed copy behind, or a page opened before the
+    // first finalize), those two disagree: the page shows the first-time upload box,
+    // and uploading that same filed report is then rejected as already-filed — a
+    // dead end. Surface the filed report here (flagged from_file) so the page offers
+    // "Start next requisition" (which seeds from the filed file) instead. Scoped to
+    // phases not already covered by a finalized row or an open draft.
+    try {
+      const openLc = new Set([...openPhases].map(p => String(p).toLowerCase()));
+      const seenLc = new Set([...seenPhase].map(p => String(p).toLowerCase()));
+      const candidates = isRail ? [...reqDraft.listFiledReportPhases(db, eid)] : [''];
+      for (const cand of candidates) {
+        const ph = reqDraft.normPhase(cand);
+        const lc = String(ph).toLowerCase();
+        if (openLc.has(lc) || seenLc.has(lc)) continue;
+        let seed = null;
+        try { seed = reqDraft.resolveAutoSeed(db, WORKPAPERS_DIR, eid, ph); } catch (_) { seed = null; }
+        if (!seed) continue;
+        seenLc.add(lc);
+        const nm = seed.name || '';
+        const mReq = nm.match(/#\s*(\d+)/);
+        const mDate = nm.match(/(\d{2})[._\/-](\d{2})[._\/-](\d{4})/);
+        finalized.push({
+          id: 'file:' + (ph || 'default'),
+          entity_id: eid,
+          status: 'finalized',
+          from_file: true,
+          req_number: mReq ? parseInt(mReq[1], 10) : null,
+          as_of_date: mDate ? (mDate[3] + '-' + mDate[1] + '-' + mDate[2]) : null,
+          phase: ph,
+          base_name: seed.name,
+          output_name: seed.name,
+          file_missing: false,
+          invoices: [],
+        });
+      }
+    } catch (_) { /* never block the page on the roll-forward-from-file probe */ }
+
     res.json({ draft: all[0] || null, drafts: all, finalized, is_rail: isRail });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

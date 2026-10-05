@@ -7884,14 +7884,14 @@ function Requisitions({entityId,entityName,canEdit=true,reqState,setReqState}){
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:10}}>
           <div><span style={{fontSize:14,fontWeight:600,color:T.text}}>Req {fin.req_number!=null?('#'+fin.req_number):''}{(fin.phase&&[...draftList,...finalizedList].length>1)?(' · Phase '+fin.phase):''}</span>
             <span style={{fontSize:12,color:T.textMuted,marginLeft:8}}>{fin.as_of_date?('as of '+fin.as_of_date):''} · {(fin.invoices||[]).length} invoice{(fin.invoices||[]).length===1?'':'s'}</span></div>
-          <span style={{fontSize:12,fontWeight:600,color:T.green}}>✓ Finalized</span>
+          <span style={{fontSize:12,fontWeight:600,color:T.green}}>{fin.from_file?'On file':'✓ Finalized'}</span>
         </div>
         {fin.file_missing
           ? <div style={{fontSize:12,color:T.orange,marginBottom:12,padding:'8px 10px',background:T.orangeDim,borderRadius:6,border:'1px solid '+T.orange+'40'}}>\u26a0 The filed report for this period isn\u2019t in Workpapers (it may have been moved, renamed, or deleted). CloudLedger seeds the next requisition from that file, so restore it \u2014 or Reopen and re-finalize to regenerate it \u2014 before starting the next one.</div>
-          : <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Filed to Workpapers. Reopen to change invoices and re-finalize \u2014 the filed copy for this period is replaced.</div>}
+          : fin.from_file ? <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>The last requisition report is on file in Workpapers. CloudLedger will seed the next requisition from it when you start it below.</div> : <div style={{fontSize:12,color:T.textMuted,marginBottom:12}}>Filed to Workpapers. Reopen to change invoices and re-finalize \u2014 the filed copy for this period is replaced.</div>}
         <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
           <button style={S.btnP} disabled={draftBusy||fin.file_missing} onClick={()=>{setNextAsOfPhase(fin.phase||'');setNextAsOf('');}} title={fin.file_missing?'Restore or regenerate the filed report first':''}>{draftBusy?'Starting\u2026':'Start next requisition'}</button>
-          <button style={S.btnS} disabled={draftBusy} onClick={()=>reopenDraft(fin.phase||'')}>{draftBusy?'Reopening\u2026':'Reopen for edits'}</button><button style={{...S.btnS,color:T.red,borderColor:T.red+'50'}} disabled={draftBusy} onClick={()=>discardFinalized(fin.phase||'')} title="Remove this finalized requisition and return to first-time setup">{draftBusy?'Discarding…':'Discard this requisition'}</button>
+          {!fin.from_file&&<><button style={S.btnS} disabled={draftBusy} onClick={()=>reopenDraft(fin.phase||'')}>{draftBusy?'Reopening\u2026':'Reopen for edits'}</button><button style={{...S.btnS,color:T.red,borderColor:T.red+'50'}} disabled={draftBusy} onClick={()=>discardFinalized(fin.phase||'')} title="Remove this finalized requisition and return to first-time setup">{draftBusy?'Discarding…':'Discard this requisition'}</button></>}
         </div>
         {nextAsOfPhase===(fin.phase||'')&&<div style={{marginTop:12,padding:14,background:T.bgElevated,borderRadius:8,border:'1px solid '+T.border}}>
           <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:4}}>Report date for the next requisition</div>

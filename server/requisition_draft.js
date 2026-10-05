@@ -260,8 +260,33 @@ function phasedFilename(name, phase, opts) {
   return s + ' ' + lbl;
 }
 
+// Phases (incl. '' for the default stream) that have a FINALIZED requisition
+// report filed in Workpapers — regardless of whether a finalized draft ROW
+// exists for them. Lets the page offer a roll-forward from the filed report
+// instead of the first-time upload box when a report is on file but no row is
+// present (a report filed under the legacy one-shot path, a discarded finalized
+// row that left its filed copy behind, or a stale page). Parsed from the filed
+// filenames; '' when a name carries no "Phase <x>" token. Never throws.
+function listFiledReportPhases(db, eid) {
+  const out = new Set();
+  try {
+    const rows = db.prepare(
+      "SELECT original_name FROM entity_files " +
+      "WHERE entity_id=? AND folder_path LIKE '%Requisition Reports%' " +
+      "AND folder_path NOT LIKE '%/Drafts' AND original_name NOT LIKE '[DRAFT] %' " +
+      "AND lower(original_name) LIKE '%requisition report%' AND lower(original_name) LIKE '%.xlsx'"
+    ).all(eid);
+    for (const r of rows) {
+      const m = String(r.original_name || '').match(/\bphase\s+([0-9]+[a-z]?)\b/i);
+      out.add(m ? normPhase(m[1]) : '');
+    }
+  } catch (_) { /* best-effort */ }
+  return out;
+}
+
 module.exports = {
   buildRollforwardMeta,
+  listFiledReportPhases,
   rollForwardFromBase,
   loadReqWorkbook,
   getOpenDraft,
