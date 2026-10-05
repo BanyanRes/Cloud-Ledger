@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const { HAIKU_MODEL } = require('./aiModel');
 const morgan = require('morgan');
 const multer = require('multer');
 const XLSX = require('xlsx');
@@ -9906,7 +9907,7 @@ app.post('/api/requisition/:entity_id/read-invoice', ...reqGuards(), requireRole
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
+        model: HAIKU_MODEL,
         max_tokens: 512,
         messages: [{ role: 'user', content: [source, { type: 'text', text: instruction }] }],
       }),
@@ -11667,7 +11668,7 @@ async function buildTtmAnalysis(d, entityName, asOf) {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
+      model: HAIKU_MODEL,
       max_tokens: 1500,
       messages: [{ role: 'user', content: [{ type: 'text', text: instruction }] }],
     }),
@@ -11706,7 +11707,7 @@ async function buildTtmAnalysis(d, entityName, asOf) {
     return { account, reason, title: account, detail: reason };
   }) : [];
   return {
-    generatedBy: 'claude-haiku-4-5-20251001',
+    generatedBy: HAIKU_MODEL,
     lastMonthLabel: monthLabels[monthLabels.length - 1] || '',
     summary: String(parsed.summary || '').slice(0, 1000),
     findings,

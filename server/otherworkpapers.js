@@ -25,6 +25,7 @@
 const path = require('path');
 const fs = require('fs');
 const ExcelJS = require('exceljs');
+const { HAIKU_MODEL } = require('./aiModel');
 
 const FUND_EID = 40;
 
@@ -621,9 +622,9 @@ function extractCoverage(text) {
   return { start: dr ? normDate(dr[1]) : null, end: dr ? normDate(dr[2]) : null, premium: pr ? Number(pr[1].replace(/,/g, '')) : null };
 }
 async function llmExtractCoverage(text) {
-  const body = { model: 'claude-3-5-haiku-latest', max_tokens: 200, messages: [{ role: 'user', content: 'From this insurance invoice text, reply with ONLY compact JSON {"start":"YYYY-MM-DD","end":"YYYY-MM-DD","premium":number} for the policy coverage period and total premium. Text:\n' + String(text).slice(0, 6000) }] };
+  const body = { model: HAIKU_MODEL, max_tokens: 200, messages: [{ role: 'user', content: 'From this insurance invoice text, reply with ONLY compact JSON {"start":"YYYY-MM-DD","end":"YYYY-MM-DD","premium":number} for the policy coverage period and total premium. Text:\n' + String(text).slice(0, 6000) }] };
   const r = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, body: JSON.stringify(body) });
-  if (!r.ok) return null;
+  if (!r.ok) { try { console.warn('[otherworkpapers] Claude coverage extract failed:', r.status, (await r.text()).slice(0, 300)); } catch (_e) {} return null; }
   const j = await r.json(); const txt = (j.content && j.content[0] && j.content[0].text) || ''; const m = txt.match(/\{[\s\S]*\}/); if (!m) return null;
   const o = JSON.parse(m[0]); if (!o.start || !o.end) return null; return o;
 }

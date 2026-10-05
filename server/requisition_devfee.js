@@ -29,6 +29,7 @@
 // ============================================================================
 
 const { cellNum, cellStr, cellFormula, isDevFeeLabel } = require('./requisition_reconcile.js');
+const { HAIKU_MODEL } = require('./aiModel');
 
 // Apply a learned spec to a base amount. Central so parse + Claude + validation
 // all compute identically.
@@ -205,7 +206,7 @@ async function analyzeDevFeeWithClaude(devFeeWs, prior, callClaude) {
 
 // A Claude caller specialized for the dev-fee spec prompt. Same transport as the
 // roll-forward verifier's caller. Returns parsed JSON {rate,halve,...}.
-function makeDevFeeClaudeCaller({ apiKey = process.env.ANTHROPIC_API_KEY, model = 'claude-haiku-4-5-20251001', fetchImpl } = {}) {
+function makeDevFeeClaudeCaller({ apiKey = process.env.ANTHROPIC_API_KEY, model = HAIKU_MODEL, fetchImpl } = {}) {
   const doFetch = fetchImpl || globalThis.fetch;
   return async function callClaude({ system, user }) {
     const res = await doFetch('https://api.anthropic.com/v1/messages', {
