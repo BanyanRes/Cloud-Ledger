@@ -6048,6 +6048,66 @@ function FixedAdditionsDialog({entityId,entityName,info,onCancel,onSaved}){
   </div>);
 }
 
+function EquityRollforwardCard({entityId,entityName,mon,canEdit}){
+  const monthNum=Number((mon||'').slice(5,7))||0;
+  const[members,setMembers]=useState([]);
+  const[re,setRe]=useState('');const[ni,setNi]=useState('');const[asof,setAsof]=useState('');
+  const[msg,setMsg]=useState('');const[err,setErr]=useState('');const[open,setOpen]=useState(false);
+  const load=async()=>{try{const r=await api.claCloseRegisters(entityId);setMembers((r.equity_members||[]).map(x=>({...x})));const m=r.equity_meta||{};setRe(m.prior_period_re==null?'':m.prior_period_re);setNi(m.net_income==null?'':m.net_income);setAsof(m.as_of||'');}catch(e){}};
+  useEffect(()=>{load();},[entityId]);
+  const onFile=async(e)=>{
+    const f=e.target.files&&e.target.files[0];if(!f)return;setErr('');setMsg('');
+    try{
+      const ab=await f.arrayBuffer();const wb=XLSX.read(ab,{type:'array'});
+      const sh=wb.Sheets['Equity Rollforward']||wb.Sheets[wb.SheetNames[0]];
+      const aoa=XLSX.utils.sheet_to_json(sh,{header:1,raw:true});
+      const begIdx=aoa.findIndex(r=>r&&r.some(c=>typeof c==='string'&&/Beginning Members/i.test(c)));
+      const mem=[];
+      if(begIdx>=0)for(let i=begIdx+1;i<aoa.length;i++){const r=aoa[i]||[];const nm=r[2],op=r[6];if(typeof nm==='string'&&nm.trim()&&typeof op==='number')mem.push({member_name:String(nm).replace(/\s+/g,' ').trim(),opening_balance:op,contributions:0,draws:0});else if(mem.length)break;}
+      const reRow=aoa.find(r=>r&&r.some(c=>typeof c==='string'&&/Retained Earnings/i.test(c)));
+      const priorRe=reRow?(typeof reRow[6]==='number'?reRow[6]:(typeof reRow[4]==='number'?reRow[4]:0)):0;
+      const endRow=aoa.find(r=>r&&r.some(c=>typeof c==='string'&&/^Ending \(Equity\)\/Deficit/i.test(String(c).trim())));
+      const col=5+monthNum;const ending=endRow&&typeof endRow[col]==='number'?endRow[col]:null;
+      const begTot=mem.reduce((a,x)=>a+x.opening_balance,0);
+      const netInc=ending!=null?Math.round((ending-(begTot+priorRe))*100)/100:'';
+      if(!mem.length){setErr('Couldn\u2019t find a \u201cBeginning Members\u2019 (Equity)/Deficit\u201d section with member rows. Check the sheet, or enter the figures below by hand.');return;}
+      setMembers(mem);setRe(priorRe);setNi(netInc);setAsof(mon);setOpen(true);
+      setMsg('Parsed '+mem.length+' members from '+f.name+(ending==null?' \u2014 couldn\u2019t read the ending column for this month; enter net income below':'')+'. Review, then Save.');
+    }catch(ex){setErr('Parse failed: '+ex.message);}
+    e.target.value='';
+  };
+  const setM=(i,k,v)=>setMembers(ms=>ms.map((m,j)=>j===i?{...m,[k]:v}:m));
+  const save=async()=>{setErr('');setMsg('');try{await api.claCloseSaveRegisters(entityId,{equity_members:members.map(m=>({member_name:m.member_name,account_code:m.account_code||null,opening_balance:Number(m.opening_balance)||0,contributions:Number(m.contributions)||0,draws:Number(m.draws)||0})),equity_meta:{prior_period_re:Number(re)||0,net_income:Number(ni)||0,as_of:asof||mon}});setMsg('Saved. Run the report to refresh the members\u2019 equity rollforward.');}catch(ex){setErr(ex.message);}};
+  return(<div style={{...S.card,marginTop:14}}>
+    <div style={{fontSize:15,fontWeight:700,color:T.textBright,marginBottom:4}}>Members\u2019 equity rollforward</div>
+    <div style={{fontSize:13,color:T.textMuted,marginBottom:12,maxWidth:800,lineHeight:1.5}}>The equity leadsheet presents members\u2019 capital \u2014 CIG QOF, Braker QOF and the undeployed accounts \u2014 rather than the single intercompany-investment line. Upload your equity rollforward workbook to pull the member openings, prior-period retained earnings, and net income through the selected month end (the consolidated figures that run through the operating entity, so they can\u2019t be re-derived from this ledger). Review the parsed figures and Save; the leadsheet reconciles to the GL equity so the package still ties.</div>
+    <div style={{display:'flex',gap:12,alignItems:'center',flexWrap:'wrap',marginBottom:10}}>
+      <label style={{...S.btnS,cursor:canEdit?'pointer':'default',opacity:canEdit?1:0.5}}>Upload rollforward (.xlsx)<input type="file" accept=".xlsx" style={{display:'none'}} disabled={!canEdit} onChange={onFile}/></label>
+      {members.length>0&&<button style={S.btnS} onClick={()=>setOpen(o=>!o)}>{open?'Hide':'Review'} figures ({members.length} member{members.length===1?'':'s'})</button>}
+      {members.length>0&&<span style={{fontSize:12,color:T.textMuted}}>as of {asof||mon}</span>}
+    </div>
+    {open&&<div style={{marginBottom:10}}>
+      <table style={{...S.table,minWidth:560}}><thead><tr><th style={S.td}>Member</th><th style={S.tdR}>Opening (Equity)/Deficit</th><th style={S.tdR}>Contributions</th><th style={S.tdR}>Draws</th></tr></thead><tbody>
+        {members.map((m,i)=><tr key={i}>
+          <td style={S.td}><input style={{...S.inputSm,width:270}} value={m.member_name} disabled={!canEdit} onChange={e=>setM(i,'member_name',e.target.value)}/></td>
+          <td style={S.tdR}><input style={{...S.inputSm,width:150,textAlign:'right'}} value={m.opening_balance} disabled={!canEdit} onChange={e=>setM(i,'opening_balance',e.target.value)}/></td>
+          <td style={S.tdR}><input style={{...S.inputSm,width:120,textAlign:'right'}} value={m.contributions} disabled={!canEdit} onChange={e=>setM(i,'contributions',e.target.value)}/></td>
+          <td style={S.tdR}><input style={{...S.inputSm,width:120,textAlign:'right'}} value={m.draws} disabled={!canEdit} onChange={e=>setM(i,'draws',e.target.value)}/></td>
+        </tr>)}
+      </tbody></table>
+      <div style={{display:'flex',gap:16,flexWrap:'wrap',marginTop:10}}>
+        <div><label style={S.label}>Prior-period retained earnings</label><input style={{...S.inputSm,width:170,textAlign:'right'}} value={re} disabled={!canEdit} onChange={e=>setRe(e.target.value)}/></div>
+        <div><label style={S.label}>Net (income)/loss \u2014 YTD through month end</label><input style={{...S.inputSm,width:170,textAlign:'right'}} value={ni} disabled={!canEdit} onChange={e=>setNi(e.target.value)}/></div>
+        <div><label style={S.label}>As of</label><input style={{...S.inputSm,width:120}} value={asof} disabled={!canEdit} onChange={e=>setAsof(e.target.value)}/></div>
+      </div>
+    </div>}
+    <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+      <button style={{...S.btnP,opacity:(!canEdit||!members.length)?0.5:1}} disabled={!canEdit||!members.length} onClick={save}>Save rollforward</button>
+      {msg&&<span style={{fontSize:12,color:T.green,fontWeight:600}}>{msg}</span>}
+      {err&&<span style={{fontSize:12,color:T.red,fontWeight:600}}>{err}</span>}
+    </div>
+  </div>);
+}
 function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true,quarterly=false,noBillcom=false}){
   const QEND=['03-31','06-30','09-30','12-31'];
   const defaultDate=()=>{const t=today();
@@ -6059,6 +6119,7 @@ function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true,quarterly=fa
   const[result,setResult]=useState(null);
   const[needFixed,setNeedFixed]=useState(null);
   const valid=/^\d{4}-\d{2}-\d{2}$/.test(mon)&&(!quarterly||QEND.includes(mon.slice(5)));
+  const isBraker=/braker\s*prop\s*co/i.test(entityName||'');
   const run=async(proceed)=>{
     if(!valid)return;
     setBusy(true);setErr('');setResult(null);
@@ -6091,6 +6152,7 @@ function ClaMonthlyCloseWorkpaper({entityId,entityName,canEdit=true,quarterly=fa
     </div>}
   </div>
   {!noBillcom&&valid&&<ClrfApDetailCard entityId={entityId} qe={mon} canEdit={canEdit} apAcct="20000" periodLabel={quarterly?'quarter end':'month end'}/>}
+  {isBraker&&<EquityRollforwardCard entityId={entityId} entityName={entityName} mon={mon} canEdit={canEdit}/>}
   {needFixed&&<FixedAdditionsDialog entityId={entityId} entityName={entityName} info={needFixed} onCancel={()=>setNeedFixed(null)} onSaved={async()=>{setNeedFixed(null);await run();}}/>}
   </div>);
 }
