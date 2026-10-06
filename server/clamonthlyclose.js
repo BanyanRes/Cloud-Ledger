@@ -194,6 +194,14 @@ function ensureRegisterSchema(db) {
       description TEXT, life_years REAL, in_service TEXT, cost REAL DEFAULT 0, accum_dep_beg REAL DEFAULT 0,
       depr_start TEXT, sort_order INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')));
     CREATE INDEX IF NOT EXISTS idx_cla_fa_ent ON cla_fixed_assets(entity_id);
+    CREATE TABLE IF NOT EXISTS cla_equity_members (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, entity_id INTEGER NOT NULL, member_name TEXT NOT NULL,
+      account_code TEXT, opening_balance REAL DEFAULT 0, contributions REAL DEFAULT 0, draws REAL DEFAULT 0,
+      sort_order INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')));
+    CREATE INDEX IF NOT EXISTS idx_cla_eqm_ent ON cla_equity_members(entity_id);
+    CREATE TABLE IF NOT EXISTS cla_equity_meta (
+      entity_id INTEGER PRIMARY KEY, prior_period_re REAL DEFAULT 0, net_income REAL DEFAULT 0,
+      as_of TEXT, note TEXT, updated_at TEXT DEFAULT (datetime('now')));
   `);
   try { db.exec('ALTER TABLE cla_fixed_assets ADD COLUMN depr_start TEXT'); } catch (e) { /* already there */ }
 }
@@ -214,6 +222,8 @@ function loadRegisters(db, eid) {
   return {
     prepaid: db.prepare('SELECT * FROM cla_prepaid_items WHERE entity_id = ? ORDER BY account_code, sort_order, id').all(eid),
     fixedAssets: db.prepare('SELECT * FROM cla_fixed_assets WHERE entity_id = ? ORDER BY asset_account, sort_order, id').all(eid),
+    equityMembers: db.prepare('SELECT * FROM cla_equity_members WHERE entity_id = ? ORDER BY sort_order, id').all(eid),
+    equityMeta: db.prepare('SELECT * FROM cla_equity_meta WHERE entity_id = ?').get(eid) || null,
   };
 }
 function replaceRegisters(db, eid, body) {
@@ -227,6 +237,16 @@ function replaceRegisters(db, eid, body) {
       db.prepare('DELETE FROM cla_fixed_assets WHERE entity_id = ?').run(eid);
       const ins = db.prepare('INSERT INTO cla_fixed_assets (entity_id, asset_account, dep_account, description, life_years, in_service, cost, accum_dep_beg, depr_start, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?)');
       body.fixed_assets.forEach((a, i) => ins.run(eid, String(a.asset_account || ''), a.dep_account == null ? null : String(a.dep_account), a.description || '', Number(a.life_years) || 0, a.in_service || null, Number(a.cost) || 0, Number(a.accum_dep_beg) || 0, a.depr_start || null, i));
+    }
+    if (Array.isArray(body.equity_members)) {
+      db.prepare('DELETE FROM cla_equity_members WHERE entity_id = ?').run(eid);
+      const ins = db.prepare('INSERT INTO cla_equity_members (entity_id, member_name, account_code, opening_balance, contributions, draws, sort_order) VALUES (?,?,?,?,?,?,?)');
+      body.equity_members.forEach((x, i) => ins.run(eid, String(x.member_name || ''), x.account_code == null ? null : String(x.account_code), Number(x.opening_balance) || 0, Number(x.contributions) || 0, Number(x.draws) || 0, i));
+    }
+    if (body.equity_meta && typeof body.equity_meta === 'object') {
+      const em = body.equity_meta;
+      db.prepare('INSERT INTO cla_equity_meta (entity_id, prior_period_re, net_income, as_of, note, updated_at) VALUES (?,?,?,?,?,datetime(\'now\')) ON CONFLICT(entity_id) DO UPDATE SET prior_period_re=excluded.prior_period_re, net_income=excluded.net_income, as_of=excluded.as_of, note=excluded.note, updated_at=datetime(\'now\')')
+        .run(eid, Number(em.prior_period_re) || 0, Number(em.net_income) || 0, em.as_of || null, em.note || null);
     }
   });
   tx();
@@ -1141,7 +1161,87 @@ function buildApReconTabs(wb, recon, en, m, used) {
 }
 
 // Equity Rollforward: prior year end → monthly activity → ending, by account.
+// Member-level equity rollforward (QOZB development entities whose CPA package
+// presents members' capital, e.g. Braker). Driven by the equity-rollforward
+// register — the consolidated member numbers (contributions/draws/NI run through
+// the operating entity and the consolidation engine, so they can't be re-derived
+// from the development ledger). Ends with a reconciliation to the GL equity that
+// the leadsheet and balance sheet carry, so the package still ties.
+function buildMemberEquityRollforward(wb, rows, data, en, m, used, leadTab, niVal, members, meta) {
+  const tab = reserveName('Equity Rollforward', used);
+  const ws = wb.addWorksheet(tab, { views: [{ showGridLines: false }] });
+  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 62; ws.getColumn('C').width = 18;
+  const re = Number((meta && meta.prior_period_re) || 0);
+  const ni = Number((meta && meta.net_income) || 0);
+  const asof = meta && meta.as_of ? ' (per schedule as of ' + meta.as_of + ')' : '';
+  tabHead(ws, 'Members\u2019 Equity Rollforward', en, 'Fiscal ' + m.year + ' through ' + spell(m.end) + ' \u2014 by member, per the equity rollforward schedule' + asof, leadTab);
+  let r = 6;
+  const TB = { top: THIN };
+  const DB = { top: THIN, bottom: DBL };
+  const bold = { font: { bold: true } };
+
+  txt(ws, 'B' + r, 'Beginning Members\u2019 (Equity)/Deficit:', bold); r++;
+  const begFirst = r;
+  for (const x of members) { txt(ws, 'B' + r, '   ' + x.member_name); num(ws, 'C' + r, Number(x.opening_balance) || 0); r++; }
+  const begLast = r - 1;
+  txt(ws, 'B' + r, 'Total beginning members\u2019 (equity)/deficit', bold);
+  num(ws, 'C' + r, { formula: 'SUM(C' + begFirst + ':C' + begLast + ')' }, { font: { bold: true }, border: TB });
+  const begTotRow = r; r += 2;
+
+  let contribTotRow = null;
+  if (members.some(x => Math.abs(Number(x.contributions) || 0) > 0.005)) {
+    txt(ws, 'B' + r, '(Contributions):', bold); r++;
+    const cf = r;
+    for (const x of members) { txt(ws, 'B' + r, '   ' + x.member_name); num(ws, 'C' + r, -(Number(x.contributions) || 0)); r++; }
+    txt(ws, 'B' + r, 'Total (contributions)', bold);
+    num(ws, 'C' + r, { formula: 'SUM(C' + cf + ':C' + (r - 1) + ')' }, { font: { bold: true }, border: TB });
+    contribTotRow = r; r += 2;
+  }
+
+  txt(ws, 'B' + r, 'Prior-period net (income)/loss \u2014 retained earnings'); num(ws, 'C' + r, re); const reRow = r; r += 2;
+
+  let drawTotRow = null;
+  if (members.some(x => Math.abs(Number(x.draws) || 0) > 0.005)) {
+    txt(ws, 'B' + r, 'Draws:', bold); r++;
+    const df = r;
+    for (const x of members) { txt(ws, 'B' + r, '   ' + x.member_name); num(ws, 'C' + r, Number(x.draws) || 0); r++; }
+    txt(ws, 'B' + r, 'Total draws', bold);
+    num(ws, 'C' + r, { formula: 'SUM(C' + df + ':C' + (r - 1) + ')' }, { font: { bold: true }, border: TB });
+    drawTotRow = r; r += 2;
+  }
+
+  const cpbParts = ['C' + begTotRow]; if (contribTotRow) cpbParts.push('C' + contribTotRow); cpbParts.push('C' + reRow);
+  txt(ws, 'B' + r, 'Current-period beginning (equity)/deficit', bold);
+  num(ws, 'C' + r, { formula: cpbParts.join('+') }, { font: { bold: true }, border: TB });
+  const cpbRow = r; r += 2;
+
+  txt(ws, 'B' + r, 'Current-period net (income)/loss \u2014 fiscal YTD'); num(ws, 'C' + r, ni); const niRow = r; r += 1;
+
+  const endParts = ['C' + cpbRow, 'C' + niRow]; if (drawTotRow) endParts.push('C' + drawTotRow);
+  txt(ws, 'B' + r, 'Ending members\u2019 (equity)/deficit', bold);
+  num(ws, 'C' + r, { formula: endParts.join('+') }, { font: { bold: true }, border: DB });
+  const endRow = r; r += 2;
+
+  const glEquity = r2(rows.reduce((s, a) => s + (a.end || 0), 0) + (niVal || 0));
+  const glSigned = r2(-glEquity);
+  const begVal = members.reduce((s, x) => s + (Number(x.opening_balance) || 0), 0);
+  const contribVal = -members.reduce((s, x) => s + (Number(x.contributions) || 0), 0);
+  const drawVal = members.reduce((s, x) => s + (Number(x.draws) || 0), 0);
+  const endingVal = r2(begVal + contribVal + re + ni + drawVal);
+  const adjVal = r2(glSigned - endingVal);
+  txt(ws, 'B' + r, 'Reconciliation to general ledger equity \u2014 ' + en, bold); r++;
+  txt(ws, 'B' + r, '   Members\u2019 ending (equity)/deficit \u2014 consolidated basis'); num(ws, 'C' + r, { formula: 'C' + endRow }); r++;
+  txt(ws, 'B' + r, '   Consolidation / QOZB-level adjustments (QOZB cash, operating results, investment basis)'); num(ws, 'C' + r, adjVal); r++;
+  txt(ws, 'B' + r, 'Total equity per general ledger \u2014 ties to balance sheet (shown as credit)', bold);
+  num(ws, 'C' + r, glSigned, { font: { bold: true }, border: DB }); r++;
+
+  const refs = new Map();
+  for (const a of rows) refs.set(String(a.code), { sheet: tab });
+  return { tab, refs };
+}
 function buildEquityRollforward(wb, rows, data, en, m, used, leadTab, niVal) {
+  const emembers = (data.reg && data.reg.equityMembers) || [];
+  if (emembers.length) return buildMemberEquityRollforward(wb, rows, data, en, m, used, leadTab, niVal, emembers, (data.reg && data.reg.equityMeta) || null);
   const tab = reserveName('Equity Rollforward', used);
   const ws = wb.addWorksheet(tab, { views: [{ showGridLines: false }] });
   const n = m.quarterly ? m.periodNum : m.monthNum; const endC = colL(5 + n);
@@ -1700,7 +1800,7 @@ function registerClaMonthlyCloseRoutes(app, ctx) {
         if (!ent) return res.status(404).json({ error: 'Entity not found' });
         ensureSeed(db, ent);
         const reg = loadRegisters(db, eid);
-        res.json({ entity_id: eid, prepaid: reg.prepaid, fixed_assets: reg.fixedAssets });
+        res.json({ entity_id: eid, prepaid: reg.prepaid, fixed_assets: reg.fixedAssets, equity_members: reg.equityMembers, equity_meta: reg.equityMeta });
       } catch (e) { res.status(400).json({ error: e.message }); }
     });
   app.put('/api/workpapers/cla-monthly-close/:entity_id/registers', auth, requireEntityAccess('entity_id'),
@@ -1709,7 +1809,7 @@ function registerClaMonthlyCloseRoutes(app, ctx) {
         const eid = Number(req.params.entity_id);
         replaceRegisters(db, eid, req.body || {});
         const reg = loadRegisters(db, eid);
-        res.json({ ok: true, entity_id: eid, prepaid: reg.prepaid, fixed_assets: reg.fixedAssets });
+        res.json({ ok: true, entity_id: eid, prepaid: reg.prepaid, fixed_assets: reg.fixedAssets, equity_members: reg.equityMembers, equity_meta: reg.equityMeta });
       } catch (e) { res.status(400).json({ error: e.message }); }
     });
 }
