@@ -6061,15 +6061,19 @@ function EquityRollforwardCard({entityId,entityName,mon,canEdit}){
       const ab=await f.arrayBuffer();const wb=XLSX.read(ab,{type:'array'});
       const sh=wb.Sheets['Equity Rollforward']||wb.Sheets[wb.SheetNames[0]];
       const aoa=XLSX.utils.sheet_to_json(sh,{header:1,raw:true});
+      // The schedule is merged/indented: member names land in column B or C row to
+      // row, so detect the name in either and read the opening as the first real
+      // figure after it. RE is the first large number on its row; NI is summed from
+      // the monthly net-income row (aligned to the month columns) Jan->month end.
+      const firstNum=(r,from)=>{for(let c=from;c<r.length;c++){if(typeof r[c]==='number'&&Math.abs(r[c])>1)return r[c];}return null;};
       const begIdx=aoa.findIndex(r=>r&&r.some(c=>typeof c==='string'&&/Beginning Members/i.test(c)));
       const mem=[];
-      if(begIdx>=0)for(let i=begIdx+1;i<aoa.length;i++){const r=aoa[i]||[];const nm=r[2],op=r[6];if(typeof nm==='string'&&nm.trim()&&typeof op==='number')mem.push({member_name:String(nm).replace(/\s+/g,' ').trim(),opening_balance:op,contributions:0,draws:0});else if(mem.length)break;}
+      if(begIdx>=0)for(let i=begIdx+1;i<aoa.length;i++){const r=aoa[i]||[];let nm=null,from=0;if(typeof r[1]==='string'&&r[1].trim()){nm=r[1];from=2;}else if(typeof r[2]==='string'&&r[2].trim()){nm=r[2];from=3;}if(nm==null){if(mem.length)break;else continue;}if(/^total|beginning members|contribution|retained|net \(income/i.test(nm.trim())){if(mem.length)break;else continue;}const op=firstNum(r,from);if(op!=null)mem.push({member_name:nm.replace(/\s+/g,' ').trim(),opening_balance:op,contributions:0,draws:0});else if(mem.length)break;}
       const reRow=aoa.find(r=>r&&r.some(c=>typeof c==='string'&&/Retained Earnings/i.test(c)));
-      const priorRe=reRow?(typeof reRow[6]==='number'?reRow[6]:(typeof reRow[4]==='number'?reRow[4]:0)):0;
-      const endRow=aoa.find(r=>r&&r.some(c=>typeof c==='string'&&/^Ending \(Equity\)\/Deficit/i.test(String(c).trim())));
-      const col=5+monthNum;const ending=endRow&&typeof endRow[col]==='number'?endRow[col]:null;
-      const begTot=mem.reduce((a,x)=>a+x.opening_balance,0);
-      const netInc=ending!=null?Math.round((ending-(begTot+priorRe))*100)/100:'';
+      const priorRe=reRow?(firstNum(reRow,2)||0):0;
+      const niRow=aoa.find(r=>r&&r.some(c=>typeof c==='string'&&/Current Period Net \(Income\)\/Loss/i.test(c)));
+      let netInc='';
+      if(niRow){let sum=0,any=false;for(let c=6;c<=5+monthNum&&c<niRow.length;c++){if(typeof niRow[c]==='number'){sum+=niRow[c];any=true;}}if(any)netInc=Math.round(sum*100)/100;}
       if(!mem.length){setErr('Couldn\u2019t find a \u201cBeginning Members\u2019 (Equity)/Deficit\u201d section with member rows. Check the sheet, or enter the figures below by hand.');return;}
       setMembers(mem);setRe(priorRe);setNi(netInc);setAsof(mon);setOpen(true);
       setMsg('Parsed '+mem.length+' members from '+f.name+(ending==null?' \u2014 couldn\u2019t read the ending column for this month; enter net income below':'')+'. Review, then Save.');
