@@ -133,6 +133,7 @@ function categoryOf(code, name, type, bank) {
   if (type === 'Liability') {
     if (/credit card/.test(n)) return 'cc';
     if (/loan|notes?\s+payable|line of credit|mortgage|bond/.test(n) || /^25/.test(c)) return 'debt';
+    if (/retention/.test(n)) return 'otherliab';
     if (/accounts payable|\bpayable\b|accrued/.test(n) || /^2[01]/.test(c)) return 'ap';
     return 'otherliab';
   }
