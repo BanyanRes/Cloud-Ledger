@@ -113,16 +113,31 @@ function priorQuarterOf(qtr) {
 function findTemplate(ctx, eid, qtr) {
   const { db, workpapersDir } = ctx;
   const prior = priorQuarterOf(qtr);
-  // Search order: (1) the combined Investment & Valuation folder for the prior
-  // quarter (new pipeline; name-filtered so the Investment Balance workbook in
-  // the same folder is never picked up), (2) the legacy Workpapers/Valuation
-  // folder, (3) the newest Valuation workbook from either tree.
-  const ivFolder = 'Workpapers/Investment & Valuation/' + prior.quarter + ' ' + prior.year;
-  const priorFolder = 'Workpapers/Valuation/' + prior.quarter + ' ' + prior.year;
-  let row = db.prepare(
+  // The transform needs a template whose trial-balance tab is still named "SOI".
+  // The generator RENAMES SOI -> TB in every workbook it produces, so a prior
+  // INTERIM quarter's generated Valuation_dist is NOT a valid template (it has
+  // "TB", not "SOI"); chaining off it breaks on the second consecutive
+  // generation with "template missing sheet for SOI". The year-end (12/31)
+  // valuation workbook is prepared manually and uploaded, so it keeps its "SOI"
+  // tab -- and interim quarters hold their valuations frozen at the year-end
+  // amounts anyway. So the correct, stable template for every Q1-Q3 of year Y is
+  // the Q4 (Y-1) workbook. Search order: (1) the year-end appraiser workbook
+  // (Investment & Valuation, then legacy Valuation), then the legacy fallbacks:
+  // (2) the prior quarter's folders, (3) the newest Valuation workbook anywhere.
+  const yeYear = String(Number(qtr.year) - 1);
+  const pickVal = (folder) => db.prepare(
     'SELECT * FROM entity_files WHERE entity_id=? AND folder_path=? '
     + "AND original_name LIKE '%Valuation%.xlsx' ORDER BY id DESC LIMIT 1"
-  ).get(eid, ivFolder);
+  ).get(eid, folder);
+  const ivFolder = 'Workpapers/Investment & Valuation/' + prior.quarter + ' ' + prior.year;
+  const priorFolder = 'Workpapers/Valuation/' + prior.quarter + ' ' + prior.year;
+  // (1) year-end appraiser workbook for the prior year (SOI intact) -- the anchor.
+  let row = pickVal('Workpapers/Investment & Valuation/Q4 ' + yeYear)
+    || pickVal('Workpapers/Valuation/Q4 ' + yeYear);
+  // (2) prior quarter's folders (legacy single-shot pipeline). These may be
+  //     generated outputs; if one is picked and lacks SOI, transform() surfaces
+  //     a clear error rather than silently misbehaving.
+  if (!row) row = pickVal(ivFolder);
   if (!row) {
     row = db.prepare(
       'SELECT * FROM entity_files WHERE entity_id=? AND folder_path=? '

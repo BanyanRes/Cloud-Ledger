@@ -780,7 +780,7 @@ export default function App(){
     const styleEl = document.createElement('style');
     styleEl.textContent = '.cl-modal-box::before{content:"";position:absolute;top:0;left:0;right:56px;height:44px;cursor:move;border-top-left-radius:14px;border-top-right-radius:14px;z-index:1;}'
       + '.cl-colresize th{position:relative;}'
-      + '.cl-colresize th::after{content:"";position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize;}';
+      + '.cl-colresize th,.cl-colresize td{border-right:1px solid ' + T.border + ';}' + '.cl-colresize th:last-child,.cl-colresize td:last-child{border-right:none;}' + '.cl-colresize th::after{content:"";position:absolute;top:0;right:0;width:7px;height:100%;cursor:col-resize;border-right:2px solid transparent;}' + '.cl-colresize th:hover::after{border-right-color:' + T.accent + ';}';
     document.head.appendChild(styleEl);
     const onDown = (e) => {
       const box = e.target.closest && e.target.closest('.cl-modal-box');
