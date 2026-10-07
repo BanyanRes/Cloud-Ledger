@@ -5324,7 +5324,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
   const sumByCol=(lines)=>{const arr=cols.map(()=>0);let tot=0;(lines||[]).forEach(l=>{const a=amt(l);tot+=a;const ci=colIdxOf(l.date);if(ci>=0)arr[ci]+=a;});return{arr,tot};};
   const priorGroupMap=(()=>{const m=new Map();priorRows.forEach(l=>{const k=groupKey(l);m.set(k,(m.get(k)||0)+amt(l));});return m;})();
   const priorGrand=priorRows.reduce((s,l)=>s+amt(l),0);
-  const descCols=5; // Account | Date | Doc # | JE | Description  (Doc #: CLA item 1)
+  const descCols=6; // Account | Date | Doc # | JE | Vendor | Description  (Doc #: CLA item 1; Vendor: CLA 10/2026)
   const totalColCount=descCols+cols.length+(showTotal?1:0)+(compare?3:0);
   const pctTxt=p=>p==null?'—':(p>=0?'+':'')+p.toFixed(1)+'%';
   const cmpCells=(cur,pri)=>{const d=cur-pri;const p=pri!==0?(d/Math.abs(pri))*100:null;return[<td key="pp" style={{...S.tdR,fontWeight:700}}>{fmt(pri)}</td>,<td key="dd" style={{...S.tdR,fontWeight:700,color:d>=0?T.green:T.red}}>{fmt(d)}</td>,<td key="pc" style={{...S.tdR,fontWeight:700,color:d>=0?T.green:T.red}}>{pctTxt(p)}</td>];};
@@ -5357,27 +5357,27 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
     const groupTotRows=[];
     groups.forEach(([g,lines])=>{
       if(groupBy!=='none')d.push([g]);
-      d.push(['Account','Date','Doc #','JE','Description',...amtHdr,...(showTotal?['Total']:[]),...cmpHdr]);STY.headerRows.push(d.length-1);
+      d.push(['Account','Date','Doc #','JE','Vendor','Description',...amtHdr,...(showTotal?['Total']:[]),...cmpHdr]);STY.headerRows.push(d.length-1);
       const _byA=[];const _im=new Map();lines.forEach(l=>{const k=l.account_code;if(!_im.has(k)){_im.set(k,_byA.length);_byA.push([k,l.account_name,[]]);}_byA[_im.get(k)][2].push(l);});
       const acctTotRows=[];
       _byA.forEach(([acode,aname,alines])=>{
         const aF=d.length;
-        alines.forEach(l=>{const a=amt(l);const ci=colIdxOf(l.date);const cells=cols.map((c,k)=>(colMode==='total'||k===ci)?a:'');d.push([l.account_code+' '+l.account_name,l.date,l.doc_number||'','JE-'+String(l.entry_num).padStart(4,'0'),l.description||l.memo||'',...cells,...(showTotal?[a]:[]),...(compare?['','','']:[])]);});
-        const aL=d.length-1;const as=sumByCol(alines);const aT=d.length;d.push(['Total '+acode+' '+aname,'','','','',...as.arr,...(showTotal?[as.tot]:[]),...(compare?['','','']:[])]);
+        alines.forEach(l=>{const a=amt(l);const ci=colIdxOf(l.date);const cells=cols.map((c,k)=>(colMode==='total'||k===ci)?a:'');d.push([l.account_code+' '+l.account_name,l.date,l.doc_number||'','JE-'+String(l.entry_num).padStart(4,'0'),l.vendor||'',l.description||l.memo||'',...cells,...(showTotal?[a]:[]),...(compare?['','','']:[])]);});
+        const aL=d.length-1;const as=sumByCol(alines);const aT=d.length;d.push(['Total '+acode+' '+aname,'','','','','',...as.arr,...(showTotal?[as.tot]:[]),...(compare?['','','']:[])]);
         // Rule under the account's LAST transaction amount, then under its total.
         STY.underlineRows.push(aL);STY.underlineRows.push(aT);
         sumCols(F,aT,pcols,aF,aL);acctTotRows.push(aT);
       });
       const {arr,tot}=sumByCol(lines);const pri=priorGroupMap.get(g)||0;
-      const gT=d.length;d.push(['Total'+(groupBy!=='none'?' for '+g:''),'','','','',...arr,...(showTotal?[tot]:[]),...(compare?[pri,tot-pri,pctN(tot,pri)]:[])]);d.push([]);
+      const gT=d.length;d.push(['Total'+(groupBy!=='none'?' for '+g:''),'','','','','',...arr,...(showTotal?[tot]:[]),...(compare?[pri,tot-pri,pctN(tot,pri)]:[])]);d.push([]);
       STY.underlineRows.push(gT);
       sumRows(F,gT,pcols,acctTotRows);groupTotRows.push(gT);
     });
     const gg=sumByCol(rows||[]);
-    const pa=d.length;d.push(['PERIOD ACTIVITY','','','','',...gg.arr,...(showTotal?[gg.tot]:[]),...(compare?[priorGrand,gg.tot-priorGrand,pctN(gg.tot,priorGrand)]:[])]);
+    const pa=d.length;d.push(['PERIOD ACTIVITY','','','','','',...gg.arr,...(showTotal?[gg.tot]:[]),...(compare?[priorGrand,gg.tot-priorGrand,pctN(gg.tot,priorGrand)]:[])]);
     STY.doubleUnderlineRows.push(pa);// grand total: double rule (CLA item 4)
     sumRows(F,pa,pcols,groupTotRows);
-    if(begRows.length>0){d.push(['ENDING BALANCE (BS accts: beginning + activity)','','','','',...(colMode==='total'?[begTotal+grand]:[...cols.map(()=>''),begTotal+grand]),...(compare?['','','']:[])]);STY.doubleUnderlineRows.push(d.length-1);}
+    if(begRows.length>0){d.push(['ENDING BALANCE (BS accts: beginning + activity)','','','','','',...(colMode==='total'?[begTotal+grand]:[...cols.map(()=>''),begTotal+grand]),...(compare?['','','']:[])]);STY.doubleUnderlineRows.push(d.length-1);}
     exportToExcel(d,'Custom_Detail_'+(to||today())+'.xlsx',{formulas:F,style:STY});
   };
   useEffect(()=>{if(runToken>0)doExport();},[runToken]); // auto-export after each Run Report
@@ -5411,7 +5411,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
           <tr style={S.subtotalRow}><td style={{...S.td,fontWeight:600}} colSpan={4}>Total Beginning Balance</td><td style={{...S.tdR,fontWeight:700,color:T.textBright}}>{fmt(begTotal)}</td></tr></tbody></table>}
       {groups.length===0&&begRows.length===0?<div style={{padding:24,color:T.textDim}}>No activity for the selected accounts/period.</div>:
       <div style={{overflowX:'auto'}}><table className="cl-colresize" style={S.table}><thead><tr>
-        <th style={S.th}>Account</th><th style={S.th}>Date</th><th style={S.th}>Doc #</th><th style={S.th}>JE</th><th style={S.th}>Description</th>
+        <th style={S.th}>Account</th><th style={S.th}>Date</th><th style={S.th}>Doc #</th><th style={S.th}>JE</th><th style={S.th}>Vendor</th><th style={S.th}>Description</th>
         {cols.map((c,i)=><th key={i} style={S.thR}>{c.label}</th>)}
         {showTotal&&<th style={S.thR}>Total</th>}
         {compare&&<><th style={S.thR}>Prev Period</th><th style={S.thR}>$ Change</th><th style={S.thR}>% Change</th></>}
@@ -5420,7 +5420,7 @@ function CustomDetailReport({entityId,entityName,dimsEnabled,canEdit=true,pendin
         {groupBy!=='none'&&<tr style={{background:T.bgElevated}}><td style={{...S.tdBold,color:T.textBright}} colSpan={totalColCount}>{g}</td></tr>}
         {(()=>{const byA=[];const im=new Map();lines.forEach(l=>{const k=l.account_code;if(!im.has(k)){im.set(k,byA.length);byA.push([k,l.account_name,[]]);}byA[im.get(k)][2].push(l);});return byA.map(([acode,aname,alines])=>{const as=sumByCol(alines);return<Fragment key={'acct'+acode}>
           {alines.map((l,i)=>{const a=amt(l);const ci=colIdxOf(l.date);const _lastOfAcct=i===alines.length-1;return<tr key={acode+'-'+i} style={_lastOfAcct?{borderBottom:'1px solid '+T.textMuted}:undefined}>
-            <td style={S.td}>{l.account_code} {l.account_name}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.date}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.doc_number||''}</td><td style={S.td}>JE-{String(l.entry_num).padStart(4,'0')}</td><td style={S.td}>{l.description||l.memo||''}</td>
+            <td style={S.td}>{l.account_code} {l.account_name}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.date}</td><td style={{...S.td,whiteSpace:'nowrap'}}>{l.doc_number||''}</td><td style={S.td}>JE-{String(l.entry_num).padStart(4,'0')}</td><td style={S.td}>{l.vendor||''}</td><td style={S.td}>{l.description||l.memo||''}</td>
             {cols.map((c,k)=><td key={k} style={{...S.tdR,color:a<0?T.red:T.textBright}}>{(colMode==='total'||k===ci)?fmt(a):''}</td>)}
             {showTotal&&<td style={{...S.tdR,color:a<0?T.red:T.textBright}}>{fmt(a)}</td>}
             {compare&&<><td style={S.tdR}></td><td style={S.tdR}></td><td style={S.tdR}></td></>}
