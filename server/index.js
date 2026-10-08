@@ -528,6 +528,30 @@ db.exec(`
   );
   CREATE UNIQUE INDEX IF NOT EXISTS uq_reqdraft_open ON requisition_draft(entity_id, IFNULL(phase,'')) WHERE status='open';
   CREATE INDEX IF NOT EXISTS idx_reqdraft_entity ON requisition_draft(entity_id, status);
+  -- SAFEGUARD: archive copies of discarded requisition drafts + their invoices, so a
+  -- discard is reversible instead of a permanent hard delete. Mirrors the live tables
+  -- (including the invoice PDF blobs). arch_id is this table's own key; batch_id groups
+  -- a draft with its invoices for one discard event; restored_at is stamped when a row
+  -- is restored (kept for audit, never deleted).
+  CREATE TABLE IF NOT EXISTS requisition_draft_discarded (
+    arch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT, id INTEGER, entity_id INTEGER, status TEXT, phase TEXT,
+    req_number INTEGER, as_of_date TEXT, base_blob BLOB, base_name TEXT, base_sha256 TEXT,
+    output_blob BLOB, output_name TEXT, packet_blob BLOB, packet_name TEXT,
+    recon_ok INTEGER, recon_summary TEXT, created_at TEXT, updated_at TEXT,
+    finalized_at TEXT, created_by TEXT, draft_file_sha256 TEXT,
+    discarded_at TEXT, discarded_by TEXT, restored_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS requisition_invoice_discarded (
+    arch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id TEXT, id INTEGER, entity_id INTEGER, req_number INTEGER, draft_id INTEGER,
+    vendor TEXT, bill_number TEXT, amount REAL, invoice_date TEXT, cost_code TEXT,
+    cost_code_name TEXT, confidence TEXT, confidence_reason TEXT, original_name TEXT,
+    mime_type TEXT, file_blob BLOB, created_at TEXT,
+    discarded_at TEXT, discarded_by TEXT, restored_at TEXT
+  );
+  CREATE INDEX IF NOT EXISTS idx_reqdisc_draft ON requisition_draft_discarded(entity_id, restored_at);
+  CREATE INDEX IF NOT EXISTS idx_reqdisc_inv ON requisition_invoice_discarded(batch_id, restored_at);
 `);
 
 periods.ensureSchema(db);
@@ -9549,8 +9573,27 @@ app.delete('/api/requisition/:entity_id/draft/invoice/:invoice_id', ...reqGuards
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// DISCARD an open draft entirely: drop its invoices, remove any in-progress
-// [DRAFT] copy filed in Workpapers for this phase, then delete the draft row.
+// Copy rows from a requisition table into its *_discarded archive twin, tagging each
+// with metadata (batch_id / discarded_at / discarded_by). Columns are matched by name
+// against both tables, so the copy keeps everything the archive carries (including the
+// invoice PDF blobs) and skips any live column the archive lacks -- no drift if the
+// live table later gains a column. Returns the INSERT run() info (lastInsertRowid is
+// the new arch_id when a single source row is copied).
+function reqArchiveCopy(db, srcTable, dstTable, whereSql, whereParams, meta) {
+  const srcCols = db.prepare('PRAGMA table_info(' + srcTable + ')').all().map(c => c.name);
+  const dstCols = db.prepare('PRAGMA table_info(' + dstTable + ')').all().map(c => c.name);
+  const metaKeys = Object.keys(meta).filter(k => dstCols.includes(k));
+  const copyCols = srcCols.filter(c => dstCols.includes(c) && !metaKeys.includes(c));
+  const insertCols = copyCols.concat(metaKeys).map(c => '"' + c + '"').join(', ');
+  const selectList = copyCols.map(c => '"' + c + '"').concat(metaKeys.map(() => '?')).join(', ');
+  const sql = 'INSERT INTO ' + dstTable + ' (' + insertCols + ') SELECT ' + selectList + ' FROM ' + srcTable + ' WHERE ' + whereSql;
+  return db.prepare(sql).run(...metaKeys.map(k => meta[k]), ...whereParams);
+}
+
+// DISCARD an open draft: archive the draft + its invoices (coding + PDF blobs) into the
+// *_discarded tables, remove any in-progress [DRAFT] copy filed in Workpapers for this
+// phase, then delete the live draft + invoice rows -- all in one transaction, so a
+// discard is reversible via POST /api/requisition/:id/discarded/:arch_id/restore.
 // Returns the page back to its prior state (first-time, or the last finalized).
 app.delete('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
   const eid = parseInt(req.params.entity_id);
@@ -9559,21 +9602,86 @@ app.delete('/api/requisition/:entity_id/draft', ...reqGuards(), requireRole('Adm
     const draft = reqDraft.getOpenDraft(db, eid, dphase);
     if (!draft) return res.status(404).json({ error: 'No open draft to discard.' });
     const phaseMatch = (nm) => reqDraft.phaseMatchesName(nm, draft.phase);
-    // Remove any [DRAFT] workbook this draft filed into Workpapers (phase-scoped).
-    try {
-      const rows = db.prepare(
-        "SELECT id, stored_filename, original_name FROM entity_files WHERE entity_id=? AND original_name LIKE '[DRAFT] %'"
-      ).all(eid);
-      for (const r of rows) {
-        if (!phaseMatch(r.original_name)) continue;
-        try { fs.unlinkSync(path.join(WORKPAPERS_DIR, String(eid), r.stored_filename)); } catch (_) {}
-        db.prepare('DELETE FROM entity_files WHERE id=?').run(r.id);
-      }
-    } catch (_) {}
-    // Drop the draft's invoices, then the draft row itself.
-    db.prepare('DELETE FROM requisition_invoice WHERE draft_id=?').run(draft.id);
-    db.prepare('DELETE FROM requisition_draft WHERE id=?').run(draft.id);
-    res.json({ discarded: true, draft_id: draft.id });
+    const discardedBy = (req.user && (req.user.name || req.user.email)) || null;
+    const batchId = cryptoMod.randomUUID();
+    const nowIso = new Date().toISOString();
+    let archId = null;
+    db.transaction(() => {
+      // Archive first -- if this throws, the whole transaction rolls back and nothing is lost.
+      archId = reqArchiveCopy(db, 'requisition_draft', 'requisition_draft_discarded',
+        'id = ?', [draft.id], { batch_id: batchId, discarded_at: nowIso, discarded_by: discardedBy }).lastInsertRowid;
+      reqArchiveCopy(db, 'requisition_invoice', 'requisition_invoice_discarded',
+        'draft_id = ?', [draft.id], { batch_id: batchId, discarded_at: nowIso, discarded_by: discardedBy });
+      // Remove any [DRAFT] workbook this draft filed into Workpapers (phase-scoped). The
+      // draft's own workbook/packet bytes live in the archived output_blob/packet_blob,
+      // so the filed [DRAFT] copy is regenerable on restore and safe to delete here.
+      try {
+        const rows = db.prepare(
+          "SELECT id, stored_filename, original_name FROM entity_files WHERE entity_id=? AND original_name LIKE '[DRAFT] %'"
+        ).all(eid);
+        for (const r of rows) {
+          if (!phaseMatch(r.original_name)) continue;
+          try { fs.unlinkSync(path.join(WORKPAPERS_DIR, String(eid), r.stored_filename)); } catch (_) {}
+          db.prepare('DELETE FROM entity_files WHERE id=?').run(r.id);
+        }
+      } catch (_) {}
+      // Drop the live draft's invoices, then the draft row itself.
+      db.prepare('DELETE FROM requisition_invoice WHERE draft_id=?').run(draft.id);
+      db.prepare('DELETE FROM requisition_draft WHERE id=?').run(draft.id);
+    })();
+    res.json({ discarded: true, draft_id: draft.id, arch_id: archId, batch_id: batchId });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// LIST discarded requisition drafts for an entity (newest first), each with its invoice
+// count + total, so an accidental discard can be found and restored. Blobs are never
+// sent here -- metadata only. Only not-yet-restored batches are returned.
+app.get('/api/requisition/:entity_id/discarded', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  try {
+    const rows = db.prepare(
+      "SELECT arch_id, batch_id, id AS orig_draft_id, phase, req_number, as_of_date, output_name, base_name, created_by, created_at, discarded_at, discarded_by " +
+      "FROM requisition_draft_discarded WHERE entity_id=? AND restored_at IS NULL ORDER BY discarded_at DESC, arch_id DESC"
+    ).all(eid);
+    const invStat = db.prepare(
+      "SELECT COUNT(*) AS n, COALESCE(SUM(amount),0) AS total, SUM(CASE WHEN file_blob IS NOT NULL THEN 1 ELSE 0 END) AS with_file FROM requisition_invoice_discarded WHERE batch_id=? AND restored_at IS NULL"
+    );
+    const out = rows.map(r => { const s = invStat.get(r.batch_id) || {}; return Object.assign({}, r, { invoice_count: s.n || 0, invoice_total: s.total || 0, invoices_with_file: s.with_file || 0 }); });
+    res.json({ discarded: out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// RESTORE a discarded requisition draft (and its invoices, with PDF blobs) back into the
+// live tables as an open draft. Refuses (409) if an open draft already exists for the same
+// stream/phase. The draft returns with a fresh id; invoices are re-linked to it. Archive
+// rows are stamped restored_at (kept for audit), not deleted.
+app.post('/api/requisition/:entity_id/discarded/:arch_id/restore', ...reqGuards(), requireRole('Admin', 'Accountant'), (req, res) => {
+  const eid = parseInt(req.params.entity_id);
+  const archId = parseInt(req.params.arch_id);
+  try {
+    const arch = db.prepare('SELECT * FROM requisition_draft_discarded WHERE arch_id=? AND entity_id=? AND restored_at IS NULL').get(archId, eid);
+    if (!arch) return res.status(404).json({ error: 'No restorable discarded draft with that id.' });
+    const phaseKey = arch.phase == null ? '' : arch.phase;
+    const open = db.prepare("SELECT id FROM requisition_draft WHERE entity_id=? AND IFNULL(phase,'')=? AND status='open'").get(eid, phaseKey);
+    if (open) return res.status(409).json({ error: 'There is already an open draft for this stream. Discard or finalize it before restoring.' });
+    const nowIso = new Date().toISOString();
+    let newDraftId = null; let invCount = 0;
+    db.transaction(() => {
+      const r = db.prepare(
+        'INSERT INTO requisition_draft (entity_id, status, phase, req_number, as_of_date, base_blob, base_name, base_sha256, output_blob, output_name, packet_blob, packet_name, recon_ok, recon_summary, created_at, updated_at, finalized_at, created_by, draft_file_sha256) ' +
+        "VALUES (?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)"
+      ).run(eid, arch.phase, arch.req_number, arch.as_of_date, arch.base_blob, arch.base_name, arch.base_sha256, arch.output_blob, arch.output_name, arch.packet_blob, arch.packet_name, arch.recon_ok, arch.recon_summary, arch.created_at, nowIso, arch.created_by, arch.draft_file_sha256);
+      newDraftId = r.lastInsertRowid;
+      const invs = db.prepare('SELECT * FROM requisition_invoice_discarded WHERE batch_id=? AND restored_at IS NULL ORDER BY id').all(arch.batch_id);
+      const ins = db.prepare(
+        'INSERT INTO requisition_invoice (entity_id, req_number, draft_id, vendor, bill_number, amount, invoice_date, cost_code, cost_code_name, confidence, confidence_reason, original_name, mime_type, file_blob, created_at) ' +
+        'VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      );
+      for (const v of invs) { ins.run(eid, newDraftId, v.vendor, v.bill_number, v.amount, v.invoice_date, v.cost_code, v.cost_code_name, v.confidence, v.confidence_reason, v.original_name, v.mime_type, v.file_blob, v.created_at); invCount++; }
+      db.prepare('UPDATE requisition_draft_discarded SET restored_at=? WHERE batch_id=?').run(nowIso, arch.batch_id);
+      db.prepare('UPDATE requisition_invoice_discarded SET restored_at=? WHERE batch_id=?').run(nowIso, arch.batch_id);
+    })();
+    res.json({ restored: true, draft_id: newDraftId, invoice_count: invCount });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

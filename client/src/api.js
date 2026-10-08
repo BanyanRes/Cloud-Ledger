@@ -524,6 +524,8 @@ export const api = {
   // Reopen the latest finalized requisition of a stream back into an editable draft.
   reopenRequisitionDraft: (eid, phase) => request('/requisition/' + eid + '/draft/reopen', { method: 'POST', body: { phase } }),
   discardRequisitionDraft: (eid, phase) => request('/requisition/' + eid + '/draft' + (phase ? ('?phase=' + encodeURIComponent(phase)) : ''), { method: 'DELETE' }),
+  listDiscardedRequisitions: (eid) => request('/requisition/' + eid + '/discarded'),
+  restoreDiscardedRequisition: (eid, archId) => request('/requisition/' + eid + '/discarded/' + archId + '/restore', { method: 'POST' }),
 
   // Workpapers › Management Fee: analyze a prior-quarter workbook, then generate
   // the next quarter as a downloadable .xlsx.
