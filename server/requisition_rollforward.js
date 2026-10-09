@@ -74,6 +74,25 @@ function findSheet(workbook, canonicalName) {
     const nb = stripPhase(n);
     if (n === want || aliases.includes(n) || nb === want || aliases.includes(nb)) return sheet;
   }
+  // 4. Fuzzy fallback, Budget-to-Actual only. CPAs name this one tab
+  //    inconsistently across project templates - "CLIP Phase 3 Budget",
+  //    "Budget to Actual 2B", "Budget to Actual (OP)", "Buna Budget" - often
+  //    with the phase token embedded mid-name (not a strippable suffix), so the
+  //    passes above miss it. In a requisition workbook the only tab carrying the
+  //    word "budget" is the B2A report (the invoice logs, contingency tables and
+  //    the dev-fee tab never do), so resolve on that, preferring the name closest
+  //    to the canonical. Scoped to this canonical so every other tab stays strict.
+  if (want === 'budget to actual') {
+    const isOther = (n) => /invoice log|inv log|contingency|dev(?:elopment)?\s*fee/.test(n);
+    let best, bestScore = 0;
+    for (const sheet of workbook.worksheets) {
+      const n = norm(sheet.name);
+      if (!/\bbudget\b/.test(n) || isOther(n)) continue;
+      const score = /budget\s*(?:to|vs\.?|-)?\s*actual/.test(n) ? 3 : (/\bactual\b/.test(n) ? 2 : 1);
+      if (score > bestScore) { best = sheet; bestScore = score; }
+    }
+    if (best) return best;
+  }
   return undefined;
 }
 
