@@ -96,13 +96,19 @@ let _activeEntityCode = null;
 // Active entity's display id (its "entity id"), or its name when there's no
 // display id — prepended to exported Excel filenames.
 let _activeEntityFileTag = '';
-const CLASS_DIM_LABELS = { TURNKEYR: 'Pay Application' };
+const CLASS_DIM_LABELS = { TURNKEYR: 'Pay Application', COUNTYLI1: 'Investor' };
 const classTerm = () => CLASS_DIM_LABELS[_activeEntityCode] || 'Class';
 // Per-entity relabel of the Location dimension. County Line Rail Fund (COUNTYLI1)
 // is an LP fund whose "locations" are its portfolio investments, so the Dimensions
 // module, the line-tagging dropdowns and the reports label them "Investment".
 const LOCATION_DIM_LABELS = { COUNTYLI1: 'Investment' };
 const locationTerm = () => LOCATION_DIM_LABELS[_activeEntityCode] || 'Location';
+// County Line Rail Fund I (COUNTYLI1 / CLRF) is reviewed by Weaver, who asked
+// that every GL-detail export carry the Investor (Class) and Investment
+// (Location) columns in a fixed position even when an account (e.g. cash) has
+// no tagged lines, so the layout stays identical across accounts. Other
+// entities keep the "show a dimension column only if some row uses it" rule.
+const clrfForceDims = () => _activeEntityCode === 'COUNTYLI1';
 // `opts.style` routes the build through the server (ExcelJS) so the workbook can
 // carry real underlines: a rule under the last amount in each account, a rule
 // under every subtotal, a double rule under the grand total. The community
@@ -4465,7 +4471,7 @@ function TrialBalance({entityId,entityName,dimsEnabled,isClrf,asOf,setAsOf,canEd
       // Residential tags projects and nothing else, so those columns were two
       // permanently empty columns in the middle of the report (CLA, 8/19/2026).
       const _ln=r.lines||[];
-      const _hasCls=_ln.some(l=>l.class_name),_hasLoc=_ln.some(l=>l.location_name);
+      const _hasCls=_ln.some(l=>l.class_name)||clrfForceDims(),_hasLoc=_ln.some(l=>l.location_name)||clrfForceDims();
       const _projLbl=l=>l.project_code&&l.project_code!==l.project_name?(l.project_code+(l.project_name?' — '+l.project_name:'')):(l.project_name||'');
       const _dimHdr=['Project',...(_hasLoc?[locationTerm()]:[]),...(_hasCls?[classTerm()]:[])];
       const _dimOf=l=>[_projLbl(l),...(_hasLoc?[l.location_name||'']:[]),...(_hasCls?[l.class_name||'']:[])];
@@ -4580,7 +4586,7 @@ function AccountDrillDownModal({entityId,entityName,acct,from:fromProp,to:toProp
     // row uses them — for Banyan Residential both are always empty, so they were
     // two dead columns (CLA, 8/19/2026). Amount positions and the running-balance
     // formula letters are derived from the column count rather than hardcoded.
-    const hasCls=lines.some(l=>l.class_name),hasLoc=lines.some(l=>l.location_name);
+    const hasCls=lines.some(l=>l.class_name)||clrfForceDims(),hasLoc=lines.some(l=>l.location_name)||clrfForceDims();
     const dimHdr=[...(hasCls?[classTerm()]:[]),...(hasLoc?[locationTerm()]:[]),'Project'];
     const dimOf=l=>[...(hasCls?[l.class_name||'']:[]),...(hasLoc?[l.location_name||'']:[]),l.project_name||''];
     const nD=dimHdr.length;
