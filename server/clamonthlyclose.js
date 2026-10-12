@@ -204,6 +204,7 @@ function ensureRegisterSchema(db) {
       as_of TEXT, note TEXT, updated_at TEXT DEFAULT (datetime('now')));
   `);
   try { db.exec('ALTER TABLE cla_fixed_assets ADD COLUMN depr_start TEXT'); } catch (e) { /* already there */ }
+  try { db.exec('ALTER TABLE cla_fixed_assets ADD COLUMN catchup REAL'); } catch (e) { /* already there */ }
 }
 function ensureSeed(db, ent) {
   if (!SEED.entityMatch.test(String(ent.name || '').trim())) return;
@@ -235,8 +236,8 @@ function replaceRegisters(db, eid, body) {
     }
     if (Array.isArray(body.fixed_assets)) {
       db.prepare('DELETE FROM cla_fixed_assets WHERE entity_id = ?').run(eid);
-      const ins = db.prepare('INSERT INTO cla_fixed_assets (entity_id, asset_account, dep_account, description, life_years, in_service, cost, accum_dep_beg, depr_start, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?)');
-      body.fixed_assets.forEach((a, i) => ins.run(eid, String(a.asset_account || ''), a.dep_account == null ? null : String(a.dep_account), a.description || '', Number(a.life_years) || 0, a.in_service || null, Number(a.cost) || 0, Number(a.accum_dep_beg) || 0, a.depr_start || null, i));
+      const ins = db.prepare('INSERT INTO cla_fixed_assets (entity_id, asset_account, dep_account, description, life_years, in_service, cost, accum_dep_beg, depr_start, catchup, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+      body.fixed_assets.forEach((a, i) => ins.run(eid, String(a.asset_account || ''), a.dep_account == null ? null : String(a.dep_account), a.description || '', Number(a.life_years) || 0, a.in_service || null, Number(a.cost) || 0, Number(a.accum_dep_beg) || 0, a.depr_start || null, Number(a.catchup) || 0, i));
     }
     if (Array.isArray(body.equity_members)) {
       db.prepare('DELETE FROM cla_equity_members WHERE entity_id = ?').run(eid);
@@ -1035,7 +1036,7 @@ function buildFixedSchedule(wb, data, en, m, used, leadTab) {
       for (let k = 1; k <= n; k++) {
         const mc = colL(MC0 + k - 1);
         const priorSum = k === 1 ? '0' : 'SUM($' + colL(MC0) + r + ':' + colL(MC0 + k - 2) + r + ')';
-        num(ws, mc + r, { formula: 'IF(AND($D' + r + '<>"",' + mc + '$9>=$D' + r + ',OR($E' + r + '="",' + mc + '$9<=$E' + r + ')),MIN($G' + r + ',MAX(0,$F' + r + '-$H' + r + '-' + priorSum + ')),0)' });
+        num(ws, mc + r, { formula: 'IF(AND($D' + r + '<>"",' + mc + '$9>=$D' + r + ',OR($E' + r + '="",' + mc + '$9<=$E' + r + ')),MIN($G' + r + ',MAX(0,$F' + r + '-$H' + r + '-' + priorSum + '))' + (k === 1 && Number(fa.catchup) ? '+' + r2(Number(fa.catchup)) : '') + ',0)' });
       }
       num(ws, accumC + r, { formula: '$H' + r + '+SUM(' + colL(MC0) + r + ':' + lastMC + r + ')' });
       num(ws, nbvC + r, { formula: '$F' + r + '-' + accumC + r });
