@@ -1009,7 +1009,7 @@ function buildFixedSchedule(wb, data, en, m, used, leadTab) {
   const maxBeg = Math.max(10, ...fa.map((x) => nlen(x.accum_dep_beg)));
   const maxDesc = Math.max(20, ...fa.map((x) => String(x.description || '').length));
   const wCost = Math.min(26, maxCost + 4), wMon = Math.min(22, maxMon + 4), wBeg = Math.min(26, maxBeg + 4);
-  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = Math.min(58, Math.max(30, maxDesc + 2)); ws.getColumn('C').width = 11; ws.getColumn('D').width = 13; ws.getColumn('E').width = 13;
+  ws.getColumn('A').width = 3.4; ws.getColumn('B').width = Math.min(58, Math.max(30, maxDesc + 2)); ws.getColumn('C').width = 18; ws.getColumn('D').width = 16; ws.getColumn('E').width = 13;
   ws.getColumn('F').width = wCost; ws.getColumn('G').width = wMon; ws.getColumn('H').width = wBeg;
   for (let k = 0; k < n; k++) ws.getColumn(colL(MC0 + k)).width = wMon;
   ws.getColumn(colL(MC0 + n)).width = wCost; ws.getColumn(colL(MC0 + n + 1)).width = wCost;
@@ -1079,7 +1079,7 @@ function buildFixedSchedule(wb, data, en, m, used, leadTab) {
     const faForExp = data.reg.fixedAssets.find((fa) => String(fa.dep_account) === dcode && fa.exp_account);
     const expCode = faForExp ? String(faForExp.exp_account) : '';
     const expNm = (data.chartNames && data.chartNames.get(expCode)) || '';
-    txt(ws, 'B' + r, expCode ? (expCode + ' ' + expNm) : 'Depreciation / amortization expense'); num(ws, 'C' + r, { formula: msum }); r++;
+    txt(ws, 'B' + r, expCode ? expNm : 'Depreciation / amortization expense'); num(ws, 'C' + r, { formula: msum }); r++;
     txt(ws, 'B' + r, '     ' + dcode + ' ' + dnm); num(ws, 'D' + r, { formula: msum }); r++;
   }
   return { tab, refs: out };
