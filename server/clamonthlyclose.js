@@ -370,9 +370,11 @@ function fixedSchedule(assets, m) {
     const monthly = life > 0 ? r2(cost / (life * 12)) : 0;
     const eol = endOfLife(a);
     const startD = a.depr_start || a.in_service;
-    let accum = beg; const dep = [];
+    let accum = beg; const dep = []; const cu = r2(Number(a.catchup) || 0); let firstM = true;
     for (const e of ends) {
-      const d = (startD && e >= startD && (!eol || e <= eol) && monthly > 0) ? Math.min(monthly, Math.max(0, r2(cost - accum))) : 0;
+      let d = (startD && e >= startD && (!eol || e <= eol) && monthly > 0) ? Math.min(monthly, Math.max(0, r2(cost - accum))) : 0;
+      if (firstM && cu && startD && e >= startD) d = r2(d + cu);
+      firstM = false;
       accum = r2(accum + d); dep.push(r2(d));
     }
     return { asset: a, monthly, dep, accumEnd: accum, nbv: r2(cost - accum), endOfLife: eol };
