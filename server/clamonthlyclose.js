@@ -1361,7 +1361,7 @@ function ccLeadsheet(ws, cd, en, m, rows, refByCode, leadCell) {
   for (const c of ['E', 'F', 'G']) totalCell(ws, c + r, last >= first ? 'SUBTOTAL(109,' + c + first + ':' + c + last + ')' : null);
   return ref(cd.tab, 'G' + r); // period-end (GL) total ties to the balance sheet
 }
-function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell) {
+function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell, reg, chartNames) {
   const nlen = (v) => Math.abs(Number(v) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).length;
   let mxn = 0; for (const p of pairs) { if (p.asset) mxn = Math.max(mxn, nlen(p.asset.end)); if (p.dep) mxn = Math.max(mxn, nlen(p.dep.end)); }
   const wNum = Math.min(28, Math.max(15, mxn + 4));
@@ -1381,11 +1381,17 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell) {
       num(ws, 'D' + r, o && o.costRef ? { formula: o.costRef } : p.asset.end);
       leadCell.set(String(p.asset.code), ref(cd.tab, 'D' + r));
     } else num(ws, 'D' + r, 0);
-    if (p.dep) {
-      txt(ws, 'E' + r, p.dep.code, { align: { horizontal: 'center' } }); txt(ws, 'F' + r, p.dep.name);
-      const o = faRefs.get(String(p.dep.code));
-      num(ws, 'G' + r, o && o.accumRef ? { formula: '-' + o.accumRef } : p.dep.end);
-      leadCell.set(String(p.dep.code), ref(cd.tab, 'G' + r));
+    let _dc = '', _dn = '', _ga = null;
+    if (p.asset) {
+      const _rf = ((reg && reg.fixedAssets) || []).find((fa) => String(fa.asset_account) === String(p.asset.code) && fa.dep_account);
+      if (_rf) { _dc = String(_rf.dep_account); _dn = (chartNames && chartNames.get(_dc)) || ''; const _o = faRefs.get(String(p.asset.code)); if (_o && _o.accumRef) _ga = { formula: '-' + _o.accumRef }; }
+    } else if (p.dep) {
+      _dc = String(p.dep.code); _dn = p.dep.name; const _o = faRefs.get(String(p.dep.code)); _ga = (_o && _o.accumRef) ? { formula: '-' + _o.accumRef } : p.dep.end;
+    }
+    if (_dc) {
+      txt(ws, 'E' + r, _dc, { align: { horizontal: 'center' } }); txt(ws, 'F' + r, _dn);
+      num(ws, 'G' + r, _ga != null ? _ga : 0);
+      leadCell.set(_dc, ref(cd.tab, 'G' + r));
     } else num(ws, 'G' + r, 0);
     num(ws, 'H' + r, { formula: 'D' + r + '+G' + r });
     fqCell(ws, 'I' + r, 'B' + r);
@@ -1618,7 +1624,7 @@ function buildWorkbook(data) {
   if ((byCat.fixed || []).length) {
     const wb = mkWb(), cd = catOf('fixed'), used = usedFor(cd), ws = lead(wb, cd);
     const fa = buildFixedSchedule(wb, data, en, m, used, cd.tab);
-    fixedLeadsheet(ws, cd, en, m, data.fixedPairs, fa.refs, fa.tab, LC);
+    fixedLeadsheet(ws, cd, en, m, data.fixedPairs, fa.refs, fa.tab, LC, data.reg, data.chartNames);
     out.push({ file: SECTION_FILE.fixed, wb });
   }
   if ((byCat.otherassets || []).length) {
