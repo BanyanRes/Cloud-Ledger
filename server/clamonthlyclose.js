@@ -205,6 +205,7 @@ function ensureRegisterSchema(db) {
   `);
   try { db.exec('ALTER TABLE cla_fixed_assets ADD COLUMN depr_start TEXT'); } catch (e) { /* already there */ }
   try { db.exec('ALTER TABLE cla_fixed_assets ADD COLUMN catchup REAL'); } catch (e) { /* already there */ }
+  try { db.exec('ALTER TABLE cla_fixed_assets ADD COLUMN exp_account TEXT'); } catch (e) { /* already there */ }
 }
 function ensureSeed(db, ent) {
   if (!SEED.entityMatch.test(String(ent.name || '').trim())) return;
@@ -236,8 +237,8 @@ function replaceRegisters(db, eid, body) {
     }
     if (Array.isArray(body.fixed_assets)) {
       db.prepare('DELETE FROM cla_fixed_assets WHERE entity_id = ?').run(eid);
-      const ins = db.prepare('INSERT INTO cla_fixed_assets (entity_id, asset_account, dep_account, description, life_years, in_service, cost, accum_dep_beg, depr_start, catchup, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?)');
-      body.fixed_assets.forEach((a, i) => ins.run(eid, String(a.asset_account || ''), a.dep_account == null ? null : String(a.dep_account), a.description || '', Number(a.life_years) || 0, a.in_service || null, Number(a.cost) || 0, Number(a.accum_dep_beg) || 0, a.depr_start || null, Number(a.catchup) || 0, i));
+      const ins = db.prepare('INSERT INTO cla_fixed_assets (entity_id, asset_account, dep_account, description, life_years, in_service, cost, accum_dep_beg, depr_start, catchup, exp_account, sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)');
+      body.fixed_assets.forEach((a, i) => ins.run(eid, String(a.asset_account || ''), a.dep_account == null ? null : String(a.dep_account), a.description || '', Number(a.life_years) || 0, a.in_service || null, Number(a.cost) || 0, Number(a.accum_dep_beg) || 0, a.depr_start || null, Number(a.catchup) || 0, a.exp_account == null ? null : String(a.exp_account), i));
     }
     if (Array.isArray(body.equity_members)) {
       db.prepare('DELETE FROM cla_equity_members WHERE entity_id = ?').run(eid);
@@ -519,6 +520,7 @@ function buildClaData(ctx, m, eid) {
   const base = buildData(ctx, m, eid);
   ensureRegisterSchema(db); ensureSeed(db, base.entity);
   const reg = loadRegisters(db, eid);
+  const chartNames = new Map(); for (const a of db.prepare('SELECT code, name FROM accounts WHERE entity_id = ?').all(eid)) chartNames.set(String(a.code), a.name);
   const showLogo = claHasAccess(db, eid);
   // Categorization overrides on top of the generic rules: the fixed-asset register
   // is the source of truth for depreciating fixed assets. Any account carried in
@@ -761,7 +763,7 @@ function buildClaData(ctx, m, eid) {
       : (': ' + (d.note || 'review'))),
   }));
 
-  return Object.assign({}, base, { flags, discrepancies, byCat, arCur, arPrior, arPrimary, apCur, apPrior, apPrimary, apRecon, reg, prepaidByAcct, prepaidSched, faSched, fixedPairs, pye, pyeBal, eqMonthly, oaActivity, oaByProject, showLogo });
+  return Object.assign({}, base, { flags, discrepancies, byCat, arCur, arPrior, arPrimary, apCur, apPrior, apPrimary, apRecon, reg, prepaidByAcct, prepaidSched, faSched, fixedPairs, pye, pyeBal, eqMonthly, oaActivity, oaByProject, showLogo, chartNames });
 }
 
 // ─── Supporting tabs ──────────────────────────────────────────────────────────
@@ -1046,7 +1048,7 @@ function buildFixedSchedule(wb, data, en, m, used, leadTab) {
     txt(ws, 'B' + r, 'Total ' + acct.name, { font: { bold: true } });
     const cols = ['F', 'H']; for (let k = 0; k < n; k++) cols.push(colL(MC0 + k)); cols.push(accumC, nbvC);
     for (const c of cols) totalCell(ws, c + r, gLast >= gFirst ? 'SUM(' + c + gFirst + ':' + c + gLast + ')' : null);
-    if (p.asset) out.set(String(p.asset.code), { costRef: ref(tab, 'F' + r), monthRef: ref(tab, lastMC + r) });
+    if (p.asset) out.set(String(p.asset.code), { costRef: ref(tab, 'F' + r), accumRef: ref(tab, accumC + r), monthRef: ref(tab, lastMC + r) });
     if (p.dep) out.set(String(p.dep.code), { accumRef: ref(tab, accumC + r), monthRef: ref(tab, lastMC + r) });
     r += 2;
   }
@@ -1054,16 +1056,29 @@ function buildFixedSchedule(wb, data, en, m, used, leadTab) {
   hdr(ws, r, 2, ['Account', 'Per schedule', 'Per GL', 'Difference']); r++;
   for (const p of data.fixedPairs) {
     if (p.asset) { const o = out.get(String(p.asset.code)); txt(ws, 'B' + r, p.asset.code + ' ' + p.asset.name + ' (cost)'); num(ws, 'C' + r, o ? { formula: o.costRef } : 0); num(ws, 'D' + r, p.asset.end); num(ws, 'E' + r, { formula: 'C' + r + '-D' + r }); r++; }
-    if (p.dep) { const o = out.get(String(p.dep.code)); txt(ws, 'B' + r, p.dep.code + ' ' + p.dep.name + ' (accumulated)'); num(ws, 'C' + r, o ? { formula: '-' + o.accumRef } : 0); num(ws, 'D' + r, p.dep.end); num(ws, 'E' + r, { formula: 'C' + r + '-D' + r }); r++; }
+  }
+  const glByCode = new Map(); for (const a of (data.acctRows || [])) glByCode.set(String(a.code), r2(a.end));
+  const depOrder = []; const depSeen = new Set();
+  for (const fa of data.reg.fixedAssets) { const dd = fa.dep_account ? String(fa.dep_account) : ''; if (dd && !depSeen.has(dd)) { depSeen.add(dd); depOrder.push(dd); } }
+  const acctsForDep = (dcode) => { const sset = new Set(); for (const fa of data.reg.fixedAssets) if (String(fa.dep_account) === dcode) sset.add(String(fa.asset_account)); return [...sset]; };
+  for (const dcode of depOrder) {
+    const refs = acctsForDep(dcode).map((ac) => { const o = out.get(ac); return o && o.accumRef; }).filter(Boolean);
+    const dnm = (data.chartNames && data.chartNames.get(dcode)) || '';
+    txt(ws, 'B' + r, dcode + ' ' + dnm + ' (accumulated)'); num(ws, 'C' + r, refs.length ? { formula: '-(' + refs.join('+') + ')' } : 0); num(ws, 'D' + r, glByCode.has(dcode) ? glByCode.get(dcode) : 0); num(ws, 'E' + r, { formula: 'C' + r + '-D' + r }); r++;
   }
   r++;
   txt(ws, 'B' + r, 'Journal entry — depreciation / amortization for ' + MONTHS[m.monthNum - 1] + ' ' + m.year, { font: { bold: true } }); r++;
   hdr(ws, r, 2, ['Account', 'Debit', 'Credit']); r++;
-  for (const p of data.fixedPairs) {
-    if (!p.dep) continue;
-    const o = out.get(String(p.dep.code)); if (!o) continue;
-    txt(ws, 'B' + r, 'Depreciation / amortization expense — ' + (p.asset ? p.asset.name : p.dep.name)); num(ws, 'C' + r, { formula: o.monthRef }); r++;
-    txt(ws, 'B' + r, '     ' + p.dep.code + ' ' + p.dep.name); num(ws, 'D' + r, { formula: o.monthRef }); r++;
+  for (const dcode of depOrder) {
+    const mrefs = acctsForDep(dcode).map((ac) => { const o = out.get(ac); return o && o.monthRef; }).filter(Boolean);
+    if (!mrefs.length) continue;
+    const msum = mrefs.join('+');
+    const dnm = (data.chartNames && data.chartNames.get(dcode)) || '';
+    const faForExp = data.reg.fixedAssets.find((fa) => String(fa.dep_account) === dcode && fa.exp_account);
+    const expCode = faForExp ? String(faForExp.exp_account) : '';
+    const expNm = (data.chartNames && data.chartNames.get(expCode)) || '';
+    txt(ws, 'B' + r, expCode ? (expCode + ' ' + expNm) : 'Depreciation / amortization expense'); num(ws, 'C' + r, { formula: msum }); r++;
+    txt(ws, 'B' + r, '     ' + dcode + ' ' + dnm); num(ws, 'D' + r, { formula: msum }); r++;
   }
   return { tab, refs: out };
 }
