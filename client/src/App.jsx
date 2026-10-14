@@ -9654,7 +9654,7 @@ function IcMappingDetail({row,entityId,entityOpts,entName,canEdit,onSaved,onMsg,
               <div style={{color:T.textMuted,fontSize:12.5,marginTop:3}}>Marks this account as facing a party outside the group. It is excluded from reconciliation; enter a value on the Reconciliation page to compare by hand.</div></div>
           :<div style={{marginTop:14}}>
             <select style={{...S.select,maxWidth:360}} value={cpId} onChange={e=>{setCpId(e.target.value);setMode('pick');setPickCode('');}}>
-              <option value=''>Pick counterparty entity\u2026</option>
+              <option value=''>Pick counterparty entity…</option>
               {entityOpts.map(x=><option key={x.id} value={String(x.id)}>{x.name}</option>)}</select>
             {cpId&&<div style={{marginTop:12}}>
               <div style={{fontWeight:650,fontSize:13,marginBottom:6}}>Their account</div>
@@ -9664,19 +9664,19 @@ function IcMappingDetail({row,entityId,entityOpts,entName,canEdit,onSaved,onMsg,
                     <b style={{color:T.textBright}}>{row.suggested_existing.account_code}</b>
                     <span style={{color:T.textMuted}}>{row.suggested_existing.account_name}</span></span>
                   <IcBadge kind="info">suggested</IcBadge>
-                  <button style={S.link} onClick={()=>setMode('pick')}>change\u2026</button>
-                  {row.suggested_new&&<button style={S.link} onClick={()=>setMode('new')}>new account\u2026</button>}</div>
+                  <button style={S.link} onClick={()=>setMode('pick')}>change…</button>
+                  {row.suggested_new&&<button style={S.link} onClick={()=>setMode('new')}>new account…</button>}</div>
               :mode==='new'&&row.suggested_new?
                 <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
                   <input style={{...S.inputSm,width:300,borderStyle:'dashed',borderColor:T.accent}} value={newAcct}
                     onChange={e=>setNewAcct(e.target.value)}/>
                   <IcBadge kind="info">created on confirm</IcBadge>
-                  <button style={S.link} onClick={()=>setMode('pick')}>pick existing\u2026</button>
+                  <button style={S.link} onClick={()=>setMode('pick')}>pick existing…</button>
                   <div style={{flexBasis:'100%',fontSize:11,color:T.textDim}}>Does not exist yet — Confirm adds it to the counterparty\u2019s chart (zero balance) and saves the mapping in one step.</div></div>
               :<div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
                   <IcCpAccountSelect entityId={entityId} accountCode={row.account_code} counterpartyEntityId={Number(cpId)}
                     value={pickCode} onChange={setPickCode} onLoaded={r=>{if(!pickCode&&r.best)setPickCode(r.best);}} width={320}/>
-                  {row.suggested_new&&<button style={S.link} onClick={()=>setMode('new')}>new account\u2026</button>}
+                  {row.suggested_new&&<button style={S.link} onClick={()=>setMode('new')}>new account…</button>}
                   {row.suggested_existing&&<button style={S.link} onClick={()=>setMode('existing')}>back to suggestion</button>}</div>}
             </div>}
           </div>}
