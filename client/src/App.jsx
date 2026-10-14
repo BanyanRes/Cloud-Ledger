@@ -942,7 +942,6 @@ export default function App(){
     {key:'INTERCOMPANY',label:'Intercompany',icon:'🔗',items:[
       {id:'ic_recon',label:'IC Reconciliation',icon:'⚖️',section:'intercompany'},
       {id:'ic_mapping',label:'IC Mapping',icon:'🗺️',section:'intercompany'},
-      {id:'external_tb',label:'External Entities TB',icon:'📥',section:'intercompany'},
       {id:'org_structure',label:'Org Structure',icon:'🏛️',section:'intercompany'},
       {id:'consolidation',label:'Consolidation',icon:'🧩',section:'consolidation'},
     ]},
@@ -1056,7 +1055,6 @@ export default function App(){
         {page==='customdetail'&&activeEntity&&<CustomDetailReport entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='customdetail'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='pivot'&&activeEntity&&dimsEnabled&&<PivotReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='pivot'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='ic_recon'&&canAccess('intercompany')&&<IntercompanyReconciliation entities={entities} activeEntity={activeEntity} setPage={setPage} key={'icr-'+rk}/>}
-        {page==='external_tb'&&canAccess('intercompany')&&<ExternalTbPage canEdit={canEdit} key={'etb-'+rk}/>}
         {page==='org_structure'&&canAccess('intercompany')&&<OrgStructurePage entities={entities} canEdit={canEdit} key={'org-'+rk}/>}
         {page==='assignment'&&canAccess('administration')&&<AssignmentPage entities={entities} user={user} key={'asg-'+rk}/>}
         {page==='letterhead'&&canAccess('administration')&&<LetterheadPage user={user} key={'lh-'+rk}/>}
@@ -8599,31 +8597,17 @@ const legCells=(l,align)=>l
 const icCpValue=(entId,nodeId,isExt)=>isExt?'__ext':(nodeId?'n'+nodeId:(entId?'e'+entId:''));
 
 function IcCpSelect({entityOpts,companies,entId,nodeId,isExt,onPick,seedName,onCompanyAdded,onMsg,onErr,style}){
-  const offLedger=(companies||[]).filter(c=>c.entity_id==null);
-  return<select style={{...S.selectSm,minWidth:200,...(style||{})}} value={icCpValue(entId,nodeId,isExt)} onChange={async e=>{
+  return<select style={{...S.selectSm,minWidth:200,...(style||{})}} value={icCpValue(entId,nodeId,isExt)} onChange={e=>{
     const v=e.target.value;
     if(v==='__ext'){onPick({entity_id:null,node_id:null,is_external:true});return;}
-    if(v==='__new'){
-      const name=prompt('Register a company that has no ledger in CloudLedger:',seedName||'');
-      if(!name||!name.trim())return;
-      try{const r=await api.createIcCompany({name:name.trim()});
-        if(onCompanyAdded)await onCompanyAdded();
-        onPick({entity_id:null,node_id:r.id,is_external:false});
-        if(onMsg)onMsg(r.existing?('"'+r.name+'" was already registered — selected it.'):('Registered "'+r.name+'".'));
-      }catch(ex){if(onErr)onErr(ex.message);}
-      return;}
-    if(v.startsWith('n'))onPick({entity_id:null,node_id:Number(v.slice(1)),is_external:false});
-    else if(v.startsWith('e'))onPick({entity_id:Number(v.slice(1)),node_id:null,is_external:false});
+    if(v.startsWith('e'))onPick({entity_id:Number(v.slice(1)),node_id:null,is_external:false});
     else onPick({entity_id:null,node_id:null,is_external:false});
   }}>
     <option value=''>{'\u2014 pick counterparty \u2014'}</option>
     <optgroup label='CloudLedger entities'>
       {(entityOpts||[]).map(x=><option key={x.id} value={'e'+x.id}>{x.name}</option>)}</optgroup>
-    {offLedger.length>0&&<optgroup label='Registered companies (no ledger)'>
-      {offLedger.map(c=><option key={c.id} value={'n'+c.id}>{c.name}</option>)}</optgroup>}
     <optgroup label='Other'>
-      <option value='__ext'>External (a vendor or third party)</option>
-      <option value='__new'>+ Register a new company…</option></optgroup>
+      <option value='__ext'>External (a vendor or third party)</option></optgroup>
   </select>;
 }
 
@@ -9157,7 +9141,7 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
   const[mapping,setMapping]=useState(null);
   const entityOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
   const loadCompanies=useCallback(async()=>{
-    try{setCompanies(await api.getIcCompanies());}catch(e){console.error('[ic] companies:',e.message);}},[]);
+    try{setCompanies([]);}catch(e){console.error('[ic] companies:',e.message);}},[]);
   useEffect(()=>{loadCompanies();},[loadCompanies]);
 
   const run=useCallback(async()=>{
@@ -9559,7 +9543,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const externalRows=rows.filter(r=>r.is_external&&r.ic_type!=='contributed_capital');
 
   const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
-  const loadCompanies=useCallback(async()=>{try{setCompanies(await api.getIcCompanies());}catch(e){console.error('[ic] companies:',e.message);}},[]);
+  const loadCompanies=useCallback(async()=>{try{setCompanies([]);}catch(e){console.error('[ic] companies:',e.message);}},[]);
   const loadPeople=useCallback(async()=>{try{setPeople(await api.getIcPeople());}catch(e){console.error('[ic] people:',e.message);}},[]);
 
   const loadRows=useCallback(async()=>{
@@ -9608,7 +9592,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         <div style={S.sub}>Tells the reconciliation which account faces which entity. Account names are only a suggestion — a person confirms every row.</div></div></div>
 
     <div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
-      {[['mappings','Account mappings'],['companies','Companies ('+offLedgerCompanies.length+')']].map(([k,l])=>
+      {[['mappings','Account mappings'],['people','People ('+people.length+')']].map(([k,l])=>
         <button key={k} onClick={()=>{setTab(k);setErr('');setMsg('');}} style={{background:'none',border:'none',borderBottom:'2px solid '+(tab===k?T.accent:'transparent'),color:tab===k?T.accent:T.textMuted,fontWeight:tab===k?700:500,fontSize:13,padding:'9px 16px',cursor:'pointer',marginBottom:-1}}>{l}</button>)}</div>
 
     {err&&<div style={{...S.card,borderColor:T.red+'40',padding:14}}><div style={S.err}>{err}</div></div>}
@@ -9689,37 +9673,18 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         </tbody></table></div>}</div>}
     </>}
 
-    {tab==='companies'&&<>
+    {tab==='people'&&<>
       <div style={{marginBottom:16,color:T.textMuted,fontSize:13}}>
-        Companies that appear on the org charts as counterparties but keep no ledger in CloudLedger — QOZBs, joint ventures, sponsor holding companies. Register one here and it becomes selectable as a counterparty everywhere, and account names that mention it start matching to it automatically.
-        {canEdit&&<button style={{...S.btnP,marginLeft:12}} onClick={async()=>{
-          const name=prompt('Company name:');if(!name||!name.trim())return;
-          try{const r=await api.createIcCompany({name:name.trim()});await loadCompanies();
-            setErr('');setMsg(r.existing?('"'+r.name+'" was already registered.'):('Registered "'+r.name+'".'));
-          }catch(e){setErr(e.message);}}}>+ Register company</button>}</div>
-
-      {offLedgerCompanies.length===0?<IcEmpty>No off-ledger companies registered yet. When a mapping names a company CloudLedger doesn’t have, register it from the counterparty picker (“+ Register a new company…”).</IcEmpty>
-      :<div className="cl-scroll" style={scrollBox()}><table style={S.table}><thead><tr>
-        <th style={S.th}>Company</th><th style={S.th}>Kind</th><th style={S.th}>Notes</th></tr></thead>
-      <tbody>{offLedgerCompanies.map(c=><tr key={c.id}>
-        <td style={{...S.td,fontWeight:600,color:T.textBright}}>{c.name} <span style={{marginLeft:6}}><IcBadge kind="info">no ledger</IcBadge></span></td>
-        <td style={S.td}>{c.node_type||'shell'}</td>
-        <td style={{...S.td,color:T.textMuted,whiteSpace:'normal'}}>{c.notes||''}</td></tr>)}</tbody></table></div>}
-
-      {people.length>0&&<div style={{marginTop:24}}>
-        <div style={{fontWeight:700,color:T.textBright,fontSize:13,marginBottom:6}}>Marked as people ({people.length})</div>
-        <div style={{color:T.textMuted,fontSize:12,marginBottom:10}}>These names are never proposed as counterparties. Individuals on capital accounts are detected automatically; these were marked by hand, which is how a person on a due-from or due-to account is handled.</div>
-        <div style={{...S.cardFlush,overflow:'hidden'}}><table style={S.table}><tbody>
+        Names marked as individuals are never proposed as counterparties. Individuals on capital accounts are detected automatically; these were marked by hand, which is how a person on a due-from or due-to account is handled.</div>
+      {people.length===0?<IcEmpty>No names marked as people yet. Mark one from the unmapped worklist when a due-from / due-to account names a person.</IcEmpty>
+      :<div style={{...S.cardFlush,overflow:'hidden'}}><table style={S.table}><tbody>
           {people.map(p=><tr key={p.id}>
             <td style={{...S.td,fontWeight:600,color:T.textBright}}>{p.name}</td>
             {canEdit&&<td style={{...S.td,textAlign:'right',width:110}}>
               <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={async()=>{
                 try{await api.unmarkIcPerson(p.id);await loadPeople();setMsg('"'+p.name+'" is no longer marked a person.');}
                 catch(e){setErr(e.message);}}}>Undo</button></td>}</tr>)}
-        </tbody></table></div></div>}
-
-      {companies.some(c=>c.entity_id!=null)&&<div style={{color:T.textMuted,fontSize:12,marginTop:12}}>
-        {companies.filter(c=>c.entity_id!=null).length} more compan{companies.filter(c=>c.entity_id!=null).length===1?'y is':'ies are'} recorded on the Org Structure page and backed by a CloudLedger entity, so they are offered under “CloudLedger entities” instead.</div>}
+        </tbody></table></div>}
     </>}
 
   </div>);
