@@ -1321,7 +1321,14 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
       if (rc < rb || (rc === rb && gc < gb)) best = cand;
     }
     if (best) row.suggested_existing = best;
-    else row.suggested_new = proposeMirrorAccount(entity, row.ic_type, acctsFor(cid));
+    // Due-from and due-to are interchangeable: one account per counterparty
+    // carries both directions (a credit balance in a "Due from" IS the "due
+    // to"). So when nothing existing answers a DUE row, do NOT draft a new
+    // opposite-kind account -- that only litters the counterparty's chart with
+    // a redundant "Due to X" beside the real "Due from X", which is exactly how
+    // the stray 23376-style accounts got created. Capital and investment are
+    // genuinely separate accounts, so the missing one is still drafted there.
+    else if (capital) row.suggested_new = proposeMirrorAccount(entity, row.ic_type, acctsFor(cid));
   }
 
   out.sort((a, b) => (Math.abs(b.balance) - Math.abs(a.balance))
