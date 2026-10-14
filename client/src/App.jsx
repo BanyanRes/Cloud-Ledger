@@ -9519,28 +9519,30 @@ function IcTbAccountSelect({nodeId,asOf,value,onChange,width=300}){
 // new one, or take the suggestion) — and saves in one Confirm. The save logic
 // mirrors the worklist exactly, so nothing about how a mapping is written
 // changed; only where it is written from.
-function IcMappingDetail({row,entityId,entityOpts,entName,canEdit,onSaved,onMsg,onErr}){
-  const init=()=>row.suggested_existing?'existing':(row.suggested_new?'new':'pick');
+// ── One account per row ──
+// The left side is this entity's intercompany account; the right side is the
+// counterparty's account that answers it — a matched pair with its gap, or the
+// inline editor (counterparty + their account) when it still needs mapping, or
+// an External marker. Everything for one account lives on one line; the save
+// path is the worklist's, so how a mapping is written is unchanged.
+function IcRow({row,st,entityId,entityOpts,entName,canEdit,onSaved,onMsg,onErr}){
   const[kindSel,setKindSel]=useState(row.is_external?'ext':'cl');
   const[cpId,setCpId]=useState(row.counterparty_entity_id?String(row.counterparty_entity_id):'');
-  const[mode,setMode]=useState(init());
+  const[mode,setMode]=useState(row.suggested_existing?'existing':(row.suggested_new?'new':'pick'));
   const[pickCode,setPickCode]=useState('');
   const[newAcct,setNewAcct]=useState(row.suggested_new?(row.suggested_new.account_code+' '+row.suggested_new.account_name):'');
   const[chgCode,setChgCode]=useState(row.their_account_code||'');
   const[changing,setChanging]=useState(false);
   const[busy,setBusy]=useState(false);
-  const mapped=row.source==='mapped'&&!row.investor_capital;
+  const mapped=row.source==='mapped'&&row.their_account_code&&!row.investor_capital;
   const external=!!row.is_external;
+  const balTxt=Number.isFinite(Number(row.balance))?fmt(row.balance):'\u2014';
 
   const save=async()=>{
     setBusy(true);
     try{
       let payload;
-      if(row.investor_capital){
-        payload={account_code:row.account_code,account_name:row.account_name,ic_type:row.ic_type,
-          counterparty_entity_id:null,counterparty_node_id:null,counterparty_account_code:null,
-          is_external:1,notes:row.notes||row.counterparty_label||null};
-      }else if(kindSel==='ext'){
+      if(row.investor_capital||kindSel==='ext'){
         payload={account_code:row.account_code,account_name:row.account_name,ic_type:row.ic_type,
           counterparty_entity_id:null,counterparty_node_id:null,counterparty_account_code:null,
           is_external:1,notes:row.notes||row.counterparty_label||null};
@@ -9549,7 +9551,7 @@ function IcMappingDetail({row,entityId,entityOpts,entName,canEdit,onSaved,onMsg,
         let cpCode=null;
         if(mode==='new'){
           const raw=String(newAcct||'').trim(),m2=raw.match(/^(\S+)\s+(.+)$/);
-          if(!m2)throw new Error('Enter the new account as \u201ccode name\u201d — e.g. \u201c23000 Due to Banyan Residential\u201d.');
+          if(!m2)throw new Error('Enter the new account as \u201ccode name\u201d \u2014 e.g. \u201c23000 Due to Banyan Residential\u201d.');
           await api.createAccount(Number(cpId),{code:m2[1],name:m2[2],type:(row.suggested_new&&row.suggested_new.type)||'Asset',subtype:'',bank_acct:false});
           cpCode=m2[1];
         }else if(mode==='pick')cpCode=pickCode||null;
@@ -9561,8 +9563,7 @@ function IcMappingDetail({row,entityId,entityOpts,entName,canEdit,onSaved,onMsg,
       }
       if(row.mapping_id||row.id)await api.updateIcMapping(row.mapping_id||row.id,payload);
       else await api.createIcMapping({...payload,entity_id:Number(entityId)});
-      onErr&&onErr('');onMsg&&onMsg('Saved '+row.account_code+'.');
-      await onSaved();
+      onErr&&onErr('');onMsg&&onMsg('Saved '+row.account_code+'.');await onSaved();
     }catch(e){onErr&&onErr(e.message);}finally{setBusy(false);}
   };
   const changeAcct=async()=>{
@@ -9582,115 +9583,87 @@ function IcMappingDetail({row,entityId,entityOpts,entName,canEdit,onSaved,onMsg,
     catch(e){onErr&&onErr(e.message);}finally{setBusy(false);}
   };
 
-  const seg=(sel)=>({background:sel?T.bg:'transparent',border:'1px solid '+(sel?T.border:'transparent'),
-    borderRadius:8,padding:'8px 10px',cursor:'pointer',fontWeight:600,fontSize:13,color:sel?T.accent:T.textMuted,flex:1});
+  const pill=st.kind
+    ?<IcBadge kind={st.kind}>{st.label}</IcBadge>
+    :<span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:999,border:'1px dashed '+T.border,color:T.textMuted}}>{st.label}</span>;
+  const cpName=entName(row.counterparty_entity_id)||row.counterparty_name||row.counterparty_label;
 
-  return<div>
-    {/* selected account summary */}
-    <div style={{padding:'14px 16px',borderBottom:'1px solid '+T.border,display:'flex',gap:12,alignItems:'flex-start',flexWrap:'wrap'}}>
-      <div style={{flex:1,minWidth:200}}>
-        <div style={{fontWeight:700,color:T.textBright,fontSize:15}}>{row.account_name}</div>
-        <div style={{color:T.textMuted,fontSize:12.5,marginTop:2}}>
-          <b style={{color:T.textBright}}>{row.account_code}</b> · {IC_TYPE_LABEL[row.ic_type]||row.ic_type} · this entity</div></div>
-      <div style={{textAlign:'right'}}>
-        <div style={{fontWeight:700,fontSize:17,color:T.textBright}}>{fmt(row.balance)}</div>
-        <div style={{color:T.textDim,fontSize:11}}>our balance</div></div>
-    </div>
+  // ── right side ──
+  let right;
+  if(external){
+    right=<div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+      <span style={{color:T.textMuted,fontSize:13}}>Outside the group — not reconciled{row.notes?' ('+row.notes+')':''}.</span>
+      {canEdit&&<button style={{...S.btnGhost,color:T.red,fontSize:11}} disabled={busy} onClick={remove}>Remove</button>}</div>;
+  }else if(row.investor_capital){
+    right=<div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+      <span style={{color:T.green,fontSize:13,fontWeight:600}}>Investor capital — no counterparty account needed</span>
+      {canEdit&&row.mapping_id==null&&!row.id&&<button style={{...S.btnP,padding:'5px 12px',fontSize:12}} disabled={busy} onClick={save}>{busy?'Saving…':'Confirm'}</button>}</div>;
+  }else if(mapped){
+    right=<div>
+      <div style={{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline'}}>
+        <div style={{fontSize:13}}>
+          <span style={{color:T.textMuted}}>{cpName} · </span>
+          <b style={{color:T.textBright}}>{row.their_account_code}</b> <span style={{color:T.textMuted}}>{row.their_account_name||''}</span>
+          {row.self&&<span style={{marginLeft:6}}><IcBadge kind="bad">points at itself</IcBadge></span>}
+          {row.their_account_missing&&<span style={{marginLeft:6}}><IcBadge kind="bad">not in their ledger</IcBadge></span>}</div>
+        <span style={{fontWeight:650,whiteSpace:'nowrap',color:T.textBright}}>{row.their_balance==null?'':fmt(row.their_balance)}</span></div>
+      {row.gap!=null&&<div style={{marginTop:4,fontSize:12,fontWeight:600,color:row.offsets?T.green:T.red}}>
+        {row.offsets?'Reconciled':'Difference '+fmt(row.gap)}</div>}
+      {canEdit&&<div style={{marginTop:8,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+        {changing
+          ?<><IcCpAccountSelect entityId={entityId} accountCode={row.account_code} counterpartyEntityId={row.counterparty_entity_id}
+              value={chgCode} onChange={setChgCode} onLoaded={r=>setChgCode(x=>x||r.best||'')} showGap={false}/>
+            <button style={{...S.btnP,padding:'5px 11px',fontSize:12}} disabled={busy} onClick={changeAcct}>Save</button>
+            <button style={{...S.btnGhost,fontSize:12}} onClick={()=>setChanging(false)}>Cancel</button></>
+          :<><button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{setChgCode(row.their_account_code||'');setChanging(true);}}>Change</button>
+            <button style={{...S.btnGhost,color:T.red,fontSize:11}} disabled={busy} onClick={remove}>Remove</button></>}</div>}
+    </div>;
+  }else{
+    // editor: counterparty (CL entity | External) + their account + Confirm
+    right=<div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+      <IcCpSelect entityOpts={entityOpts} companies={[]} entId={kindSel==='ext'?'':cpId} nodeId={''} isExt={kindSel==='ext'}
+        seedName={row.account_name}
+        onPick={pk=>{if(pk.is_external){setKindSel('ext');}else{setKindSel('cl');setCpId(pk.entity_id?String(pk.entity_id):'');setMode(row.suggested_existing?'existing':(row.suggested_new?'new':'pick'));setPickCode('');}}}
+        onMsg={onMsg} onErr={onErr}/>
+      {kindSel!=='ext'&&cpId&&(
+        mode==='existing'&&row.suggested_existing
+          ?<span style={{display:'inline-flex',gap:6,alignItems:'center'}}>
+             <span style={{display:'inline-flex',gap:5,alignItems:'center',border:'1px solid '+T.border,borderRadius:7,padding:'5px 9px',fontSize:12.5}}>
+               <b style={{color:T.textBright}}>{row.suggested_existing.account_code}</b><span style={{color:T.textMuted}}>{row.suggested_existing.account_name}</span></span>
+             <IcBadge kind="info">suggested</IcBadge>
+             <button style={S.link} onClick={()=>setMode('pick')}>change…</button>
+             {row.suggested_new&&<button style={S.link} onClick={()=>setMode('new')}>new…</button>}</span>
+        :mode==='new'&&row.suggested_new
+          ?<span style={{display:'inline-flex',gap:6,alignItems:'center'}}>
+             <input style={{...S.inputSm,width:240,borderStyle:'dashed',borderColor:T.accent}} value={newAcct} onChange={e=>setNewAcct(e.target.value)}/>
+             <IcBadge kind="info">created on confirm</IcBadge>
+             <button style={S.link} onClick={()=>setMode('pick')}>pick existing…</button></span>
+        :<span style={{display:'inline-flex',gap:6,alignItems:'center'}}>
+             <IcCpAccountSelect entityId={entityId} accountCode={row.account_code} counterpartyEntityId={Number(cpId)}
+               value={pickCode} onChange={setPickCode} onLoaded={r=>{if(!pickCode&&r.best)setPickCode(r.best);}} width={240} showGap={false}/>
+             {row.suggested_new&&<button style={S.link} onClick={()=>setMode('new')}>new…</button>}
+             {row.suggested_existing&&<button style={S.link} onClick={()=>setMode('existing')}>suggestion</button>}</span>
+      )}
+      {canEdit&&<button style={{...S.btnP,padding:'6px 13px',fontSize:12}} disabled={busy} onClick={save}>{busy?'Saving…':'Save'}</button>}
+    </div>;
+  }
 
-    {external?
-      <div style={{padding:'16px 18px'}}>
-        <div style={{border:'1px solid '+T.border,borderRadius:12,padding:'14px 16px',background:T.bgElevated}}>
-          <div style={{fontWeight:700,color:T.textBright,fontSize:13.5}}>External counterparty — excluded from reconciliation</div>
-          <div style={{color:T.textMuted,fontSize:12.5,marginTop:3}}>Faces a party outside the group; there is no counterparty ledger to agree with, so it is left out of the tie-out. Enter a value on the Reconciliation page to compare by hand.</div>
-          {row.notes&&<div style={{color:T.textMuted,fontSize:12,marginTop:8}}>Notes: {row.notes}</div>}
-        </div>
-        {canEdit&&<div style={{marginTop:14,display:'flex',gap:10}}>
-          <button style={{...S.btnGhost,color:T.red}} disabled={busy} onClick={remove}>Remove — return to worklist</button></div>}
-      </div>
-    :mapped?
-      <div style={{padding:'16px 18px'}}>
-        <div style={{display:'grid',gridTemplateColumns:'1fr auto 1fr',gap:12,alignItems:'center',
-          border:'1px solid '+T.border,borderRadius:12,padding:'14px 16px',background:T.bgElevated}}>
-          <div style={{textAlign:'center'}}><div style={{fontSize:11,color:T.textDim}}>our net</div>
-            <div style={{fontWeight:700,fontSize:15,color:T.textBright}}>{row.signed==null?fmt(row.balance):fmt(row.signed)}</div></div>
-          <div style={{textAlign:'center',color:T.textDim,fontSize:16}}>{row.offsets?'=':'\u2260'}</div>
-          <div style={{textAlign:'center'}}>
-            <div style={{fontSize:11,color:T.textDim}}>{entName(row.counterparty_entity_id)||row.counterparty_name}</div>
-            <div style={{fontWeight:600,fontSize:13,color:T.textBright}}>
-              <b>{row.their_account_code}</b> {row.their_account_name||''}</div>
-            <div style={{fontWeight:700,fontSize:15,color:T.textBright}}>{row.their_signed==null?(row.their_balance==null?'':fmt(row.their_balance)):fmt(row.their_signed)}</div></div>
-        </div>
-        <div style={{marginTop:11,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-          <span style={{fontWeight:600,color:T.textMuted}}>{row.their_account_missing?'Counterparty account is gone':(row.offsets?'Reconciled':'Unreconciled difference')}</span>
-          {row.gap!=null&&<span style={{fontWeight:700,fontSize:16,color:row.offsets?T.green:T.red}}>{fmt(row.gap)}</span>}</div>
-        {canEdit&&<div style={{marginTop:14,display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
-          {changing
-            ?<><IcCpAccountSelect entityId={entityId} accountCode={row.account_code} counterpartyEntityId={row.counterparty_entity_id}
-                value={chgCode} onChange={setChgCode} onLoaded={r=>setChgCode(x=>x||r.best||'')}/>
-              <button style={{...S.btnP,padding:'6px 12px',fontSize:12}} disabled={busy} onClick={changeAcct}>Save</button>
-              <button style={{...S.btnGhost,fontSize:12}} onClick={()=>setChanging(false)}>Cancel</button></>
-            :<><button style={{...S.btnGhost,color:T.accent}} onClick={()=>{setChgCode(row.their_account_code||'');setChanging(true);}}>Change their account</button>
-              <button style={{...S.btnGhost,color:T.red}} disabled={busy} onClick={remove}>Remove</button></>}</div>}
-      </div>
-    :
-      <div style={{padding:'16px 18px'}}>
-        {row.investor_capital?
-          <div>
-            <div style={{border:'1px solid '+T.border,borderRadius:12,padding:'14px 16px',background:T.bgElevated}}>
-              <div style={{fontWeight:700,color:T.textBright,fontSize:13.5}}>Investor capital — no counterparty account needed</div>
-              <div style={{color:T.textMuted,fontSize:12.5,marginTop:3}}>This contributor keeps no ledger in CloudLedger{row.counterparty_label?' ('+row.counterparty_label+')':''}, so there is no investment account to match. Confirm records it as complete.</div></div>
-            {canEdit&&<button style={{...S.btnP,marginTop:14}} disabled={busy} onClick={save}>{busy?'Saving\u2026':'Confirm'}</button>}
-          </div>
-        :<>
-          <div style={{fontWeight:650,fontSize:13,marginBottom:3}}>Counterparty</div>
-          <div style={{color:T.textMuted,fontSize:12.5,marginBottom:10}}>Who does this account face? A CloudLedger entity is reconciled against its ledger; External is left out of the tie-out.</div>
-          <div style={{display:'flex',gap:6,background:T.bgElevated,padding:5,borderRadius:11}}>
-            <button style={seg(kindSel==='cl')} onClick={()=>setKindSel('cl')}>CloudLedger entity</button>
-            <button style={seg(kindSel==='ext')} onClick={()=>setKindSel('ext')}>External</button></div>
-
-          {kindSel==='ext'?
-            <div style={{marginTop:14,border:'1px solid '+T.border,borderRadius:12,padding:'14px 16px',background:T.bgElevated}}>
-              <div style={{fontWeight:680,color:T.textBright,fontSize:13.5}}>External — not reconciled</div>
-              <div style={{color:T.textMuted,fontSize:12.5,marginTop:3}}>Marks this account as facing a party outside the group. It is excluded from reconciliation; enter a value on the Reconciliation page to compare by hand.</div></div>
-          :<div style={{marginTop:14}}>
-            <select style={{...S.select,maxWidth:360}} value={cpId} onChange={e=>{setCpId(e.target.value);setMode('pick');setPickCode('');}}>
-              <option value=''>Pick counterparty entity…</option>
-              {entityOpts.map(x=><option key={x.id} value={String(x.id)}>{x.name}</option>)}</select>
-            {cpId&&<div style={{marginTop:12}}>
-              <div style={{fontWeight:650,fontSize:13,marginBottom:6}}>Their account</div>
-              {mode==='existing'&&row.suggested_existing?
-                <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
-                  <span style={{display:'inline-flex',gap:6,alignItems:'center',border:'1px solid '+T.border,borderRadius:7,padding:'6px 10px'}}>
-                    <b style={{color:T.textBright}}>{row.suggested_existing.account_code}</b>
-                    <span style={{color:T.textMuted}}>{row.suggested_existing.account_name}</span></span>
-                  <IcBadge kind="info">suggested</IcBadge>
-                  <button style={S.link} onClick={()=>setMode('pick')}>change…</button>
-                  {row.suggested_new&&<button style={S.link} onClick={()=>setMode('new')}>new account…</button>}</div>
-              :mode==='new'&&row.suggested_new?
-                <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
-                  <input style={{...S.inputSm,width:300,borderStyle:'dashed',borderColor:T.accent}} value={newAcct}
-                    onChange={e=>setNewAcct(e.target.value)}/>
-                  <IcBadge kind="info">created on confirm</IcBadge>
-                  <button style={S.link} onClick={()=>setMode('pick')}>pick existing…</button>
-                  <div style={{flexBasis:'100%',fontSize:11,color:T.textDim}}>Does not exist yet — Confirm adds it to the counterparty\u2019s chart (zero balance) and saves the mapping in one step.</div></div>
-              :<div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
-                  <IcCpAccountSelect entityId={entityId} accountCode={row.account_code} counterpartyEntityId={Number(cpId)}
-                    value={pickCode} onChange={setPickCode} onLoaded={r=>{if(!pickCode&&r.best)setPickCode(r.best);}} width={320}/>
-                  {row.suggested_new&&<button style={S.link} onClick={()=>setMode('new')}>new account…</button>}
-                  {row.suggested_existing&&<button style={S.link} onClick={()=>setMode('existing')}>back to suggestion</button>}</div>}
-            </div>}
-          </div>}
-
-          {canEdit&&<button style={{...S.btnP,marginTop:16}} disabled={busy} onClick={save}>{busy?'Saving\u2026':'Save mapping'}</button>}
-        </>}
-      </div>}
+  return<div style={{display:'flex',gap:14,padding:'12px 16px',borderBottom:'1px solid '+T.borderLight,alignItems:'flex-start',flexWrap:'wrap'}}>
+    <div style={{flex:'1 1 280px',minWidth:240}}>
+      <div style={{display:'flex',justifyContent:'space-between',gap:10}}>
+        <span style={{fontWeight:600,color:external?T.textDim:T.textBright,fontSize:13.5}}>{row.account_name}</span>
+        <span style={{fontWeight:650,fontSize:13.5,whiteSpace:'nowrap',color:external?T.textDim:T.textBright,textDecoration:external?'line-through':'none'}}>{balTxt}</span></div>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginTop:3}}>
+        <span style={{fontSize:12,color:T.textMuted,fontFamily:'monospace'}}>{row.account_code}</span>
+        <span style={{fontSize:11,color:T.textDim}}>· {IC_TYPE_LABEL[row.ic_type]||row.ic_type}</span>{pill}</div></div>
+    <div style={{color:T.textDim,alignSelf:'center',fontSize:16}}>→</div>
+    <div style={{flex:'1 1 380px',minWidth:300}}>{right}</div>
   </div>;
 }
 
 function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[tab,setTab]=useState('mappings');
   const[eid,setEid]=useState(activeEntity||'');
-  // Follow the header's entity picker.
   useEffect(()=>{if(activeEntity)setEid(activeEntity);},[activeEntity]);
   const[mapped,setMapped]=useState(null);
   const[unmapped,setUnmapped]=useState(null);
@@ -9700,7 +9673,6 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[err,setErr]=useState('');const[msg,setMsg]=useState('');
   const[filter,setFilter]=useState('all');
   const[q,setQ]=useState('');
-  const[sel,setSel]=useState(null);
   const entityOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
   const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
 
@@ -9715,9 +9687,8 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   useEffect(()=>{load();},[load]);
   const loadPeople=useCallback(async()=>{try{setPeople(await api.getIcPeople());}catch(e){console.error('[ic] people:',e.message);}},[]);
   useEffect(()=>{loadPeople();},[loadPeople]);
-  useEffect(()=>{setSel(null);},[eid]);
 
-  // One row per account: mapped pairs first, then the unmapped worklist, then
+  // One row per account: mapped pairs, then the unmapped worklist, then the
   // external mappings the worklist doesn't carry. Deduped by account code.
   const rows=[];{
     const seen=new Set();
@@ -9730,7 +9701,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
     if(r.self)return{k:'self',label:'Self-reference',kind:'bad',issue:true};
     if(r.individual)return{k:'individual',label:'Individual',kind:'mute',issue:false};
     if(r.investor_capital)return{k:'investor',label:'Investor capital',kind:'ok',issue:false};
-    if(r.is_external)return{k:'external',label:'External \u00b7 not reconciled',kind:'mute',issue:false};
+    if(r.is_external)return{k:'external',label:'External · not reconciled',kind:'mute',issue:false};
     if(r.source==='mapped'){
       if(r.their_account_missing)return{k:'broken',label:'Broken pin',kind:'bad',issue:true};
       if(r.offsets)return{k:'matched',label:'Matched',kind:'ok',issue:false};
@@ -9746,21 +9717,15 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
     if(f==='mapped')return k==='matched'||k==='mapped'||k==='mismatch'||k==='investor';
     if(f==='external')return k==='external';
     if(f==='issues')return statusOf(r).issue;};
-  const inFilter=r=>matchesFilter(r,filter);
   const nq=q.trim().toLowerCase();
-  const shown=rows.filter(inFilter).filter(r=>!nq||[r.account_code,r.account_name,r.counterparty_name,r.counterparty_label].some(v=>String(v||'').toLowerCase().includes(nq)));
+  const shown=rows.filter(r=>matchesFilter(r,filter)).filter(r=>!nq||[r.account_code,r.account_name,r.counterparty_name,r.counterparty_label].some(v=>String(v||'').toLowerCase().includes(nq)));
   const count=f=>rows.filter(r=>matchesFilter(r,f)).length;
   const CHIPS=[['all','All'],['unmapped','Unmapped'],['mapped','Mapped'],['external','External'],['issues','Issues']];
-  const selRow=rows.find(r=>String(r.account_code)===String(sel))||null;
-
-  const pill=st=>st.kind
-    ?<IcBadge kind={st.kind}>{st.label}</IcBadge>
-    :<span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:999,border:'1px dashed '+T.border,color:T.textMuted}}>{st.label}</span>;
 
   return(<div>
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8,flexWrap:'wrap',gap:12}}>
       <div><div style={S.h1}>IC Mapping</div>
-        <div style={S.sub}>Tells the reconciliation which account faces which entity. Account names are only a suggestion — a person confirms every row.</div></div></div>
+        <div style={S.sub}>Each row is one account: this entity’s account on the left, the counterparty’s account on the right. Names are only a suggestion — a person confirms every row.</div></div></div>
 
     <div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
       {[['mappings','Account mappings'],['people','People ('+people.length+')']].map(([k,l])=>
@@ -9778,39 +9743,19 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         <button style={{...S.btnGhost,fontSize:12}} onClick={load} disabled={loading||!eid}>{loading?'Loading…':'Refresh'}</button></div>
 
       {!eid?<IcEmpty>Pick an entity to see and edit its intercompany account mappings.</IcEmpty>
-      :<div style={{display:'grid',gridTemplateColumns:'minmax(0,420px) minmax(0,1fr)',gap:16,alignItems:'start'}}>
-        {/* LEFT — this entity's accounts */}
-        <div style={{...S.cardFlush,border:'1px solid '+T.border,overflow:'hidden'}}>
-          <div style={{padding:'11px 14px',borderBottom:'1px solid '+T.border}}>
-            <div style={{fontWeight:700,color:T.textBright,fontSize:13}}>{entName(eid)} — accounts ({shown.length})</div></div>
-          <div style={{padding:'9px 12px',borderBottom:'1px solid '+T.border,background:T.bgElevated,display:'flex',flexWrap:'wrap',gap:7,alignItems:'center'}}>
-            {CHIPS.map(([k,l])=><button key={k} onClick={()=>setFilter(k)} style={{fontSize:12,fontWeight:600,borderRadius:999,padding:'4px 10px',cursor:'pointer',
-              border:'1px solid '+(filter===k?'transparent':T.border),color:filter===k?T.accent:T.textMuted,background:filter===k?T.accentDim:T.bg}}>{l} <span style={{opacity:.6}}>{count(k)}</span></button>)}
-            <IcSearch value={q} onChange={setQ} placeholder='Code or name…' width={150}/></div>
-          <div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(360px, calc(100vh - 300px))'}}>
-            {loading&&!mapped?<div style={{padding:30,textAlign:'center',color:T.textMuted}}>Loading…</div>
-            :shown.length===0?<div style={{padding:30,textAlign:'center',color:T.textDim}}>No accounts match.</div>
-            :shown.map(r=>{const st=statusOf(r),on=String(r.account_code)===String(sel),excl=st.k==='external';
-              return<div key={r.account_code} onClick={()=>setSel(r.account_code)} style={{padding:'10px 14px',borderBottom:'1px solid '+T.borderLight,cursor:'pointer',
-                borderLeft:'3px solid '+(on?T.accent:'transparent'),background:on?T.accentDim:'transparent'}}>
-                <div style={{display:'flex',justifyContent:'space-between',gap:10}}>
-                  <span style={{fontWeight:600,color:excl?T.textDim:T.textBright,fontSize:13.5}}>{r.account_name}</span>
-                  <span style={{fontWeight:650,fontSize:13.5,color:excl?T.textDim:T.textBright,whiteSpace:'nowrap',textDecoration:excl?'line-through':'none'}}>{fmt(r.balance)}</span></div>
-                <div style={{display:'flex',alignItems:'center',gap:8,marginTop:3}}>
-                  <span style={{fontSize:12,color:T.textMuted,fontFamily:'monospace'}}>{r.account_code}</span>
-                  <span style={{fontSize:11,color:T.textDim}}>· {IC_TYPE_LABEL[r.ic_type]||r.ic_type}</span>
-                  {pill(st)}</div></div>;})}
-          </div>
-        </div>
-        {/* RIGHT — counterparty detail */}
-        <div style={{...S.cardFlush,border:'1px solid '+T.border,overflow:'hidden',minHeight:240}}>
-          <div style={{padding:'11px 14px',borderBottom:'1px solid '+T.border}}>
-            <div style={{fontWeight:700,color:T.textBright,fontSize:13}}>Counterparty</div></div>
-          {!selRow?<div style={{padding:'48px 24px',textAlign:'center',color:T.textMuted}}>
-            <div style={{fontWeight:600,color:T.textBright,marginBottom:4}}>Pick an account on the left</div>
-            Map it to the account on the counterparty’s books — or mark it external.</div>
-          :<IcMappingDetail key={selRow.account_code} row={selRow} entityId={eid} entityOpts={entityOpts} entName={entName}
-             canEdit={canEdit} onSaved={load} onMsg={setMsg} onErr={setErr}/>}
+      :<div style={{...S.cardFlush,border:'1px solid '+T.border,overflow:'hidden'}}>
+        <div style={{padding:'10px 16px',borderBottom:'1px solid '+T.border,display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+          <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>{entName(eid)} — accounts ({shown.length})</span>
+          <span style={{color:T.textDim,fontSize:12}}>this entity → counterparty</span></div>
+        <div style={{padding:'9px 12px',borderBottom:'1px solid '+T.border,background:T.bgElevated,display:'flex',flexWrap:'wrap',gap:7,alignItems:'center'}}>
+          {CHIPS.map(([k,l])=><button key={k} onClick={()=>setFilter(k)} style={{fontSize:12,fontWeight:600,borderRadius:999,padding:'4px 10px',cursor:'pointer',
+            border:'1px solid '+(filter===k?'transparent':T.border),color:filter===k?T.accent:T.textMuted,background:filter===k?T.accentDim:T.bg}}>{l} <span style={{opacity:.6}}>{count(k)}</span></button>)}
+          <IcSearch value={q} onChange={setQ} placeholder='Code or name…' width={180}/></div>
+        <div className="cl-scroll" style={{overflow:'auto',maxHeight:'max(380px, calc(100vh - 300px))'}}>
+          {loading&&!mapped?<div style={{padding:30,textAlign:'center',color:T.textMuted}}>Loading…</div>
+          :shown.length===0?<div style={{padding:30,textAlign:'center',color:T.textDim}}>No accounts match.</div>
+          :shown.map(r=><IcRow key={r.account_code} row={r} st={statusOf(r)} entityId={eid} entityOpts={entityOpts} entName={entName}
+             canEdit={canEdit} onSaved={load} onMsg={setMsg} onErr={setErr}/>)}
         </div>
       </div>}
     </>}
