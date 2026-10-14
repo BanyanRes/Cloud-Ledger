@@ -1700,12 +1700,98 @@ function reconcileForEntity(db, entityId, opts) {
 
 // ══════════════════════════════ Routes ══════════════════════════════
 
+// --- One-off maintenance: redundant duplicate due accounts ---
+// The old matcher, when an entity had no due account for a counterparty yet,
+// drafted an OPPOSITE-kind account ("Due to X" to answer their "Due from us").
+// Once the entity's real "Due from X" also existed, that draft became a stray
+// zero-balance duplicate. This finds every such duplicate across the portfolio
+// and, when apply is set, repoints the counterparty's mapping to the real
+// account, drops the stray mapping, and deletes the empty account. Read-only
+// otherwise. It NEVER touches a due account that has any balance or any journal
+// posting, and only acts where a real sibling faces the same counterparty.
+function sweepRedundantDue(db, computeBalances, { apply } = {}) {
+  ensureSchema(db);
+  const entities = db.prepare('SELECT id, name, code FROM entities').all();
+  const companies = listCompanies(db);
+  const postingCount = db.prepare('SELECT COUNT(*) AS c FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id WHERE je.entity_id = ? AND jl.account_code = ?');
+  const findings = [];
+  for (const E of entities) {
+    let accts, bals;
+    try {
+      accts = db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ?').all(E.id);
+      bals = new Map(computeBalances(E.id, {}).map(b => [String(b.code), b]));
+    } catch (e) { continue; }
+    const byCp = new Map();
+    for (const a of accts) {
+      const p = parseAccountName(a.name);
+      if (!p || (p.ic_type !== 'due_from' && p.ic_type !== 'due_to')) continue;
+      const m = matchCompany(p.label, entities, companies);
+      if (m.entity_id == null || Number(m.entity_id) === Number(E.id)) continue;
+      const cpEid = Number(m.entity_id);
+      const held = bals.get(String(a.code));
+      const balance = round2(held ? (Number(held.balance) || 0) : 0);
+      const posted = postingCount.get(E.id, String(a.code)).c;
+      if (!byCp.has(cpEid)) byCp.set(cpEid, []);
+      byCp.get(cpEid).push({ code: String(a.code), name: a.name, ic_type: p.ic_type, balance, posted });
+    }
+    for (const [cpEid, list] of byCp) {
+      if (list.length < 2) continue;
+      const real = list.filter(x => Math.abs(x.balance) > 0.005 || x.posted > 0);
+      const empty = list.filter(x => Math.abs(x.balance) < 0.005 && x.posted === 0);
+      if (!real.length || !empty.length) continue;
+      const cp = entities.find(e => Number(e.id) === cpEid);
+      for (const em of empty) {
+        const ownMap = db.prepare('SELECT id FROM intercompany_accounts WHERE entity_id = ? AND account_code = ?').get(E.id, em.code);
+        const inbound = db.prepare('SELECT id FROM intercompany_accounts WHERE counterparty_entity_id = ? AND counterparty_account_code = ?').all(E.id, em.code);
+        findings.push({
+          entity: { id: E.id, name: E.name },
+          counterparty: { id: cpEid, name: cp ? cp.name : ('entity ' + cpEid) },
+          empty_account: { code: em.code, name: em.name },
+          real_account: { code: real[0].code, name: real[0].name, balance: real[0].balance },
+          own_mapping_id: ownMap ? ownMap.id : null,
+          inbound_mapping_ids: inbound.map(x => x.id),
+          ambiguous: real.length > 1,
+        });
+      }
+    }
+  }
+  let applied = 0;
+  if (apply) {
+    const now = new Date().toISOString();
+    db.transaction(() => {
+      for (const f of findings) {
+        if (f.ambiguous) continue;
+        for (const id of f.inbound_mapping_ids) {
+          db.prepare('UPDATE intercompany_accounts SET counterparty_account_code = ?, updated_at = ?, updated_by = ? WHERE id = ?')
+            .run(f.real_account.code, now, 'sweep', id);
+        }
+        if (f.own_mapping_id) db.prepare('DELETE FROM intercompany_accounts WHERE id = ?').run(f.own_mapping_id);
+        const stillRef = db.prepare('SELECT COUNT(*) AS c FROM intercompany_accounts WHERE (entity_id = ? AND account_code = ?) OR (counterparty_entity_id = ? AND counterparty_account_code = ?)')
+          .get(f.entity.id, f.empty_account.code, f.entity.id, f.empty_account.code).c;
+        if (stillRef === 0) db.prepare('DELETE FROM accounts WHERE entity_id = ? AND code = ?').run(f.entity.id, f.empty_account.code);
+        applied++;
+      }
+    })();
+  }
+  return { count: findings.length, applied, ambiguous: findings.filter(f => f.ambiguous).length, findings };
+}
+
 function registerIntercompanyRoutes(app, deps) {
   const { db, auth, requireRole, computeBalances, userHasEntityAccess, workpapersDir } = deps;
   ensureSchema(db);
 
   const who = req => (req.user && (req.user.name || req.user.email)) || null;
   const gate = [auth, requireRole('Admin', 'Accountant')];
+
+  const adminGate = [auth, requireRole('Admin')];
+  app.get('/api/intercompany/sweep-redundant', ...adminGate, (req, res) => {
+    try { res.json(sweepRedundantDue(db, computeBalances, { apply: false })); }
+    catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+  });
+  app.post('/api/intercompany/sweep-redundant', ...adminGate, (req, res) => {
+    try { res.json(sweepRedundantDue(db, computeBalances, { apply: true })); }
+    catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+  });
 
   // Pairs confirmed before auto-mirroring existed get their mirrors at boot.
   // Re-running is a no-op: an account already mapped is never touched.

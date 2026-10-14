@@ -9673,6 +9673,8 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[err,setErr]=useState('');const[msg,setMsg]=useState('');
   const[filter,setFilter]=useState('all');
   const[q,setQ]=useState('');
+  const[sweep,setSweep]=useState(null);
+  const[sweepBusy,setSweepBusy]=useState(false);
   const entityOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
   const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
 
@@ -9687,6 +9689,8 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   useEffect(()=>{load();},[load]);
   const loadPeople=useCallback(async()=>{try{setPeople(await api.getIcPeople());}catch(e){console.error('[ic] people:',e.message);}},[]);
   useEffect(()=>{loadPeople();},[loadPeople]);
+  const runSweep=async()=>{setSweepBusy(true);try{setSweep(await api.getIcSweepRedundant());setErr('');}catch(e){setErr(e.message);}finally{setSweepBusy(false);}};
+  const applySweep=async()=>{setSweepBusy(true);try{const r=await api.applyIcSweepRedundant();setSweep(r);setMsg('Cleaned up '+r.applied+' redundant account'+(r.applied===1?'':'s')+(r.ambiguous?(' ('+r.ambiguous+' ambiguous left for review)'):'')+'.');await load();}catch(e){setErr(e.message);}finally{setSweepBusy(false);}};
 
   // One row per account: mapped pairs, then the unmapped worklist, then the
   // external mappings the worklist doesn't carry. Deduped by account code.
@@ -9740,7 +9744,24 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           <select style={S.select} value={eid} onChange={e=>{setEid(e.target.value);setMsg('');}}>
             <option value=''>Select an entity…</option>
             {entityOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
-        <button style={{...S.btnGhost,fontSize:12}} onClick={load} disabled={loading||!eid}>{loading?'Loading…':'Refresh'}</button></div>
+        <button style={{...S.btnGhost,fontSize:12}} onClick={load} disabled={loading||!eid}>{loading?'Loading…':'Refresh'}</button>
+        {canEdit&&<button style={{...S.btnGhost,fontSize:12}} onClick={runSweep} disabled={sweepBusy} title='Scan every entity for stray zero-balance duplicate due accounts the old matcher created.'>{sweepBusy?'Scanning…':'Scan for duplicates'}</button>}</div>
+      {sweep&&<div style={{...S.card,borderColor:T.accent+'55',padding:14,marginBottom:12}}>
+        <div style={{fontWeight:700,color:T.textBright,marginBottom:6}}>
+          {sweep.count===0?'No redundant duplicate due accounts anywhere in the portfolio.'
+            :(sweep.applied?('Cleaned up '+sweep.applied+' of '+sweep.count+' redundant duplicate account'+(sweep.count===1?'':'s')+(sweep.ambiguous?(' · '+sweep.ambiguous+' ambiguous left for review'):'')+'.')
+              :(sweep.count+' redundant duplicate due account'+(sweep.count===1?'':'s')+' found across the portfolio'+(sweep.ambiguous?(' ('+sweep.ambiguous+' ambiguous)'):'')+'.'))}</div>
+        {sweep.count>0&&<div className="cl-scroll" style={{maxHeight:240,overflow:'auto',marginBottom:10,border:'1px solid '+T.border,borderRadius:8}}>
+          {sweep.findings.map((f,i)=><div key={i} style={{fontSize:12.5,padding:'7px 10px',borderBottom:'1px solid '+T.borderLight,display:'flex',gap:8,flexWrap:'wrap',alignItems:'center'}}>
+            <b style={{color:T.textBright}}>{f.entity.name}</b>
+            <span style={{fontFamily:'monospace',color:T.textMuted}}>{f.empty_account.code}</span><span style={{color:T.textMuted}}>{f.empty_account.name}</span>
+            <span style={{color:T.textDim}}>→ reuse</span>
+            <span style={{fontFamily:'monospace',color:T.textBright}}>{f.real_account.code}</span><span style={{color:T.textMuted}}>{f.real_account.name}</span>
+            <span style={{color:T.textDim}}>({f.counterparty.name})</span>
+            {f.ambiguous&&<IcBadge kind="warn">ambiguous — skipped</IcBadge>}</div>)}</div>}
+        <div style={{display:'flex',gap:8,alignItems:'center'}}>
+          {sweep.count>sweep.ambiguous&&!sweep.applied&&canEdit&&<button style={S.btnP} disabled={sweepBusy} onClick={applySweep}>{sweepBusy?'Cleaning…':('Apply cleanup ('+(sweep.count-sweep.ambiguous)+')')}</button>}
+          <button style={{...S.btnGhost,fontSize:12}} onClick={()=>setSweep(null)}>Close</button></div></div>}
 
       {!eid?<IcEmpty>Pick an entity to see and edit its intercompany account mappings.</IcEmpty>
       :<div style={{...S.cardFlush,border:'1px solid '+T.border,overflow:'hidden'}}>

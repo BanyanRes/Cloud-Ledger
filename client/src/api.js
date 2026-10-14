@@ -1068,6 +1068,8 @@ export const api = {
   getIcPeople: () => request('/intercompany/people'),
   markIcPerson: (b) => request('/intercompany/people', { method: 'POST', body: b }),
   unmarkIcPerson: (id) => request('/intercompany/people/' + id, { method: 'DELETE' }),
+  getIcSweepRedundant: () => request('/intercompany/sweep-redundant'),
+  applyIcSweepRedundant: () => request('/intercompany/sweep-redundant', { method: 'POST' }),
 
   // Registered companies: counterparties that appear on the org charts but have
   // no ledger here (QOZBs, joint ventures, sponsor holdcos). Stored as org
