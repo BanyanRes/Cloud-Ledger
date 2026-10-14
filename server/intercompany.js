@@ -120,25 +120,41 @@ function ensureSchema(db) {
       UNIQUE(mapping_id, as_of)
     );
   `);
-  // Uploaded trial balances for counterparties that keep no ledger in
-  // CloudLedger (JVs, sponsor holdcos registered as org nodes). One TB per
-  // (company, as-of date); re-uploading replaces. Balances stored in NATURAL
-  // terms — asset/expense debit-positive, liability/equity credit-positive —
-  // so a line reads exactly like a computeBalances row.
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS external_tb_lines (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      node_id INTEGER NOT NULL,
-      as_of TEXT NOT NULL,
-      account_code TEXT NOT NULL,
-      account_name TEXT,
-      type TEXT,
-      balance REAL NOT NULL DEFAULT 0,
-      uploaded_at TEXT, uploaded_by TEXT, filename TEXT,
-      UNIQUE(node_id, as_of, account_code)
-    );
-    CREATE INDEX IF NOT EXISTS idx_etb_node ON external_tb_lines(node_id, as_of);
-  `);
+  // ── Registered-company counterparty removal (one-time migration) ──
+  // The IC module no longer supports an off-ledger "registered company" as a
+  // counterparty. Existing mappings that named one are rewritten in place:
+  //   - if the org node is backed by a CloudLedger entity, it becomes that
+  //     entity (a normal, reconcilable counterparty);
+  //   - otherwise it becomes external (no ledger to reconcile), with the
+  //     company name preserved in the notes.
+  // counterparty_node_id is cleared either way. Idempotent: once no row carries
+  // a node id, every statement below is a no-op. The external-trial-balance
+  // feature is removed with it, so its table is dropped.
+  try {
+    if (hasOrgNodes(db)) {
+      db.exec(`
+        UPDATE intercompany_accounts
+          SET counterparty_entity_id = (SELECT n.entity_id FROM org_nodes n WHERE n.id = intercompany_accounts.counterparty_node_id),
+              counterparty_node_id = NULL
+          WHERE counterparty_node_id IS NOT NULL AND counterparty_entity_id IS NULL
+            AND (SELECT n.entity_id FROM org_nodes n WHERE n.id = intercompany_accounts.counterparty_node_id) IS NOT NULL;
+        UPDATE intercompany_accounts
+          SET is_external = 1,
+              notes = TRIM(COALESCE(notes,'') || CASE WHEN COALESCE(notes,'') = '' THEN '' ELSE ' | ' END
+                     || 'was off-ledger company: '
+                     || COALESCE((SELECT n.name FROM org_nodes n WHERE n.id = intercompany_accounts.counterparty_node_id), '(unknown)')),
+              counterparty_node_id = NULL
+          WHERE counterparty_node_id IS NOT NULL AND counterparty_entity_id IS NULL;
+      `);
+    }
+    // Stragglers: a node id with no resolvable node.
+    db.exec(`UPDATE intercompany_accounts SET is_external = 1
+             WHERE counterparty_node_id IS NOT NULL AND counterparty_entity_id IS NULL`);
+    db.exec(`UPDATE intercompany_accounts SET counterparty_node_id = NULL
+             WHERE counterparty_node_id IS NOT NULL`);
+  } catch (e) { console.error('[db migrate] ic registered-company removal:', e.message); }
+
+  db.exec('DROP TABLE IF EXISTS external_tb_lines');
 }
 
 // org_nodes is created by server/orgstructure.js. Both modules register at boot,
@@ -149,17 +165,12 @@ function hasOrgNodes(db) {
   catch { return false; }
 }
 
-// Registered companies: every org_node, whether or not it is backed by a
-// CloudLedger entity. This is the list the counterparty picker offers beyond
-// the entity list.
+// Registered off-ledger companies have been removed as IC counterparties.
+// Nothing surfaces them any more. Kept as an empty-returning stub so the
+// callers that still pass a "companies" list into the matcher keep working —
+// with an empty list the matcher can only resolve to an entity or to external.
 function listCompanies(db) {
-  if (!hasOrgNodes(db)) return [];
-  return db.prepare(`
-    SELECT n.id, n.name, n.entity_id, n.node_type, n.notes,
-           e.name AS entity_name, e.code AS entity_code
-    FROM org_nodes n LEFT JOIN entities e ON e.id = n.entity_id
-    WHERE n.node_type <> 'individual'
-    ORDER BY n.name COLLATE NOCASE`).all();
+  return [];
 }
 
 // Fold a node-based counterparty into the shape the reconciliations expect.
@@ -472,8 +483,8 @@ function validateMapping(body) {
   if (!body.entity_id) return 'entity_id is required';
   if (!body.account_code) return 'account_code is required';
   if (!IC_TYPES.includes(body.ic_type)) return 'ic_type must be one of: ' + IC_TYPES.join(', ');
-  if (!body.is_external && !body.counterparty_entity_id && !body.counterparty_node_id) {
-    return 'Pick a counterparty — a CloudLedger entity, a registered company, or mark it external';
+  if (!body.is_external && !body.counterparty_entity_id) {
+    return 'Pick a counterparty — a CloudLedger entity — or mark it external';
   }
   return null;
 }
@@ -1712,220 +1723,9 @@ function registerIntercompanyRoutes(app, deps) {
   }
   const fail = (res, e) => res.status(e.status || 500).json({ error: e.message });
 
-  // ── Registered companies ──
-  // Companies that appear on the org charts as counterparties. They live in
-  // org_nodes so the same row can later be placed in an ownership tree without
-  // being re-entered; a company created here simply has no edges yet. Exposed
-  // from this module (not just from /api/org-structure) because the need shows
-  // up while mapping accounts, and making someone leave the page to register a
-  // QOZB before they can finish a mapping is the wrong shape.
-  app.get('/api/intercompany/companies', ...gate, (req, res) => {
-    try { res.json(listCompanies(db)); } catch (e) { fail(res, e); }
-  });
-
-  app.post('/api/intercompany/companies', ...gate, (req, res) => {
-    try {
-      const name = req.body && String(req.body.name || '').trim();
-      if (!name) return res.status(400).json({ error: 'Company name is required' });
-      const dup = db.prepare('SELECT id, name FROM org_nodes WHERE LOWER(name) = LOWER(?)').get(name);
-      if (dup) return res.json({ id: dup.id, existing: true, name: dup.name });
-      const eid = req.body.entity_id ? Number(req.body.entity_id) : null;
-      if (eid && !userHasEntityAccess(req.user.id, req.user.role, eid)) {
-        return res.status(403).json({ error: 'No access to entity ' + eid });
-      }
-      const now = new Date().toISOString();
-      const r = db.prepare(`INSERT INTO org_nodes (name, entity_id, node_type, notes, sort_order, created_at, created_by, updated_at, updated_by)
-        VALUES (?,?,?,?,0,?,?,?,?)`).run(
-          name, eid, eid ? 'company' : 'shell', (req.body.notes || null),
-          now, who(req), now, who(req));
-      res.json({ id: r.lastInsertRowid, existing: false, name });
-    } catch (e) { fail(res, e); }
-  });
-
-  // ── External entity trial balances ──
-  // A counterparty with no ledger in CloudLedger can still be reconciled once
-  // someone uploads its trial balance. One TB per (company, as-of date);
-  // re-uploading the same pair replaces it in full.
-  const tbUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
-
-  app.get('/api/intercompany/external-tbs', ...gate, (req, res) => {
-    try {
-      res.json(db.prepare(`SELECT l.node_id, l.as_of, COUNT(*) AS line_count,
-          ROUND(SUM(ABS(l.balance)), 2) AS abs_total,
-          MAX(l.uploaded_at) AS uploaded_at, MAX(l.uploaded_by) AS uploaded_by, MAX(l.filename) AS filename,
-          n.name AS node_name
-        FROM external_tb_lines l JOIN org_nodes n ON n.id = l.node_id
-        GROUP BY l.node_id, l.as_of
-        ORDER BY n.name COLLATE NOCASE, l.as_of DESC`).all());
-    } catch (e) { fail(res, e); }
-  });
-
-  app.get('/api/intercompany/external-tb-lines', ...gate, (req, res) => {
-    try {
-      const node_id = Number(req.query.node_id);
-      const as_of = String(req.query.as_of || '');
-      if (!node_id || !as_of) return res.status(400).json({ error: 'node_id and as_of are required' });
-      res.json(db.prepare(`SELECT account_code, account_name, type, balance FROM external_tb_lines
-        WHERE node_id = ? AND as_of = ? ORDER BY account_code`).all(node_id, as_of));
-    } catch (e) { fail(res, e); }
-  });
-
-  app.delete('/api/intercompany/external-tbs', ...gate, (req, res) => {
-    try {
-      const node_id = Number(req.query.node_id);
-      const as_of = String(req.query.as_of || '');
-      if (!node_id || !as_of) return res.status(400).json({ error: 'node_id and as_of are required' });
-      const r = db.prepare('DELETE FROM external_tb_lines WHERE node_id = ? AND as_of = ?').run(node_id, as_of);
-      res.json({ success: true, deleted: r.changes });
-    } catch (e) { fail(res, e); }
-  });
-
-  app.post('/api/intercompany/external-tbs', ...gate, tbUpload.single('file'), (req, res) => {
-    try {
-      if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-      const node_id = Number(req.body.node_id);
-      const as_of = String(req.body.as_of || '');
-      if (!node_id) return res.status(400).json({ error: 'node_id is required' });
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(as_of)) return res.status(400).json({ error: 'as_of must be YYYY-MM-DD' });
-      const node = db.prepare('SELECT id, name, entity_id FROM org_nodes WHERE id = ?').get(node_id);
-      if (!node) return res.status(404).json({ error: 'Company not found — register it first' });
-      if (node.entity_id) return res.status(400).json({ error: node.name + ' is set up as a CloudLedger entity — its ledger is already here, no TB upload needed.' });
-
-      // Same column detection as the entity TB import: code + name columns,
-      // then either debit/credit columns or one signed amount column.
-      const wb = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: true });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const raw = XLSX.utils.sheet_to_json(ws, { defval: '' });
-      if (!raw.length) return res.status(400).json({ error: 'No data rows found in file' });
-      const cols = Object.keys(raw[0]);
-      const norm = c => String(c).toLowerCase().trim();
-      const findCol = (patterns, exclude = []) => {
-        const pool = cols.filter(c => !exclude.includes(c));
-        for (const pat of patterns) { const hit = pool.find(c => norm(c) === pat); if (hit) return hit; }
-        for (const pat of patterns) { const hit = pool.find(c => norm(c).includes(pat)); if (hit) return hit; }
-        return null;
-      };
-      const codeCol = findCol(['account number','account #','account code','acct number','acct code','acct','code','number','account']);
-      const nameCol = findCol(['account name','account description','acct name','description','name'], [codeCol]);
-      // Project managers export from different systems, so the ENDING balance
-      // hides under different names — and an activity-format TB (Beginning /
-      // Debit / Credit / Ending) must read the Ending column, not the period
-      // activity. Beginning/opening/prior/budget columns are never candidates.
-      const notEnding = cols.filter(c => /beginn|opening|prior|budget|activity|change/i.test(String(c)));
-      const amtCol  = findCol(['ending balance','end balance','closing balance','current balance','balance','net amount','amount','total'],
-        [codeCol, nameCol].filter(Boolean).concat(notEnding));
-      const drCol   = findCol(['debit'], [codeCol, nameCol, amtCol].filter(Boolean).concat(notEnding));
-      const crCol   = findCol(['credit'], [codeCol, nameCol, amtCol].filter(Boolean).concat(notEnding));
-      // An explicit ending/closing column outranks debit/credit columns, which
-      // in an activity-format export are the month's movement, not the balance.
-      const preferAmt = !!(amtCol && /end|closing|current/i.test(String(amtCol)));
-      if (!codeCol) return res.status(400).json({ error: 'Could not find an account number/code column. Found: ' + cols.join(', ') });
-      if (!nameCol) return res.status(400).json({ error: 'Could not find an account name column. Found: ' + cols.join(', ') });
-      if (!amtCol && !drCol && !crCol) return res.status(400).json({ error: 'Could not find amount or debit/credit columns. Found: ' + cols.join(', ') });
-
-      const typeFromCode = (codeStr) => {
-        const n = parseInt(String(codeStr).replace(/[^0-9]/g, ''), 10);
-        if (isNaN(n)) return null;
-        if (n <= 19999) return 'Asset';
-        if (n <= 29999) return 'Liability';
-        if (n <= 39999) return 'Equity';
-        if (n <= 49999) return 'Revenue';
-        if (n <= 69999) return 'Expense';
-        return 'Revenue';
-      };
-      const parsed = [];
-      for (const row of raw) {
-        const code = String(row[codeCol] || '').trim();
-        const name = String(row[nameCol] || '').trim();
-        if (!code || !name) continue;
-        const type = typeFromCode(code);
-        if (!type) continue;
-        let dr = 0, cr = 0, amt = null;
-        if ((drCol || crCol) && !preferAmt) {
-          dr = parseFloat(String(row[drCol] || '0').replace(/[,$()]/g, '')) || 0;
-          cr = parseFloat(String(row[crCol] || '0').replace(/[,$()]/g, '')) || 0;
-        } else {
-          const rawAmt = String(row[amtCol] || '').trim();
-          const isParen = /^\(.*\)$/.test(rawAmt);
-          let v = parseFloat(rawAmt.replace(/[,$()]/g, '')) || 0;
-          if (isParen) v = -v;
-          amt = v;
-        }
-        parsed.push({ code, name, type, dr, cr, amt });
-      }
-      if (!parsed.length) return res.status(400).json({ error: 'No valid rows found. Check that account codes are numeric.' });
-
-      // Single-amount files: debit-positive when the column sums to zero,
-      // natural-side otherwise (positive = the account's normal side).
-      let signMode = 'debit-positive';
-      if (parsed.some(p => p.amt !== null)) {
-        const sumSigned = parsed.reduce((s, p) => s + (p.amt || 0), 0);
-        signMode = Math.abs(sumSigned) < 0.01 ? 'debit-positive' : 'natural';
-      }
-      const isDrNatural = t => t === 'Asset' || t === 'Expense';
-      const byCode = new Map();
-      for (const p of parsed) {
-        let natural;
-        if (p.amt === null) natural = isDrNatural(p.type) ? (p.dr - p.cr) : (p.cr - p.dr);
-        else if (signMode === 'debit-positive') natural = isDrNatural(p.type) ? p.amt : -p.amt;
-        else natural = p.amt;
-        const cur = byCode.get(p.code);
-        if (cur) cur.balance += natural;
-        else byCode.set(p.code, { code: p.code, name: p.name, type: p.type, balance: natural });
-      }
-      const lines = [...byCode.values()];
-
-      // A TB should balance. In debit-positive terms the whole file sums to
-      // zero; a residual usually means a subtotal row was read or the ending
-      // column was misdetected — said out loud, never swallowed.
-      const isDr2 = t => t === 'Asset' || t === 'Expense';
-      const residual = round2(lines.reduce((s, l) => s + (isDr2(l.type) ? l.balance : -l.balance), 0));
-
-      const now = new Date().toISOString();
-      const tx = db.transaction(() => {
-        db.prepare('DELETE FROM external_tb_lines WHERE node_id = ? AND as_of = ?').run(node_id, as_of);
-        const ins = db.prepare(`INSERT INTO external_tb_lines
-          (node_id, as_of, account_code, account_name, type, balance, uploaded_at, uploaded_by, filename)
-          VALUES (?,?,?,?,?,?,?,?,?)`);
-        for (const l of lines) ins.run(node_id, as_of, l.code, l.name, l.type, round2(l.balance), now, who(req), req.file.originalname || null);
-      });
-      tx();
-
-      // File the ORIGINAL upload in Shell Entities Accounting's workpapers so
-      // the source document sits next to what was parsed from it. Folder per
-      // as-of date, company + date in the file name; re-upload replaces.
-      let workpaper = null;
-      try {
-        const shell = db.prepare(`SELECT id FROM entities WHERE name LIKE '%Shell Entities Accounting%' ORDER BY id LIMIT 1`).get();
-        if (shell && workpapersDir) {
-          const folder = 'External TBs/' + as_of;
-          const by = who(req) || 'system';
-          for (const fp of ['External TBs', folder]) {
-            try { db.prepare('INSERT INTO entity_folders (entity_id, folder_path, created_by) VALUES (?,?,?)').run(shell.id, fp, by); }
-            catch (e) { if (!/UNIQUE/i.test(e.message)) throw e; }
-          }
-          const ext = (String(req.file.originalname || '').match(/\.[A-Za-z0-9]+$/) || ['.xlsx'])[0];
-          const originalName = as_of + ' ' + node.name + ' TB' + ext;
-          const dir = path.join(workpapersDir, String(shell.id));
-          fs.mkdirSync(dir, { recursive: true });
-          // Replace an earlier copy of the same TB rather than piling up versions.
-          for (const old of db.prepare('SELECT id, stored_filename FROM entity_files WHERE entity_id = ? AND folder_path = ? AND original_name = ?')
-            .all(shell.id, folder, originalName)) {
-            try { fs.unlinkSync(path.join(dir, old.stored_filename)); } catch (e) {}
-            db.prepare('DELETE FROM entity_files WHERE id = ?').run(old.id);
-          }
-          const stored = Date.now() + '_' + Math.floor(Math.random() * 1e6) + '_' + originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
-          fs.writeFileSync(path.join(dir, stored), req.file.buffer);
-          db.prepare('INSERT INTO entity_files (entity_id, folder_path, stored_filename, original_name, size, mime_type, uploaded_by) VALUES (?,?,?,?,?,?,?)')
-            .run(shell.id, folder, stored, originalName, req.file.size, req.file.mimetype || null, by);
-          workpaper = { entity_id: shell.id, folder_path: folder, file_name: originalName };
-        }
-      } catch (e) { console.error('[ic] TB workpaper filing failed:', e.message); }
-
-      res.json({ success: true, node_id, node_name: node.name, as_of, count: lines.length,
-        sign_mode: signMode, residual, balanced: Math.abs(residual) < 0.02, workpaper });
-    } catch (e) { fail(res, e); }
-  });
+  // Registered-company counterparties and the external-trial-balance upload
+  // were removed from the IC module: a counterparty is now a CloudLedger entity
+  // or external, nothing else. The /companies and /external-tbs routes are gone.
 
   // -- People --
   // Names marked as individuals so they stop being proposed as counterparties.
