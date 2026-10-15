@@ -285,22 +285,29 @@ const BRAKER_MAP = [
   ['59105-000', '61154', 'Utility Rebill Service Fee Reimbursement', 'Expense'],
 ];
 
-// The development-entity accounts that were debited when cash went to Foxtail,
-// with the cumulative amounts as at July 2026. Traced to the funding requests
-// in the requisition invoice log:
+// The development-entity accounts that carry the operating ledger's contributed
+// capital (32000 on Braker Operating), eliminated against it in consolidation.
+//
+// Through July 2026 the funding sat in three accounts on Braker Prop Co, traced
+// to the requisition invoice log (cumulative):
 //   11690 Other FF&E           33,250.00  Q1 2026 funding request
 //   12597 Other Marketing      55,197.00  Q1 funding request
 //   13425 Operating Shortfall  238,779.06 Q4 2025 119,204.00 + Q1 69,575.06
 //                                         + Q2 2026 50,000.00
-// Total 327,226.06 — the operating ledger's contributed capital to the penny.
-// 13425 exists only to carry funding, so it eliminates in full and maintains
-// itself. The other two are mixed accounts and carry a stated amount, which the
-// user raises as further transfers post.
+// plus a Q3 2026 Greystar transfer of 120,000.00 — 447,226.06 in total, the
+// operating ledger's contributed capital to the penny.
+//
+// All of it has since been reclassed INTO 11020 Buildings, so the elimination
+// now targets Buildings for the full 447,226.06 (Dr 32000 / Cr 11020). The three
+// original accounts are reclassed to zero and kept here only for provenance. A
+// reclass into a fixed asset is not a cash transfer, so the forward-funding
+// derivation cannot trace it — the amount is stated. (CLA / Max Meyer, 2026-10-15.)
 // [ account code, name, mode, amount ]
 const BRAKER_FUNDING = [
-  ['11690', 'Other FF&E', 'amount', 33250.00],
-  ['12597', 'Other Marketing', 'amount', 55197.00],
-  ['13425', 'Operating Shortfall', 'full', 238779.06],
+  ['11020', 'Buildings', 'amount', 447226.06],
+  ['11690', 'Other FF&E', 'amount', 0],
+  ['12597', 'Other Marketing', 'amount', 0],
+  ['13425', 'Operating Shortfall', 'amount', 0],
 ];
 
 // ────────────────────────────── HP ──────────────────────────────
