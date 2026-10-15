@@ -762,6 +762,12 @@ const BS_ACCOUNT_MAP_BANYANDEV = {
   '12180': ['Other Assets', 'Soft Costs'],
   '12411': ['Other Assets', 'Other development'],
   '12770': ['Other Assets', 'Other development'],
+  // Braker Prop Co's built asset: 11020 Buildings and its 11025 Accumulated
+  // Depreciation present under Fixed Assets, Net (gross + contra), mirroring the
+  // Silsbee package, rather than falling into the Soft Costs heuristic bucket
+  // (CLA / Max Meyer, 2026-10-15). HP has neither code, so it is unaffected.
+  '11020': ['Fixed Assets, Net', 'Fixed Assets'],
+  '11025': ['Fixed Assets, Net', 'Accumulated Depreciation'],
   // Current Liabilities → Accounts Payable
   '20000': ['Current Liabilities', 'Accounts Payable'],
   '20001': ['Current Liabilities', 'Accounts Payable'],
@@ -795,6 +801,7 @@ const BS_ACCOUNT_MAP_BANYANDEV = {
 // Construction Costs → Land → Permits and fees → Other development.
 const BS_SUB_ORDER_BANYANDEV = Object.assign({}, {
   'Current Assets': ['Cash and Cash Equivalents', 'Accounts Receivable, Net', 'Intercompany Receivable', 'Other Current Assets'],
+  'Fixed Assets, Net': ['Fixed Assets', 'Accumulated Depreciation'],
   'Investments': ['Long Term Investments'],
   'Other Assets': ['Soft Costs', 'Construction Costs', 'Land', 'Permits and fees', 'Other development'],
   'Current Liabilities': ['Accounts Payable', 'Accrued Liabilities'],
@@ -803,6 +810,9 @@ const BS_SUB_ORDER_BANYANDEV = Object.assign({}, {
 // single account (CLA shows Total Land, Total Permits and fees), so the renderer
 // forces subtotals within Other Assets for this profile.
 const BANYANDEV_FORCE_SUBTOTAL_SECTIONS = new Set(['Other Assets']);
+// Accumulated-depreciation contra for the banyandev profile — Braker's 11025,
+// subtracted within Fixed Assets, Net the same way Silsbee's 16160/16500 are.
+const BS_CONTRA_CODES_BANYANDEV = new Set(['11025']);
 function banyandevBsClassify(row) {
   const explicit = BS_ACCOUNT_MAP_BANYANDEV[String(row.code)];
   if (explicit) return { section: explicit[0], sub: explicit[1] };
@@ -1967,6 +1977,7 @@ async function buildStatements(getBalances, opts) {
   // and Silsbee's are 16160/16500 in their own Accumulated Depreciation
   // subsection.
   const contraSet = (profile === 'banyan') ? BS_CONTRA_CODES_BANYAN
+    : (profile === 'banyandev') ? BS_CONTRA_CODES_BANYANDEV
     : (profile === 'clip') ? BS_CONTRA_CODES_CLIP
     : (profile === 'silsbee') ? BS_CONTRA_CODES_SILSBEE
     : (profile === 'midco') ? BS_CONTRA_CODES_MIDCO
