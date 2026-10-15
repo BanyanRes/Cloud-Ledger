@@ -1007,7 +1007,12 @@ function buildColumns(db, group, o, computeBalances) {
   const accounts = new Map();
   const note = (row) => {
     if (!accounts.has(row.code)) {
-      accounts.set(row.code, { code: row.code, name: row.name, type: row.type, subtype: row.subtype, bank_acct: row.bank_acct, byEntity: {}, elimination: 0, consolidated: 0 });
+      accounts.set(row.code, { code: row.code, name: row.name, type: row.type, subtype: row.subtype, bank_acct: row.bank_acct, fs_section: row.fs_section || null, fs_subsection: row.fs_subsection || null, byEntity: {}, elimination: 0, consolidated: 0 });
+    } else {
+      // A later member may carry the Chart-of-Accounts placement when the first
+      // did not (e.g. the account exists on several columns, pinned on one).
+      const ex = accounts.get(row.code);
+      if (!ex.fs_section && row.fs_section) { ex.fs_section = row.fs_section; ex.fs_subsection = row.fs_subsection || ex.fs_subsection; }
     }
     return accounts.get(row.code);
   };
@@ -1044,7 +1049,7 @@ function buildColumns(db, group, o, computeBalances) {
 function consolidatedBalances(db, group, o, computeBalances) {
   const built = buildColumns(db, group, o, computeBalances);
   return built.accounts
-    .map(a => ({ code: a.code, name: a.name, type: a.type, subtype: a.subtype, bank_acct: a.bank_acct, balance: a.consolidated, total_debit: 0, total_credit: 0 }))
+    .map(a => ({ code: a.code, name: a.name, type: a.type, subtype: a.subtype, bank_acct: a.bank_acct, fs_section: a.fs_section || null, fs_subsection: a.fs_subsection || null, balance: a.consolidated, total_debit: 0, total_credit: 0 }))
     .filter(r => Math.abs(r.balance) > 0.004 || true);
 }
 

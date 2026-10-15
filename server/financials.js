@@ -459,7 +459,14 @@ function bsClassifyFor(profile, row) {
   // The section picker only offers this account's own side (asset subsections
   // for an asset, etc.), so this regroups within a side and never unbalances
   // the statement. Null for accounts that were never pinned.
-  if (row.fs_section && row.fs_subsection) return { section: row.fs_section, sub: row.fs_subsection };
+  //
+  // EXCEPTION: the midco profile is the consolidated-only CLA package, whose
+  // explicit map (BS_ACCOUNT_MAP_MIDCO) is built account-by-account to match the
+  // CPA deliverable and deliberately DIFFERS from how the member entities pin
+  // the same accounts for their own standalone statements (e.g. SRN pins its
+  // railroad assets to Fixed Assets, but the Midco package groups them in Long
+  // Term Investments). So a member's pin must not override the Midco map here.
+  if (row.fs_section && row.fs_subsection && profile !== 'midco') return { section: row.fs_section, sub: row.fs_subsection };
   if (profile === 'banyan') return banyanBsClassify(row);
   if (profile === 'banyandev') return banyandevBsClassify(row);
   if (profile === 'bsfrgp') {
