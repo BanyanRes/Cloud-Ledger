@@ -1300,11 +1300,14 @@ function simpleLeadsheet(ws, cd, en, m, rows, refByCode, leadCell) {
   const HR = 7;
   hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet', 'Balance', 'FQ Anchor', 'Comments']);
   let r = HR + 1; const first = r;
+  // Liability leadsheets carry credit balances as negative amounts (GL stores them
+  // as positive magnitudes); assets and equity are shown as-is.
+  const neg = cd.type === 'Liability';
   for (const a of rows) {
     const rr = refByCode.get(String(a.code)) || {};
     txt(ws, 'B' + r, a.code, { align: { horizontal: 'left' } }); txt(ws, 'C' + r, a.name);
     wpLink(ws, 'D' + r, rr.sheet, rr.sheet || '');
-    num(ws, 'E' + r, rr.endRef ? { formula: rr.endRef } : a.end);
+    num(ws, 'E' + r, rr.endRef ? { formula: (neg ? '-(' + rr.endRef + ')' : rr.endRef) } : (neg ? -(Number(a.end) || 0) : a.end));
     fqCell(ws, 'F' + r, 'B' + r);
     leadCell.set(String(a.code), ref(cd.tab, 'E' + r));
     r++;
@@ -1345,13 +1348,16 @@ function ccLeadsheet(ws, cd, en, m, rows, refByCode, leadCell) {
   const HR = 7;
   hdr(ws, HR, 2, ['Account No.', 'Account Name', 'Worksheet / Location', 'Cleared Balance', 'Register Balance', 'Ending Balance', 'FQ Anchor', 'CC Statement Ref', 'Comments']);
   let r = HR + 1; const first = r;
+  // Credit cards are liabilities: show the cleared, register and GL balances as
+  // negative (credit) amounts. GL stores the card balance as a positive magnitude.
+  const neg = cd.type === 'Liability';
   for (const a of rows) {
     const rr = refByCode.get(String(a.code)) || {};
     txt(ws, 'B' + r, a.code, { align: { horizontal: 'left' } }); txt(ws, 'C' + r, a.name);
     wpLink(ws, 'D' + r, rr.sheet, a.code);
-    num(ws, 'E' + r, rr.clearedRef ? { formula: rr.clearedRef } : '');
-    num(ws, 'F' + r, rr.registerRef ? { formula: rr.registerRef } : '');
-    num(ws, 'G' + r, rr.endingRef ? { formula: rr.endingRef } : a.end);
+    num(ws, 'E' + r, rr.clearedRef ? { formula: (neg ? '-(' + rr.clearedRef + ')' : rr.clearedRef) } : '');
+    num(ws, 'F' + r, rr.registerRef ? { formula: (neg ? '-(' + rr.registerRef + ')' : rr.registerRef) } : '');
+    num(ws, 'G' + r, rr.endingRef ? { formula: (neg ? '-(' + rr.endingRef + ')' : rr.endingRef) } : (neg ? -(Number(a.end) || 0) : a.end));
     fqCell(ws, 'H' + r, 'B' + r); txt(ws, 'I' + r, 'CC Statement');
     leadCell.set(String(a.code), ref(cd.tab, 'G' + r));
     r++;
@@ -1365,22 +1371,32 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell, reg, char
   const nlen = (v) => Math.abs(Number(v) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).length;
   let mxn = 0; for (const p of pairs) { if (p.asset) mxn = Math.max(mxn, nlen(p.asset.end)); if (p.dep) mxn = Math.max(mxn, nlen(p.dep.end)); }
   const wNum = Math.min(28, Math.max(15, mxn + 4));
+  // Columns: B Asset Acct # | C Asset Name | D Asset Cost | E FQ Anchor (asset) |
+  //          F Dep Acct # | G Dep Name | H Deprec. Balance | I Net Asset | J FQ Anchor (dep) | K Comments.
+  // The FQ (FloQast) anchor reads the amount in the cell to its LEFT, so each anchor
+  // sits immediately right of the figure that ties to the TB. Asset Cost ties directly,
+  // so its anchor moves to E (right after D). Accumulated depreciation/amortization is
+  // ALLOCATED across assets, so no single Deprec. Balance row ties; instead the recap
+  // block below the table sums each dep account (over column H) and puts that tie amount
+  // immediately left of its own #fq-<dep acct> anchor.
   ws.getColumn('A').width = 3.4; ws.getColumn('B').width = 13; ws.getColumn('C').width = 32; ws.getColumn('D').width = wNum;
-  ws.getColumn('E').width = 15; ws.getColumn('F').width = 44; ws.getColumn('G').width = wNum; ws.getColumn('H').width = wNum; ws.getColumn('I').width = 18; ws.getColumn('J').width = 26;
-  titleBlock(ws, en, cd.lead, m, 'K');
+  ws.getColumn('E').width = 16; ws.getColumn('F').width = 15; ws.getColumn('G').width = 44; ws.getColumn('H').width = wNum; ws.getColumn('I').width = wNum; ws.getColumn('J').width = 16; ws.getColumn('K').width = 26;
+  titleBlock(ws, en, cd.lead, m, 'L');
   txt(ws, 'G3', 'Capitalization Policy:'); txt(ws, 'H3', '>$1,000 for single item');
   const sB = ws.getCell('B7'); sB.value = 'Fixed Asset Account Breakdown'; sB.font = F({ bold: true }); sB.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
-  const sF = ws.getCell('E7'); sF.value = 'Depreciation Account Breakdown'; sF.font = F({ bold: true }); sF.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
-  hdr(ws, 8, 2, ['Asset Acct. #', 'Asset Acct. Name', 'Asset Cost', 'Depreciation Account #', 'Depreciation Account Name', 'Deprec. Balance', 'Net Asset Amount', 'FQ Anchor', 'Comments']);
-  ws.getCell('E8').alignment = { horizontal: 'center' };
+  const sF = ws.getCell('F7'); sF.value = 'Depreciation Account Breakdown'; sF.font = F({ bold: true }); sF.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
+  hdr(ws, 8, 2, ['Asset Acct. #', 'Asset Acct. Name', 'Asset Cost', 'FQ Anchor', 'Depreciation Account #', 'Depreciation Account Name', 'Deprec. Balance', 'Net Asset Amount', 'FQ Anchor', 'Comments']);
+  ws.getCell('F8').alignment = { horizontal: 'center' };
+  const depSeen = new Set(); const depCodes = [];
   let r = 9; const first = r;
   for (const p of pairs) {
     if (p.asset) {
       txt(ws, 'B' + r, p.asset.code); wpLink(ws, 'C' + r, faTab, p.asset.name); ws.getCell('C' + r).alignment = { horizontal: 'left' };
       const o = faRefs.get(String(p.asset.code));
       num(ws, 'D' + r, o && o.costRef ? { formula: o.costRef } : p.asset.end);
+      fqCell(ws, 'E' + r, 'B' + r);
       leadCell.set(String(p.asset.code), ref(cd.tab, 'D' + r));
-    } else num(ws, 'D' + r, 0);
+    } else { num(ws, 'D' + r, 0); }
     let _dc = '', _dn = '', _ga = null;
     if (p.asset) {
       const _rf = ((reg && reg.fixedAssets) || []).find((fa) => String(fa.asset_account) === String(p.asset.code) && fa.dep_account);
@@ -1389,18 +1405,31 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell, reg, char
       _dc = String(p.dep.code); _dn = p.dep.name; const _o = faRefs.get(String(p.dep.code)); _ga = (_o && _o.accumRef) ? { formula: '-' + _o.accumRef } : p.dep.end;
     }
     if (_dc) {
-      txt(ws, 'E' + r, _dc, { align: { horizontal: 'center' } }); txt(ws, 'F' + r, _dn);
-      num(ws, 'G' + r, _ga != null ? _ga : 0);
-      leadCell.set(_dc, ref(cd.tab, 'G' + r));
-    } else num(ws, 'G' + r, 0);
-    num(ws, 'H' + r, { formula: 'D' + r + '+G' + r });
-    fqCell(ws, 'I' + r, 'B' + r);
+      txt(ws, 'F' + r, _dc, { align: { horizontal: 'center' } }); txt(ws, 'G' + r, _dn);
+      num(ws, 'H' + r, _ga != null ? _ga : 0);
+      leadCell.set(_dc, ref(cd.tab, 'H' + r));
+      if (!depSeen.has(_dc)) { depSeen.add(_dc); depCodes.push(_dc); }
+    } else { num(ws, 'H' + r, 0); }
+    num(ws, 'I' + r, { formula: 'D' + r + '+H' + r });
     r++;
   }
   const last = r - 1;
   txt(ws, 'B' + r, cd.total, { font: { bold: true } });
-  for (const c of ['D', 'G', 'H']) totalCell(ws, c + r, last >= first ? 'SUBTOTAL(109,' + c + first + ':' + c + last + ')' : null);
-  return ref(cd.tab, 'H' + r);
+  for (const c of ['D', 'H', 'I']) totalCell(ws, c + r, last >= first ? 'SUBTOTAL(109,' + c + first + ':' + c + last + ')' : null);
+  // Depreciation/amortization tie-out recap: because these accounts are allocated
+  // across assets, no single row ties to the TB. One line per dep account sums its
+  // allocated Deprec. Balance rows (SUMPRODUCT over column H, text-safe on the code),
+  // and the #fq anchor sits immediately to the right so the summed figure is what the
+  // FloQast anchor ties to the TB.
+  if (last >= first && depCodes.length) {
+    let rr = r + 2;
+    for (const dc of depCodes) {
+      num(ws, 'I' + rr, { formula: 'SUMPRODUCT(($F$' + first + ':$F$' + last + '="' + dc + '")*($H$' + first + ':$H$' + last + '))' });
+      const fc = ws.getCell('J' + rr); fc.value = '#fq-' + dc; fc.font = F(); fc.alignment = { horizontal: 'center', vertical: 'middle' };
+      rr++;
+    }
+  }
+  return ref(cd.tab, 'I' + r);
 }
 // Other Assets by project — an account × project matrix: every Other Assets GL
 // account down the rows, one column per project (dim_projects, e.g. Van Buren /
