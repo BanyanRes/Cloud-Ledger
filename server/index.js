@@ -11949,6 +11949,7 @@ function reconScopeData(scope, asOf) {
     if (!inScope(E.id)) continue;
     let rec; try { rec = icMod.reconcileForEntity(db, E.id, { computeBalances, as_of: asOf }); } catch (e) { continue; }
     for (const g of (rec.due.rows || [])) {
+      if (!inScope(g.counterparty_entity_id)) continue;
       due.push({
         entity: E.name, cp: nameOf[g.counterparty_entity_id] || g.counterparty_name || '(external)',
         our_acc: codes(g.our_legs), their_acc: codes(g.their_legs),
@@ -11961,6 +11962,7 @@ function reconScopeData(scope, asOf) {
       });
     }
     for (const g of (rec.investment.rows || [])) {
+      if (!inScope(g.counterparty_entity_id)) continue;
       const invLegs = (g.our_legs || []).filter(l => l.ic_type === 'investment');
       const capLegs = (g.our_legs || []).filter(l => l.ic_type === 'contributed_capital');
       const d = [];
@@ -11977,7 +11979,7 @@ function reconScopeData(scope, asOf) {
     }
   }
   const data = computeIcArAp(asOf);
-  const arap = data.comp.filter(r => inScope(r.creditor) || inScope(r.debtor)).map(r => {
+  const arap = data.comp.filter(r => inScope(r.creditor) && inScope(r.debtor)).map(r => {
     const arRows = data.arInvoices.filter(x => x.creditor === r.creditor && x.debtor === r.debtor);
     const apRows = data.apBills.filter(x => x.creditor === r.creditor && x.debtor === r.debtor);
     return {
@@ -11989,9 +11991,15 @@ function reconScopeData(scope, asOf) {
       ],
     };
   });
+  const arCust = new Map();
+  for (const x of data.arInvoices) { if (!(inScope(x.creditor) && inScope(x.debtor))) continue; const k = x.creditor + '>' + x.debtor; arCust.set(k, round2((arCust.get(k) || 0) + x.amount)); }
+  const ar_by_customer = [...arCust.entries()].map(([k, v]) => { const [c, dr] = k.split('>'); return { entity: nameOf[c], customer: nameOf[dr], open: round2(v) }; }).sort((a, b) => Math.abs(b.open) - Math.abs(a.open) || String(a.entity).localeCompare(String(b.entity)));
+  const apVend = new Map();
+  for (const x of data.apBills) { if (!(inScope(x.creditor) && inScope(x.debtor))) continue; const k = x.debtor + '>' + x.creditor; apVend.set(k, round2((apVend.get(k) || 0) + x.amount)); }
+  const ap_by_vendor = [...apVend.entries()].map(([k, v]) => { const [dr, c] = k.split('>'); return { entity: nameOf[dr], vendor: nameOf[c], open: round2(v) }; }).sort((a, b) => Math.abs(b.open) - Math.abs(a.open) || String(a.entity).localeCompare(String(b.entity)));
   const sortD = a => a.sort((x, y) => Math.abs(y.diff) - Math.abs(x.diff) || String(x.entity).localeCompare(String(y.entity)));
   sortD(due); sortD(inv); sortD(arap);
-  return { scope, as_of: asOf, due, inv, arap };
+  return { scope, as_of: asOf, due, inv, arap, ar_by_customer, ap_by_vendor };
 }
 
 app.get('/api/intercompany/recon-view', auth, requireRole('Admin', 'Accountant'), (req, res) => {
@@ -12030,9 +12038,31 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
         ws.addRow({});
       }
     };
-    sheet('Due from - Due to', d.due);
-    sheet('Investment - Contrib capital', d.inv);
-    sheet('A-R vs A-P', d.arap);
+    // Summary schedule first (lead schedule across all three categories).
+    const sum = wb.addWorksheet('Summary');
+    sum.columns = [
+      { header: 'Category', key: 'cat', width: 28 },
+      { header: 'Entity', key: 'e', width: 32 },
+      { header: 'Counterparty', key: 'cp', width: 32 },
+      { header: 'Our side', key: 'l', width: 18, style: { numFmt: MONEY } },
+      { header: 'Their side', key: 'r', width: 18, style: { numFmt: MONEY } },
+      { header: 'Difference', key: 'df', width: 18, style: { numFmt: MONEY } },
+      { header: 'Status', key: 's', width: 12, style: CTR },
+    ];
+    sum.getRow(1).font = { bold: true }; sum.views = [{ state: 'frozen', ySplit: 1 }];
+    const CATN = { due: 'Due from / Due to', inv: 'Investment / Contributed capital', arap: 'A/R vs A/P' };
+    for (const [ck, rr] of [['due', d.due], ['inv', d.inv], ['arap', d.arap]]) for (const r of rr) sum.addRow({ cat: CATN[ck], e: r.entity, cp: r.cp, l: r.left, r: r.right, df: r.diff, s: r.status });
+    sheet('Due from - Due to detail', d.due);
+    sheet('Investment - Contrib detail', d.inv);
+    sheet('A-R vs A-P detail', d.arap);
+    const arc = wb.addWorksheet('A-R by IC customer');
+    arc.columns = [{ header: 'Entity', key: 'e', width: 32 }, { header: 'Customer (entity)', key: 'c', width: 32 }, { header: 'Open A/R', key: 'o', width: 18, style: { numFmt: MONEY } }];
+    arc.getRow(1).font = { bold: true }; arc.views = [{ state: 'frozen', ySplit: 1 }];
+    for (const r of (d.ar_by_customer || [])) arc.addRow({ e: r.entity, c: r.customer, o: r.open });
+    const apv = wb.addWorksheet('A-P by IC vendor');
+    apv.columns = [{ header: 'Entity', key: 'e', width: 32 }, { header: 'Vendor (entity)', key: 'v', width: 32 }, { header: 'Open A/P', key: 'o', width: 18, style: { numFmt: MONEY } }];
+    apv.getRow(1).font = { bold: true }; apv.views = [{ state: 'frozen', ySplit: 1 }];
+    for (const r of (d.ap_by_vendor || [])) apv.addRow({ e: r.entity, v: r.vendor, o: r.open });
     const label = scope === 'cla' ? 'CLA' : scope === 'weaver' ? 'Weaver' : 'All';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="IC_Recon_' + label + '_' + asOf + '.xlsx"');
