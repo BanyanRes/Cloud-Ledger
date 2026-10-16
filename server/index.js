@@ -11910,7 +11910,7 @@ app.get('/api/intercompany/ic-arap-comparison.xlsx', auth, requireRole('Admin', 
       try { const m = icMod.matchCompany(String(nm), entities, []); return (m && m.entity_id != null) ? Number(m.entity_id) : null; }
       catch (e) { return null; }
     };
-    const arByPair = new Map(), apByPair = new Map(), arDetail = [], apDetail = [];
+    const arByPair = new Map(), apByPair = new Map(), arDetail = [], apDetail = [], arInvoices = [], apBills = [];
     for (const E of entities) {
       try {
         const aging = arMod.buildAging(db, E.id, asOf);
@@ -11922,11 +11922,26 @@ app.get('/api/intercompany/ic-arap-comparison.xlsx', auth, requireRole('Admin', 
           arDetail.push({ fromId: E.id, name: r.customer, toId, open: round2(open) });
           const k = E.id + '>' + toId; arByPair.set(k, round2((arByPair.get(k) || 0) + open));
         }
+        let memoMap = {};
+        try { for (const m of db.prepare('SELECT invoice_num, memo FROM ar_invoices WHERE entity_id = ?').all(E.id)) memoMap[m.invoice_num] = m.memo || ''; } catch (e) {}
+        for (const d of (aging.detail || [])) {
+          const open = Number(d.open) || 0;
+          if (Math.abs(open) < 0.005) continue;
+          const toId = matchEntity(d.customer);
+          if (toId == null || toId === E.id) continue;
+          arInvoices.push({ creditor: E.id, debtor: toId, doc: d.invoice_num, date: d.invoice_date, memo: memoMap[d.invoice_num] || '', amount: round2(open) });
+        }
       } catch (e) { /* no AR */ }
       try {
         const ap = buildApAging(E.id, asOf);
         const byV = new Map();
-        for (const it of (ap.open_items || [])) { const v = (it.vendor || '').trim(); if (!v) continue; byV.set(v, round2((byV.get(v) || 0) + (Number(it.amount) || 0))); }
+        for (const it of (ap.open_items || [])) {
+          const v = (it.vendor || '').trim(); if (!v) continue;
+          const amt = Number(it.amount) || 0;
+          byV.set(v, round2((byV.get(v) || 0) + amt));
+          const toId = matchEntity(v);
+          if (toId != null && toId !== E.id) apBills.push({ creditor: toId, debtor: E.id, doc: it.entry_num, date: it.date, vendor: v, memo: it.memo || '', amount: round2(amt) });
+        }
         for (const [vend, open] of byV) {
           if (Math.abs(open) < 0.005) continue;
           const toId = matchEntity(vend);
@@ -11961,6 +11976,29 @@ app.get('/api/intercompany/ic-arap-comparison.xlsx', auth, requireRole('Admin', 
     for (const r of comp) c.addRow({ cr: nameOf[r.creditor], dr: nameOf[r.debtor], ar: r.ar, ap: r.ap, diff: r.diff });
     const t = c.addRow({ cr: 'TOTAL', dr: '', ar: round2(comp.reduce((s, r) => s + r.ar, 0)), ap: round2(comp.reduce((s, r) => s + r.ap, 0)), diff: round2(comp.reduce((s, r) => s + r.diff, 0)) });
     t.font = { bold: true };
+    const fmtM = n => (n < 0 ? '(' : '') + Math.abs(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (n < 0 ? ')' : '');
+    // The actual invoices and bills behind each pair that does not tie.
+    const disc = comp.filter(r => Math.abs(r.diff) >= 0.005);
+    const dd = wb.addWorksheet('Discrepancy detail');
+    dd.columns = [
+      { header: 'Relationship', key: 'rel', width: 48 },
+      { header: 'Side', key: 'side', width: 8 },
+      { header: 'Doc #', key: 'doc', width: 16 },
+      { header: 'Date', key: 'date', width: 13 },
+      { header: 'Memo / party', key: 'memo', width: 54 },
+      { header: 'Amount', key: 'amt', width: 18, style: { numFmt: MONEY } },
+    ];
+    mkHdr(dd);
+    for (const r of disc) {
+      const arRows = arInvoices.filter(x => x.creditor === r.creditor && x.debtor === r.debtor).sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+      const apRows = apBills.filter(x => x.creditor === r.creditor && x.debtor === r.debtor).sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+      const h = dd.addRow({ rel: nameOf[r.creditor] + '  ->  ' + nameOf[r.debtor], memo: 'A/R ' + fmtM(r.ar) + '    A/P ' + fmtM(r.ap) + '    diff ' + fmtM(r.diff) });
+      h.font = { bold: true };
+      for (const x of arRows) dd.addRow({ side: 'A/R', doc: x.doc, date: x.date, memo: x.memo, amt: x.amount });
+      for (const x of apRows) dd.addRow({ side: 'A/P', doc: x.doc, date: x.date, memo: (x.vendor ? (x.vendor + (x.memo ? ' - ' + x.memo : '')) : x.memo), amt: x.amount });
+      if (!arRows.length && !apRows.length) dd.addRow({ memo: '(balance is opening/GL, not invoice-detailed)' });
+      dd.addRow({});
+    }
     const mkDetail = (title, rows, who) => {
       const w = wb.addWorksheet(title);
       w.columns = [
