@@ -942,8 +942,6 @@ export default function App(){
     {key:'INTERCOMPANY',label:'Intercompany',icon:'🔗',items:[
       {id:'ic_recon',label:'IC Reconciliation',icon:'⚖️',section:'intercompany'},
       {id:'ic_mapping',label:'IC Mapping',icon:'🗺️',section:'intercompany'},
-      {id:'org_structure',label:'Org Structure',icon:'🏛️',section:'intercompany'},
-      {id:'consolidation',label:'Consolidation',icon:'🧩',section:'consolidation'},
     ]},
     {key:'REPORTS',label:'Reports',icon:'📊',items:[
       // CLRF is a pure LP fund: its statement package is the ASC 946 set under
@@ -957,6 +955,8 @@ export default function App(){
       {id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
       ...(!isCLRF?[{id:'ttm',label:'Trailing 12 Months',icon:'📈',section:'reports'}]:[]),
       {id:'fundrep',label:'Fund Reporting',icon:'🏦',section:'reports'},
+      {id:'org_structure',label:'Org Structure',icon:'🏛️',section:'intercompany'},
+      {id:'consolidation',label:'Consolidation',icon:'🧩',section:'consolidation'},
       ...(isCLRF?[{id:'rep_pcapstmt',label:'PCAP Statements',icon:'📄',section:'reports'}]:[]),
       {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},
       ...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),
@@ -9127,278 +9127,96 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
 }
 
 function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}){
-  const[tab,setTab]=useState('due');
-  const[eid,setEid]=useState(activeEntity||'');
-  // Follow the header's entity picker, same as IC Mapping.
-  useEffect(()=>{if(activeEntity)setEid(activeEntity);},[activeEntity]);
+  const[scope,setScope]=useState('all');
+  const[cat,setCat]=useState('arap');
   const[asOf,setAsOf]=useState(today());
   const[data,setData]=useState(null);
-  const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
-  const[msg,setMsg]=useState('');
+  const[loading,setLoading]=useState(false);
+  const[err,setErr]=useState('');const[msg,setMsg]=useState('');
   const[q,setQ]=useState('');
-  const[arapBusy,setArapBusy]=useState(false);
-  const dlArap=async()=>{setArapBusy(true);setErr('');try{const out=await api.getIcArApComparisonXlsx(asOf);if(out){const u=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=u;a.download=out.filename;a.click();URL.revokeObjectURL(u);setMsg('Downloaded '+out.filename+'.');}}catch(e){setErr(e.message);}finally{setArapBusy(false);}};
-  const[claBusy,setClaBusy]=useState(false);
-  const dlCla=async()=>{setClaBusy(true);setErr('');try{const out=await api.getClaReconPackageXlsx(asOf);if(out){const u=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=u;a.download=out.filename;a.click();URL.revokeObjectURL(u);setMsg('Downloaded '+out.filename+'.');}}catch(e){setErr(e.message);}finally{setClaBusy(false);}};
-  // An unmapped account is mapped here, on the page that found it.
-  const[companies,setCompanies]=useState([]);
-  const[mapping,setMapping]=useState(null);
-  const entityOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
-  const loadCompanies=useCallback(async()=>{
-    try{setCompanies([]);}catch(e){console.error('[ic] companies:',e.message);}},[]);
-  useEffect(()=>{loadCompanies();},[loadCompanies]);
-
-  const run=useCallback(async()=>{
-    if(!eid){setData(null);return;}
-    setLoading(true);setErr('');
-    try{setData(await api.reconcileIcEntity(eid,asOf));}
-    catch(e){setErr(e.message);setData(null);}
-    finally{setLoading(false);}
-  },[eid,asOf]);
-  useEffect(()=>{run();},[eid]);// eslint-disable-line react-hooks/exhaustive-deps
-
-  const side=data?(tab==='due'?data.due:data.investment):null;
-  const us=data?data.entity.name:'Selected entity';
-
-  // Search narrows what is SHOWN, never what was computed. The totals line
-  // keeps reporting the whole entity, so filtering the table can never make an
-  // unexplained difference look smaller than it is.
-  const needle=q.trim().toLowerCase();
-  const acctMatches=a=>!needle
-    ||String(a.account_code||'').toLowerCase().includes(needle)
-    ||String(a.account_name||'').toLowerCase().includes(needle);
-  const shownRows=side?side.rows.filter(r=>icRowMatches(r,needle)):[];
-  const shownUnmapped=side?(side.unmapped||[]).filter(acctMatches):[];
-  const shownExternal=side?(side.external||[]).filter(acctMatches):[];
-
-  const doExport=()=>{
-    if(!data)return;
-    const d=[['Intercompany Reconciliation'],[data.entity.name+' — as of '+(data.as_of||asOf)],[]];
-    const dump=(title,rows,cols)=>{
-      d.push([title]);
-      d.push(['Counterparty','Status','Difference',data.entity.name+' acct','Account name','Amount','Counterparty acct','Account name','Amount']);
-      rows.forEach(r=>{
-        zipLegs(r.our_legs,r.their_legs).forEach(([a,b],i)=>d.push([
-          i===0?r.counterparty_name:'',i===0?(IC_STATUS[r.status]||['','' ])[1]:'',i===0?r.difference:'',
-          a?a.account_code:'',a?a.account_name:'',a?a.amount:'',
-          b?b.account_code:'',b?b.account_name:'',b?b.amount:'']));
-        if(cols)d.push(['','','','Net',...['',r.our_net,'','',r.their_net]]);
-      });
-      d.push([]);
-    };
-    dump('DUE FROM / DUE TO',data.due.rows,true);
-    if(data.investment.findings.length){
-      d.push(['INVESTMENT IN ITSELF']);
-      d.push(['Account','Account name','Amount']);
-      data.investment.findings.forEach(f=>d.push([f.account_code,f.account_name,f.amount]));
-      d.push([]);
-    }
-    dump('INVESTMENT / CONTRIBUTED CAPITAL',data.investment.rows,false);
-    const ext=[...data.due.external,...data.investment.external];
-    if(ext.length){
-      d.push(['OUTSIDE THE GROUP']);
-      d.push(['Account','Account name','Type','Our balance','Their value (entered)','Difference']);
-      ext.forEach(x=>d.push([x.account_code,x.account_name,IC_TYPE_LABEL[x.ic_type]||x.ic_type,x.amount,
-        x.manual_balance==null?'':x.manual_balance,x.difference==null?'':x.difference]));
-      d.push([]);
-    }
-    exportToExcel(d,'IC_Recon_'+String(data.entity.code||data.entity.id)+'_'+String(data.as_of||asOf).replace(/-/g,'')+'.xlsx');
-  };
-
-  const StatusLine=({t})=>{
-    if(!t)return null;
-    const bits=[['matched',t.matched],['mismatch',t.mismatched],['one_sided',t.one_sided],['no_ledger',t.no_ledger]]
-      .filter(([,n])=>n>0);
-    return<div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:14}}>
-      {bits.length?bits.map(([k,n])=><span key={k}>{n} <IcStatus status={k}/></span>)
-        :<span style={{color:T.textDim,fontSize:12}}>nothing with a balance</span>}
-      {t.settled>0&&<span style={{color:T.textDim,fontSize:12}}>· {t.settled} settled</span>}
-      {t.abs_difference>0.005&&<span style={{marginLeft:'auto',fontWeight:700,color:T.red,fontVariantNumeric:'tabular-nums'}}>
-        {fmt(t.abs_difference)} unexplained</span>}
-    </div>;
-  };
-
+  const[open,setOpen]=useState({});
+  const[dlBusy,setDlBusy]=useState(false);
+  const load=useCallback(async()=>{setLoading(true);setErr('');setOpen({});try{setData(await api.getReconView(scope,asOf));}catch(e){setErr(e.message);setData(null);}finally{setLoading(false);}},[scope,asOf]);
+  useEffect(()=>{load();},[load]);
+  const SCOPES=[['all','All entities','every entity'],['cla','CLA package','CLA group'],['weaver','Weaver package','Weaver group']];
+  const CATS=[['due','Due from / Due to'],['inv','Investment / Contributed capital'],['arap','A/R vs A/P']];
+  const rowsOf=c=>data?(c==='due'?data.due:c==='inv'?data.inv:data.arap):[];
+  const mmc=c=>rowsOf(c).filter(r=>Math.abs(r.diff)>=0.005).length;
+  const nq=q.trim().toLowerCase();
+  const rows=rowsOf(cat).filter(r=>!nq||[r.entity,r.cp,r.our_acc,r.their_acc,...(r.detail||[]).map(d=>(d.ref||'')+' '+(d.desc||''))].some(v=>String(v||'').toLowerCase().includes(nq)));
+  const net=rows.reduce((s,r)=>s+r.diff,0);
+  const mm=rows.filter(r=>Math.abs(r.diff)>=0.005).length;
+  const dl=async()=>{setDlBusy(true);setErr('');try{const out=await api.getReconPackageXlsx(scope,asOf);if(out){const u=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=u;a.download=out.filename;a.click();URL.revokeObjectURL(u);setMsg('Downloaded '+out.filename+'.');}}catch(e){setErr(e.message);}finally{setDlBusy(false);}};
+  const sideLab={ar:'A/R',ap:'A/P',our:'Ours',their:'Theirs'};
+  const sKind=x=>x==='Matched'||x==='Settled'?'ok':x==='One-sided'?'warn':x==='Mismatch'?'bad':'info';
+  const green=T.ok||T.green||'#15803d';
+  const colHead=cat==='arap'?['Creditor (A/R)','Debtor (A/P)','A/R','A/P','Difference','Status']:cat==='inv'?['Entity','Counterparty','Our side','Their side','Difference','Status']:['Entity','Counterparty','Our net','Their net','Difference','Status'];
+  const thS={textAlign:'left',fontSize:11,textTransform:'uppercase',letterSpacing:'.04em',color:T.textDim,fontWeight:650,padding:'10px 14px',borderBottom:'1px solid '+T.border,background:T.bgElevated};
   return(<div>
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8,flexWrap:'wrap',gap:12}}>
-      <div><div style={S.h1}>IC Reconciliation</div>
-        <div style={S.sub}>Every counterparty of the selected entity, with the account number and name on both sides.</div></div>
-      <div style={{display:'flex',gap:8,alignItems:'flex-end',flexWrap:'wrap'}}>
-        <div><label style={S.label}>Entity</label>
-          <select style={{...S.selectSm,minWidth:240}} value={eid} onChange={e=>setEid(e.target.value)}>
-            <option value=''>Select an entity…</option>
-            {entityOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
-        <div><label style={S.label}>As of</label>
-          <input style={S.inputSm} type='date' value={asOf} onChange={e=>setAsOf(e.target.value)}/></div>
-        <div><label style={S.label}>Search</label>
-          <IcSearch value={q} onChange={setQ} placeholder='Counterparty, account code or name…' width={250}/></div>
-        <button style={S.btnP} onClick={run} disabled={!eid||loading}>{loading?'Running…':'Run'}</button>
-        {data&&<button style={S.btnExport} onClick={doExport}>Export Excel</button>}</div></div>
-
-    {err&&<div style={{...S.card,borderColor:T.red+'40'}}><div style={S.err}>{err}</div></div>}
-    {msg&&<div style={{...S.card,borderColor:T.green+'40',padding:14}}><div style={S.success}>{msg}</div></div>}
-    {!eid&&!err&&<IcEmpty>Pick an entity to reconcile.</IcEmpty>}
-
-    {eid&&<div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
-      {[['due','Due from / Due to'],['investment','Investment / Contributed capital'],['arap','A/R vs A/P (all entities)'],['cla','CLA package']].map(([k,l])=>
-        <button key={k} onClick={()=>setTab(k)} style={{background:'none',border:'none',borderBottom:'2px solid '+(tab===k?T.accent:'transparent'),color:tab===k?T.accent:T.textMuted,fontWeight:tab===k?700:500,fontSize:13,padding:'9px 16px',cursor:'pointer',marginBottom:-1}}>{l}
-          {k==='due'&&data&&data.due.totals.mismatched>0&&<span style={{marginLeft:7}}><IcBadge kind="bad">{data.due.totals.mismatched}</IcBadge></span>}
-          {k==='investment'&&data&&(data.investment.findings.length+data.investment.totals.mismatched)>0&&
-            <span style={{marginLeft:7}}><IcBadge kind="bad">{data.investment.findings.length+data.investment.totals.mismatched}</IcBadge></span>}</button>)}</div>}
-
-    {tab==='arap'&&<div style={{...S.card,padding:20,maxWidth:760}}>
-      <div style={{fontWeight:700,color:T.textBright,fontSize:15,marginBottom:4}}>Intercompany A/R vs A/P reconciliation</div>
-      <div style={{color:T.textMuted,fontSize:13,marginBottom:14}}>Across every entity: customers (A/R) and vendors (A/P) matched to CloudLedger entities, each relationship lined up — the creditor’s A/R against the debtor’s A/P, with the difference and the invoices/bills behind each gap. Uses the As-of date above ({asOf}).</div>
-      <button style={S.btnP} disabled={arapBusy} onClick={dlArap}>{arapBusy?'Preparing…':'Download Excel'}</button></div>}
-    {tab==='cla'&&<div style={{...S.card,padding:20,maxWidth:760}}>
-      <div style={{fontWeight:700,color:T.textBright,fontSize:15,marginBottom:4}}>CLA reconciliation package</div>
-      <div style={{color:T.textMuted,fontSize:13,marginBottom:14}}>One Excel for the entities in the CLA group — Due from/Due to, Investment/Contributed capital, and A/R vs A/P (with the invoices/bills behind each gap) — scoped to the CLA-handled entities, to hand off to CLA. Uses the As-of date above ({asOf}).</div>
-      <button style={S.btnP} disabled={claBusy} onClick={dlCla}>{claBusy?'Preparing…':'Download CLA package'}</button></div>}
-    {(tab==='due'||tab==='investment')&&loading&&<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Reading balances…</div>}
-
-    {(tab==='due'||tab==='investment')&&!loading&&data&&<>
-      <StatusLine t={side.totals}/>
-
-      {/* The investment tab says so plainly when the entity simply has none,
-          rather than showing an empty table that reads like a failure. */}
-      {tab==='investment'&&!data.investment.has_any
-        ?<IcEmpty><b>{data.entity.name}</b> has no investment or contributed-capital accounts.<br/>
-          <span style={{fontSize:12}}>Nothing to reconcile on this tab for this entity.</span></IcEmpty>
-      :side.rows.length===0&&!(side.external||[]).length&&(tab==='due'||!data.investment.findings.length)
-        ?<IcEmpty>No mapped {tab==='due'?'due from / due to':'investment'} account on <b>{data.entity.name}</b> faces another group entity at {data.as_of||asOf}.
-          {' '}Map its accounts on the <button style={S.link} onClick={()=>setPage&&setPage('ic_mapping')}>IC Mapping</button> page.</IcEmpty>
-      :side.rows.length===0&&(side.external||[]).length>0
-        ?<IcEmpty>Every mapped {tab==='due'?'due from / due to':'investment'} account on <b>{data.entity.name}</b> faces a party outside the group,
-          {' '}so there is nothing to reconcile. They are listed below.</IcEmpty>
-      :null}
-
-      {tab==='investment'&&data.investment.findings.length>0&&
-        <div style={{...S.cardFlush,border:'1px solid '+T.red+'40',overflow:'hidden'}}>
-          <div style={{padding:'12px 16px',background:T.redDim,borderBottom:'1px solid '+T.border}}>
-            <span style={{fontWeight:700,color:T.red,fontSize:13}}>Investment in itself ({data.investment.findings.length})</span>
-            <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>Inflates this entity's own assets and equity by the same amount.</span></div>
-          <table style={S.table}><tbody>{data.investment.findings.map(f=><tr key={f.account_code}>
-            <td style={{...S.td,fontWeight:600,color:T.textBright,width:88}}>{f.account_code}</td>
-            <td style={{...S.td,whiteSpace:'normal'}}>{f.account_name}</td>
-            <td style={{...S.tdR,fontWeight:700,color:T.red,width:150}}>{fmt(f.amount)}</td></tr>)}</tbody></table></div>}
-
-      {shownRows.length>0&&<div className="cl-scroll" style={scrollBox()}>
-        <table style={S.table}>
-          <thead><tr>
-            <th colSpan={3} style={{...S.th,borderRight:'2px solid '+T.border}}>{us}</th>
-            <th colSpan={3} style={S.th}>Counterparty</th>
-            <th style={S.thR}>Difference</th></tr></thead>
-          <tbody>{shownRows.map(r=>{
-            const pairs=zipLegs(r.our_legs,r.their_legs);
-            const bad=r.status==='mismatch'||r.status==='self';
-            const warn=r.status==='one_sided';
-            return<Fragment key={(r.counterparty_entity_id||r.counterparty_node_id||r.counterparty_name)+'-'+r.status}>
-              <tr style={{background:bad?T.redDim:(warn?T.orangeDim:T.bgElevated)}}>
-                <td colSpan={6} style={{...S.td,fontWeight:700,color:T.textBright}}>
-                  {r.counterparty_name}
-                  {r.tb_as_of?<span style={{marginLeft:8}}><IcBadge kind="info">their TB · {r.tb_as_of}</IcBadge></span>
-                    :r.off_ledger&&<span style={{marginLeft:8}}><IcBadge kind="info">no ledger</IcBadge></span>}
-                  <span style={{marginLeft:8}}><IcStatus status={r.status}/></span></td>
-                <td style={{...S.tdR,fontWeight:700,color:bad?T.red:(warn?T.orange:T.green)}}>{fmt(r.difference)}</td></tr>
-              {pairs.map(([a,b],i)=><tr key={i}>
-                {legCells(a)}
-                <td style={{...S.td,borderLeft:'2px solid '+T.border,width:88,color:T.textBright,fontWeight:600}}>{b?b.account_code:''}</td>
-                <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{b?b.account_name:
-                  (i===0&&!r.their_legs.length?<span style={{color:T.textDim,fontStyle:'italic'}}>
-                    {r.off_ledger?'no ledger in CloudLedger':'this entity has not mapped its side'}</span>:'')}
-                  {b&&b.ic_type&&<span style={{marginLeft:6,fontSize:10,color:T.textDim}}>{IC_TYPE_LABEL[b.ic_type]}</span>}
-                  {b&&b.from_pin&&<span style={{marginLeft:6}} title={'Read straight from '+r.counterparty_name+'\u2019s ledger because the mapping on this side names this account. '+r.counterparty_name+' has not mapped it.'}>
-                    <IcBadge kind="info">their GL</IcBadge></span>}
-                  {b&&b.from_tb&&<span style={{marginLeft:6}} title={'Read from the uploaded trial balance as of '+(r.tb_as_of||'')+'.'}>
-                    <IcBadge kind="info">their TB</IcBadge></span>}</td>
-                <td style={{...S.tdR,width:130}}>{b?fmt(b.amount):''}</td>
-                <td style={S.tdR}></td></tr>)}
-              {tab==='due'&&<tr style={{background:T.bgElevated}}>
-                <td style={S.td}></td>
-                <td style={{...S.td,fontWeight:600,color:T.textMuted}}>Net receivable</td>
-                <td style={{...S.tdR,fontWeight:700}}>{fmt(r.our_net)}</td>
-                <td style={{...S.td,borderLeft:'2px solid '+T.border}}></td>
-                <td style={{...S.td,fontWeight:600,color:T.textMuted}}>Net receivable</td>
-                <td style={{...S.tdR,fontWeight:700}}>{fmt(r.their_net)}</td>
-                <td style={S.tdR}></td></tr>}
-              {tab==='investment'&&<tr style={{background:T.bgElevated}}>
-                <td style={S.td}></td>
-                <td style={{...S.td,fontWeight:600,color:T.textMuted}}>Investment / Capital</td>
-                <td style={{...S.tdR,fontWeight:700}}>{fmt(r.our_investment)} / {fmt(r.our_capital)}</td>
-                <td style={{...S.td,borderLeft:'2px solid '+T.border}}></td>
-                <td style={{...S.td,fontWeight:600,color:T.textMuted}}>Investment / Capital</td>
-                <td style={{...S.tdR,fontWeight:700}}>{fmt(r.their_investment)} / {fmt(r.their_capital)}</td>
-                <td style={S.tdR}></td></tr>}
-            </Fragment>;})}</tbody></table></div>}
-
-      {needle&&side.rows.length>0&&shownRows.length===0&&
-        <IcEmpty>No counterparty or account on this tab matches “{q}”.</IcEmpty>}
-
-      {/* Mapped right here. Walking to the setup page to retype an account code
-          that is already on the screen is the reason these sat unmapped. */}
-      {shownUnmapped.length>0&&<div className="cl-scroll" style={scrollBox()}>
-        <div style={{padding:'12px 16px',background:T.bgElevated,borderBottom:'1px solid '+T.border}}>
-          <span style={{fontWeight:700,color:T.textBright,fontSize:13}}>Not mapped yet ({shownUnmapped.length}{shownUnmapped.length!==side.unmapped.length?' of '+side.unmapped.length:''})</span>
-          <span style={{color:T.textMuted,fontSize:12,marginLeft:8}}>These accounts on {data.entity.name} carry a balance and look intercompany, but no mapping says who they face.</span>
-          <button style={{...S.link,marginLeft:10}} onClick={()=>setPage&&setPage('ic_mapping')}>Open IC Mapping</button></div>
-        <table style={S.table}><tbody>{shownUnmapped.map(u=><Fragment key={u.account_code}>
-          <tr style={mapping===u.account_code?{background:T.accentDim}:null}>
-            <td style={{...S.td,fontWeight:600,color:T.textBright,width:88}}>{u.account_code}</td>
-            <td style={{...S.td,whiteSpace:'normal'}}>{u.account_name}
-              {u.reason&&<span style={{color:T.textDim,fontSize:11,marginLeft:8}}>{u.reason}</span>}</td>
-            <td style={{...S.tdR,width:150}}>{fmt(u.balance)}</td>
-            {canEdit&&<td style={{...S.td,width:80,textAlign:'right'}}>
-              <button style={{...S.btnGhost,color:T.accent,fontSize:11}}
-                onClick={()=>{setMapping(mapping===u.account_code?null:u.account_code);setMsg('');}}>
-                {mapping===u.account_code?'Close':'Map'}</button></td>}</tr>
-          {canEdit&&mapping===u.account_code&&<tr style={{background:T.accentDim}}>
-            <td colSpan={4} style={{...S.td,whiteSpace:'normal'}}>
-              <IcMapForm entityId={data.entity.id} acct={u} entityOpts={entityOpts} companies={companies}
-                onCompanyAdded={loadCompanies} onCancel={()=>setMapping(null)} onMsg={setMsg} onErr={setErr}
-                onSaved={async()=>{setMapping(null);await run();}}/></td></tr>}
-        </Fragment>)}</tbody></table></div>}
-
-      {/* Not reconciled — there is no counterparty ledger to agree with, so a
-          difference would be meaningless. Listed anyway so the balance is not
-          silently missing from the page. */}
-      {shownExternal.length>0&&<details open={shownExternal.some(x=>x.manual_balance!=null)} style={{...S.cardFlush,marginTop:14,padding:'10px 16px'}}>
-        <summary style={{cursor:'pointer',color:T.textMuted,fontSize:12.5}}>
-          <b style={{color:T.textBright}}>{shownExternal.length}</b> account{shownExternal.length>1?'s':''} face
-          {shownExternal.length>1?'':'s'} a party outside the group
-          <span style={{marginLeft:8,fontVariantNumeric:'tabular-nums'}}>({fmt(shownExternal.reduce((s,x)=>s+Math.abs(x.amount),0))})</span>
-          <span style={{marginLeft:8,color:T.textDim}}>— no ledger here; enter their value to compare</span>
-        </summary>
-        <table style={{...S.table,marginTop:8}}>
-          <thead><tr><th style={S.th}>Account</th><th style={S.th}></th>
-            <th style={S.thR}>Our balance</th><th style={S.thR}>Their value (entered)</th><th style={S.thR}>Difference</th></tr></thead>
-          <tbody>{shownExternal.map(x=><tr key={x.account_code}>
-          <td style={{...S.td,fontWeight:600,color:T.textBright,width:88}}>{x.account_code}</td>
-          <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{x.account_name}
-            <span style={{marginLeft:6,fontSize:10,color:T.textDim}}>{IC_TYPE_LABEL[x.ic_type]}</span></td>
-          <td style={{...S.tdR,width:130}}>{fmt(x.amount)}</td>
-          <td style={{...S.tdR,width:170}}>
-            {canEdit?<input key={x.mapping_id+':'+(x.manual_balance==null?'':x.manual_balance)}
-              style={{...S.inputSm,width:140,textAlign:'right'}} placeholder='from their books…'
-              defaultValue={x.manual_balance==null?'':x.manual_balance}
-              onKeyDown={e=>{if(e.key==='Enter')e.target.blur();}}
-              onBlur={async e=>{
-                const v=e.target.value.trim().replace(/[,$\s]/g,'');
-                const cur=x.manual_balance==null?'':String(x.manual_balance);
-                if(v===cur)return;
-                if(v!==''&&!isFinite(Number(v))){setErr('Enter a number for '+x.account_code+'.');return;}
-                try{await api.setIcManualBalance(x.mapping_id,(data.as_of||asOf)||null,v===''?null:Number(v));setErr('');await run();}
-                catch(e2){setErr(e2.message);}}}/>
-              :(x.manual_balance==null?<span style={{color:T.textDim}}>—</span>:fmt(x.manual_balance))}</td>
-          <td style={{...S.tdR,width:120,fontWeight:700,color:x.difference==null?T.textDim:(Math.abs(x.difference)<0.01?T.green:T.red)}}>
-            {x.difference==null?'':fmt(x.difference)}</td></tr>)}</tbody></table></details>}
-    </>}
+    <div style={{marginBottom:12}}><div style={S.h1}>IC Reconciliation</div>
+      <div style={S.sub}>Due from/Due to, Investment/Contributed capital, and A/R vs A/P — with the invoices and accounts behind every discrepancy. Pick a scope, then a report.</div></div>
+    <div style={{display:'flex',gap:8,marginBottom:16,flexWrap:'wrap'}}>
+      {SCOPES.map(([k,l,sub])=><div key={k} onClick={()=>setScope(k)} style={{display:'flex',flexDirection:'column',gap:1,background:scope===k?T.accentDim:T.panel,border:'1px solid '+(scope===k?T.accent:T.border),borderRadius:12,padding:'10px 16px',cursor:'pointer',minWidth:150}}>
+        <span style={{fontWeight:650,fontSize:14,color:scope===k?T.accent:T.textBright}}>{l}</span><span style={{fontSize:12,color:T.textDim}}>{sub}</span></div>)}
+    </div>
+    <div style={{...S.row,alignItems:'flex-end',marginBottom:14,flexWrap:'wrap'}}>
+      <div><label style={S.label}>As of</label><div><input style={S.inputSm} type='date' value={asOf} onChange={e=>setAsOf(e.target.value)}/></div></div>
+      <div style={{flex:1,minWidth:240}}><label style={S.label}>Search</label><div><input style={{...S.inputSm,width:'100%'}} value={q} onChange={e=>setQ(e.target.value)} placeholder='Entity, counterparty, account or doc #…'/></div></div>
+      <button style={S.btnP} disabled={dlBusy||loading} onClick={dl}>{dlBusy?'Preparing\u2026':'Export Excel package'}</button>
+    </div>
+    {err&&<div style={{...S.card,borderColor:T.red+'40',padding:14}}><div style={S.err}>{err}</div></div>}
+    {msg&&<div style={{...S.card,borderColor:green+'40',padding:14}}><div style={S.success}>{msg}</div></div>}
+    <div style={{display:'flex',gap:2,marginBottom:4,borderBottom:'1px solid '+T.border,flexWrap:'wrap'}}>
+      {CATS.map(([k,l])=>{const m=mmc(k);return <button key={k} onClick={()=>{setCat(k);setOpen({});}} style={{background:'none',border:'none',borderBottom:'2px solid '+(cat===k?T.accent:'transparent'),color:cat===k?T.textBright:T.textMuted,fontWeight:cat===k?700:600,fontSize:13.5,padding:'10px 16px',cursor:'pointer',marginBottom:-1,display:'flex',gap:8,alignItems:'center'}}>{l}{m>0&&<IcBadge kind="bad">{m}</IcBadge>}</button>;})}
+    </div>
+    <div style={{display:'flex',gap:18,alignItems:'center',padding:'12px 2px',color:T.textMuted,fontSize:13,flexWrap:'wrap'}}>
+      <span><b style={{color:T.textBright}}>{rows.length}</b> relationships</span>
+      <span><b style={{color:T.red}}>{mm}</b> with a difference</span>
+      <span><b style={{color:green}}>{rows.length-mm}</b> tie out</span>
+      <span>net difference <b style={{color:T.textBright,fontFamily:'monospace'}}>{fmt(net)}</b></span>
+    </div>
+    {loading?<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Reading balances…</div>
+    :<div style={{...S.cardFlush,border:'1px solid '+T.border,overflow:'hidden'}}>
+      <table style={{...S.table,width:'100%'}}><thead><tr>
+        <th style={{...thS,width:24}}></th>
+        {colHead.map((c,i)=><th key={i} style={{...thS,textAlign:i>=2&&i<=4?'right':(i===5?'center':'left')}}>{c}</th>)}
+      </tr></thead><tbody>
+        {rows.length===0?<tr><td colSpan={7} style={{padding:28,textAlign:'center',color:T.textDim}}>No {CATS.find(c=>c[0]===cat)[1]} relationships in this scope.</td></tr>
+        :rows.flatMap((r,i)=>{
+          const key=cat+'-'+i; const isOpen=!!open[key];
+          const main=<tr key={key} onClick={()=>setOpen(o=>({...o,[key]:!o[key]}))} style={{cursor:'pointer',borderBottom:'1px solid '+T.borderLight,background:isOpen?T.accentDim:'transparent'}}>
+            <td style={{...S.td,color:isOpen?T.accent:T.textDim}}>{isOpen?'\u25be':'\u25b8'}</td>
+            <td style={S.td}><div style={{fontWeight:650,color:T.textBright}}>{r.entity}</div>{r.our_acc&&<div style={{fontSize:12,color:T.textDim,fontFamily:'monospace'}}>{r.our_acc}</div>}</td>
+            <td style={S.td}><div style={{color:T.textMuted}}>{r.cp}</div>{r.their_acc&&<div style={{fontSize:12,color:T.textDim,fontFamily:'monospace'}}>{r.their_acc}</div>}</td>
+            <td style={{...S.td,textAlign:'right',fontFamily:'monospace'}}>{fmt(r.left)}</td>
+            <td style={{...S.td,textAlign:'right',fontFamily:'monospace'}}>{fmt(r.right)}</td>
+            <td style={{...S.td,textAlign:'right',fontFamily:'monospace',fontWeight:700,color:Math.abs(r.diff)<0.005?green:T.red}}>{fmt(r.diff)}</td>
+            <td style={{...S.td,textAlign:'center'}}><IcBadge kind={sKind(r.status)}>{r.status}</IcBadge></td>
+          </tr>;
+          if(!isOpen) return [main];
+          const sub=(r.detail||[]).reduce((a,d)=>a+d.amt,0);
+          const grid={display:'grid',gridTemplateColumns:'70px 130px 1fr 150px',gap:10,padding:'7px 12px',alignItems:'center'};
+          const det=<tr key={key+'-d'}><td colSpan={7} style={{padding:0,borderBottom:'1px solid '+T.borderLight}}>
+            <div style={{padding:'10px 14px 14px 36px',background:T.bgElevated}}>
+              <div style={{fontSize:11,color:T.textDim,fontWeight:650,textTransform:'uppercase',letterSpacing:'.04em',marginBottom:6}}>Line items that make up the difference</div>
+              <div style={{border:'1px solid '+T.border,borderRadius:9,overflow:'hidden'}}>
+                {(r.detail||[]).length===0?<div style={{padding:'10px 12px',color:T.textDim,fontSize:13}}>No line-item detail.</div>
+                :(r.detail||[]).map((d,j)=><div key={j} style={{...grid,borderBottom:'1px solid '+T.borderLight,fontSize:13}}>
+                  <span style={{fontWeight:700,fontSize:11,color:(d.side==='ar'||d.side==='our')?T.accent:(T.ext||T.textMuted)}}>{sideLab[d.side]||d.side}</span>
+                  <span style={{fontFamily:'monospace',fontSize:12,color:T.textMuted}}>{d.ref}</span>
+                  <span style={{color:T.textMuted}}>{d.desc}</span>
+                  <span style={{textAlign:'right',fontFamily:'monospace',fontWeight:600,color:d.amt<0?T.red:T.textBright}}>{fmt(d.amt)}</span></div>)}
+                <div style={{...grid,fontWeight:700,background:T.panel}}>
+                  <span></span><span></span><span style={{color:T.textBright}}>Subtotal (our side less their side)</span>
+                  <span style={{textAlign:'right',fontFamily:'monospace',color:sub<0?T.red:T.textBright}}>{fmt(sub)}</span></div>
+              </div></div></td></tr>;
+          return [main,det];
+        })}
+      </tbody></table>
+    </div>}
   </div>);
 }
 
-// ── External Entities TB ──
-// Counterparties with no ledger in CloudLedger (JVs, outside ventures) still
-// issue trial balances. Uploaded here per company + month, a TB stands in for
-// the missing ledger: IC Mapping answers from its lines and the
-// reconciliation compares against it like an in-ledger pair.
 function ExternalTbPage({canEdit=true}){
   const[companies,setCompanies]=useState([]);
   const[tbs,setTbs]=useState([]);

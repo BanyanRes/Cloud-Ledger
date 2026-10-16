@@ -11926,6 +11926,120 @@ app.get('/api/intercompany/unmapped-all.xlsx', auth, requireRole('Admin', 'Accou
   } catch (e) { if (!res.headersSent) res.status(500).json({ error: e.message }); else res.end(); }
 });
 
+// Scope-based IC reconciliation data (All entities / CLA group / Weaver group):
+// Due from/Due to and Investment/Contributed capital (from reconcileForEntity)
+// plus A/R vs A/P (from computeIcArAp), each relationship carrying the line
+// items that make up its difference. Feeds both the on-screen view and the
+// Excel package.
+function groupEntitySet(name) {
+  const g = db.prepare('SELECT id FROM user_groups WHERE name = ?').get(name);
+  if (!g) return new Set();
+  return new Set(db.prepare('SELECT DISTINCT entity_id FROM user_group_entity_access WHERE group_id = ?').all(g.id).map(r => Number(r.entity_id)));
+}
+function reconScopeData(scope, asOf) {
+  const icMod = require('./intercompany');
+  const cla = groupEntitySet('CLA'), weaver = groupEntitySet('Weaver');
+  const inScope = (eid) => scope === 'cla' ? cla.has(Number(eid)) : scope === 'weaver' ? weaver.has(Number(eid)) : true;
+  const allEnt = db.prepare('SELECT id, name FROM entities ORDER BY name COLLATE NOCASE').all();
+  const nameOf = {}; allEnt.forEach(e => { nameOf[e.id] = e.name; });
+  const STAT = { matched: 'Matched', mismatch: 'Mismatch', one_sided: 'One-sided', settled: 'Settled', no_ledger: 'No ledger', self: 'Self-invest' };
+  const codes = legs => (legs || []).map(l => l.account_code).join(', ');
+  const due = [], inv = [];
+  for (const E of allEnt) {
+    if (!inScope(E.id)) continue;
+    let rec; try { rec = icMod.reconcileForEntity(db, E.id, { computeBalances, as_of: asOf }); } catch (e) { continue; }
+    for (const g of (rec.due.rows || [])) {
+      due.push({
+        entity: E.name, cp: nameOf[g.counterparty_entity_id] || g.counterparty_name || '(external)',
+        our_acc: codes(g.our_legs), their_acc: codes(g.their_legs),
+        left: round2(g.our_net), right: round2(g.their_net), diff: round2(g.difference),
+        status: STAT[g.status] || g.status,
+        detail: [
+          ...(g.our_legs || []).map(l => ({ side: 'our', ref: l.account_code, desc: l.account_name, amt: round2(l.signed || 0) })),
+          ...(g.their_legs || []).map(l => ({ side: 'their', ref: l.account_code, desc: l.account_name, amt: round2(l.signed || 0) })),
+        ],
+      });
+    }
+    for (const g of (rec.investment.rows || [])) {
+      const invLegs = (g.our_legs || []).filter(l => l.ic_type === 'investment');
+      const capLegs = (g.our_legs || []).filter(l => l.ic_type === 'contributed_capital');
+      const d = [];
+      if (g.our_investment) d.push({ side: 'our', ref: codes(invLegs) || 'inv', desc: 'Our investment', amt: round2(g.our_investment) });
+      if (g.their_capital) d.push({ side: 'their', ref: '', desc: 'Their contributed capital', amt: round2(-g.their_capital) });
+      if (g.our_capital) d.push({ side: 'our', ref: codes(capLegs) || 'cap', desc: 'Our contributed capital', amt: round2(g.our_capital) });
+      if (g.their_investment) d.push({ side: 'their', ref: '', desc: 'Their investment', amt: round2(-g.their_investment) });
+      inv.push({
+        entity: E.name, cp: nameOf[g.counterparty_entity_id] || g.counterparty_name || '(external)',
+        our_acc: codes(g.our_legs), their_acc: '',
+        left: round2((g.our_investment || 0) + (g.our_capital || 0)), right: round2((g.their_capital || 0) + (g.their_investment || 0)),
+        diff: round2(g.difference), status: STAT[g.status] || g.status, detail: d,
+      });
+    }
+  }
+  const data = computeIcArAp(asOf);
+  const arap = data.comp.filter(r => inScope(r.creditor) || inScope(r.debtor)).map(r => {
+    const arRows = data.arInvoices.filter(x => x.creditor === r.creditor && x.debtor === r.debtor);
+    const apRows = data.apBills.filter(x => x.creditor === r.creditor && x.debtor === r.debtor);
+    return {
+      entity: nameOf[r.creditor], cp: nameOf[r.debtor], our_acc: '', their_acc: '',
+      left: r.ar, right: r.ap, diff: r.diff, status: Math.abs(r.diff) < 0.005 ? 'Matched' : 'Mismatch',
+      detail: [
+        ...arRows.map(x => ({ side: 'ar', ref: x.doc, desc: x.memo || '', amt: round2(x.amount) })),
+        ...apRows.map(x => ({ side: 'ap', ref: x.doc, desc: (x.vendor ? (x.vendor + (x.memo ? ' - ' + x.memo : '')) : x.memo) || '', amt: round2(-x.amount) })),
+      ],
+    };
+  });
+  const sortD = a => a.sort((x, y) => Math.abs(y.diff) - Math.abs(x.diff) || String(x.entity).localeCompare(String(y.entity)));
+  sortD(due); sortD(inv); sortD(arap);
+  return { scope, as_of: asOf, due, inv, arap };
+}
+
+app.get('/api/intercompany/recon-view', auth, requireRole('Admin', 'Accountant'), (req, res) => {
+  try {
+    const asOf = (req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of)) ? req.query.as_of : '2026-08-31';
+    const scope = ['all', 'cla', 'weaver'].includes(req.query.scope) ? req.query.scope : 'all';
+    res.json(reconScopeData(scope, asOf));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
+  try {
+    const asOf = (req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of)) ? req.query.as_of : '2026-08-31';
+    const scope = ['all', 'cla', 'weaver'].includes(req.query.scope) ? req.query.scope : 'all';
+    const d = reconScopeData(scope, asOf);
+    const MONEY = '#,##0.00;(#,##0.00)'; const CTR = { alignment: { horizontal: 'center' } };
+    const fmtM = n => (n < 0 ? '(' : '') + Math.abs(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (n < 0 ? ')' : '');
+    const sideLab = { ar: 'A/R', ap: 'A/P', our: 'Ours', their: 'Theirs' };
+    const wb = new ExcelJS.Workbook(); wb.creator = 'CloudLedger'; wb.created = new Date();
+    const sheet = (title, rows) => {
+      const ws = wb.addWorksheet(title);
+      ws.columns = [
+        { header: 'Relationship', key: 'rel', width: 24 },
+        { header: 'Side', key: 'side', width: 9, style: CTR },
+        { header: 'Ref', key: 'ref', width: 16, style: CTR },
+        { header: 'Description', key: 'desc', width: 54 },
+        { header: 'Amount', key: 'amt', width: 18, style: { numFmt: MONEY } },
+      ];
+      ws.getRow(1).font = { bold: true }; ws.views = [{ state: 'frozen', ySplit: 1 }];
+      for (const r of rows) {
+        const h = ws.addRow({ rel: r.entity + '  ->  ' + r.cp, desc: 'left ' + fmtM(r.left) + '    right ' + fmtM(r.right) + '    diff ' + fmtM(r.diff) + '   (' + r.status + ')' });
+        h.font = { bold: true };
+        for (const x of (r.detail || [])) ws.addRow({ side: sideLab[x.side] || x.side, ref: x.ref, desc: x.desc, amt: x.amt });
+        const sub = ws.addRow({ desc: 'Subtotal', amt: round2((r.detail || []).reduce((s, x) => s + x.amt, 0)) });
+        sub.font = { bold: true };
+        ws.addRow({});
+      }
+    };
+    sheet('Due from - Due to', d.due);
+    sheet('Investment - Contrib capital', d.inv);
+    sheet('A-R vs A-P', d.arap);
+    const label = scope === 'cla' ? 'CLA' : scope === 'weaver' ? 'Weaver' : 'All';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="IC_Recon_' + label + '_' + asOf + '.xlsx"');
+    await wb.xlsx.write(res); res.end();
+  } catch (e) { if (!res.headersSent) res.status(500).json({ error: e.message }); else res.end(); }
+});
+
 // Shared: intercompany A/R-vs-A/P data across every entity (also used by the CLA package).
 function computeIcArAp(asOf) {
   const arMod = require('./ar');
