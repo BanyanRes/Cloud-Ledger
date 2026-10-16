@@ -11941,6 +11941,11 @@ function reconScopeData(scope, asOf) {
   const cla = groupEntitySet('CLA'), weaver = groupEntitySet('Weaver');
   const inScope = (eid) => scope === 'cla' ? cla.has(Number(eid)) : scope === 'weaver' ? weaver.has(Number(eid)) : true;
   const allEnt = db.prepare('SELECT id, name FROM entities ORDER BY name COLLATE NOCASE').all();
+  // Weaver's package is scoped to CLRF's intercompany activity: every pair must
+  // involve County Line Rail Fund. Activity between the other Weaver entities
+  // (e.g. CLIP and Silsbee) is excluded.
+  const clrfIds = new Set(allEnt.filter(e => weaver.has(Number(e.id)) && /rail fund/i.test(String(e.name))).map(e => Number(e.id)));
+  const involvesClrf = (a, b) => scope !== 'weaver' || clrfIds.has(Number(a)) || clrfIds.has(Number(b));
   const nameOf = {}; allEnt.forEach(e => { nameOf[e.id] = e.name; });
   const STAT = { matched: 'Matched', mismatch: 'Mismatch', one_sided: 'One-sided', settled: 'Settled', no_ledger: 'No ledger', self: 'Self-invest' };
   const codes = legs => (legs || []).map(l => l.account_code).join(', ');
@@ -11949,7 +11954,7 @@ function reconScopeData(scope, asOf) {
     if (!inScope(E.id)) continue;
     let rec; try { rec = icMod.reconcileForEntity(db, E.id, { computeBalances, as_of: asOf }); } catch (e) { continue; }
     for (const g of (rec.due.rows || [])) {
-      if (!inScope(g.counterparty_entity_id)) continue;
+      if (!inScope(g.counterparty_entity_id) || !involvesClrf(E.id, g.counterparty_entity_id)) continue;
       due.push({
         entity: E.name, cp: nameOf[g.counterparty_entity_id] || g.counterparty_name || '(external)',
         our_acc: codes(g.our_legs), their_acc: codes(g.their_legs),
@@ -11962,7 +11967,7 @@ function reconScopeData(scope, asOf) {
       });
     }
     for (const g of (rec.investment.rows || [])) {
-      if (!inScope(g.counterparty_entity_id)) continue;
+      if (!inScope(g.counterparty_entity_id) || !involvesClrf(E.id, g.counterparty_entity_id)) continue;
       const invLegs = (g.our_legs || []).filter(l => l.ic_type === 'investment');
       const capLegs = (g.our_legs || []).filter(l => l.ic_type === 'contributed_capital');
       const d = [];
@@ -11979,7 +11984,7 @@ function reconScopeData(scope, asOf) {
     }
   }
   const data = computeIcArAp(asOf);
-  const arap = data.comp.filter(r => inScope(r.creditor) && inScope(r.debtor)).map(r => {
+  const arap = data.comp.filter(r => inScope(r.creditor) && inScope(r.debtor) && involvesClrf(r.creditor, r.debtor)).map(r => {
     const arRows = data.arInvoices.filter(x => x.creditor === r.creditor && x.debtor === r.debtor);
     const apRows = data.apBills.filter(x => x.creditor === r.creditor && x.debtor === r.debtor);
     return {
@@ -11992,10 +11997,10 @@ function reconScopeData(scope, asOf) {
     };
   });
   const arCust = new Map();
-  for (const x of data.arInvoices) { if (!(inScope(x.creditor) && inScope(x.debtor))) continue; const k = x.creditor + '>' + x.debtor; arCust.set(k, round2((arCust.get(k) || 0) + x.amount)); }
+  for (const x of data.arInvoices) { if (!(inScope(x.creditor) && inScope(x.debtor)) || !involvesClrf(x.creditor, x.debtor)) continue; const k = x.creditor + '>' + x.debtor; arCust.set(k, round2((arCust.get(k) || 0) + x.amount)); }
   const ar_by_customer = [...arCust.entries()].map(([k, v]) => { const [c, dr] = k.split('>'); return { entity: nameOf[c], customer: nameOf[dr], open: round2(v) }; }).sort((a, b) => Math.abs(b.open) - Math.abs(a.open) || String(a.entity).localeCompare(String(b.entity)));
   const apVend = new Map();
-  for (const x of data.apBills) { if (!(inScope(x.creditor) && inScope(x.debtor))) continue; const k = x.debtor + '>' + x.creditor; apVend.set(k, round2((apVend.get(k) || 0) + x.amount)); }
+  for (const x of data.apBills) { if (!(inScope(x.creditor) && inScope(x.debtor)) || !involvesClrf(x.creditor, x.debtor)) continue; const k = x.debtor + '>' + x.creditor; apVend.set(k, round2((apVend.get(k) || 0) + x.amount)); }
   const ap_by_vendor = [...apVend.entries()].map(([k, v]) => { const [dr, c] = k.split('>'); return { entity: nameOf[dr], vendor: nameOf[c], open: round2(v) }; }).sort((a, b) => Math.abs(b.open) - Math.abs(a.open) || String(a.entity).localeCompare(String(b.entity)));
   const sortD = a => a.sort((x, y) => Math.abs(y.diff) - Math.abs(x.diff) || String(x.entity).localeCompare(String(y.entity)));
   sortD(due); sortD(inv); sortD(arap);
