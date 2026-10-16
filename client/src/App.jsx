@@ -9600,13 +9600,14 @@ function IcRow({row,st,entityId,entityOpts,entName,canEdit,onSaved,onMsg,onErr})
       {canEdit&&row.mapping_id==null&&!row.id&&<button style={{...S.btnP,padding:'5px 12px',fontSize:12}} disabled={busy} onClick={save}>{busy?'Saving…':'Confirm'}</button>}</div>;
   }else if(mapped){
     right=<div>
-      <div style={{display:'flex',justifyContent:'space-between',gap:10,alignItems:'baseline'}}>
-        <div style={{fontSize:13}}>
-          <span style={{color:T.textMuted}}>{cpName} · </span>
-          <b style={{color:T.textBright}}>{row.their_account_code}</b> <span style={{color:T.textMuted}}>{row.their_account_name||''}</span>
-          {row.self&&<span style={{marginLeft:6}}><IcBadge kind="bad">points at itself</IcBadge></span>}
-          {row.their_account_missing&&<span style={{marginLeft:6}}><IcBadge kind="bad">not in their ledger</IcBadge></span>}</div>
-        <span style={{fontWeight:650,whiteSpace:'nowrap',color:T.textBright}}>{row.their_balance==null?'':fmt(row.their_balance)}</span></div>
+      <div style={{display:'flex',justifyContent:'space-between',gap:10}}>
+        <span style={{fontWeight:600,color:T.textBright,fontSize:13.5}}>{cpName}</span>
+        <span style={{fontWeight:650,fontSize:13.5,whiteSpace:'nowrap',color:T.textBright}}>{row.their_balance==null?'':fmt(row.their_balance)}</span></div>
+      <div style={{display:'flex',alignItems:'center',gap:8,marginTop:3,flexWrap:'wrap'}}>
+        <span style={{fontSize:12,color:T.textMuted,fontFamily:'monospace'}}>{row.their_account_code}</span>
+        <span style={{fontSize:11,color:T.textDim}}>· {row.their_account_name||''}</span>
+        {row.self&&<IcBadge kind="bad">points at itself</IcBadge>}
+        {row.their_account_missing&&<IcBadge kind="bad">not in their ledger</IcBadge>}</div>
       {row.gap!=null&&<div style={{marginTop:4,fontSize:12,fontWeight:600,color:row.offsets?T.green:T.red}}>
         {row.offsets?'Reconciled':'Difference '+fmt(row.gap)}</div>}
       {canEdit&&<div style={{marginTop:8,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
