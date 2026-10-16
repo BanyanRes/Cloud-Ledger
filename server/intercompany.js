@@ -155,6 +155,17 @@ function ensureSchema(db) {
   } catch (e) { console.error('[db migrate] ic registered-company removal:', e.message); }
 
   db.exec('DROP TABLE IF EXISTS external_tb_lines');
+
+  // Accounts a person has marked as NOT intercompany. Some accounts parse as
+  // intercompany by name ("Due from Outside Vendor") but face a third party, so
+  // they should never appear in the IC module. Excluding one removes any mapping
+  // and keeps the name-based scan from resurfacing it. Reversible.
+  db.exec(`CREATE TABLE IF NOT EXISTS ic_excluded_accounts (
+    entity_id INTEGER NOT NULL,
+    account_code TEXT NOT NULL,
+    note TEXT, excluded_at TEXT, excluded_by TEXT,
+    PRIMARY KEY (entity_id, account_code)
+  )`);
 }
 
 // org_nodes is created by server/orgstructure.js. Both modules register at boot,
@@ -565,7 +576,9 @@ function suggestMappings(db, entityId, { computeBalances, as_of, includeIndividu
     .all(entityId).map(r => r.account_code));
   const balances = computeBalances(entityId, as_of ? { as_of } : {});
   const balByCode = new Map(balances.map(b => [String(b.code), b]));
-  const accounts = db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ? ORDER BY code').all(entityId);
+  let excludedIc = new Set();
+  try { excludedIc = new Set(db.prepare('SELECT account_code FROM ic_excluded_accounts WHERE entity_id = ?').all(entityId).map(r => String(r.account_code))); } catch (e) {}
+  const accounts = db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ? ORDER BY code').all(entityId).filter(a => !excludedIc.has(String(a.code)));
 
   const out = [];
   for (const a of accounts) {
@@ -1784,6 +1797,39 @@ function registerIntercompanyRoutes(app, deps) {
   const gate = [auth, requireRole('Admin', 'Accountant')];
 
   const adminGate = [auth, requireRole('Admin')];
+
+  // Mark an account as NOT intercompany (removes the whole row) / restore it.
+  app.get('/api/intercompany/excluded', ...gate, (req, res) => {
+    try {
+      const eid = req.query.entity_id ? Number(req.query.entity_id) : null;
+      const rows = eid
+        ? db.prepare('SELECT entity_id, account_code, note, excluded_at FROM ic_excluded_accounts WHERE entity_id = ? ORDER BY account_code').all(eid)
+        : db.prepare('SELECT entity_id, account_code, note, excluded_at FROM ic_excluded_accounts ORDER BY entity_id, account_code').all();
+      res.json(rows);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+  app.post('/api/intercompany/exclude', ...gate, (req, res) => {
+    try {
+      const entity_id = Number(req.body && req.body.entity_id);
+      const account_code = req.body && String(req.body.account_code || '').trim();
+      if (!entity_id || !account_code) return res.status(400).json({ error: 'entity_id and account_code are required' });
+      if (!userHasEntityAccess(req.user.id, req.user.role, entity_id)) return res.status(403).json({ error: 'No access to entity ' + entity_id });
+      const now = new Date().toISOString();
+      db.prepare('INSERT OR REPLACE INTO ic_excluded_accounts (entity_id, account_code, note, excluded_at, excluded_by) VALUES (?,?,?,?,?)')
+        .run(entity_id, account_code, (req.body.note || null), now, who(req));
+      const del = db.prepare('DELETE FROM intercompany_accounts WHERE entity_id = ? AND account_code = ?').run(entity_id, account_code);
+      res.json({ ok: true, removed_mapping: del.changes });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+  app.delete('/api/intercompany/exclude', ...gate, (req, res) => {
+    try {
+      const entity_id = Number(req.query.entity_id);
+      const account_code = String(req.query.account_code || '');
+      if (!entity_id || !account_code) return res.status(400).json({ error: 'entity_id and account_code are required' });
+      const r = db.prepare('DELETE FROM ic_excluded_accounts WHERE entity_id = ? AND account_code = ?').run(entity_id, account_code);
+      res.json({ ok: true, restored: r.changes });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
   app.get('/api/intercompany/sweep-redundant', ...adminGate, (req, res) => {
     try { res.json(sweepRedundantDue(db, computeBalances, { apply: false })); }
     catch (e) { res.status(e.status || 500).json({ error: e.message }); }

@@ -9525,7 +9525,7 @@ function IcTbAccountSelect({nodeId,asOf,value,onChange,width=300}){
 // inline editor (counterparty + their account) when it still needs mapping, or
 // an External marker. Everything for one account lives on one line; the save
 // path is the worklist's, so how a mapping is written is unchanged.
-function IcRow({row,st,entityId,entityOpts,entName,canEdit,onSaved,onMsg,onErr}){
+function IcRow({row,st,entityId,entityOpts,entName,canEdit,onSaved,onMsg,onErr,onExclude}){
   const[kindSel,setKindSel]=useState(row.is_external?'ext':'cl');
   const[cpId,setCpId]=useState(row.counterparty_entity_id?String(row.counterparty_entity_id):'');
   const[mode,setMode]=useState(row.suggested_existing?'existing':(row.suggested_new?'new':'pick'));
@@ -9583,6 +9583,11 @@ function IcRow({row,st,entityId,entityOpts,entName,canEdit,onSaved,onMsg,onErr})
     catch(e){onErr&&onErr(e.message);}finally{setBusy(false);}
   };
 
+  const excludeRow=async()=>{
+    if(!window.confirm('Remove '+row.account_code+' '+(row.account_name||'')+' from intercompany entirely? It will stop appearing here (reversible under the People tab).'))return;
+    setBusy(true);
+    try{await onExclude(row.account_code);onErr&&onErr('');}catch(e){onErr&&onErr(e.message);}finally{setBusy(false);}
+  };
   const pill=st.kind
     ?<IcBadge kind={st.kind}>{st.label}</IcBadge>
     :<span style={{fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:999,border:'1px dashed '+T.border,color:T.textMuted}}>{st.label}</span>;
@@ -9593,7 +9598,7 @@ function IcRow({row,st,entityId,entityOpts,entName,canEdit,onSaved,onMsg,onErr})
   if(external){
     right=<div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
       <span style={{color:T.textMuted,fontSize:13}}>Outside the group — not reconciled{row.notes?' ('+row.notes+')':''}.</span>
-      {canEdit&&<button style={{...S.btnGhost,color:T.red,fontSize:11}} disabled={busy} onClick={remove}>Remove</button>}</div>;
+      {canEdit&&<button style={{...S.btnGhost,color:T.red,fontSize:11}} disabled={busy} onClick={excludeRow} title='Not an intercompany account — remove it from the module entirely. Reversible under People.'>Remove</button>}</div>;
   }else if(row.investor_capital){
     right=<div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
       <span style={{color:T.green,fontSize:13,fontWeight:600}}>Investor capital — no counterparty account needed</span>
@@ -9646,6 +9651,7 @@ function IcRow({row,st,entityId,entityOpts,entName,canEdit,onSaved,onMsg,onErr})
              {row.suggested_existing&&<button style={S.link} onClick={()=>setMode('existing')}>suggestion</button>}</span>
       )}
       {canEdit&&<button style={{...S.btnP,padding:'6px 13px',fontSize:12}} disabled={busy} onClick={save}>{busy?'Saving…':'Save'}</button>}
+      {canEdit&&<button style={{...S.link,fontSize:12}} disabled={busy} onClick={excludeRow} title='Not an intercompany account — remove it from the module entirely.'>not intercompany</button>}
     </div>;
   }
 
@@ -9678,6 +9684,9 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[sweepBusy,setSweepBusy]=useState(false);
   const[dlBusy,setDlBusy]=useState(false);
   const dlCompare=async()=>{setDlBusy(true);setErr('');try{const out=await api.getIcArApComparisonXlsx('2026-08-31');if(out){const u=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=u;a.download=out.filename;a.click();URL.revokeObjectURL(u);setMsg('Downloaded '+out.filename+'.');}}catch(e){setErr(e.message);}finally{setDlBusy(false);}};
+  const[excluded,setExcluded]=useState([]);
+  const loadExcluded=useCallback(async()=>{try{setExcluded(await api.getIcExcluded());}catch(e){}},[]);
+  const excludeAccount=async(code)=>{setErr('');await api.excludeIcAccount({entity_id:Number(eid),account_code:code});setMsg('Removed '+code+' from intercompany.');await load();await loadExcluded();};
   const entityOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
   const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
 
@@ -9692,6 +9701,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   useEffect(()=>{load();},[load]);
   const loadPeople=useCallback(async()=>{try{setPeople(await api.getIcPeople());}catch(e){console.error('[ic] people:',e.message);}},[]);
   useEffect(()=>{loadPeople();},[loadPeople]);
+  useEffect(()=>{loadExcluded();},[loadExcluded]);
   const runSweep=async()=>{setSweepBusy(true);try{setSweep(await api.getIcSweepRedundant());setErr('');}catch(e){setErr(e.message);}finally{setSweepBusy(false);}};
   const applySweep=async()=>{setSweepBusy(true);try{const r=await api.applyIcSweepRedundant();setSweep(r);setMsg('Cleaned up '+r.applied+' redundant account'+(r.applied===1?'':'s')+(r.ambiguous?(' ('+r.ambiguous+' ambiguous left for review)'):'')+'.');await load();}catch(e){setErr(e.message);}finally{setSweepBusy(false);}};
 
@@ -9780,7 +9790,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
           {loading&&!mapped?<div style={{padding:30,textAlign:'center',color:T.textMuted}}>Loading…</div>
           :shown.length===0?<div style={{padding:30,textAlign:'center',color:T.textDim}}>No accounts match.</div>
           :shown.map(r=><IcRow key={r.account_code} row={r} st={statusOf(r)} entityId={eid} entityOpts={entityOpts} entName={entName}
-             canEdit={canEdit} onSaved={load} onMsg={setMsg} onErr={setErr}/>)}
+             canEdit={canEdit} onSaved={load} onMsg={setMsg} onErr={setErr} onExclude={excludeAccount}/>)}
         </div>
       </div>}
     </>}
@@ -9797,6 +9807,17 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
                 try{await api.unmarkIcPerson(p.id);await loadPeople();setMsg('"'+p.name+'" is no longer marked a person.');}
                 catch(e){setErr(e.message);}}}>Undo</button></td>}</tr>)}
         </tbody></table></div>}
+      {excluded.length>0&&<div style={{marginTop:18}}>
+        <div style={{fontWeight:700,color:T.textBright,marginBottom:6}}>Accounts marked not intercompany ({excluded.length})</div>
+        <div style={{...S.cardFlush,overflow:'hidden'}}><table style={S.table}><tbody>
+          {excluded.map(x=><tr key={x.entity_id+'-'+x.account_code}>
+            <td style={{...S.td,color:T.textMuted}}>{entName(x.entity_id)||('entity '+x.entity_id)}</td>
+            <td style={{...S.td,fontFamily:'monospace',color:T.textBright}}>{x.account_code}</td>
+            {canEdit&&<td style={{...S.td,textAlign:'right',width:110}}>
+              <button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={async()=>{
+                try{await api.unexcludeIcAccount(x.entity_id,x.account_code);await loadExcluded();await load();setMsg('Restored '+x.account_code+'.');}
+                catch(e){setErr(e.message);}}}>Undo</button></td>}</tr>)}
+        </tbody></table></div></div>}
     </>}
 
   </div>);

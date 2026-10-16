@@ -1080,6 +1080,9 @@ export const api = {
   getIcPeople: () => request('/intercompany/people'),
   markIcPerson: (b) => request('/intercompany/people', { method: 'POST', body: b }),
   unmarkIcPerson: (id) => request('/intercompany/people/' + id, { method: 'DELETE' }),
+  getIcExcluded: (entityId) => request('/intercompany/excluded' + (entityId ? ('?entity_id=' + entityId) : '')),
+  excludeIcAccount: (b) => request('/intercompany/exclude', { method: 'POST', body: b }),
+  unexcludeIcAccount: (entityId, code) => request('/intercompany/exclude?entity_id=' + entityId + '&account_code=' + encodeURIComponent(code), { method: 'DELETE' }),
   getIcSweepRedundant: () => request('/intercompany/sweep-redundant'),
   applyIcSweepRedundant: () => request('/intercompany/sweep-redundant', { method: 'POST' }),
 
