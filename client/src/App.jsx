@@ -8660,7 +8660,7 @@ function IcCpAccountSelect({entityId,accountCode,counterpartyEntityId,value,onCh
     <select style={{...S.selectSm,minWidth:width||260}} value={value||''} onChange={e=>onChange(e.target.value)}
       title='Optional. The reconciliation nets by counterparty either way — naming the account lines the two entries up and brings their balance in even if they have not mapped their side.'>
       <option value=''>{busy?'Reading their ledger…':'— their account (optional) —'}</option>
-      {cand&&cand.candidates.map(x=><option key={x.account_code} value={x.account_code}>
+      {cand&&[...cand.candidates].sort((a,b)=>String(a.account_code).localeCompare(String(b.account_code),undefined,{numeric:true})).map(x=><option key={x.account_code} value={x.account_code}>
         {x.account_code+' '+x.account_name+'  '+fmt(x.balance)}</option>)}</select>
     {/* No gap amounts here. Whether the two sides agree is IC Reconciliation's
         job; this page only says WHICH account answers which. */}
