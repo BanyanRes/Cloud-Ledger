@@ -11995,8 +11995,10 @@ app.get('/api/intercompany/ic-arap-comparison.xlsx', auth, requireRole('Admin', 
       const h = dd.addRow({ rel: nameOf[r.creditor] + '  ->  ' + nameOf[r.debtor], memo: 'A/R ' + fmtM(r.ar) + '    A/P ' + fmtM(r.ap) + '    diff ' + fmtM(r.diff) });
       h.font = { bold: true };
       for (const x of arRows) dd.addRow({ side: 'A/R', doc: x.doc, date: x.date, memo: x.memo, amt: x.amount });
-      for (const x of apRows) dd.addRow({ side: 'A/P', doc: x.doc, date: x.date, memo: (x.vendor ? (x.vendor + (x.memo ? ' - ' + x.memo : '')) : x.memo), amt: x.amount });
+      for (const x of apRows) dd.addRow({ side: 'A/P', doc: x.doc, date: x.date, memo: (x.vendor ? (x.vendor + (x.memo ? ' - ' + x.memo : '')) : x.memo), amt: round2(-x.amount) });
       if (!arRows.length && !apRows.length) dd.addRow({ memo: '(balance is opening/GL, not invoice-detailed)' });
+      const sub = dd.addRow({ memo: 'Subtotal (A/R less A/P)', amt: round2(arRows.reduce((s, x) => s + x.amount, 0) - apRows.reduce((s, x) => s + x.amount, 0)) });
+      sub.font = { bold: true };
       dd.addRow({});
     }
     const mkDetail = (title, rows, who) => {
