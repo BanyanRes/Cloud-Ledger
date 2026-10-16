@@ -11981,10 +11981,10 @@ app.get('/api/intercompany/ic-arap-comparison.xlsx', auth, requireRole('Admin', 
     const disc = comp.filter(r => Math.abs(r.diff) >= 0.005);
     const dd = wb.addWorksheet('Discrepancy detail');
     dd.columns = [
-      { header: 'Relationship', key: 'rel', width: 48 },
-      { header: 'Side', key: 'side', width: 8 },
-      { header: 'Doc #', key: 'doc', width: 16 },
-      { header: 'Date', key: 'date', width: 13 },
+      { header: 'Relationship', key: 'rel', width: 24 },
+      { header: 'Side', key: 'side', width: 8, style: { alignment: { horizontal: 'center' } } },
+      { header: 'Doc #', key: 'doc', width: 16, style: { alignment: { horizontal: 'center' } } },
+      { header: 'Date', key: 'date', width: 13, style: { alignment: { horizontal: 'center' } } },
       { header: 'Memo / party', key: 'memo', width: 54 },
       { header: 'Amount', key: 'amt', width: 18, style: { numFmt: MONEY } },
     ];

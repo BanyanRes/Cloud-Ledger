@@ -9136,6 +9136,8 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
   const[loading,setLoading]=useState(false);const[err,setErr]=useState('');
   const[msg,setMsg]=useState('');
   const[q,setQ]=useState('');
+  const[arapBusy,setArapBusy]=useState(false);
+  const dlArap=async()=>{setArapBusy(true);setErr('');try{const out=await api.getIcArApComparisonXlsx(asOf);if(out){const u=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=u;a.download=out.filename;a.click();URL.revokeObjectURL(u);setMsg('Downloaded '+out.filename+'.');}}catch(e){setErr(e.message);}finally{setArapBusy(false);}};
   // An unmapped account is mapped here, on the page that found it.
   const[companies,setCompanies]=useState([]);
   const[mapping,setMapping]=useState(null);
@@ -9235,15 +9237,19 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
     {!eid&&!err&&<IcEmpty>Pick an entity to reconcile.</IcEmpty>}
 
     {eid&&<div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
-      {[['due','Due from / Due to'],['investment','Investment / Contributed capital']].map(([k,l])=>
+      {[['due','Due from / Due to'],['investment','Investment / Contributed capital'],['arap','A/R vs A/P (all entities)']].map(([k,l])=>
         <button key={k} onClick={()=>setTab(k)} style={{background:'none',border:'none',borderBottom:'2px solid '+(tab===k?T.accent:'transparent'),color:tab===k?T.accent:T.textMuted,fontWeight:tab===k?700:500,fontSize:13,padding:'9px 16px',cursor:'pointer',marginBottom:-1}}>{l}
           {k==='due'&&data&&data.due.totals.mismatched>0&&<span style={{marginLeft:7}}><IcBadge kind="bad">{data.due.totals.mismatched}</IcBadge></span>}
           {k==='investment'&&data&&(data.investment.findings.length+data.investment.totals.mismatched)>0&&
             <span style={{marginLeft:7}}><IcBadge kind="bad">{data.investment.findings.length+data.investment.totals.mismatched}</IcBadge></span>}</button>)}</div>}
 
-    {loading&&<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Reading balances…</div>}
+    {tab==='arap'&&<div style={{...S.card,padding:20,maxWidth:760}}>
+      <div style={{fontWeight:700,color:T.textBright,fontSize:15,marginBottom:4}}>Intercompany A/R vs A/P reconciliation</div>
+      <div style={{color:T.textMuted,fontSize:13,marginBottom:14}}>Across every entity: customers (A/R) and vendors (A/P) matched to CloudLedger entities, each relationship lined up — the creditor’s A/R against the debtor’s A/P, with the difference and the invoices/bills behind each gap. Uses the As-of date above ({asOf}).</div>
+      <button style={S.btnP} disabled={arapBusy} onClick={dlArap}>{arapBusy?'Preparing…':'Download Excel'}</button></div>}
+    {tab!=='arap'&&loading&&<div style={{textAlign:'center',padding:40,color:T.textMuted}}>Reading balances…</div>}
 
-    {!loading&&data&&<>
+    {tab!=='arap'&&!loading&&data&&<>
       <StatusLine t={side.totals}/>
 
       {/* The investment tab says so plainly when the entity simply has none,
