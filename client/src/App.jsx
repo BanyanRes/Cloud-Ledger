@@ -9150,7 +9150,7 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
   const sideLab={ar:'A/R',ap:'A/P',our:'Ours',their:'Theirs'};
   const sKind=x=>x==='Matched'||x==='Settled'?'ok':x==='One-sided'?'warn':x==='Mismatch'?'bad':'info';
   const green=T.ok||T.green||'#15803d';
-  const colHead=cat==='arap'?['Creditor (A/R)','Debtor (A/P)','A/R','A/P','Difference','Status']:cat==='inv'?['Entity','Counterparty','Our side','Their side','Difference','Status']:['Entity','Counterparty','Our net','Their net','Difference','Status'];
+  const colHead=['Entity','Counterparty','Entity recorded','Counterparty recorded','Out of balance','Status'];
   const thS={textAlign:'left',fontSize:11,textTransform:'uppercase',letterSpacing:'.04em',color:T.textDim,fontWeight:650,padding:'10px 14px',borderBottom:'1px solid '+T.border,background:T.bgElevated};
   return(<div>
     <div style={{marginBottom:12}}><div style={S.h1}>IC Reconciliation</div>
@@ -9207,7 +9207,7 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
                   <span style={{color:T.textMuted}}>{d.desc}</span>
                   <span style={{textAlign:'right',fontFamily:'monospace',fontWeight:600,color:d.amt<0?T.red:T.textBright}}>{fmt(d.amt)}</span></div>)}
                 <div style={{...grid,fontWeight:700,background:T.panel}}>
-                  <span></span><span></span><span style={{color:T.textBright}}>Subtotal (our side less their side)</span>
+                  <span></span><span></span><span style={{color:T.textBright}}>Out of balance</span>
                   <span style={{textAlign:'right',fontFamily:'monospace',color:sub<0?T.red:T.textBright}}>{fmt(sub)}</span></div>
               </div></div></td></tr>;
           return [main,det];

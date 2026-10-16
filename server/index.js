@@ -11958,7 +11958,7 @@ function reconScopeData(scope, asOf) {
       due.push({
         entity: E.name, cp: nameOf[g.counterparty_entity_id] || g.counterparty_name || '(external)',
         our_acc: codes(g.our_legs), their_acc: codes(g.their_legs),
-        left: round2(g.our_net), right: round2(g.their_net), diff: round2(g.difference),
+        left: round2(g.our_net), right: round2(-g.their_net), diff: round2(g.difference),
         status: STAT[g.status] || g.status,
         detail: [
           ...(g.our_legs || []).map(l => ({ side: 'our', ref: l.account_code, desc: l.account_name, amt: round2(l.signed || 0) })),
@@ -12002,9 +12002,20 @@ function reconScopeData(scope, asOf) {
   const apVend = new Map();
   for (const x of data.apBills) { if (!(inScope(x.creditor) && inScope(x.debtor)) || !involvesClrf(x.creditor, x.debtor)) continue; const k = x.debtor + '>' + x.creditor; apVend.set(k, round2((apVend.get(k) || 0) + x.amount)); }
   const ap_by_vendor = [...apVend.entries()].map(([k, v]) => { const [dr, c] = k.split('>'); return { entity: nameOf[dr], vendor: nameOf[c], open: round2(v) }; }).sort((a, b) => Math.abs(b.open) - Math.abs(a.open) || String(a.entity).localeCompare(String(b.entity)));
+  const onePerPair = rows => {
+    const by = new Map();
+    for (const r of rows) {
+      const k = [String(r.entity), String(r.cp)].sort((a, b) => a.localeCompare(b)).join(' || ');
+      const cur = by.get(k);
+      if (!cur) { by.set(k, r); continue; }
+      if (r.left >= -0.005 && cur.left < -0.005) by.set(k, r); // prefer the receivable-side view
+    }
+    return [...by.values()];
+  };
+  const dueP = onePerPair(due), invP = onePerPair(inv);
   const sortD = a => a.sort((x, y) => Math.abs(y.diff) - Math.abs(x.diff) || String(x.entity).localeCompare(String(y.entity)));
-  sortD(due); sortD(inv); sortD(arap);
-  return { scope, as_of: asOf, due, inv, arap, ar_by_customer, ap_by_vendor };
+  sortD(dueP); sortD(invP); sortD(arap);
+  return { scope, as_of: asOf, due: dueP, inv: invP, arap, ar_by_customer, ap_by_vendor };
 }
 
 app.get('/api/intercompany/recon-view', auth, requireRole('Admin', 'Accountant'), (req, res) => {
@@ -12038,7 +12049,7 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
         const h = ws.addRow({ rel: r.entity + '  ->  ' + r.cp, desc: 'left ' + fmtM(r.left) + '    right ' + fmtM(r.right) + '    diff ' + fmtM(r.diff) + '   (' + r.status + ')' });
         h.font = { bold: true };
         for (const x of (r.detail || [])) ws.addRow({ side: sideLab[x.side] || x.side, ref: x.ref, desc: x.desc, amt: x.amt });
-        const sub = ws.addRow({ desc: 'Subtotal', amt: round2((r.detail || []).reduce((s, x) => s + x.amt, 0)) });
+        const sub = ws.addRow({ desc: 'Out of balance', amt: round2((r.detail || []).reduce((s, x) => s + x.amt, 0)) });
         sub.font = { bold: true };
         ws.addRow({});
       }
@@ -12049,9 +12060,9 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
       { header: 'Category', key: 'cat', width: 28 },
       { header: 'Entity', key: 'e', width: 32 },
       { header: 'Counterparty', key: 'cp', width: 32 },
-      { header: 'Our side', key: 'l', width: 18, style: { numFmt: MONEY } },
-      { header: 'Their side', key: 'r', width: 18, style: { numFmt: MONEY } },
-      { header: 'Difference', key: 'df', width: 18, style: { numFmt: MONEY } },
+      { header: 'Entity recorded', key: 'l', width: 18, style: { numFmt: MONEY } },
+      { header: 'Counterparty recorded', key: 'r', width: 20, style: { numFmt: MONEY } },
+      { header: 'Out of balance', key: 'df', width: 18, style: { numFmt: MONEY } },
       { header: 'Status', key: 's', width: 12, style: CTR },
     ];
     sum.getRow(1).font = { bold: true }; sum.views = [{ state: 'frozen', ySplit: 1 }];
