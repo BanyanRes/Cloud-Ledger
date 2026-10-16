@@ -11891,6 +11891,171 @@ app.post('/api/xlsx-styled', auth, async (req, res) => {
   }
 });
 
+// Shared: intercompany A/R-vs-A/P data across every entity (also used by the CLA package).
+function computeIcArAp(asOf) {
+  const arMod = require('./ar');
+  const icMod = require('./intercompany');
+  const entities = db.prepare('SELECT id, name, code FROM entities ORDER BY name COLLATE NOCASE').all();
+  const nameOf = {}; entities.forEach(e => { nameOf[e.id] = e.name; });
+  const matchEntity = (nm) => {
+    if (!nm || !String(nm).trim()) return null;
+    try { const m = icMod.matchCompany(String(nm), entities, []); return (m && m.entity_id != null) ? Number(m.entity_id) : null; }
+    catch (e) { return null; }
+  };
+  const arByPair = new Map(), apByPair = new Map(), arInvoices = [], apBills = [];
+  for (const E of entities) {
+    try {
+      const aging = arMod.buildAging(db, E.id, asOf);
+      for (const r of (aging.rows || [])) {
+        const open = Number(r.total) || 0;
+        if (Math.abs(open) < 0.005) continue;
+        const toId = matchEntity(r.customer);
+        if (toId == null || toId === E.id) continue;
+        const k = E.id + '>' + toId; arByPair.set(k, round2((arByPair.get(k) || 0) + open));
+      }
+      let memoMap = {};
+      try { for (const m of db.prepare('SELECT invoice_num, memo FROM ar_invoices WHERE entity_id = ?').all(E.id)) memoMap[m.invoice_num] = m.memo || ''; } catch (e) {}
+      for (const d of (aging.detail || [])) {
+        const open = Number(d.open) || 0;
+        if (Math.abs(open) < 0.005) continue;
+        const toId = matchEntity(d.customer);
+        if (toId == null || toId === E.id) continue;
+        arInvoices.push({ creditor: E.id, debtor: toId, doc: d.invoice_num, date: d.invoice_date, memo: memoMap[d.invoice_num] || '', amount: round2(open) });
+      }
+    } catch (e) {}
+    try {
+      const ap = buildApAging(E.id, asOf);
+      const byV = new Map();
+      for (const it of (ap.open_items || [])) {
+        const v = (it.vendor || '').trim(); if (!v) continue;
+        const amt = Number(it.amount) || 0;
+        byV.set(v, round2((byV.get(v) || 0) + amt));
+        const toId = matchEntity(v);
+        if (toId != null && toId !== E.id) apBills.push({ creditor: toId, debtor: E.id, doc: it.entry_num, date: it.date, vendor: v, memo: it.memo || '', amount: round2(amt) });
+      }
+      for (const [vend, open] of byV) {
+        if (Math.abs(open) < 0.005) continue;
+        const toId = matchEntity(vend);
+        if (toId == null || toId === E.id) continue;
+        const k = E.id + '>' + toId; apByPair.set(k, round2((apByPair.get(k) || 0) + open));
+      }
+    } catch (e) {}
+  }
+  const compKeys = new Set();
+  for (const k of arByPair.keys()) compKeys.add(k);
+  for (const k of apByPair.keys()) { const [dr, cr] = k.split('>'); compKeys.add(cr + '>' + dr); }
+  const comp = [];
+  for (const key of compKeys) {
+    const [cr, dr] = key.split('>');
+    const ar = arByPair.get(cr + '>' + dr) || 0, ap = apByPair.get(dr + '>' + cr) || 0;
+    comp.push({ creditor: Number(cr), debtor: Number(dr), ar: round2(ar), ap: round2(ap), diff: round2(ar - ap) });
+  }
+  comp.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff) || String(nameOf[a.creditor] || '').localeCompare(String(nameOf[b.creditor] || '')));
+  return { entities, nameOf, comp, arInvoices, apBills };
+}
+
+// Intercompany reconciliation PACKAGE for the CLA-handled entities, in Excel:
+// Due from/Due to, Investment/Contributed capital, and A/R vs A/P (with the
+// invoices/bills behind each gap) -- scoped to the entities in the CLA user
+// group, so it can be handed to CLA.
+app.get('/api/intercompany/cla-recon-package.xlsx', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
+  try {
+    const asOf = (req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of)) ? req.query.as_of : '2026-08-31';
+    const icMod = require('./intercompany');
+    const grp = db.prepare("SELECT id FROM user_groups WHERE name = 'CLA'").get();
+    const claIds = grp ? db.prepare('SELECT DISTINCT entity_id FROM user_group_entity_access WHERE group_id = ?').all(grp.id).map(r => Number(r.entity_id)) : [];
+    const claSet = new Set(claIds);
+    const allEnt = db.prepare('SELECT id, name, code FROM entities ORDER BY name COLLATE NOCASE').all();
+    const nameOf = {}; allEnt.forEach(e => { nameOf[e.id] = e.name; });
+    const claEntities = allEnt.filter(e => claSet.has(Number(e.id)));
+    const MONEY = '#,##0.00;(#,##0.00)';
+    const CTR = { alignment: { horizontal: 'center' } };
+    const wb = new ExcelJS.Workbook(); wb.creator = 'CloudLedger'; wb.created = new Date();
+    const mkHdr = (ws) => { ws.getRow(1).font = { bold: true }; ws.views = [{ state: 'frozen', ySplit: 1 }]; };
+    const acctList = legs => (legs || []).map(l => (l.account_code || '') + ' ' + (l.account_name || '')).join('; ');
+
+    const ds = wb.addWorksheet('Due from - Due to');
+    ds.columns = [
+      { header: 'Entity', key: 'e', width: 30 },
+      { header: 'Counterparty', key: 'cp', width: 30 },
+      { header: 'Our account(s)', key: 'oa', width: 42 },
+      { header: 'Our net', key: 'on', width: 16, style: { numFmt: MONEY } },
+      { header: 'Their account(s)', key: 'ta', width: 42 },
+      { header: 'Their net', key: 'tn', width: 16, style: { numFmt: MONEY } },
+      { header: 'Difference', key: 'd', width: 16, style: { numFmt: MONEY } },
+      { header: 'Status', key: 's', width: 12, style: CTR },
+    ];
+    mkHdr(ds);
+    const is = wb.addWorksheet('Investment - Contrib capital');
+    is.columns = [
+      { header: 'Entity', key: 'e', width: 30 },
+      { header: 'Counterparty', key: 'cp', width: 30 },
+      { header: 'Our investment', key: 'oi', width: 16, style: { numFmt: MONEY } },
+      { header: 'Their contributed cap', key: 'tc', width: 18, style: { numFmt: MONEY } },
+      { header: 'Our contributed cap', key: 'oc', width: 18, style: { numFmt: MONEY } },
+      { header: 'Their investment', key: 'ti', width: 16, style: { numFmt: MONEY } },
+      { header: 'Difference', key: 'd', width: 16, style: { numFmt: MONEY } },
+      { header: 'Status', key: 's', width: 12, style: CTR },
+    ];
+    mkHdr(is);
+    for (const E of claEntities) {
+      let rec;
+      try { rec = icMod.reconcileForEntity(db, E.id, { computeBalances, as_of: asOf }); } catch (e) { continue; }
+      for (const g of (rec.due.rows || [])) {
+        ds.addRow({ e: E.name, cp: nameOf[g.counterparty_entity_id] || g.counterparty_name || '(external)',
+          oa: acctList(g.our_legs), on: g.our_net, ta: acctList(g.their_legs), tn: g.their_net, d: g.difference, s: g.status });
+      }
+      for (const g of (rec.investment.rows || [])) {
+        is.addRow({ e: E.name, cp: nameOf[g.counterparty_entity_id] || g.counterparty_name || '(external)',
+          oi: g.our_investment, tc: g.their_capital, oc: g.our_capital, ti: g.their_investment, d: g.difference, s: g.status });
+      }
+    }
+
+    // A/R vs A/P scoped to pairs that involve a CLA entity.
+    const data = computeIcArAp(asOf);
+    const comp = data.comp.filter(r => claSet.has(r.creditor) || claSet.has(r.debtor));
+    const c = wb.addWorksheet('IC A-R vs A-P');
+    c.columns = [
+      { header: 'Creditor (records A/R)', key: 'cr', width: 36 },
+      { header: 'Debtor (records A/P)', key: 'dr', width: 36 },
+      { header: 'A/R by creditor', key: 'ar', width: 20, style: { numFmt: MONEY } },
+      { header: 'A/P by debtor', key: 'ap', width: 20, style: { numFmt: MONEY } },
+      { header: 'Difference', key: 'diff', width: 18, style: { numFmt: MONEY } },
+    ];
+    mkHdr(c);
+    for (const r of comp) c.addRow({ cr: data.nameOf[r.creditor], dr: data.nameOf[r.debtor], ar: r.ar, ap: r.ap, diff: r.diff });
+    const t = c.addRow({ cr: 'TOTAL', ar: round2(comp.reduce((s, r) => s + r.ar, 0)), ap: round2(comp.reduce((s, r) => s + r.ap, 0)), diff: round2(comp.reduce((s, r) => s + r.diff, 0)) });
+    t.font = { bold: true };
+    const fmtM = n => (n < 0 ? '(' : '') + Math.abs(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (n < 0 ? ')' : '');
+    const disc = comp.filter(r => Math.abs(r.diff) >= 0.005);
+    const dd = wb.addWorksheet('Discrepancy detail');
+    dd.columns = [
+      { header: 'Relationship', key: 'rel', width: 24 },
+      { header: 'Side', key: 'side', width: 8, style: CTR },
+      { header: 'Doc #', key: 'doc', width: 16, style: CTR },
+      { header: 'Date', key: 'date', width: 13, style: CTR },
+      { header: 'Memo / party', key: 'memo', width: 54 },
+      { header: 'Amount', key: 'amt', width: 18, style: { numFmt: MONEY } },
+    ];
+    mkHdr(dd);
+    for (const r of disc) {
+      const arRows = data.arInvoices.filter(x => x.creditor === r.creditor && x.debtor === r.debtor).sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+      const apRows = data.apBills.filter(x => x.creditor === r.creditor && x.debtor === r.debtor).sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+      const h = dd.addRow({ rel: data.nameOf[r.creditor] + '  ->  ' + data.nameOf[r.debtor], memo: 'A/R ' + fmtM(r.ar) + '    A/P ' + fmtM(r.ap) + '    diff ' + fmtM(r.diff) });
+      h.font = { bold: true };
+      for (const x of arRows) dd.addRow({ side: 'A/R', doc: x.doc, date: x.date, memo: x.memo, amt: x.amount });
+      for (const x of apRows) dd.addRow({ side: 'A/P', doc: x.doc, date: x.date, memo: (x.vendor ? (x.vendor + (x.memo ? ' - ' + x.memo : '')) : x.memo), amt: round2(-x.amount) });
+      const sub = dd.addRow({ memo: 'Subtotal (A/R less A/P)', amt: round2(arRows.reduce((s, x) => s + x.amount, 0) - apRows.reduce((s, x) => s + x.amount, 0)) });
+      sub.font = { bold: true };
+      dd.addRow({});
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="CLA_IC_Reconciliation_' + asOf + '.xlsx"');
+    await wb.xlsx.write(res); res.end();
+  } catch (e) { if (!res.headersSent) res.status(500).json({ error: e.message }); else res.end(); }
+});
+
 // Intercompany A/R vs A/P comparison across all entities, as of a date, in Excel.
 // Intercompany receivables/payables issued through the normal invoice flow sit
 // in the general A/R (buildAging) and A/P (buildApAging) control ledgers keyed
