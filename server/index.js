@@ -11891,6 +11891,96 @@ app.post('/api/xlsx-styled', auth, async (req, res) => {
   }
 });
 
+// Intercompany A/R vs A/P comparison across all entities, as of a date, in Excel.
+// Intercompany receivables/payables issued through the normal invoice flow sit
+// in the general A/R (buildAging) and A/P (buildApAging) control ledgers keyed
+// by customer / vendor -- not in Due-from/Due-to accounts -- so IC mapping never
+// sees them. This matches every customer and vendor name to a CloudLedger entity
+// and lines up each relationship's two sides: the creditor's A/R from the debtor
+// against the debtor's A/P to the creditor. Read-only.
+app.get('/api/intercompany/ic-arap-comparison.xlsx', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
+  try {
+    const asOf = (req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of)) ? req.query.as_of : '2026-08-31';
+    const arMod = require('./ar');
+    const icMod = require('./intercompany');
+    const entities = db.prepare('SELECT id, name, code FROM entities ORDER BY name COLLATE NOCASE').all();
+    const nameOf = {}; entities.forEach(e => { nameOf[e.id] = e.name; });
+    const matchEntity = (nm) => {
+      if (!nm || !String(nm).trim()) return null;
+      try { const m = icMod.matchCompany(String(nm), entities, []); return (m && m.entity_id != null) ? Number(m.entity_id) : null; }
+      catch (e) { return null; }
+    };
+    const arByPair = new Map(), apByPair = new Map(), arDetail = [], apDetail = [];
+    for (const E of entities) {
+      try {
+        const aging = arMod.buildAging(db, E.id, asOf);
+        for (const r of (aging.rows || [])) {
+          const open = Number(r.total) || 0;
+          if (Math.abs(open) < 0.005) continue;
+          const toId = matchEntity(r.customer);
+          if (toId == null || toId === E.id) continue;
+          arDetail.push({ fromId: E.id, name: r.customer, toId, open: round2(open) });
+          const k = E.id + '>' + toId; arByPair.set(k, round2((arByPair.get(k) || 0) + open));
+        }
+      } catch (e) { /* no AR */ }
+      try {
+        const ap = buildApAging(E.id, asOf);
+        const byV = new Map();
+        for (const it of (ap.open_items || [])) { const v = (it.vendor || '').trim(); if (!v) continue; byV.set(v, round2((byV.get(v) || 0) + (Number(it.amount) || 0))); }
+        for (const [vend, open] of byV) {
+          if (Math.abs(open) < 0.005) continue;
+          const toId = matchEntity(vend);
+          if (toId == null || toId === E.id) continue;
+          apDetail.push({ fromId: E.id, name: vend, toId, open: round2(open) });
+          const k = E.id + '>' + toId; apByPair.set(k, round2((apByPair.get(k) || 0) + open));
+        }
+      } catch (e) { /* no AP */ }
+    }
+    const compKeys = new Set();
+    for (const k of arByPair.keys()) compKeys.add(k);
+    for (const k of apByPair.keys()) { const [dr, cr] = k.split('>'); compKeys.add(cr + '>' + dr); }
+    const comp = [];
+    for (const key of compKeys) {
+      const [cr, dr] = key.split('>');
+      const ar = arByPair.get(cr + '>' + dr) || 0, ap = apByPair.get(dr + '>' + cr) || 0;
+      comp.push({ creditor: Number(cr), debtor: Number(dr), ar: round2(ar), ap: round2(ap), diff: round2(ar - ap) });
+    }
+    comp.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff) || String(nameOf[a.creditor] || '').localeCompare(String(nameOf[b.creditor] || '')));
+    const MONEY = '#,##0.00;(#,##0.00)';
+    const wb = new ExcelJS.Workbook(); wb.creator = 'CloudLedger'; wb.created = new Date();
+    const mkHdr = (ws) => { ws.getRow(1).font = { bold: true }; ws.views = [{ state: 'frozen', ySplit: 1 }]; };
+    const c = wb.addWorksheet('IC A-R vs A-P');
+    c.columns = [
+      { header: 'Creditor (records A/R)', key: 'cr', width: 36 },
+      { header: 'Debtor (records A/P)', key: 'dr', width: 36 },
+      { header: 'A/R by creditor', key: 'ar', width: 20, style: { numFmt: MONEY } },
+      { header: 'A/P by debtor', key: 'ap', width: 20, style: { numFmt: MONEY } },
+      { header: 'Difference', key: 'diff', width: 18, style: { numFmt: MONEY } },
+    ];
+    mkHdr(c);
+    for (const r of comp) c.addRow({ cr: nameOf[r.creditor], dr: nameOf[r.debtor], ar: r.ar, ap: r.ap, diff: r.diff });
+    const t = c.addRow({ cr: 'TOTAL', dr: '', ar: round2(comp.reduce((s, r) => s + r.ar, 0)), ap: round2(comp.reduce((s, r) => s + r.ap, 0)), diff: round2(comp.reduce((s, r) => s + r.diff, 0)) });
+    t.font = { bold: true };
+    const mkDetail = (title, rows, who) => {
+      const w = wb.addWorksheet(title);
+      w.columns = [
+        { header: 'Entity', key: 'e', width: 36 },
+        { header: who + ' (matched entity)', key: 'm', width: 36 },
+        { header: who + ' name on file', key: 'n', width: 40 },
+        { header: 'Open', key: 'o', width: 18, style: { numFmt: MONEY } },
+      ];
+      mkHdr(w);
+      rows.sort((a, b) => String(nameOf[a.fromId] || '').localeCompare(String(nameOf[b.fromId] || '')) || String(nameOf[a.toId] || '').localeCompare(String(nameOf[b.toId] || '')));
+      for (const r of rows) w.addRow({ e: nameOf[r.fromId], m: nameOf[r.toId], n: r.name, o: r.open });
+    };
+    mkDetail('A-R by IC customer', arDetail, 'Customer');
+    mkDetail('A-P by IC vendor', apDetail, 'Vendor');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="IC_AR_AP_Comparison_' + asOf + '.xlsx"');
+    await wb.xlsx.write(res); res.end();
+  } catch (e) { if (!res.headersSent) res.status(500).json({ error: e.message }); else res.end(); }
+});
+
 app.post('/api/entities/:eid/ttm-pl.xlsx', auth, requireEntityAccess(), requireRole('Admin', 'Accountant'), async (req, res) => {
   try {
     const eid = req.params.eid;

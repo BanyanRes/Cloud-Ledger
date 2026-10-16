@@ -9676,6 +9676,8 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[q,setQ]=useState('');
   const[sweep,setSweep]=useState(null);
   const[sweepBusy,setSweepBusy]=useState(false);
+  const[dlBusy,setDlBusy]=useState(false);
+  const dlCompare=async()=>{setDlBusy(true);setErr('');try{const out=await api.getIcArApComparisonXlsx('2026-08-31');if(out){const u=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=u;a.download=out.filename;a.click();URL.revokeObjectURL(u);setMsg('Downloaded '+out.filename+'.');}}catch(e){setErr(e.message);}finally{setDlBusy(false);}};
   const entityOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
   const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
 
@@ -9746,7 +9748,8 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
             <option value=''>Select an entity…</option>
             {entityOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
         <button style={{...S.btnGhost,fontSize:12}} onClick={load} disabled={loading||!eid}>{loading?'Loading…':'Refresh'}</button>
-        {canEdit&&<button style={{...S.btnGhost,fontSize:12}} onClick={runSweep} disabled={sweepBusy} title='Scan every entity for stray zero-balance duplicate due accounts the old matcher created.'>{sweepBusy?'Scanning…':'Scan for duplicates'}</button>}</div>
+        {canEdit&&<button style={{...S.btnGhost,fontSize:12}} onClick={runSweep} disabled={sweepBusy} title='Scan every entity for stray zero-balance duplicate due accounts the old matcher created.'>{sweepBusy?'Scanning…':'Scan for duplicates'}</button>}
+        {canEdit&&<button style={{...S.btnGhost,fontSize:12}} disabled={dlBusy} onClick={dlCompare} title='Download an Excel comparison of intercompany A/R vs A/P — customers and vendors matched to entities — as of 8/31/26.'>{dlBusy?'Preparing…':'IC A/R vs A/P (xlsx)'}</button>}</div>
       {sweep&&<div style={{...S.card,borderColor:T.accent+'55',padding:14,marginBottom:12}}>
         <div style={{fontWeight:700,color:T.textBright,marginBottom:6}}>
           {sweep.count===0?'No redundant duplicate due accounts anywhere in the portfolio.'
