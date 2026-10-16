@@ -11891,6 +11891,41 @@ app.post('/api/xlsx-styled', auth, async (req, res) => {
   }
 });
 
+// Every intercompany-looking account across the portfolio that is NOT yet
+// mapped -- carries a balance and parses as intercompany, but has no (or an
+// incomplete) counterparty mapping. Read-only, Excel.
+app.get('/api/intercompany/unmapped-all.xlsx', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
+  try {
+    const icMod = require('./intercompany');
+    const entities = db.prepare('SELECT id, name FROM entities ORDER BY name COLLATE NOCASE').all();
+    const rows = [];
+    for (const E of entities) {
+      let un; try { un = icMod.listUnmappedAccounts(db, E.id, { computeBalances, as_of: null }); } catch (e) { continue; }
+      for (const a of (un.accounts || [])) {
+        const status = a.is_external ? 'external (auto)' : (a.mapping_id ? 'one-sided' : 'unmapped');
+        rows.push({ entity: E.name, code: a.account_code, name: a.account_name, type: a.ic_type || '', bal: round2(Number(a.balance) || 0), status, sugg: a.counterparty_name || '' });
+      }
+    }
+    rows.sort((x, y) => (x.status === y.status ? 0 : (x.status === 'unmapped' ? -1 : 1)) || String(x.entity).localeCompare(String(y.entity)) || String(x.code).localeCompare(String(y.code)));
+    const wb = new ExcelJS.Workbook(); wb.creator = 'CloudLedger'; wb.created = new Date();
+    const ws = wb.addWorksheet('Unmapped IC accounts');
+    ws.columns = [
+      { header: 'Entity', key: 'e', width: 32 },
+      { header: 'Account', key: 'c', width: 12 },
+      { header: 'Name', key: 'n', width: 42 },
+      { header: 'Type', key: 't', width: 18 },
+      { header: 'Balance', key: 'b', width: 18, style: { numFmt: '#,##0.00;(#,##0.00)' } },
+      { header: 'Status', key: 's', width: 16 },
+      { header: 'Suggested counterparty', key: 'g', width: 30 },
+    ];
+    ws.getRow(1).font = { bold: true }; ws.views = [{ state: 'frozen', ySplit: 1 }];
+    for (const r of rows) ws.addRow({ e: r.entity, c: r.code, n: r.name, t: r.type, b: r.bal, s: r.status, g: r.sugg });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="IC_Unmapped_Accounts.xlsx"');
+    await wb.xlsx.write(res); res.end();
+  } catch (e) { if (!res.headersSent) res.status(500).json({ error: e.message }); else res.end(); }
+});
+
 // Shared: intercompany A/R-vs-A/P data across every entity (also used by the CLA package).
 function computeIcArAp(asOf) {
   const arMod = require('./ar');
