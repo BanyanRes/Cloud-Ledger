@@ -12012,10 +12012,14 @@ function reconScopeData(scope, asOf) {
     }
     return [...by.values()];
   };
-  const dueP = onePerPair(due), invP = onePerPair(inv);
+  const hasAmt = r => Math.abs(r.left) > 0.005 || Math.abs(r.right) > 0.005;
+  const trim = r => ({ ...r, detail: (r.detail || []).filter(x => Math.abs(x.amt) > 0.005) });
+  const dueP = onePerPair(due).filter(hasAmt).map(trim);
+  const invP = onePerPair(inv).filter(hasAmt).map(trim);
+  const arapF = arap.filter(hasAmt).map(trim);
   const sortD = a => a.sort((x, y) => Math.abs(y.diff) - Math.abs(x.diff) || String(x.entity).localeCompare(String(y.entity)));
-  sortD(dueP); sortD(invP); sortD(arap);
-  return { scope, as_of: asOf, due: dueP, inv: invP, arap, ar_by_customer, ap_by_vendor };
+  sortD(dueP); sortD(invP); sortD(arapF);
+  return { scope, as_of: asOf, due: dueP, inv: invP, arap: arapF, ar_by_customer, ap_by_vendor };
 }
 
 app.get('/api/intercompany/recon-view', auth, requireRole('Admin', 'Accountant'), (req, res) => {
@@ -12039,10 +12043,10 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
       const ws = wb.addWorksheet(title);
       ws.columns = [
         { header: 'Relationship', key: 'rel', width: 24 },
-        { header: 'Side', key: 'side', width: 9, style: CTR },
-        { header: 'Ref', key: 'ref', width: 16, style: CTR },
+        { header: 'Side', key: 'side', width: 14, style: CTR },
+        { header: 'Ref', key: 'ref', width: 18, style: CTR },
         { header: 'Description', key: 'desc', width: 54 },
-        { header: 'Amount', key: 'amt', width: 18, style: { numFmt: MONEY } },
+        { header: 'Amount', key: 'amt', width: 20, style: { numFmt: MONEY } },
       ];
       ws.getRow(1).font = { bold: true }; ws.views = [{ state: 'frozen', ySplit: 1 }];
       for (const r of rows) {
@@ -12058,12 +12062,12 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
     const sum = wb.addWorksheet('Summary');
     sum.columns = [
       { header: 'Category', key: 'cat', width: 28 },
-      { header: 'Entity', key: 'e', width: 32 },
-      { header: 'Counterparty', key: 'cp', width: 32 },
-      { header: 'Entity recorded', key: 'l', width: 18, style: { numFmt: MONEY } },
-      { header: 'Counterparty recorded', key: 'r', width: 20, style: { numFmt: MONEY } },
-      { header: 'Out of balance', key: 'df', width: 18, style: { numFmt: MONEY } },
-      { header: 'Status', key: 's', width: 12, style: CTR },
+      { header: 'Entity', key: 'e', width: 40 },
+      { header: 'Counterparty', key: 'cp', width: 40 },
+      { header: 'Entity recorded', key: 'l', width: 20, style: { numFmt: MONEY } },
+      { header: 'Counterparty recorded', key: 'r', width: 24, style: { numFmt: MONEY } },
+      { header: 'Out of balance', key: 'df', width: 20, style: { numFmt: MONEY } },
+      { header: 'Status', key: 's', width: 14, style: CTR },
     ];
     sum.getRow(1).font = { bold: true }; sum.views = [{ state: 'frozen', ySplit: 1 }];
     const CATN = { due: 'Due from / Due to', inv: 'Investment / Contributed capital', arap: 'A/R vs A/P' };
@@ -12071,14 +12075,6 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
     sheet('Due from - Due to detail', d.due);
     sheet('Investment - Contrib detail', d.inv);
     sheet('A-R vs A-P detail', d.arap);
-    const arc = wb.addWorksheet('A-R by IC customer');
-    arc.columns = [{ header: 'Entity', key: 'e', width: 32 }, { header: 'Customer (entity)', key: 'c', width: 32 }, { header: 'Open A/R', key: 'o', width: 18, style: { numFmt: MONEY } }];
-    arc.getRow(1).font = { bold: true }; arc.views = [{ state: 'frozen', ySplit: 1 }];
-    for (const r of (d.ar_by_customer || [])) arc.addRow({ e: r.entity, c: r.customer, o: r.open });
-    const apv = wb.addWorksheet('A-P by IC vendor');
-    apv.columns = [{ header: 'Entity', key: 'e', width: 32 }, { header: 'Vendor (entity)', key: 'v', width: 32 }, { header: 'Open A/P', key: 'o', width: 18, style: { numFmt: MONEY } }];
-    apv.getRow(1).font = { bold: true }; apv.views = [{ state: 'frozen', ySplit: 1 }];
-    for (const r of (d.ap_by_vendor || [])) apv.addRow({ e: r.entity, v: r.vendor, o: r.open });
     const label = scope === 'cla' ? 'CLA' : scope === 'weaver' ? 'Weaver' : 'All';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="IC_Recon_' + label + '_' + asOf + '.xlsx"');
