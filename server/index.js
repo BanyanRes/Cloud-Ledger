@@ -11939,8 +11939,9 @@ function groupEntitySet(name) {
 function reconScopeData(scope, asOf) {
   const icMod = require('./intercompany');
   const cla = groupEntitySet('CLA'), weaver = groupEntitySet('Weaver');
-  const inScope = (eid) => scope === 'cla' ? cla.has(Number(eid)) : scope === 'weaver' ? weaver.has(Number(eid)) : true;
   const allEnt = db.prepare('SELECT id, name FROM entities ORDER BY name COLLATE NOCASE').all();
+  const banyan = new Set(allEnt.map(e => Number(e.id)).filter(id => !cla.has(id) && !weaver.has(id)));
+  const inScope = (eid) => scope === 'cla' ? cla.has(Number(eid)) : scope === 'weaver' ? weaver.has(Number(eid)) : scope === 'banyan' ? banyan.has(Number(eid)) : true;
   // Weaver's package is scoped to CLRF's intercompany activity: every pair must
   // involve County Line Rail Fund. Activity between the other Weaver entities
   // (e.g. CLIP and Silsbee) is excluded.
@@ -12025,7 +12026,7 @@ function reconScopeData(scope, asOf) {
 app.get('/api/intercompany/recon-view', auth, requireRole('Admin', 'Accountant'), (req, res) => {
   try {
     const asOf = (req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of)) ? req.query.as_of : '2026-08-31';
-    const scope = ['all', 'cla', 'weaver'].includes(req.query.scope) ? req.query.scope : 'all';
+    const scope = ['all', 'cla', 'weaver', 'banyan'].includes(req.query.scope) ? req.query.scope : 'all';
     res.json(reconScopeData(scope, asOf));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -12033,7 +12034,7 @@ app.get('/api/intercompany/recon-view', auth, requireRole('Admin', 'Accountant')
 app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
   try {
     const asOf = (req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of)) ? req.query.as_of : '2026-08-31';
-    const scope = ['all', 'cla', 'weaver'].includes(req.query.scope) ? req.query.scope : 'all';
+    const scope = ['all', 'cla', 'weaver', 'banyan'].includes(req.query.scope) ? req.query.scope : 'all';
     const d = reconScopeData(scope, asOf);
     const MONEY = '#,##0.00;(#,##0.00)'; const CTR = { alignment: { horizontal: 'center' } };
     const fmtM = n => (n < 0 ? '(' : '') + Math.abs(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (n < 0 ? ')' : '');
@@ -12075,7 +12076,7 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
     sheet('Due from - Due to detail', d.due);
     sheet('Investment - Contrib detail', d.inv);
     sheet('A-R vs A-P detail', d.arap);
-    const label = scope === 'cla' ? 'CLA' : scope === 'weaver' ? 'Weaver' : 'All';
+    const label = scope === 'cla' ? 'CLA' : scope === 'weaver' ? 'Weaver' : scope === 'banyan' ? 'Banyan' : 'All';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="IC_Recon_' + label + '_' + asOf + '.xlsx"');
     await wb.xlsx.write(res); res.end();

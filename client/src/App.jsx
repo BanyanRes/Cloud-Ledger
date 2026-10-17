@@ -9138,7 +9138,7 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
   const[dlBusy,setDlBusy]=useState(false);
   const load=useCallback(async()=>{setLoading(true);setErr('');setOpen({});try{setData(await api.getReconView(scope,asOf));}catch(e){setErr(e.message);setData(null);}finally{setLoading(false);}},[scope,asOf]);
   useEffect(()=>{load();},[load]);
-  const SCOPES=[['all','All entities','every entity'],['cla','CLA package','CLA group'],['weaver','Weaver package','Weaver group']];
+  const SCOPES=[['all','All entities','every entity'],['cla','CLA package','CLA group'],['weaver','Weaver package','Weaver group'],['banyan','Banyan package','all except CLA & Weaver']];
   const CATS=[['due','Due from / Due to'],['inv','Investment / Contributed capital'],['arap','A/R vs A/P']];
   const rowsOf=c=>data?(c==='due'?data.due:c==='inv'?data.inv:data.arap):[];
   const mmc=c=>rowsOf(c).filter(r=>Math.abs(r.diff)>=0.005).length;
