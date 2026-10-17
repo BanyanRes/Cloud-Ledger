@@ -9452,7 +9452,7 @@ function IcRow({row,st,entityId,entityOpts,entName,canEdit,onSaved,onMsg,onErr,o
             <button style={{...S.btnP,padding:'5px 11px',fontSize:12}} disabled={busy} onClick={changeAcct}>Save</button>
             <button style={{...S.btnGhost,fontSize:12}} onClick={()=>setChanging(false)}>Cancel</button></>
           :<><button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{setChgCode(row.their_account_code||'');setChanging(true);}}>Change</button>
-            <button style={{...S.btnGhost,color:T.red,fontSize:11}} disabled={busy} onClick={remove}>Remove</button></>}</div>}
+            <button style={{...S.btnGhost,color:T.red,fontSize:11}} disabled={busy} onClick={remove}>Remove</button><button style={{...S.link,fontSize:11}} disabled={busy} onClick={excludeRow} title='Not an intercompany account — remove it from the module entirely. Reversible under People.'>not intercompany</button></>}</div>}
     </div>;
   }else{
     // editor: counterparty (CL entity | External) + their account + Confirm
