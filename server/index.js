@@ -12033,7 +12033,7 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
     const d = reconScopeData(scope, asOf);
     const MONEY = '#,##0.00;(#,##0.00)'; const CTR = { alignment: { horizontal: 'center' } };
     const fmtM = n => (n < 0 ? '(' : '') + Math.abs(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (n < 0 ? ')' : '');
-    const sideLab = { ar: 'A/R', ap: 'A/P', our: 'Ours', their: 'Theirs' };
+    const sideLab = { ar: 'A/R', ap: 'A/P', our: 'Entity', their: 'Counterparty' };
     const wb = new ExcelJS.Workbook(); wb.creator = 'CloudLedger'; wb.created = new Date();
     const sheet = (title, rows) => {
       const ws = wb.addWorksheet(title);
@@ -12046,7 +12046,7 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
       ];
       ws.getRow(1).font = { bold: true }; ws.views = [{ state: 'frozen', ySplit: 1 }];
       for (const r of rows) {
-        const h = ws.addRow({ rel: r.entity + '  ->  ' + r.cp, desc: 'left ' + fmtM(r.left) + '    right ' + fmtM(r.right) + '    diff ' + fmtM(r.diff) + '   (' + r.status + ')' });
+        const h = ws.addRow({ rel: r.entity + '  ->  ' + r.cp, desc: 'Entity recorded ' + fmtM(r.left) + '    Counterparty recorded ' + fmtM(r.right) + '    Out of balance ' + fmtM(r.diff) + '   (' + r.status + ')' });
         h.font = { bold: true };
         for (const x of (r.detail || [])) ws.addRow({ side: sideLab[x.side] || x.side, ref: x.ref, desc: x.desc, amt: x.amt });
         const sub = ws.addRow({ desc: 'Out of balance', amt: round2((r.detail || []).reduce((s, x) => s + x.amt, 0)) });

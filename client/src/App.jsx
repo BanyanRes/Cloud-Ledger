@@ -9147,7 +9147,7 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
   const net=rows.reduce((s,r)=>s+r.diff,0);
   const mm=rows.filter(r=>Math.abs(r.diff)>=0.005).length;
   const dl=async()=>{setDlBusy(true);setErr('');try{const out=await api.getReconPackageXlsx(scope,asOf);if(out){const u=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=u;a.download=out.filename;a.click();URL.revokeObjectURL(u);setMsg('Downloaded '+out.filename+'.');}}catch(e){setErr(e.message);}finally{setDlBusy(false);}};
-  const sideLab={ar:'A/R',ap:'A/P',our:'Ours',their:'Theirs'};
+  const sideLab={ar:'A/R',ap:'A/P',our:'Entity',their:'Counterparty'};
   const sKind=x=>x==='Matched'||x==='Settled'?'ok':x==='One-sided'?'warn':x==='Mismatch'?'bad':'info';
   const green=T.ok||T.green||'#15803d';
   const colHead=['Entity','Counterparty','Entity recorded','Counterparty recorded','Out of balance','Status'];
