@@ -166,6 +166,7 @@ function ensureSchema(db) {
     note TEXT, excluded_at TEXT, excluded_by TEXT,
     PRIMARY KEY (entity_id, account_code)
   )`);
+  try { db.exec('ALTER TABLE accounts ADD COLUMN created_at TEXT'); } catch (e) {}
 }
 
 // org_nodes is created by server/orgstructure.js. Both modules register at boot,
@@ -1043,6 +1044,10 @@ function proposeMirrorAccount(ourEntity, ourIcType, cpAccounts) {
     type: mir.type, ic_type: mir.ic_type };
 }
 
+// Zero-balance intercompany accounts are normally hidden (nothing to reconcile),
+// but accounts created on/after this date show anyway so a freshly-created IC
+// account is available to map before it has any activity.
+const IC_SHOW_ZERO_SINCE = '2026-10-17';
 function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   ensureSchema(db);
   const eid = Number(entityId);
@@ -1058,7 +1063,7 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   const mapped = new Set(db.prepare('SELECT account_code FROM intercompany_accounts WHERE entity_id = ?')
     .all(eid).map(r => String(r.account_code)));
   const balByCode = new Map(computeBalances(eid, as_of ? { as_of } : {}).map(b => [String(b.code), b]));
-  const accounts = db.prepare('SELECT code, name, type FROM accounts WHERE entity_id = ? ORDER BY code').all(eid);
+  const accounts = db.prepare('SELECT code, name, type, created_at FROM accounts WHERE entity_id = ? ORDER BY code').all(eid);
 
   const out = [];
   let skippedOther = 0, skippedShellCapital = 0, skippedZero = 0;
@@ -1074,7 +1079,7 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
     if (shell && parsed.ic_type === 'contributed_capital') { skippedShellCapital++; continue; }
     const bal = balByCode.get(String(a.code));
     // A zero balance has nothing for a counterparty ledger to disagree with.
-    if (Math.abs(bal ? Number(bal.balance) || 0 : 0) < DEFAULT_TOLERANCE) { skippedZero++; continue; }
+    if (Math.abs(bal ? Number(bal.balance) || 0 : 0) < DEFAULT_TOLERANCE && !(a.created_at && a.created_at >= IC_SHOW_ZERO_SINCE)) { skippedZero++; continue; }
     const match = matchCompany(parsed.label, entities, companies);
     out.push({
       source: 'account',

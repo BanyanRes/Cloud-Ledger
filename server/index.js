@@ -3449,7 +3449,7 @@ app.post('/api/entities/:eid/accounts', auth, requireEntityAccess(), requireRole
   const { code, name, type, subtype, bank_acct } = req.body; if (!code||!name||!type) return res.status(400).json({ error: 'Required' });
   const fsSection = req.body.fs_section ? String(req.body.fs_section) : null;
   const fsSubsection = req.body.fs_subsection ? String(req.body.fs_subsection) : null;
-  try { const r = db.prepare('INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct, fs_section, fs_subsection) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(req.params.eid, code, name, type, subtype||'', bank_acct?1:0, fsSection, fsSubsection);
+  try { const r = db.prepare("INSERT INTO accounts (entity_id, code, name, type, subtype, bank_acct, fs_section, fs_subsection, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))").run(req.params.eid, code, name, type, subtype||'', bank_acct?1:0, fsSection, fsSubsection);
     res.json({ id: r.lastInsertRowid, code, name, type, subtype: subtype||'', bank_acct: bank_acct?1:0, fs_section: fsSection, fs_subsection: fsSubsection, entity_id: +req.params.eid }); }
   catch(e) { if (e.message.includes('UNIQUE')) return res.status(400).json({ error: 'Code exists' }); throw e; }
 });
