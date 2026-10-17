@@ -1968,6 +1968,28 @@ function statementLineItems(profile, accounts) {
   return out;
 }
 
+// Fund reporting line items (County Line Rail Fund). The fund package (Statement
+// of Assets, Liabilities & Partners' Capital and Statement of Operations) groups
+// accounts by code range, so its line labels are a fixed set -- these mirror
+// buildFundStatements exactly.
+function fundStatementTaxonomy() {
+  const SALP = "Statement of Assets, Liabilities & Partners' Capital";
+  const SOO = 'Statement of Operations';
+  return {
+    Asset: { statement: SALP, sections: [{ section: 'Assets', subsections: [
+      'Portfolio investments, at fair value', 'Cash and cash equivalents', 'Interest receivable',
+      'Due from portfolio investment', 'Deferred development fees', 'Prepaid advisory fees',
+      'Prepaid insurance', 'Due from affiliates', 'Other assets', 'Capital contributions receivable' ] }] },
+    Liability: { statement: SALP, sections: [{ section: 'Liabilities', subsections: [
+      'Due to affiliates', 'Accounts payable and accrued expenses', 'Management fees payable',
+      'Due to manager', 'Due to portfolio investments', 'Due to members' ] }] },
+    Equity: { statement: SALP, sections: [{ section: "Partners' Capital", subsections: ["Partners' Capital"] }] },
+    Revenue: { statement: SOO, sections: [{ section: 'Investment Income', subsections: ['Interest income'] }] },
+    Expense: { statement: SOO, sections: [{ section: 'Operating Expenses', subsections: [
+      'Management fees', 'Professional fees', 'Organizational costs', 'Broken deal costs', 'Other expenses' ] }] },
+  };
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // buildStatements — the numeric core. Pure given getBalances; no I/O.
@@ -6392,6 +6414,7 @@ module.exports = {
   entityProfile,
   statementTaxonomy,
   statementLineItems,
+  fundStatementTaxonomy,
   groupConsolidatingSchedule,
   renderConsolidatingSchedulesPdf,
   buildTtmPL,
