@@ -3499,7 +3499,8 @@ app.get('/api/entities/:eid/statement-sections', auth, requireEntityAccess(), (r
   const ent = db.prepare('SELECT name, code, entity_type FROM entities WHERE id=?').get(eid);
   if (!ent) return res.status(404).json({ error: 'Entity not found' });
   const profile = financials.entityProfile({ entityName: ent.name, entityCode: ent.code, entityType: ent.entity_type });
-  const tax = financials.statementTaxonomy(profile);
+  const accounts = db.prepare('SELECT code, name, type, subtype, fs_section, fs_subsection FROM accounts WHERE entity_id=?').all(eid);
+  const tax = financials.statementLineItems(profile, accounts);
   const byType = {};
   for (const [type, def] of Object.entries(tax)) {
     byType[type] = { statement: def.statement, sections: def.sections.map(sec => ({ section: sec.section, subsections: sec.subsections.slice(), custom: [] })) };

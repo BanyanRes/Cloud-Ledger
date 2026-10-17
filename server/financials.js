@@ -1943,6 +1943,31 @@ function statementTaxonomy(profile) {
   };
 }
 
+// The entity's ACTUAL statement line items: start from the profile taxonomy,
+// then fold in every (section, subsection) this entity's own balance-sheet /
+// equity accounts classify into -- so the Chart-of-Accounts picker shows the
+// real lines the entity uses (per-counterparty intercompany lines, named
+// investments, etc.), not just the generic pick-list. The income statement
+// uses standard categories, so its taxonomy already matches its line items.
+function statementLineItems(profile, accounts) {
+  const tax = statementTaxonomy(profile);
+  const out = {};
+  for (const [type, def] of Object.entries(tax)) {
+    out[type] = { statement: def.statement, sections: def.sections.map(sc => ({ section: sc.section, subsections: sc.subsections.slice() })) };
+  }
+  for (const a of (accounts || [])) {
+    const type = a.type;
+    if (type !== 'Asset' && type !== 'Liability' && type !== 'Equity') continue;
+    let cls; try { cls = bsClassifyFor(profile, a); } catch (e) { cls = null; }
+    if (!cls || !cls.section || !cls.sub) continue;
+    const def = out[type] || (out[type] = { statement: 'Balance Sheet', sections: [] });
+    let sec = def.sections.find(x => x.section === cls.section);
+    if (!sec) { sec = { section: cls.section, subsections: [] }; def.sections.push(sec); }
+    if (!sec.subsections.includes(cls.sub)) sec.subsections.push(cls.sub);
+  }
+  return out;
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // buildStatements — the numeric core. Pure given getBalances; no I/O.
@@ -6366,6 +6391,7 @@ module.exports = {
   buildStatements,
   entityProfile,
   statementTaxonomy,
+  statementLineItems,
   groupConsolidatingSchedule,
   renderConsolidatingSchedulesPdf,
   buildTtmPL,
