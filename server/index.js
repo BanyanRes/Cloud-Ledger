@@ -6,7 +6,7 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const { HAIKU_MODEL } = require('./aiModel');
+const { anthropicFetch, refreshHaikuModel } = require('./aiModel');
 const morgan = require('morgan');
 const multer = require('multer');
 const XLSX = require('xlsx');
@@ -10052,11 +10052,11 @@ app.post('/api/requisition/:entity_id/read-invoice', ...reqGuards(), requireRole
 
   let extracted;
   try {
-    const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
+    const apiRes = await anthropicFetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: HAIKU_MODEL,
+        model: 'auto', // resolved to the newest Haiku by aiModel.anthropicFetch
         max_tokens: 512,
         messages: [{ role: 'user', content: [source, { type: 'text', text: instruction }] }],
       }),
@@ -11813,11 +11813,11 @@ async function buildTtmAnalysis(d, entityName, asOf) {
     'Aim for the 3-8 most material items; return an empty array if nothing warrants attention.\n\n' +
     'THE REPORT:\n' + matrixText;
 
-  const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
+  const apiRes = await anthropicFetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
     body: JSON.stringify({
-      model: HAIKU_MODEL,
+      model: 'auto', // resolved to the newest Haiku by aiModel.anthropicFetch
       max_tokens: 1500,
       messages: [{ role: 'user', content: [{ type: 'text', text: instruction }] }],
     }),
@@ -11856,7 +11856,7 @@ async function buildTtmAnalysis(d, entityName, asOf) {
     return { account, reason, title: account, detail: reason };
   }) : [];
   return {
-    generatedBy: HAIKU_MODEL,
+    generatedBy: data.model || 'claude-haiku',
     lastMonthLabel: monthLabels[monthLabels.length - 1] || '',
     summary: String(parsed.summary || '').slice(0, 1000),
     findings,
@@ -13383,4 +13383,7 @@ app.use((err, req, res, next) => {
   res.status(status).type('text/plain').send(message);
 });
 
-app.listen(PORT, '0.0.0.0', () => console.log(`CloudLedger on port ${PORT}`));
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`CloudLedger on port ${PORT}`);
+  if (process.env.ANTHROPIC_API_KEY) refreshHaikuModel({ force: true }).then(m => console.log('[aiModel] Claude model: ' + m)).catch(() => {});
+});

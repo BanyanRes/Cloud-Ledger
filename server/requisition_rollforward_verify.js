@@ -28,7 +28,7 @@
 
 const { reconcile, cellNum, cellStr, cellFormula, COL } = require('./requisition_reconcile.js');
 const { findSheet } = require('./requisition_rollforward.js');
-const { HAIKU_MODEL } = require('./aiModel');
+const { anthropicFetch } = require('./aiModel');
 
 // Allowed patch operations the model may return. Anything else is rejected.
 //   setFormula : { op:'setFormula', sheet, cell, formula }    e.g. fix Dev Fee J6 ref
@@ -197,8 +197,8 @@ async function verifyRollforward(opts) {
 // Messages API and parses a strict-JSON patch list back. No SDK dependency -
 // uses global fetch (Node 18+). The model is instructed to return ONLY JSON.
 // ----------------------------------------------------------------------------
-function makeClaudeCaller({ apiKey = process.env.ANTHROPIC_API_KEY, model = HAIKU_MODEL, fetchImpl } = {}) {
-  const doFetch = fetchImpl || globalThis.fetch;
+function makeClaudeCaller({ apiKey = process.env.ANTHROPIC_API_KEY, model = 'auto', fetchImpl } = {}) {
+  const doFetch = (url, init) => anthropicFetch(url, init, fetchImpl); // auto model + retry on retirement
   const SYSTEM = [
     'You diagnose MECHANICAL errors in a real-estate requisition roll-forward.',
     'A roll-forward only moves Req#N Current Log into Req#N+1 Prior Log, so every',
