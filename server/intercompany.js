@@ -1067,7 +1067,9 @@ function listUnmappedAccounts(db, entityId, { computeBalances, as_of }) {
   const mapped = new Set(db.prepare('SELECT account_code FROM intercompany_accounts WHERE entity_id = ?')
     .all(eid).map(r => String(r.account_code)));
   const balByCode = new Map(computeBalances(eid, as_of ? { as_of } : {}).map(b => [String(b.code), b]));
-  const accounts = db.prepare('SELECT code, name, type, created_at FROM accounts WHERE entity_id = ? ORDER BY code').all(eid);
+  let excludedIc = new Set();
+  try { excludedIc = new Set(db.prepare('SELECT account_code FROM ic_excluded_accounts WHERE entity_id = ?').all(eid).map(r => String(r.account_code))); } catch (e) {}
+  const accounts = db.prepare('SELECT code, name, type, created_at FROM accounts WHERE entity_id = ? ORDER BY code').all(eid).filter(a => !excludedIc.has(String(a.code)));
 
   const out = [];
   let skippedOther = 0, skippedShellCapital = 0, skippedZero = 0;
