@@ -453,6 +453,7 @@ function isMarkedPerson(people, label) {
 function parseAccountName(name) {
   const s = String(name || '').trim();
   let m;
+  if ((m = s.match(/^due\s+(?:from|to)\s*\/\s*(?:from|to)\s+(.+)$/i))) return { ic_type: 'due_from', label: m[1] }; // combined "Due from/to X"
   if ((m = s.match(/^due\s+from\s+(.+)$/i)))                      return { ic_type: 'due_from', label: m[1] };
   if ((m = s.match(/^due\s+to\s+(.+)$/i)))                        return { ic_type: 'due_to', label: m[1] };
   if ((m = s.match(/^contributed\s+capital\s*[-–—:]?\s*(.+)$/i))) return { ic_type: 'contributed_capital', label: m[1] };
