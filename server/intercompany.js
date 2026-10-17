@@ -167,6 +167,10 @@ function ensureSchema(db) {
     PRIMARY KEY (entity_id, account_code)
   )`);
   try { db.exec('ALTER TABLE accounts ADD COLUMN created_at TEXT'); } catch (e) {}
+  // One-time backfill: CLRF's new combined "Due from/to X" accounts were created
+  // just before the created_at column existed, so stamp them as created today
+  // (they are zero-balance and should appear in IC Mapping for mapping).
+  try { db.exec("UPDATE accounts SET created_at = '2026-10-17 00:00:01' WHERE created_at IS NULL AND code IN ('101110','101120','101130','101140') AND entity_id IN (SELECT id FROM entities WHERE name LIKE 'County Line Rail Fund%')"); } catch (e) {}
 }
 
 // org_nodes is created by server/orgstructure.js. Both modules register at boot,
