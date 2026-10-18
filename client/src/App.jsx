@@ -9579,7 +9579,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         <div style={S.sub}>Each row is one account: this entity’s account on the left, the counterparty’s account on the right. Names are only a suggestion — a person confirms every row.</div></div></div>
 
     <div style={{display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid '+T.border}}>
-      {[['mappings','Account mappings'],['people','People ('+people.length+')']].map(([k,l])=>
+      {[['mappings','Account mappings'],['people','External ('+(people.length+excluded.length)+')']].map(([k,l])=>
         <button key={k} onClick={()=>{setTab(k);setErr('');setMsg('');}} style={{background:'none',border:'none',borderBottom:'2px solid '+(tab===k?T.accent:'transparent'),color:tab===k?T.accent:T.textMuted,fontWeight:tab===k?700:500,fontSize:13,padding:'9px 16px',cursor:'pointer',marginBottom:-1}}>{l}</button>)}</div>
 
     {err&&<div style={{...S.card,borderColor:T.red+'40',padding:14}}><div style={S.err}>{err}</div></div>}
