@@ -11932,6 +11932,54 @@ app.get('/api/intercompany/unmapped-all.xlsx', auth, requireRole('Admin', 'Accou
   } catch (e) { if (!res.headersSent) res.status(500).json({ error: e.message }); else res.end(); }
 });
 
+app.get('/api/intercompany/mapped-all.xlsx', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
+  try {
+    const icMod = require('./intercompany');
+    const entities = db.prepare('SELECT id, name FROM entities ORDER BY name COLLATE NOCASE').all();
+    const rows = [];
+    for (const E of entities) {
+      let mp; try { mp = icMod.listMappedPairs(db, E.id, { computeBalances, as_of: null }); } catch (e) { continue; }
+      for (const r of (mp.rows || [])) {
+        let status;
+        if (!r.their_account_code && r.ic_type === 'contributed_capital') status = 'investor capital';
+        else if (r.their_account_missing) status = 'broken pin';
+        else if (r.offsets) status = 'reconciled';
+        else if (r.gap != null) status = 'difference';
+        else status = 'mapped';
+        rows.push({
+          entity: E.name, code: r.account_code, name: r.account_name, type: r.ic_type || '',
+          bal: round2(Number(r.balance) || 0),
+          cp: r.counterparty_name || '', cpcode: r.their_account_code || '', cpname: r.their_account_name || '',
+          cpbal: (r.their_balance == null ? null : round2(Number(r.their_balance) || 0)),
+          diff: (r.gap == null ? null : round2(Number(r.gap) || 0)),
+          status,
+        });
+      }
+    }
+    rows.sort((x, y) => String(x.entity).localeCompare(String(y.entity)) || String(x.code).localeCompare(String(y.code)));
+    const wb = new ExcelJS.Workbook(); wb.creator = 'CloudLedger'; wb.created = new Date();
+    const ws = wb.addWorksheet('Mapped IC accounts');
+    ws.columns = [
+      { header: 'Entity', key: 'e', width: 32 },
+      { header: 'Account', key: 'c', width: 12 },
+      { header: 'Name', key: 'n', width: 40 },
+      { header: 'Type', key: 't', width: 18 },
+      { header: 'Balance', key: 'b', width: 18, style: { numFmt: '#,##0.00;(#,##0.00)' } },
+      { header: 'Counterparty', key: 'cp', width: 32 },
+      { header: 'CP account', key: 'cc', width: 12 },
+      { header: 'CP account name', key: 'cn', width: 40 },
+      { header: 'CP balance', key: 'cb', width: 18, style: { numFmt: '#,##0.00;(#,##0.00)' } },
+      { header: 'Difference', key: 'd', width: 16, style: { numFmt: '#,##0.00;(#,##0.00)' } },
+      { header: 'Status', key: 's', width: 16 },
+    ];
+    ws.getRow(1).font = { bold: true }; ws.views = [{ state: 'frozen', ySplit: 1 }];
+    for (const r of rows) ws.addRow({ e: r.entity, c: r.code, n: r.name, t: r.type, b: r.bal, cp: r.cp, cc: r.cpcode, cn: r.cpname, cb: r.cpbal, d: r.diff, s: r.status });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="IC_Mapped_Accounts.xlsx"');
+    await wb.xlsx.write(res); res.end();
+  } catch (e) { if (!res.headersSent) res.status(500).json({ error: e.message }); else res.end(); }
+});
+
 // Scope-based IC reconciliation data (All entities / CLA group / Weaver group):
 // Due from/Due to and Investment/Contributed capital (from reconcileForEntity)
 // plus A/R vs A/P (from computeIcArAp), each relationship carrying the line
