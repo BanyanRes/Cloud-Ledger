@@ -12026,10 +12026,10 @@ function reconScopeData(scope, asOf) {
       const invLegs = (g.our_legs || []).filter(l => l.ic_type === 'investment');
       const capLegs = (g.our_legs || []).filter(l => l.ic_type === 'contributed_capital');
       const d = [];
-      if (g.our_investment) d.push({ side: 'our', ref: codes(invLegs) || 'inv', desc: 'Our investment', amt: round2(g.our_investment) });
-      if (g.their_capital) d.push({ side: 'their', ref: '', desc: 'Their contributed capital', amt: round2(-g.their_capital) });
-      if (g.our_capital) d.push({ side: 'our', ref: codes(capLegs) || 'cap', desc: 'Our contributed capital', amt: round2(g.our_capital) });
-      if (g.their_investment) d.push({ side: 'their', ref: '', desc: 'Their investment', amt: round2(-g.their_investment) });
+      if (g.our_investment) d.push({ side: 'our', ref: codes(invLegs) || 'inv', desc: 'Investment', amt: round2(g.our_investment) });
+      if (g.their_capital) d.push({ side: 'their', ref: '', desc: 'Contributed capital', amt: round2(-g.their_capital) });
+      if (g.our_capital) d.push({ side: 'our', ref: codes(capLegs) || 'cap', desc: 'Contributed capital', amt: round2(g.our_capital) });
+      if (g.their_investment) d.push({ side: 'their', ref: '', desc: 'Investment', amt: round2(-g.their_investment) });
       inv.push({
         entity: E.name, cp: nameOf[g.counterparty_entity_id] || g.counterparty_name || '(external)',
         our_acc: codes(g.our_legs), their_acc: '',
@@ -12090,6 +12090,9 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
     const asOf = (req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of)) ? req.query.as_of : '2026-08-31';
     const scope = ['all', 'cla', 'weaver', 'banyan'].includes(req.query.scope) ? req.query.scope : 'all';
     const d = reconScopeData(scope, asOf);
+    const label = scope === 'cla' ? 'CLA' : scope === 'weaver' ? 'Weaver' : scope === 'banyan' ? 'Banyan' : 'All';
+    const [asY, asM, asD] = asOf.split('-');
+    const asOfLabel = 'as of ' + Number(asM) + '/' + Number(asD) + '/' + String(asY).slice(2);
     const MONEY = '#,##0.00;(#,##0.00)'; const CTR = { alignment: { horizontal: 'center' } };
     const fmtM = n => (n < 0 ? '(' : '') + Math.abs(Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + (n < 0 ? ')' : '');
     const sideLab = { ar: 'A/R', ap: 'A/P', our: 'Entity', their: 'Counterparty' };
@@ -12116,21 +12119,27 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
     // Summary schedule first (lead schedule across all three categories).
     const sum = wb.addWorksheet('Summary');
     sum.columns = [
-      { header: 'Category', key: 'cat', width: 28 },
-      { header: 'Entity', key: 'e', width: 40 },
-      { header: 'Counterparty', key: 'cp', width: 40 },
-      { header: 'Entity recorded', key: 'l', width: 20, style: { numFmt: MONEY } },
-      { header: 'Counterparty recorded', key: 'r', width: 24, style: { numFmt: MONEY } },
-      { header: 'Out of balance', key: 'df', width: 20, style: { numFmt: MONEY } },
-      { header: 'Status', key: 's', width: 14, style: CTR },
+      { key: 'cat', width: 28 },
+      { key: 'e', width: 40 },
+      { key: 'cp', width: 40 },
+      { key: 'l', width: 20, style: { numFmt: MONEY } },
+      { key: 'r', width: 24, style: { numFmt: MONEY } },
+      { key: 'df', width: 20, style: { numFmt: MONEY } },
+      { key: 's', width: 14, style: CTR },
     ];
-    sum.getRow(1).font = { bold: true }; sum.views = [{ state: 'frozen', ySplit: 1 }];
+    sum.addRow(['Intercompany Reconciliation Summary for ' + label + ' Entities']);
+    sum.mergeCells('A1:G1'); sum.getCell('A1').font = { bold: true, size: 14 };
+    sum.addRow([asOfLabel]);
+    sum.mergeCells('A2:G2'); sum.getCell('A2').font = { italic: true };
+    sum.addRow([]);
+    const sumHdr = sum.addRow({ cat: 'Category', e: 'Entity', cp: 'Counterparty', l: 'Entity recorded', r: 'Counterparty recorded', df: 'Out of balance', s: 'Status' });
+    sumHdr.font = { bold: true };
+    sum.views = [{ state: 'frozen', ySplit: 4 }];
     const CATN = { due: 'Due from / Due to', inv: 'Investment / Contributed capital', arap: 'A/R vs A/P' };
     for (const [ck, rr] of [['due', d.due], ['inv', d.inv], ['arap', d.arap]]) for (const r of rr) sum.addRow({ cat: CATN[ck], e: r.entity, cp: r.cp, l: r.left, r: r.right, df: r.diff, s: r.status });
     sheet('Due from - Due to detail', d.due);
     sheet('Investment - Contrib detail', d.inv);
     sheet('A-R vs A-P detail', d.arap);
-    const label = scope === 'cla' ? 'CLA' : scope === 'weaver' ? 'Weaver' : scope === 'banyan' ? 'Banyan' : 'All';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="IC_Recon_' + label + '_' + asOf + '.xlsx"');
     await wb.xlsx.write(res); res.end();
