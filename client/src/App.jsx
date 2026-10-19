@@ -9533,6 +9533,28 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
   const[excluded,setExcluded]=useState([]);
   const loadExcluded=useCallback(async()=>{try{setExcluded(await api.getIcExcluded());}catch(e){}},[]);
   const excludeAccount=async(code)=>{setErr('');await api.excludeIcAccount({entity_id:Number(eid),account_code:code});setMsg('Removed '+code+' from intercompany.');await load();await loadExcluded();};
+  const[addMode,setAddMode]=useState(false);
+  const[addAccts,setAddAccts]=useState([]);
+  const[addCode,setAddCode]=useState('');
+  const[addType,setAddType]=useState('due_from');
+  const[addCpId,setAddCpId]=useState('');
+  const[addExt,setAddExt]=useState(false);
+  const[addCpCode,setAddCpCode]=useState('');
+  const[addBusy,setAddBusy]=useState(false);
+  const openAdd=async()=>{setErr('');setMsg('');setAddCode('');setAddType('due_from');setAddCpId('');setAddExt(false);setAddCpCode('');try{const a=await api.getAccounts(eid);setAddAccts(Array.isArray(a)?a:(a.accounts||a.rows||[]));}catch(e){setErr(e.message);}setAddMode(true);};
+  const addSave=async()=>{
+    if(!addCode){setErr('Pick an account to map.');return;}
+    if(!addExt&&!addCpId){setErr('Pick a counterparty entity, or mark it external.');return;}
+    setAddBusy(true);setErr('');
+    try{
+      const acct=addAccts.find(a=>String(a.code)===String(addCode));
+      const base={entity_id:Number(eid),account_code:addCode,account_name:acct?acct.name:'',ic_type:addType,counterparty_node_id:null,notes:null};
+      const payload=addExt?{...base,counterparty_entity_id:null,counterparty_account_code:null,is_external:1}
+        :{...base,counterparty_entity_id:Number(addCpId),counterparty_account_code:addCpCode||null,is_external:0};
+      await api.createIcMapping(payload);
+      setMsg('Added '+addCode+' to intercompany mapping.');setAddMode(false);await load();
+    }catch(e){setErr(e.message);}finally{setAddBusy(false);}
+  };
   const entityOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
   const entName=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:'';};
 
@@ -9604,6 +9626,7 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
             <option value=''>Select an entity…</option>
             {entityOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></div>
         <button style={{...S.btnGhost,fontSize:12}} onClick={load} disabled={loading||!eid}>{loading?'Loading…':'Refresh'}</button>
+        {canEdit&&<button style={{...S.btnP,fontSize:12,padding:'6px 13px'}} onClick={openAdd} disabled={!eid} title="Manually add an account from this entity's chart and map it.">+ Add account</button>}
         {canEdit&&<button style={{...S.btnGhost,fontSize:12}} onClick={runSweep} disabled={sweepBusy} title='Scan every entity for stray zero-balance duplicate due accounts the old matcher created.'>{sweepBusy?'Scanning…':'Scan for duplicates'}</button>}
         {canEdit&&<button style={{...S.btnGhost,fontSize:12}} disabled={dlBusy} onClick={dlCompare} title='Download an Excel comparison of intercompany A/R vs A/P — customers and vendors matched to entities — as of 8/31/26.'>{dlBusy?'Preparing…':'IC A/R vs A/P (xlsx)'}</button>}
         {canEdit&&<button style={{...S.btnGhost,fontSize:12}} disabled={unmBusy} onClick={dlUnmapped} title='Every intercompany account across all entities that is not yet mapped (carries a balance, parses as intercompany, no complete mapping).'>{unmBusy?'Preparing…':'Unmapped (xlsx)'}</button>}{canEdit&&<button style={{...S.btnGhost,fontSize:12}} disabled={mapBusy} onClick={dlMapped} title='Every mapped intercompany account across all entities, with its counterparty account and both balances — for checking accuracy.'>{mapBusy?'Preparing…':'Mapped (xlsx)'}</button>}</div>
@@ -9623,6 +9646,24 @@ function IntercompanyMapping({entities,activeEntity,canEdit=true}){
         <div style={{display:'flex',gap:8,alignItems:'center'}}>
           {sweep.count>sweep.ambiguous&&!sweep.applied&&canEdit&&<button style={S.btnP} disabled={sweepBusy} onClick={applySweep}>{sweepBusy?'Cleaning…':('Apply cleanup ('+(sweep.count-sweep.ambiguous)+')')}</button>}
           <button style={{...S.btnGhost,fontSize:12}} onClick={()=>setSweep(null)}>Close</button></div></div>}
+
+      {addMode&&eid&&<div style={{...S.card,borderColor:T.accent+'55',padding:14,marginBottom:12}}>
+        <div style={{fontWeight:700,color:T.textBright,marginBottom:10}}>Add an account to map</div>
+        <div style={{display:'flex',gap:12,flexWrap:'wrap',alignItems:'flex-end'}}>
+          <div><label style={S.label}>Account</label>
+            <select style={{...S.select,minWidth:280}} value={addCode} onChange={e=>setAddCode(e.target.value)}>
+              <option value=''>Select an account…</option>
+              {[...addAccts].sort((a,b)=>String(a.code).localeCompare(String(b.code),undefined,{numeric:true})).map(a=><option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}</select></div>
+          <div><label style={S.label}>Type</label>
+            <select style={{...S.select,minWidth:170}} value={addType} onChange={e=>setAddType(e.target.value)}>
+              {Object.entries(IC_TYPE_LABEL).map(([k,l])=><option key={k} value={k}>{l}</option>)}</select></div>
+          <div><label style={S.label}>Counterparty</label>
+            <IcCpSelect entityOpts={entityOpts} companies={[]} entId={addExt?'':addCpId} nodeId={''} isExt={addExt} seedName={(addAccts.find(a=>String(a.code)===String(addCode))||{}).name}
+              onPick={pk=>{if(pk.is_external){setAddExt(true);}else{setAddExt(false);setAddCpId(pk.entity_id?String(pk.entity_id):'');setAddCpCode('');}}} onMsg={setMsg} onErr={setErr}/></div>
+          {!addExt&&addCpId&&<div><label style={S.label}>Their account</label>
+            <IcCpAccountSelect entityId={eid} accountCode={addCode} counterpartyEntityId={Number(addCpId)} value={addCpCode} onChange={setAddCpCode} onLoaded={r=>{if(!addCpCode&&r.best)setAddCpCode(r.best);}} width={240} showGap={false}/></div>}
+          <button style={{...S.btnP,padding:'8px 14px',fontSize:12}} disabled={addBusy} onClick={addSave}>{addBusy?'Adding…':'Add mapping'}</button>
+          <button style={{...S.btnGhost,fontSize:12}} onClick={()=>setAddMode(false)}>Cancel</button></div></div>}
 
       {!eid?<IcEmpty>Pick an entity to see and edit its intercompany account mappings.</IcEmpty>
       :<div style={{...S.cardFlush,border:'1px solid '+T.border,overflow:'hidden'}}>
