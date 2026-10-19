@@ -861,6 +861,28 @@ if (!entHideDimCols.includes('hide_dims')) {
   const seeded = db.prepare("UPDATE entities SET hide_dims=1 WHERE code IN ('SABINERI','CLRSILSB2')").run();
   console.log('[db migrate] entities.hide_dims added; seeded hidden for ' + seeded.changes + ' entity(ies) (SABINERI, CLRSILSB2)');
 }
+const entBillCols = db.prepare("PRAGMA table_info(entities)").all().map(c => c.name);
+if (!entBillCols.includes('bill_inbox_email')) {
+  db.exec("ALTER TABLE entities ADD COLUMN bill_inbox_email TEXT");
+  const BILL_INBOX = {
+    'Banyan Residential':'banyanresidential@bill.com',
+    'Banyan SFR GP Investors':'banyansfrgp@bill.com',
+    'Banyan Van Buren':'vanburen@bill.com',
+    'Braker Prop Co':'brakerpropcollc@bill.com',
+    'CLIP Property Owner':'clippropertyownerllc@bill.com',
+    'CLR Silsbee Property Owner':'silsbeeap@bill.com',
+    'CLR Buna Property Owner':'countylinerailbunallc@bill.com',
+    'County Line Rail Fund':'countylinerailfund@bill.com',
+    'County Line Rail Operations':'countylinerailoperations@bill.com',
+    'HP Property Owner':'hppropertyownerllc@bill.com',
+    'Sabine River & Northern Railroad':'srnrailroad@bill.com',
+    'Turnkey Rail':'turnkeyrailap@bill.com',
+  };
+  let _bn = 0;
+  const _up = db.prepare("UPDATE entities SET bill_inbox_email = ? WHERE name = ? AND (bill_inbox_email IS NULL OR bill_inbox_email = '')");
+  for (const nm of Object.keys(BILL_INBOX)) _bn += _up.run(BILL_INBOX[nm], nm).changes;
+  console.log('[db migrate] entities.bill_inbox_email added; seeded ' + _bn + ' Bill.com inbox address(es)');
+}
 const bslCols = db.prepare("PRAGMA table_info(billcom_sync_log)").all().map(c => c.name);
 if (!bslCols.includes('invoice_number')) { db.exec("ALTER TABLE billcom_sync_log ADD COLUMN invoice_number TEXT"); console.log('[db migrate] billcom_sync_log.invoice_number added'); }
 // Bill re-sync change detection (issue: edited bills in Bill.com didn't update in CL).

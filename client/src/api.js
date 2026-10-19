@@ -354,6 +354,7 @@ export const api = {
   redateArInvoice: (eid, id, body = {}) => request('/entities/' + eid + '/ar/invoices/' + id + '/date', { method: 'PATCH', body }),
   updateArInvoiceDetails: (eid, id, body = {}) => request('/entities/' + eid + '/ar/invoices/' + id + '/details', { method: 'PATCH', body }),
   sendArInvoice: (eid, id, body = {}) => request('/entities/' + eid + '/ar/invoices/' + id + '/send', { method: 'POST', body }),
+  sendArInvoiceToCounterparty: (eid, id) => request('/entities/' + eid + '/ar/invoices/' + id + '/send-to-counterparty', { method: 'POST', body: {} }),
   markArInvoiceSent: (eid, id) => request('/entities/' + eid + '/ar/invoices/' + id + '/mark-sent', { method: 'POST', body: {} }),
   saveArInvoicePdf: (eid, id) => request('/entities/' + eid + '/ar/invoices/' + id + '/save-pdf', { method: 'POST', body: {} }),
   arInvoicePdfUrl: (eid, id) => API_BASE + '/entities/' + eid + '/ar/invoices/' + id + '/pdf?token=' + encodeURIComponent(getToken() || ''),

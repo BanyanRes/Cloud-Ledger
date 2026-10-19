@@ -1255,6 +1255,44 @@ function registerArRoutes(app, ctx) {
     } catch (e) { fail(res, e); }
   });
 
+  // Send an intercompany invoice straight to the counterparty's Bill.com inbox,
+  // so it becomes a bill on their side and the A/R and A/P reconcile.
+  app.post('/api/entities/:eid/ar/invoices/:id/send-to-counterparty', ...writers, async (req, res) => {
+    try {
+      const eid = req.params.eid;
+      const inv = invoiceWithLines(db, eid, req.params.id);
+      if (!inv) return res.status(404).json({ error: 'Not found' });
+      if (inv.status === 'void') throw new Error('This invoice is void');
+      const norm = (x) => String(x || '').replace(/[^a-z0-9 ]/gi, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+      const ents = db.prepare('SELECT id, name, bill_inbox_email FROM entities').all();
+      const cust = norm(inv.customer_name);
+      let cp = ents.find(e => norm(e.name) === cust);
+      if (!cp) cp = ents.find(e => { const n = norm(e.name); return n && (cust === n + ' llc' || cust === n + ' lp' || cust.startsWith(n + ' ') || n.startsWith(cust + ' ')); });
+      if (!cp) cp = ents.find(e => { const n = norm(e.name); return n.length > 4 && (cust.includes(n) || n.includes(cust)); });
+      if (!cp) throw new Error('Could not match the invoice customer "' + (inv.customer_name || '') + '" to a CloudLedger entity. This send is for intercompany invoices only.');
+      const to = String(cp.bill_inbox_email || '').trim();
+      if (!to) throw new Error('No Bill.com inbox address on file for ' + cp.name + '.');
+      const settings = getSettings(db, eid);
+      const buf = await pdfBufferFor(eid, inv.id);
+      const fileId = savePdf(db, workpapersDir, eid, 'Invoices/' + String(inv.invoice_date).slice(0, 4), inv.invoice_num + '.pdf', buf, who(req));
+      db.prepare('UPDATE ar_invoices SET pdf_file_id = ? WHERE id = ?').run(fileId, inv.id);
+      const name = entName(eid);
+      const result = await sendInvoiceEmail({
+        apiKey: ctx.getResendKey(),
+        from: ctx.getFromEmail(),
+        replyTo: settings.reply_to || null,
+        to: to,
+        subject: 'Invoice ' + inv.invoice_num + ' from ' + name,
+        html: invoiceEmailHtml({ entityName: name, invoice: inv, settings: settings }),
+        filename: inv.invoice_num + '.pdf',
+        pdf: buf,
+      });
+      if (!result.ok) return res.status(502).json({ error: 'Email not sent: ' + (result.reason || 'unknown error'), pdf_saved: true, pdf_file_id: fileId });
+      db.prepare("UPDATE ar_invoices SET status = CASE WHEN status='draft' THEN 'sent' ELSE status END, sent_at = datetime('now') WHERE id = ?").run(inv.id);
+      res.json({ success: true, sent_to: to, counterparty: cp.name, pdf_file_id: fileId, invoice: invoiceWithLines(db, eid, inv.id) });
+    } catch (e) { fail(res, e); }
+  });
+
   // Mark as sent without emailing (invoice delivered by other means).
   app.post('/api/entities/:eid/ar/invoices/:id/mark-sent', ...writers, (req, res) => {
     const inv = db.prepare('SELECT * FROM ar_invoices WHERE id = ? AND entity_id = ?').get(req.params.id, req.params.eid);

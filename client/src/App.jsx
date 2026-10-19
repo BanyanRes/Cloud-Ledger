@@ -3290,6 +3290,11 @@ function ArInvoiceDetail({entityId,invoice,bankAccts,canEdit,busy,act,onClose}){
           <button style={S.btnP} disabled={!!busy||!sendTo.trim()} onClick={()=>act(()=>api.sendArInvoice(entityId,inv.id,{to:sendTo.trim()}),'send')}>{busy==='send'?'Sending…':'Email Invoice'}</button></div>
         <div style={{fontSize:11,color:T.textMuted,marginTop:8}}>Attaches the PDF, files a copy under Workpapers &gt; Invoices/{String(inv.invoice_date).slice(0,4)}, and marks the invoice sent.</div>
       </div>}
+      {canEdit&&!isVoid&&<div style={{...S.card,marginBottom:12,borderColor:T.accent+'44'}}>
+        <div style={{fontSize:13,fontWeight:600,color:T.textBright,marginBottom:8}}>Send to counterparty&rsquo;s Bill.com</div>
+        <div style={{fontSize:12,color:T.textMuted,marginBottom:10}}>For an intercompany invoice: emails the PDF to the counterparty entity&rsquo;s Bill.com inbox so it lands as a bill on their side and the A/R and A/P tie out. The counterparty is matched from the customer name.</div>
+        <button style={S.btnP} disabled={!!busy} onClick={()=>act(()=>api.sendArInvoiceToCounterparty(entityId,inv.id),'sendcp')}>{busy==='sendcp'?'Sending\u2026':'Send to counterparty'}</button>
+      </div>}
       {canEdit&&!isVoid&&!isCm&&inv.open_amount>0.005&&credits.length>0&&<div style={{...S.card,marginBottom:12,borderColor:T.orange+'55'}}>
         <div style={{fontSize:13,fontWeight:600,color:T.textBright,marginBottom:8}}>Apply a credit memo</div>
         <div style={{display:'flex',gap:10,alignItems:'flex-end',flexWrap:'wrap'}}>
