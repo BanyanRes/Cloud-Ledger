@@ -1161,7 +1161,7 @@ export default function App(){
         {page==='fundrep'&&activeEntity&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
         {page==='rep_pcapstmt'&&activeEntity&&isCLRF&&<PcapStatementsReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-ps-'+rk}/>}
       </>})()}</div></div>
-    {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} entityName={entityName} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
+    {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} entityName={_activeEnt?_activeEnt.name:''} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
     {wpEntity&&<WorkpapersModal entity={wpEntity} user={user} onClose={()=>setWpEntity(null)}/>}
   </div>);}
