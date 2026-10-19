@@ -1266,7 +1266,11 @@ function registerArRoutes(app, ctx) {
       const norm = (x) => String(x || '').replace(/[^a-z0-9 ]/gi, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
       const ents = db.prepare('SELECT id, name, bill_inbox_email FROM entities').all();
       const cust = norm(inv.customer_name);
-      let cp = ents.find(e => norm(e.name) === cust);
+      // Explicit aliases: customer names kept as-is on the customer record (per request)
+      // that differ from the CloudLedger entity name -> the entity to route to.
+      const CUST_ALIAS = { 'braker propco llc': 'braker prop co', 'county line rail buna llc': 'clr buna property owner' };
+      let cp = CUST_ALIAS[cust] ? ents.find(e => norm(e.name) === CUST_ALIAS[cust]) : null;
+      if (!cp) cp = ents.find(e => norm(e.name) === cust);
       if (!cp) cp = ents.find(e => { const n = norm(e.name); return n && (cust === n + ' llc' || cust === n + ' lp' || cust.startsWith(n + ' ') || n.startsWith(cust + ' ')); });
       if (!cp) cp = ents.find(e => { const n = norm(e.name); return n.length > 4 && (cust.includes(n) || n.includes(cust)); });
       if (!cp) throw new Error('Could not match the invoice customer "' + (inv.customer_name || '') + '" to a CloudLedger entity. This send is for intercompany invoices only.');
