@@ -2390,7 +2390,8 @@ function Dashboard({entityId,setActiveEntity,setPage,user}){const[summary,setSum
   </div>);}
 
 // ═══ Edit JE Modal ═══
-function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,accounts:initAccounts,onClose,onSaved,onDuplicate}){
+function EditJEModal({entityId,entityName,dimsEnabled=true,isTurnkeyEntity=false,entry,accounts:initAccounts,onClose,onSaved,onDuplicate}){
+  const[mirror,setMirror]=useState(null);
   // dimsEnabled defaults to true: report drilldowns (AccountDrillDownModal, ApAgingReport,
   // FundReporting) open this modal without the prop and only ever do so for real
   // accounting/fund entities, so the full Location/Class/Project dimension list must show —
@@ -2454,7 +2455,7 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
   const save=async()=>{if(!form.date||!form.memo.trim()){setErr('Date and memo required');return;}if(form.lines.some(l=>!l.account_code)){setErr('All lines need an account');return;}if(!bal){setErr('Must balance');return;}
     setSaving(true);setErr('');
     const _basePayload=override=>({date:form.date,memo:form.memo.trim(),doc_number:(form.doc_number||'').trim(),vendor:(form.vendor||'').trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null})),...(override||{})});
-    const _doSave=async override=>{await api.updateEntry(entityId,entry.id,_basePayload(override));onSaved();onClose();};
+    const _doSave=async override=>{const _p=_basePayload(override);await api.updateEntry(entityId,entry.id,_p);let _mp=null;try{_mp=await api.getMirrorProposal({entity_id:Number(entityId),lines:_p.lines});}catch(_e){}if(_mp&&Array.isArray(_mp.proposals)&&_mp.proposals.length){setMirror({proposals:_mp.proposals,srcDate:_p.date,srcMemo:_p.memo,srcEntryNum:entry.entry_num,srcEntityName:entityName||''});}else{onSaved();onClose();}};
     try{await _doSave();}
     catch(e){
       const d=e.detail||{};
@@ -2492,6 +2493,7 @@ function EditJEModal({entityId,dimsEnabled=true,isTurnkeyEntity=false,entry,acco
   const jeObDown=useRef(false);
   return(<div style={S.modal} onMouseDown={e=>{jeObDown.current=(e.target===e.currentTarget);}} onClick={e=>{if(jeObDown.current&&e.target===e.currentTarget)onClose();}}><div className="cl-modal-box" style={{...S.modalBox,width:'min(1200px, 96vw)',maxWidth:'96vw',height:'auto',maxHeight:'92vh',resize:'both',overflow:'auto',minWidth:'min(560px, 96vw)',minHeight:360}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
+    {mirror&&<MirrorEntryModal proposals={mirror.proposals} srcDate={mirror.srcDate} srcMemo={mirror.srcMemo} srcEntryNum={mirror.srcEntryNum} srcEntityName={mirror.srcEntityName} onClose={()=>{setMirror(null);onSaved();onClose();}} onPosted={()=>{}}/>}
     <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Edit JE-{String(entry.entry_num).padStart(4,'0')}</div>
     {(entry.created_by||entry.created_at)&&<div style={{fontSize:11,color:T.textMuted,marginBottom:2}}>
       Posted{entry.created_by?' by '+entry.created_by:''}{entry.created_at?' on '+fmtPst(entry.created_at):''}
@@ -2815,7 +2817,7 @@ function JournalList({entityId,entityName,dimsEnabled,canEdit=true,onNewEntry,on
             <td style={{...S.tdR,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{l.debit>0?fmt(l.debit):''}</td><td style={{...S.tdR,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{l.credit>0?fmt(l.credit):''}</td></tr>)}</tbody></table></div>
         {e.attachments?.length>0&&<div style={{marginTop:10,display:'flex',flexWrap:'wrap',gap:4}}>{e.attachments.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>)}</div>}
       </div>)}</div>}
-    {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} isTurnkeyEntity={/turnkey\s*rail/i.test(entityName||'')} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={load} onDuplicate={onDuplicate}/>}
+    {editEntry&&<EditJEModal entityId={entityId} entityName={entityName} dimsEnabled={dimsEnabled} isTurnkeyEntity={/turnkey\s*rail/i.test(entityName||'')} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={load} onDuplicate={onDuplicate}/>}
     {showBulk&&<BulkJEModal entityId={entityId} onClose={()=>setShowBulk(false)} onPosted={()=>{setShowBulk(false);load();}}/>}
     {showRecurring&&<RecurringTemplatesModal entityId={entityId} entityName={entityName} dimsEnabled={dimsEnabled} onClose={()=>setShowRecurring(false)} onPosted={load}/>}
   </div>);}
@@ -3740,7 +3742,7 @@ function GeneralLedger({entityId,entityName,dimsEnabled,from,setFrom,to,setTo,fi
         <div style={{overflowX:'auto'}}><table style={{...S.table,minWidth:1100}}><thead><tr><th style={S.th}>Date</th><th style={S.th}>JE</th><th style={S.th}>Doc #</th><th style={S.th}>Vendor</th><th style={S.th}>Memo</th><th style={S.thR}>Debit</th><th style={S.thR}>Credit</th><th style={S.thR}>Balance</th><th style={{...S.th,width:100}}>Docs</th></tr></thead>
           <tbody>{from&&<tr><td style={{...S.td,color:T.textMuted}}>{from}</td><td style={S.td}></td><td style={S.td}></td><td style={S.td}></td><td style={{...S.td,fontStyle:'italic',color:T.textMuted}}>Beginning Balance</td><td style={S.tdR}></td><td style={S.tdR}></td><td style={{...S.tdR,fontWeight:600,color:T.textMuted}}>{fmt(beg)}</td><td style={S.td}></td></tr>}{txns.map((t,i)=>{run+=dr?(t.debit-t.credit):(t.credit-t.debit);const atts=entryAtts[t.jeId];return<tr key={i}><td style={{...S.td,color:T.textMuted}}>{t.date}</td><td style={S.td}><button style={{background:'none',border:0,padding:0,color:T.accent,fontWeight:600,cursor:'pointer',fontSize:'inherit',fontFamily:'inherit'}} onClick={()=>{const e=entries.find(x=>x.id===t.jeId);if(e)setEditEntry(e);}}>JE-{String(t.jeNum).padStart(4,'0')}</button></td><td style={{...S.td,color:T.textMuted,whiteSpace:'nowrap'}}>{t.doc||''}</td><td style={S.td} title={t.vendor||''}>{t.vendor||''}</td><td style={S.td} title={t.description||t.memo}>{t.description||t.memo}</td><td style={S.tdR}>{t.debit>0?fmt(t.debit):''}</td><td style={S.tdR}>{t.credit>0?fmt(t.credit):''}</td><td style={{...S.tdR,fontWeight:600,color:T.textBright}}>{fmt(run)}</td>
             <td style={S.td}>{atts?atts.map(a=><a key={a.id} href={api.downloadAttachment(a.id)} target="_blank" rel="noreferrer" style={S.attachLink}>{a.original_name}</a>):''}</td></tr>;})}</tbody></table></div>}</div>);})}
-    {editEntry&&<EditJEModal entityId={entityId} dimsEnabled={dimsEnabled} isTurnkeyEntity={/turnkey\s*rail/i.test(entityName||'')} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={()=>{setEditEntry(null);reload();}}/>}
+    {editEntry&&<EditJEModal entityId={entityId} entityName={entityName} dimsEnabled={dimsEnabled} isTurnkeyEntity={/turnkey\s*rail/i.test(entityName||'')} entry={editEntry} accounts={accounts} onClose={()=>setEditEntry(null)} onSaved={()=>{setEditEntry(null);reload();}}/>}
     </div>);}
 
 // ═══ Wire Coding Notes Modal ═══
