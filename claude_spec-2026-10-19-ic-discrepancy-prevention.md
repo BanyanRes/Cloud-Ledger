@@ -43,11 +43,11 @@ BILL organization name -> proposed CL entity (CONFIRM the two marked ?):
 - Braker PropCo, LLC                 -> Braker Prop Co                 brakerpropcollc@bill.com
 - CLIP Property Owner, LLC           -> CLIP Property Owner            clippropertyownerllc@bill.com
 - CLR Silsbee Property Owner LLC     -> CLR Silsbee Property Owner     silsbeeap@bill.com
-- County Line Rail Buna LLC          -> CLR Buna Property Owner  (?)   countylinerailbunallc@bill.com
+- County Line Rail Buna LLC          -> CLR Buna Property Owner        countylinerailbunallc@bill.com
 - County Line Rail Fund I LP         -> County Line Rail Fund          countylinerailfund@bill.com
 - County Line Rail Operations LLC    -> County Line Rail Operations    countylinerailoperations@bill.com
 - HP Property Owner, LLC             -> HP Property Owner              hppropertyownerllc@bill.com
-- Pflugerville Property Owner, LLC   -> Pflugerville Property Owner (?) pflugervillepropertyownerllc@bill.com
+- Pflugerville Property Owner, LLC   -> DISREGARD (not mapped per Jimmy 2026-10-19)   pflugervillepropertyownerllc@bill.com
 - Sabine River & Northern Railroad LLC -> Sabine River & Northern Railroad  srnrailroad@bill.com
 - Turnkey Rail LLC                   -> Turnkey Rail                   turnkeyrailap@bill.com
 
@@ -58,7 +58,7 @@ BILL organization name -> proposed CL entity (CONFIRM the two marked ?):
    ar.js Resend send to B's inbox with PDF.
 
 ## Open items
-- Confirm the two "?" entity matches (Buna, Pflugerville).
+- Entity matches confirmed: Buna = CLR Buna Property Owner; Pflugerville disregarded.
 - Decide settings location for bill_inbox_email (per-entity settings page).
 - DEPLOY: Railway has not promoted any build since af4e10a (External rename). 7dc67a7 / 4177db4 / d5a60b3 are queued
   and unverified. Nothing here can ship or be tested until that clears.

@@ -12085,6 +12085,45 @@ app.get('/api/intercompany/recon-view', auth, requireRole('Admin', 'Accountant')
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Mirror-JE proposal: given a draft journal entry on `entity_id`, return the
+// intercompany legs that should be posted on each counterparty to keep the two
+// sides in balance. Only fires when entity and counterparty are in the SAME
+// group (CLA<->CLA or Banyan<->Banyan). CLRF is Weaver-only, so it has no
+// CLA/Banyan group and never produces a proposal, by design.
+app.post('/api/intercompany/mirror-proposal', auth, requireRole('Admin', 'Accountant'), (req, res) => {
+  try {
+    const eid = Number(req.body.entity_id);
+    const lines = Array.isArray(req.body.lines) ? req.body.lines : [];
+    if (!eid) return res.status(400).json({ error: 'entity_id required' });
+    const cla = groupEntitySet('CLA'), weaver = groupEntitySet('Weaver');
+    const mirrorGroupOf = (id) => cla.has(Number(id)) ? 'cla' : (!weaver.has(Number(id)) ? 'banyan' : null);
+    const myGroup = mirrorGroupOf(eid);
+    if (!myGroup) return res.json({ group: null, proposals: [] });
+    const maps = db.prepare('SELECT account_code, account_name, ic_type, counterparty_entity_id FROM intercompany_accounts WHERE entity_id = ? AND is_external = 0 AND counterparty_entity_id IS NOT NULL').all(eid);
+    const mapByCode = new Map(maps.map(m => [String(m.account_code), m]));
+    const flip = { due_from: 'due_to', due_to: 'due_from', investment: 'contributed_capital', contributed_capital: 'investment' };
+    const IC_LABEL = { due_from: 'Due from', due_to: 'Due to', investment: 'Investment', contributed_capital: 'Contributed capital' };
+    const nameOf = (id) => (db.prepare('SELECT name FROM entities WHERE id = ?').get(id) || {}).name || '';
+    const proposals = [];
+    for (const l of lines) {
+      const m = mapByCode.get(String(l.account_code));
+      if (!m) continue;
+      const cpId = Number(m.counterparty_entity_id);
+      if (mirrorGroupOf(cpId) !== myGroup) continue;
+      const cpType = flip[m.ic_type]; if (!cpType) continue;
+      const dr = Number(l.debit) || 0, cr = Number(l.credit) || 0;
+      if (Math.abs(dr) < 0.005 && Math.abs(cr) < 0.005) continue;
+      proposals.push({
+        our_account_code: m.account_code, our_account_name: m.account_name, our_ic_type: m.ic_type,
+        counterparty_entity_id: cpId, counterparty_name: nameOf(cpId),
+        counterparty_ic_type: cpType, counterparty_ic_label: IC_LABEL[cpType] || cpType,
+        mirror_debit: round2(cr), mirror_credit: round2(dr),
+        candidate_accounts: db.prepare('SELECT code, name FROM accounts WHERE entity_id = ? ORDER BY code').all(cpId),
+      });
+    }
+    res.json({ group: myGroup, proposals });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
   try {
     const asOf = (req.query.as_of && /^\d{4}-\d{2}-\d{2}$/.test(req.query.as_of)) ? req.query.as_of : '2026-08-31';
