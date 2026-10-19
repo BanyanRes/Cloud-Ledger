@@ -9363,6 +9363,7 @@ function IcRow({row,st,entityId,entityOpts,entName,canEdit,onSaved,onMsg,onErr,o
   const[newAcct,setNewAcct]=useState(row.suggested_new?(row.suggested_new.account_code+' '+row.suggested_new.account_name):'');
   const[chgCode,setChgCode]=useState(row.their_account_code||'');
   const[changing,setChanging]=useState(false);
+  const[chgExt,setChgExt]=useState(false);
   const[busy,setBusy]=useState(false);
   const mapped=row.source==='mapped'&&row.their_account_code&&!row.investor_capital;
   const external=!!row.is_external;
@@ -9399,10 +9400,17 @@ function IcRow({row,st,entityId,entityOpts,entName,canEdit,onSaved,onMsg,onErr,o
   const changeAcct=async()=>{
     setBusy(true);
     try{
-      await api.updateIcMapping(row.id,{account_code:row.account_code,account_name:row.account_name,ic_type:row.ic_type,
-        counterparty_entity_id:row.counterparty_entity_id,counterparty_node_id:null,
-        counterparty_account_code:chgCode||null,is_external:0,notes:row.notes||null});
-      onErr&&onErr('');onMsg&&onMsg(chgCode?(row.account_code+' now answers their '+chgCode+'.'):('Cleared the counterparty account on '+row.account_code+'.'));
+      let payload;
+      if(chgExt){
+        payload={account_code:row.account_code,account_name:row.account_name,ic_type:row.ic_type,
+          counterparty_entity_id:null,counterparty_node_id:null,counterparty_account_code:null,is_external:1,notes:row.notes||null};
+      }else{
+        if(!cpId)throw new Error('Pick a counterparty entity, or mark it external.');
+        payload={account_code:row.account_code,account_name:row.account_name,ic_type:row.ic_type,
+          counterparty_entity_id:Number(cpId),counterparty_node_id:null,counterparty_account_code:chgCode||null,is_external:0,notes:row.notes||null};
+      }
+      await api.updateIcMapping(row.id,payload);
+      onErr&&onErr('');onMsg&&onMsg('Saved '+row.account_code+'.');
       setChanging(false);await onSaved();
     }catch(e){onErr&&onErr(e.message);}finally{setBusy(false);}
   };
@@ -9447,11 +9455,15 @@ function IcRow({row,st,entityId,entityOpts,entName,canEdit,onSaved,onMsg,onErr,o
         {row.offsets?'Reconciled':'Difference '+fmt(row.gap)}</div>}
       {canEdit&&<div style={{marginTop:8,display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
         {changing
-          ?<><IcCpAccountSelect entityId={entityId} accountCode={row.account_code} counterpartyEntityId={row.counterparty_entity_id}
-              value={chgCode} onChange={setChgCode} onLoaded={r=>setChgCode(x=>x||r.best||'')} showGap={false}/>
+          ?<><IcCpSelect entityOpts={entityOpts} companies={[]} entId={chgExt?'':cpId} nodeId={''} isExt={chgExt}
+              seedName={row.account_name}
+              onPick={pk=>{if(pk.is_external){setChgExt(true);}else{setChgExt(false);setCpId(pk.entity_id?String(pk.entity_id):'');setChgCode('');}}}
+              onMsg={onMsg} onErr={onErr}/>
+            {!chgExt&&cpId&&<IcCpAccountSelect entityId={entityId} accountCode={row.account_code} counterpartyEntityId={Number(cpId)}
+              value={chgCode} onChange={setChgCode} onLoaded={r=>setChgCode(x=>x||r.best||'')} showGap={false} width={240}/>}
             <button style={{...S.btnP,padding:'5px 11px',fontSize:12}} disabled={busy} onClick={changeAcct}>Save</button>
             <button style={{...S.btnGhost,fontSize:12}} onClick={()=>setChanging(false)}>Cancel</button></>
-          :<><button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{setChgCode(row.their_account_code||'');setChanging(true);}}>Change</button>
+          :<><button style={{...S.btnGhost,color:T.accent,fontSize:11}} onClick={()=>{setChgCode(row.their_account_code||'');setCpId(row.counterparty_entity_id?String(row.counterparty_entity_id):'');setChgExt(false);setChanging(true);}}>Change</button>
             <button style={{...S.btnGhost,color:T.red,fontSize:11}} disabled={busy} onClick={remove}>Remove</button><button style={{...S.link,fontSize:11}} disabled={busy} onClick={excludeRow} title='Not an intercompany account — remove it from the module entirely. Reversible under People.'>not intercompany</button></>}</div>}
     </div>;
   }else{
