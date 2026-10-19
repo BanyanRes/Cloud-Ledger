@@ -100,6 +100,7 @@ export const api = {
   getEntry: (eid, id) => request('/entities/' + eid + '/entries/' + id),
   getJeVendors: (eid) => request('/entities/' + eid + '/je-vendors'),
   createEntry: (eid, data) => request('/entities/' + eid + '/entries', { method: 'POST', body: data }),
+  getMirrorProposal: (b) => request('/intercompany/mirror-proposal', { method: 'POST', body: b }),
   updateEntry: (eid, id, data) => request('/entities/' + eid + '/entries/' + id, { method: 'PUT', body: data }),
   deleteEntry: (eid, id) => request('/entities/' + eid + '/entries/' + id, { method: 'DELETE' }),
   bulkEntriesPreview: (eid, file) => {

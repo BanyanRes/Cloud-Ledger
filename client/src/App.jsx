@@ -431,9 +431,77 @@ function QuickAddAccountModal({entityId,onClose,onCreated}){const[form,setForm]=
   </div></div>);}
 
 // ─── JE Modal — form state received from App (persists across open/close) ───
-function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,onPosted,form,setForm,pendingFiles,setPendingFiles}){
+function MirrorEntryModal({proposals,srcDate,srcMemo,srcEntryNum,srcEntityName,onClose,onPosted}){
+  const groups=[];{const m=new Map();for(const p of (proposals||[])){const k=p.counterparty_entity_id;if(!m.has(k))m.set(k,{cpId:k,cpName:p.counterparty_name,cands:p.candidate_accounts||[],legs:[]});m.get(k).legs.push(p);}for(const v of m.values())groups.push(v);}
+  const[gi,setGi]=useState(0);
+  const g=groups[gi];
+  const[date,setDate]=useState(srcDate);
+  const[memo,setMemo]=useState('');
+  const[lines,setLines]=useState([]);
+  const[posting,setPosting]=useState(false);const[err,setErr]=useState('');const[done,setDone]=useState('');
+  useEffect(()=>{if(!g)return;
+    setLines([...g.legs.map(l=>({account_code:'',debit:l.mirror_debit?String(l.mirror_debit):'',credit:l.mirror_credit?String(l.mirror_credit):'',ic:true,label:l.counterparty_ic_label})),{account_code:'',debit:'',credit:''}]);
+    setMemo('IC mirror of '+(srcEntityName?srcEntityName+' ':'')+'JE-'+String(srcEntryNum).padStart(4,'0'));
+    setDate(srcDate);setErr('');setDone('');
+  },[gi]);
+  const upd=(i,k,v)=>setLines(ls=>ls.map((l,j)=>j===i?{...l,[k]:v}:l));
+  const addLine=()=>setLines(ls=>[...ls,{account_code:'',debit:'',credit:''}]);
+  const rm=i=>setLines(ls=>ls.filter((_,j)=>j!==i));
+  const tDr=lines.reduce((s,l)=>s+(parseFloat(l.debit)||0),0);const tCr=lines.reduce((s,l)=>s+(parseFloat(l.credit)||0),0);const bal=Math.abs(tDr-tCr)<0.005&&tDr>0;
+  const sortCands=[...(g?g.cands:[])].sort((a,b)=>String(a.code).localeCompare(String(b.code),undefined,{numeric:true}));
+  const doPost=async(override)=>{
+    const payload={date,memo:(memo.trim()||('IC mirror JE-'+srcEntryNum)),lines:lines.map(l=>({account_code:l.account_code,debit:parseFloat(l.debit)||0,credit:parseFloat(l.credit)||0})),...(override||{})};
+    await api.createEntry(g.cpId,payload);
+    if(onPosted)onPosted();
+    if(gi+1<groups.length){setDone('Posted on '+g.cpName+'. Next counterparty...');setTimeout(()=>setGi(gi+1),800);}
+    else{setDone('Posted on '+g.cpName+'.');setTimeout(onClose,900);}
+  };
+  const post=async()=>{
+    if(lines.some(l=>!l.account_code)){setErr('Every line needs an account.');return;}
+    if(!bal){setErr('Entry must balance.');return;}
+    setPosting(true);setErr('');
+    try{await doPost();}
+    catch(e){const d=e.detail||{};
+      if(d.code==='SOFT_CLOSED'){const mon=(d.period&&d.period.month)||'that month';
+        if(window.confirm(mon+' is soft-closed on '+g.cpName+'. Post the mirror into it anyway?')){try{await doPost({override_period_lock:true});}catch(e2){setErr((e2.detail&&e2.detail.error)||e2.message);}}
+        else setErr('Mirror not posted -- '+mon+' is soft-closed on '+g.cpName+'.');}
+      else setErr(d.error||e.message);}
+    finally{setPosting(false);}
+  };
+  if(!g)return null;
+  const money=n=>Number(n||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,width:'min(780px,96vw)',maxHeight:'90vh',overflow:'auto'}} onClick={e=>e.stopPropagation()}>
+    <button style={S.modalClose} onClick={onClose}>&times;</button>
+    <div style={{fontSize:18,fontWeight:700,color:T.textBright,marginBottom:4}}>Matching intercompany entry &mdash; {g.cpName}</div>
+    <div style={{fontSize:12.5,color:T.textMuted,marginBottom:14}}>Your entry hit an intercompany account, so {g.cpName} needs the mirror to keep both sides in balance. The intercompany line is pre-filled &mdash; pick its account on {g.cpName} and add the offsetting line(s).{groups.length>1?(' ('+(gi+1)+' of '+groups.length+' counterparties)'):''}</div>
+    <div style={{display:'flex',gap:10,marginBottom:12,flexWrap:'wrap'}}>
+      <div><label style={S.label}>Date</label><input type="date" style={{...S.input,width:160}} value={date} onChange={e=>setDate(e.target.value)}/></div>
+      <div style={{flex:1,minWidth:240}}><label style={S.label}>Memo</label><input style={S.input} value={memo} onChange={e=>setMemo(e.target.value)}/></div></div>
+    <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+      <thead><tr style={{textAlign:'left',color:T.textMuted,fontSize:11}}><th style={{padding:'4px 6px'}}>Account</th><th style={{padding:'4px 6px',width:120}}>Debit</th><th style={{padding:'4px 6px',width:120}}>Credit</th><th style={{width:28}}/></tr></thead>
+      <tbody>{lines.map((l,i)=><tr key={i}>
+        <td style={{padding:'3px 6px',verticalAlign:'top'}}>
+          <select style={{...S.select,width:'100%'}} value={l.account_code} onChange={e=>upd(i,'account_code',e.target.value)}>
+            <option value=''>{l.ic?('Select '+(l.label||'intercompany')+' account...'):'Select account...'}</option>
+            {sortCands.map(a=><option key={a.code} value={a.code}>{a.code} - {a.name}</option>)}
+          </select>
+          {l.ic&&<div style={{fontSize:10.5,color:T.accent,marginTop:1}}>intercompany leg - {l.label}</div>}</td>
+        <td style={{padding:'3px 6px',verticalAlign:'top'}}><input style={{...S.input,textAlign:'right'}} value={l.debit} onChange={e=>upd(i,'debit',e.target.value)}/></td>
+        <td style={{padding:'3px 6px',verticalAlign:'top'}}><input style={{...S.input,textAlign:'right'}} value={l.credit} onChange={e=>upd(i,'credit',e.target.value)}/></td>
+        <td style={{padding:'3px 6px',verticalAlign:'top'}}>{!l.ic&&lines.length>1&&<button style={{...S.btnGhost,color:T.red,fontSize:13,padding:'2px 6px'}} onClick={()=>rm(i)}>&times;</button>}</td></tr>)}</tbody></table>
+    <button style={{...S.link,fontSize:12,marginTop:6}} onClick={addLine}>+ Add line</button>
+    <div style={{marginTop:12,fontSize:12.5,color:bal?T.green:T.textMuted}}>Dr {money(tDr)} &middot; Cr {money(tCr)}{bal?' - balanced':(' - out by '+money(Math.abs(tDr-tCr)))}</div>
+    {err&&<div style={{...S.err,marginTop:8}}>{err}</div>}
+    {done&&<div style={{...S.success,marginTop:8}}>{done}</div>}
+    <div style={{display:'flex',gap:10,marginTop:16,justifyContent:'flex-end'}}>
+      <button style={S.btnGhost} onClick={onClose}>Skip</button>
+      <button style={S.btnP} disabled={posting} onClick={post}>{posting?'Posting...':('Post on '+g.cpName)}</button></div>
+  </div></div>);
+}
+function JournalEntryModal({entityId,entityName,isTurnkeyEntity,dimsEnabled,user,onClose,onPosted,form,setForm,pendingFiles,setPendingFiles}){
   const[accounts,setAccounts]=useState([]);const[showAddAcct,setShowAddAcct]=useState(false);const[err,setErr]=useState('');const[posting,setPosting]=useState(false);const[posted,setPosted]=useState('');
   const[autoReverse,setAutoReverse]=useState(false);const[reverseDate,setReverseDate]=useState('');
+  const[mirror,setMirror]=useState(null);
   const[projects,setProjects]=useState([]);
   const[dimProjects,setDimProjects]=useState([]);
   const[locations,setLocations]=useState([]);const[classes,setClasses]=useState([]);
@@ -490,11 +558,13 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
     setPosting(true);setErr('');
     const _basePayload=override=>({date:form.date,memo:form.memo.trim(),vendor:(form.vendor||'').trim(),doc_number:(form.doc_number||'').trim(),lines:form.lines.map(l=>({account_code:l.account_code,debit:parseAmt(l.debit),credit:parseAmt(l.credit),description:l.description||'',project_id:l.project_id||null,location_id:l.location_id||null,class_id:l.class_id||null})),...(autoReverse?{auto_reverse:true,reverse_date:reverseDate||firstOfNextMonth(form.date)}:{}),...(override||{})});
     const _doPost=async override=>{
-      const r=await api.createEntry(entityId,_basePayload(override));
+      const _payload=_basePayload(override);
+      const r=await api.createEntry(entityId,_payload);
       let msg='JE-'+String(r.entry_num).padStart(4,'0')+' posted';
       if(r.reversal)msg+=' + auto-reversal JE-'+String(r.reversal.entry_num).padStart(4,'0');
       if(pendingFiles.length>0){try{const u=await api.uploadAttachments(entityId,r.id,pendingFiles);msg+=' with '+u.length+' attachment(s)';}catch(ue){msg+=' (attachments failed: '+ue.message+')';}}
       setForm(BLANK_JE());setPendingFiles([]);setAutoReverse(false);setReverseDate('');setPosted(msg+'!');setTimeout(()=>setPosted(''),5000);if(onPosted)onPosted();
+      try{const mp=await api.getMirrorProposal({entity_id:Number(entityId),lines:_payload.lines});if(mp&&Array.isArray(mp.proposals)&&mp.proposals.length)setMirror({proposals:mp.proposals,srcDate:_payload.date,srcMemo:_payload.memo,srcEntryNum:r.entry_num,srcEntityName:entityName||''});}catch(_e){}
     };
     try{await _doPost();}
     catch(e){
@@ -512,6 +582,7 @@ function JournalEntryModal({entityId,isTurnkeyEntity,dimsEnabled,user,onClose,on
 
   return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,width:'min(1200px, 96vw)',maxWidth:'96vw',height:'auto',maxHeight:'92vh',resize:'both',overflow:'auto',minWidth:'min(560px, 96vw)',minHeight:360}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
+    {mirror&&<MirrorEntryModal proposals={mirror.proposals} srcDate={mirror.srcDate} srcMemo={mirror.srcMemo} srcEntryNum={mirror.srcEntryNum} srcEntityName={mirror.srcEntityName} onClose={()=>setMirror(null)} onPosted={onPosted}/>}
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
       <div><div style={{fontSize:18,fontWeight:700,color:T.textBright}}>New Journal Entry</div>
         {form.copiedFrom&&<div style={{fontSize:11,color:T.accent,marginTop:2}}>Copied from {form.copiedFrom} — review the date, amounts and memo before posting.</div>}</div>
@@ -1090,7 +1161,7 @@ export default function App(){
         {page==='fundrep'&&activeEntity&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
         {page==='rep_pcapstmt'&&activeEntity&&isCLRF&&<PcapStatementsReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-ps-'+rk}/>}
       </>})()}</div></div>
-    {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
+    {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} entityName={entityName} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
     {showChangePw&&<SettingsModal onClose={()=>setShowChangePw(false)} user={user} onUserUpdate={u=>setUser(u)}/>}
     {wpEntity&&<WorkpapersModal entity={wpEntity} user={user} onClose={()=>setWpEntity(null)}/>}
   </div>);}
