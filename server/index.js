@@ -3273,7 +3273,8 @@ app.post('/api/entities/:eid/ar/customers', auth, requireEntityAccess(), require
   const email = (req.body.email || '').trim() || null;
   const address = (req.body.address || '').trim() || null;
   const terms = Number.isFinite(+req.body.terms_days) ? +req.body.terms_days : 30;
-  try { const r = db.prepare('INSERT INTO ar_customers (entity_id, name, email, address, terms_days) VALUES (?, ?, ?, ?, ?)').run(req.params.eid, name, email, address, terms);
+  const cpEnt = (req.body.counterparty_entity_id != null && req.body.counterparty_entity_id !== '') ? Number(req.body.counterparty_entity_id) : null;
+  try { const r = db.prepare('INSERT INTO ar_customers (entity_id, name, email, address, terms_days, counterparty_entity_id) VALUES (?, ?, ?, ?, ?, ?)').run(req.params.eid, name, email, address, terms, cpEnt);
     res.json(db.prepare('SELECT * FROM ar_customers WHERE id = ?').get(r.lastInsertRowid)); }
   catch(e) { if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'A customer with that name already exists' }); throw e; }
 });
@@ -3286,7 +3287,8 @@ app.patch('/api/entities/:eid/ar/customers/:id', auth, requireEntityAccess(), re
   const address = req.body.address !== undefined ? ((req.body.address || '').trim() || null) : row.address;
   const terms = req.body.terms_days !== undefined && Number.isFinite(+req.body.terms_days) ? +req.body.terms_days : row.terms_days;
   const active = req.body.active !== undefined ? (req.body.active ? 1 : 0) : row.active;
-  try { db.prepare('UPDATE ar_customers SET name = ?, email = ?, address = ?, terms_days = ?, active = ? WHERE id = ? AND entity_id = ?').run(name, email, address, terms, active, req.params.id, req.params.eid);
+  const cpEnt = req.body.counterparty_entity_id !== undefined ? ((req.body.counterparty_entity_id === '' || req.body.counterparty_entity_id == null) ? null : Number(req.body.counterparty_entity_id)) : row.counterparty_entity_id;
+  try { db.prepare('UPDATE ar_customers SET name = ?, email = ?, address = ?, terms_days = ?, active = ?, counterparty_entity_id = ? WHERE id = ? AND entity_id = ?').run(name, email, address, terms, active, cpEnt, req.params.id, req.params.eid);
     res.json(db.prepare('SELECT * FROM ar_customers WHERE id = ?').get(req.params.id)); }
   catch(e) { if (String(e.message).includes('UNIQUE')) return res.status(409).json({ error: 'A customer with that name already exists' }); throw e; }
 });

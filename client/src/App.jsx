@@ -1112,7 +1112,7 @@ export default function App(){
         {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)} onDuplicate={(entry)=>{setJeForm(jeFromEntry(entry));setShowJE(true);}} openJEId={pendingJEId} clearOpenJE={()=>setPendingJEId(null)}/>}
         {page==='coa'&&activeEntity&&<ChartOfAccounts entityId={activeEntity} entityName={entityName} canEdit={canEdit}/>}
         {page==='dimensions'&&activeEntity&&dimsEnabled&&<DimensionsManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
-        {page==='ar_customers'&&activeEntity&&arFull&&<CustomersManager entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
+        {page==='ar_customers'&&activeEntity&&arFull&&<CustomersManager entityId={activeEntity} entityName={entityName} entities={entities} canEdit={canEdit} key={activeEntity+'-'+rk}/>}
         {page==='ar_invoices'&&activeEntity&&arFull&&<ArInvoices entityId={activeEntity} entityName={entityName} canEdit={canEdit} dimsEnabled={dimsEnabled} isBanyanRes={isBanyanRes} key={activeEntity+'-'+rk}/>}
         {page==='ar_recurring'&&activeEntity&&arFull&&<ArRecurring entityId={activeEntity} entityName={entityName} canEdit={canEdit} dimsEnabled={dimsEnabled} key={activeEntity+'-'+rk}/>}
         {page==='ar_aging'&&activeEntity&&arAgingEnabled&&<ArAgingReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
@@ -2906,17 +2906,20 @@ function DimensionsManager({entityId,entityName,canEdit}){
 }
 
 // ═══ AR Customers manager ═══
-function CustomersManager({entityId,entityName,canEdit}){
+function CustomersManager({entityId,entityName,entities,canEdit}){
   const[customers,setCustomers]=useState([]);const[loading,setLoading]=useState(true);
   const[showAdd,setShowAdd]=useState(false);
-  const blank={name:'',email:'',address:'',terms_days:30};
+  const blank={name:'',email:'',address:'',terms_days:30,counterparty_entity_id:''};
   const[form,setForm]=useState(blank);const[err,setErr]=useState('');
   const[editing,setEditing]=useState(null);const[editForm,setEditForm]=useState(blank);const[editErr,setEditErr]=useState('');
+  const entOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
+  const billFor=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.bill_inbox_email:null;};
+  const entName2=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.name:('entity '+id);};
   const load=useCallback(async()=>{setLoading(true);try{const c=await api.getArCustomers(entityId);setCustomers(c||[]);}finally{setLoading(false);}},[entityId]);
   useEffect(()=>{load();},[load]);
-  const add=async()=>{if(!form.name.trim()){setErr('Name required');return;}try{await api.createArCustomer(entityId,{name:form.name.trim(),email:form.email.trim()||null,address:form.address.trim()||null,terms_days:+form.terms_days||30});setForm(blank);setShowAdd(false);setErr('');await load();}catch(e){setErr(e.message);}};
-  const startEdit=c=>{setEditing(c.id);setEditForm({name:c.name||'',email:c.email||'',address:c.address||'',terms_days:c.terms_days??30});setEditErr('');};
-  const save=async()=>{if(!editForm.name.trim()){setEditErr('Name required');return;}try{await api.updateArCustomer(entityId,editing,{name:editForm.name.trim(),email:editForm.email.trim()||null,address:editForm.address.trim()||null,terms_days:+editForm.terms_days||30});setEditing(null);await load();}catch(e){setEditErr(e.message);}};
+  const add=async()=>{if(!form.name.trim()){setErr('Name required');return;}try{await api.createArCustomer(entityId,{name:form.name.trim(),email:form.email.trim()||null,address:form.address.trim()||null,terms_days:+form.terms_days||30,counterparty_entity_id:form.counterparty_entity_id?Number(form.counterparty_entity_id):null});setForm(blank);setShowAdd(false);setErr('');await load();}catch(e){setErr(e.message);}};
+  const startEdit=c=>{setEditing(c.id);setEditForm({name:c.name||'',email:c.email||'',address:c.address||'',terms_days:c.terms_days??30,counterparty_entity_id:c.counterparty_entity_id||''});setEditErr('');};
+  const save=async()=>{if(!editForm.name.trim()){setEditErr('Name required');return;}try{await api.updateArCustomer(entityId,editing,{name:editForm.name.trim(),email:editForm.email.trim()||null,address:editForm.address.trim()||null,terms_days:+editForm.terms_days||30,counterparty_entity_id:editForm.counterparty_entity_id?Number(editForm.counterparty_entity_id):null});setEditing(null);await load();}catch(e){setEditErr(e.message);}};
   const toggleActive=async c=>{try{await api.updateArCustomer(entityId,c.id,{active:c.active?0:1});await load();}catch(e){alert(e.message);}};
   const del=async c=>{if(!confirm('Delete "'+c.name+'"? (Only possible if no invoices exist.)'))return;try{await api.deleteArCustomer(entityId,c.id);await load();}catch(e){alert(e.message);}};
   return(<div><div style={{marginBottom:20,display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
@@ -2927,6 +2930,11 @@ function CustomersManager({entityId,entityName,canEdit}){
         <div style={{flex:'1 1 220px'}}><label style={S.label}>Customer name</label><input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} autoFocus/></div>
         <div style={{flex:'1 1 220px'}}><label style={S.label}>Email (invoice recipient)</label><input style={S.input} type="email" placeholder="ar@customer.com" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))}/></div>
         <div style={{flex:'0 0 120px'}}><label style={S.label}>Terms (days)</label><input style={S.input} type="number" value={form.terms_days} onChange={e=>setForm(f=>({...f,terms_days:e.target.value}))}/></div>
+        <div style={{flex:'1 1 240px'}}><label style={S.label}>Counterparty entity <span style={{color:T.textMuted}}>(intercompany only)</span></label>
+          <select style={S.input} value={form.counterparty_entity_id||''} onChange={e=>setForm(f=>({...f,counterparty_entity_id:e.target.value}))}>
+            <option value=''>— none (outside customer) —</option>
+            {entOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select>
+          {form.counterparty_entity_id&&<div style={{fontSize:11.5,marginTop:4,color:billFor(form.counterparty_entity_id)?T.textMuted:T.orange}}>{billFor(form.counterparty_entity_id)?('Routes to '+billFor(form.counterparty_entity_id)):'No Bill.com address on file for this entity.'}</div>}</div>
       </div>
       <div style={{marginTop:10}}><label style={S.label}>Billing address (optional)</label><textarea style={{...S.input,minHeight:54,resize:'vertical'}} value={form.address} onChange={e=>setForm(f=>({...f,address:e.target.value}))}/></div>
       <div style={{marginTop:12,display:'flex',justifyContent:'flex-end'}}><button style={S.btnP} onClick={add}>Add Customer</button></div>
@@ -2938,14 +2946,17 @@ function CustomersManager({entityId,entityName,canEdit}){
         {!loading&&customers.length===0&&<tr><td colSpan={canEdit?5:4} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>No customers yet — add one to start invoicing.</td></tr>}
         {!loading&&customers.map(c=>editing===c.id?
           <tr key={c.id} style={{background:T.accentDim}}>
-            <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))}/></td>
+            <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))}/>
+              <select style={{...S.input,marginTop:4,fontSize:12}} value={editForm.counterparty_entity_id||''} onChange={e=>setEditForm(f=>({...f,counterparty_entity_id:e.target.value}))}>
+                <option value=''>— no counterparty —</option>
+                {entOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></td>
             <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.email} onChange={e=>setEditForm(f=>({...f,email:e.target.value}))}/></td>
             <td style={{padding:'6px 8px'}}><input style={{...S.input,textAlign:'right'}} type="number" value={editForm.terms_days} onChange={e=>setEditForm(f=>({...f,terms_days:e.target.value}))}/></td>
             <td style={S.td}>—</td>
             {canEdit&&<td style={S.td}><div style={{display:'flex',gap:6}}><button style={{...S.btnGhost,color:T.green,fontSize:11}} onClick={save}>Save</button><button style={{...S.btnGhost,fontSize:11}} onClick={()=>setEditing(null)}>Cancel</button></div></td>}
           </tr>
           :<tr key={c.id} style={c.active?undefined:{opacity:0.5}}>
-            <td style={S.td} title={c.address||''}>{c.name}</td>
+            <td style={S.td} title={c.address||''}>{c.name}{c.counterparty_entity_id?<div style={{fontSize:11,color:T.accent,marginTop:1}} title={billFor(c.counterparty_entity_id)||''}>→ {entName2(c.counterparty_entity_id)}</div>:null}</td>
             <td style={S.td}>{c.email||<span style={{color:T.textMuted}}>— no email —</span>}</td>
             <td style={{...S.td,textAlign:'right'}}>Net {c.terms_days}</td>
             <td style={S.td}>{c.active?<span style={{color:T.green,fontSize:12}}>Active</span>:<span style={{color:T.textMuted,fontSize:12}}>Inactive</span>}</td>

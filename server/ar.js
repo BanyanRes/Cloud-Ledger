@@ -108,6 +108,8 @@ function ensureSchema(db) {
   // Residential uses this as its only dimension (its whole COA is project-coded).
   const licols = db.prepare('PRAGMA table_info(ar_invoice_lines)').all().map(c => c.name);
   if (!licols.includes('project_id')) db.exec('ALTER TABLE ar_invoice_lines ADD COLUMN project_id INTEGER');
+  const custCols = db.prepare('PRAGMA table_info(ar_customers)').all().map(c => c.name);
+  if (!custCols.includes('counterparty_entity_id')) db.exec('ALTER TABLE ar_customers ADD COLUMN counterparty_entity_id INTEGER');
   console.log('[db] AR invoicing schema ready');
 }
 
@@ -1266,10 +1268,16 @@ function registerArRoutes(app, ctx) {
       const norm = (x) => String(x || '').replace(/[^a-z0-9 ]/gi, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
       const ents = db.prepare('SELECT id, name, bill_inbox_email FROM entities').all();
       const cust = norm(inv.customer_name);
-      // Explicit aliases: customer names kept as-is on the customer record (per request)
-      // that differ from the CloudLedger entity name -> the entity to route to.
+      // Prefer an explicit customer -> entity link set on the customer record.
+      let cp = null;
+      if (inv.customer_id) {
+        const link = db.prepare('SELECT counterparty_entity_id FROM ar_customers WHERE id = ?').get(inv.customer_id);
+        if (link && link.counterparty_entity_id) cp = ents.find(e => e.id === Number(link.counterparty_entity_id)) || null;
+      }
+      // Fall back to name matching. Aliases cover names kept as-is on the customer
+      // record that differ from the CloudLedger entity name.
       const CUST_ALIAS = { 'braker propco llc': 'braker prop co', 'county line rail buna llc': 'clr buna property owner' };
-      let cp = CUST_ALIAS[cust] ? ents.find(e => norm(e.name) === CUST_ALIAS[cust]) : null;
+      if (!cp) cp = CUST_ALIAS[cust] ? ents.find(e => norm(e.name) === CUST_ALIAS[cust]) : null;
       if (!cp) cp = ents.find(e => norm(e.name) === cust);
       if (!cp) cp = ents.find(e => { const n = norm(e.name); return n && (cust === n + ' llc' || cust === n + ' lp' || cust.startsWith(n + ' ') || n.startsWith(cust + ' ')); });
       if (!cp) cp = ents.find(e => { const n = norm(e.name); return n.length > 4 && (cust.includes(n) || n.includes(cust)); });
