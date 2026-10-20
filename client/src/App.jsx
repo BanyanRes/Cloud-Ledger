@@ -1049,7 +1049,7 @@ export default function App(){
       ...(canClaClose?[{id:'wp_cla_monthlyclose',label:(quarterlyCla?'Quarterly':'Monthly')+' Closing Workpapers',icon:'📑',section:'workpapers'}]:[]),
       ...(!isShellEntity?[{id:'wp_taxpackage',label:'Tax Packages',icon:'🧾',section:'workpapers'}]:[]),
     ]}]:[]),
-    {key:'ADMINISTRATION',label:'Administration',icon:'⚙️',items:[
+    {key:'ADMINISTRATION',adminOnly:true,label:'Administration',icon:'⚙️',items:[
       {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
       {id:'letterhead',label:'Letterhead',icon:'📄',section:'administration'},
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
@@ -1061,7 +1061,7 @@ export default function App(){
   // Access filter, then the user's saved order. Items with no saved position sort
   // to the end in their declared order (Array.sort is stable), so a newly shipped
   // page appears at the bottom of its category rather than disappearing.
-  const visibleItems=cat=>cat.items.filter(n=>n.section==='all'?user.role==='Admin':canAccess(n.section));
+  const visibleItems=cat=>(cat.adminOnly&&user.role!=='Admin')?[]:cat.items.filter(n=>n.section==='all'?user.role==='Admin':canAccess(n.section));
   const orderedItems=cat=>{
     const ord=navOrder[cat.key]||[];
     const rank=id=>{const i=ord.indexOf(id);return i<0?1e6:i;};
