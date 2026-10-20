@@ -925,7 +925,7 @@ export default function App(){
   useEffect(()=>{if(user)Promise.all([api.getEntities(),api.getMyPrefs().catch(()=>({}))]).then(([e,p])=>{setEntities(e);if(p&&p.defaultEntityId!=null)setDefaultEntityId(p.defaultEntityId);if(e.length>0&&!activeEntity){const def=p&&p.defaultEntityId;setActiveEntity((def!=null&&e.find(x=>x.id===def))?def:e[0].id);}});},[user]);
   const setDefaultEntity=(id)=>{setDefaultEntityId(id);api.saveMyPrefs({defaultEntityId:id}).catch(err=>console.error('[prefs] save default entity failed:',err.message));};
   const refreshEntities=useCallback(async()=>{const e=await api.getEntities();setEntities(e);return e;},[]);
-  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers','intercompany','consolidation','periods'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
+  const canAccess=s=>{if(!user)return false;if(user.role==='Admin')return true;return({Accountant:['entries','reports','coa','bankrec','billcom','workpapers','intercompany','consolidation'],Viewer:['entries','reports','coa','bankrec','workpapers']}[user.role]||[]).includes(s);};
   // Read-only users (Viewer) SEE the same sections as an Accountant but cannot edit.
   // canEdit gates every write control; it must never be derived from mere visibility.
   const canEdit = !!user && (user.role==='Admin' || (()=>{ const ae=activeEntity?entities.find(e=>e.id===activeEntity):null; return ae&&ae.access_level ? ae.access_level==='full' : user.role==='Accountant'; })());
@@ -1137,7 +1137,7 @@ export default function App(){
         {page==='entities'&&<EntityManagement refresh={refreshEntities} entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
         {page==='users'&&<UserManagement currentUser={user}/>}
         {page==='billcom'&&user.role==='Admin'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity}/>}
-        {page==='periods'&&activeEntity&&<PeriodLockingPage entityId={activeEntity} entityName={entityName} user={user} canEdit={canEdit} key={'per-'+activeEntity+'-'+rk}/>}
+        {page==='periods'&&activeEntity&&canAccess('periods')&&<PeriodLockingPage entityId={activeEntity} entityName={entityName} user={user} canEdit={canEdit} key={'per-'+activeEntity+'-'+rk}/>}
         {page==='billcom_sync'&&<BillcomSetup entities={entities} activeEntity={activeEntity} setActiveEntity={setActiveEntity} initialTab='sync'/>}
         {page==='requisitions'&&activeEntity&&isReqEntity&&<Requisitions entityId={activeEntity} entityName={entityName} canEdit={canEdit} reqState={reqState} setReqState={setReqState}/>}
         {page==='wp_mgmtfee'&&activeEntity&&isCLRF&&<MgmtFeeWorkpaper entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-'+rk}/>}

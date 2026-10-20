@@ -4194,20 +4194,20 @@ app.get('/api/entities/:eid/periods', auth, requireEntityAccess(), (req, res) =>
   res.json({ locks: periods.listLocks(db, req.params.eid), can_reopen_year: periods.canReopenYear(req.user && req.user.email) });
 });
 
-app.post('/api/entities/:eid/periods/soft-close', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+app.post('/api/entities/:eid/periods/soft-close', auth, requireEntityAccess(), requireRole('Admin'), (req, res) => {
   const month = String((req.body && req.body.month) || '').slice(0, 7);
   if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM' });
   const r = periods.softClose(db, req.params.eid, month, req.user.name || req.user.email, (req.body && req.body.reason) || null);
   res.json({ success: true, lock: r });
 });
 
-app.post('/api/entities/:eid/periods/reopen-soft', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+app.post('/api/entities/:eid/periods/reopen-soft', auth, requireEntityAccess(), requireRole('Admin'), (req, res) => {
   const month = String((req.body && req.body.month) || '').slice(0, 7);
   if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM' });
   res.json({ success: true, ...periods.reopenSoft(db, req.params.eid, month) });
 });
 
-app.post('/api/entities/:eid/periods/hard-close-year', auth, requireEntityAccess(), requireRole('Admin','Accountant'), (req, res) => {
+app.post('/api/entities/:eid/periods/hard-close-year', auth, requireEntityAccess(), requireRole('Admin'), (req, res) => {
   const year = String((req.body && req.body.year) || '').slice(0, 4);
   if (!/^\d{4}$/.test(year)) return res.status(400).json({ error: 'year must be YYYY' });
   const r = periods.hardCloseYear(db, req.params.eid, year, req.user.name || req.user.email, (req.body && req.body.reason) || null);
@@ -4229,7 +4229,7 @@ app.post('/api/entities/:eid/periods/reopen-year', auth, requireEntityAccess(), 
 // gates as the per-entity routes; year reopen still restricted to the allowlist.
 const allEntityIds = () => db.prepare('SELECT id FROM entities ORDER BY code').all().map(e => e.id);
 
-app.post('/api/periods/all/soft-close', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.post('/api/periods/all/soft-close', auth, requireRole('Admin'), (req, res) => {
   const month = String((req.body && req.body.month) || '').slice(0, 7);
   if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM' });
   const who = req.user.name || req.user.email;
@@ -4237,14 +4237,14 @@ app.post('/api/periods/all/soft-close', auth, requireRole('Admin','Accountant'),
   res.json({ success: true, entities: n, month });
 });
 
-app.post('/api/periods/all/reopen-soft', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.post('/api/periods/all/reopen-soft', auth, requireRole('Admin'), (req, res) => {
   const month = String((req.body && req.body.month) || '').slice(0, 7);
   if (!/^\d{4}-\d{2}$/.test(month)) return res.status(400).json({ error: 'month must be YYYY-MM' });
   const n = db.transaction(() => { const ids = allEntityIds(); let c = 0; for (const id of ids) c += periods.reopenSoft(db, id, month).removed; return c; })();
   res.json({ success: true, reopened: n, month });
 });
 
-app.post('/api/periods/all/hard-close-year', auth, requireRole('Admin','Accountant'), (req, res) => {
+app.post('/api/periods/all/hard-close-year', auth, requireRole('Admin'), (req, res) => {
   const year = String((req.body && req.body.year) || '').slice(0, 4);
   if (!/^\d{4}$/.test(year)) return res.status(400).json({ error: 'year must be YYYY' });
   const who = req.user.name || req.user.email;
