@@ -743,8 +743,13 @@ function createCreditMemo(db, eid, body, whoName) {
 // open toward 0) and −amt against the CREDIT MEMO (reduces its negative open
 // toward 0). Amount defaults to the largest that fits both sides.
 function applyCreditMemo(db, eid, creditMemoId, invoiceId, rawAmount, dateStr, whoName) {
-  const cm = db.prepare("SELECT * FROM ar_invoices WHERE id = ? AND entity_id = ? AND doc_type = 'credit_memo'").get(creditMemoId, eid);
+  const cm = db.prepare("SELECT * FROM ar_invoices WHERE id = ? AND entity_id = ?").get(creditMemoId, eid);
   if (!cm) throw new Error('Credit memo not found for this entity');
+  // A credit source is either a native credit memo or an imported opening item
+  // carried in with a negative balance (a credit from the prior system's aging).
+  // Both are applied the same way: pure subledger linkage, no JE.
+  const cmIsCredit = cm.doc_type === 'credit_memo' || (cm.origin === 'opening' && Number(cm.total || 0) < 0);
+  if (!cmIsCredit) throw new Error('That document is not a credit — choose a credit memo or an open prior-system credit.');
   if (cm.status === 'void') throw new Error('That credit memo is void');
   const inv = db.prepare("SELECT * FROM ar_invoices WHERE id = ? AND entity_id = ?").get(invoiceId, eid);
   if (!inv) throw new Error('Invoice not found for this entity');
@@ -940,7 +945,7 @@ function registerArRoutes(app, ctx) {
   // Credit memos that still have credit remaining, for the "apply credit" picker.
   app.get('/api/entities/:eid/ar/credit-memos', ...readers, (req, res) => {
     const eid = req.params.eid;
-    const cms = db.prepare("SELECT * FROM ar_invoices WHERE entity_id = ? AND doc_type = 'credit_memo' AND status != 'void' ORDER BY invoice_date DESC, id DESC").all(eid);
+    const cms = db.prepare("SELECT * FROM ar_invoices WHERE entity_id = ? AND status != 'void' AND (doc_type = 'credit_memo' OR (origin = 'opening' AND total < 0)) ORDER BY invoice_date DESC, id DESC").all(eid);
     const applied = new Map(db.prepare("SELECT invoice_id, SUM(amount) AS p FROM ar_receipts WHERE entity_id = ? GROUP BY invoice_id").all(eid).map(r => [r.invoice_id, Number(r.p || 0)]));
     const out = [];
     for (const cm of cms) {
