@@ -6509,7 +6509,7 @@ app.get('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id')
   });
 });
 
-app.put('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
+app.put('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), (req, res) => {
   const { environment, username, password, org_id, dev_key, default_ap_account, default_cash_account, default_clearing_account, sync_cutoff_date } = req.body || {};
   if (!environment || !username || !org_id) return res.status(400).json({ error: 'environment, username, org_id required' });
   if (!['sandbox','production'].includes(environment)) return res.status(400).json({ error: 'environment must be sandbox or production' });
@@ -6559,7 +6559,7 @@ app.put('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id')
 // stores latestBillDate + 1 day only to keep the stored value aligned with the
 // aging report it came from. Creating a fresh config row here would be missing
 // required credentials, so this only updates an existing config.
-app.put('/api/billcom/config/:entity_id/cutoff', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
+app.put('/api/billcom/config/:entity_id/cutoff', auth, requireEntityAccess('entity_id'), requireRole('Admin'), (req, res) => {
   const cutoff = (req.body && req.body.sync_cutoff_date) || null;
   if (cutoff !== null && !/^\d{4}-\d{2}-\d{2}$/.test(String(cutoff))) return res.status(400).json({ error: 'sync_cutoff_date must be YYYY-MM-DD or null' });
   const existing = db.prepare('SELECT entity_id FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
@@ -6590,12 +6590,12 @@ app.put('/api/billcom/config/:entity_id/cutoff', auth, requireEntityAccess('enti
   res.json({ success: true, sync_cutoff_date: cutoff, aging_lines: linesJson !== null ? JSON.parse(linesJson).length : undefined });
 });
 
-app.delete('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), (req, res) => {
+app.delete('/api/billcom/config/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin'), (req, res) => {
   db.prepare('DELETE FROM billcom_config WHERE entity_id = ?').run(req.params.entity_id);
   res.json({ success: true });
 });
 
-app.post('/api/billcom/config/:entity_id/test', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), async (req, res) => {
+app.post('/api/billcom/config/:entity_id/test', auth, requireEntityAccess('entity_id'), requireRole('Admin'), async (req, res) => {
   const row = db.prepare('SELECT environment, api_base_url, username, password_enc, org_id, dev_key_enc FROM billcom_config WHERE entity_id = ?').get(req.params.entity_id);
   if (!row) return res.status(404).json({ error: 'No config found for this entity' });
   let password, devKey;
