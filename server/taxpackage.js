@@ -301,13 +301,21 @@ function addGlDerivedSheets(wb, d, includeOrgChart) {
 // joinders, a prior-year TB like "TB 2023" — is bespoke and carried verbatim.
 function isGlDerivedSheet(name, year) {
   const n = String(name || '').trim();
-  if (/^(tb|gl|trial balance|general ledger)$/i.test(n)) return true;
+  if (/^(tb|gl|trial balance|general ledger)( report)?$/i.test(n)) return true;
   if (/^\d+$/.test(n)) return true;
-  if (new RegExp('^(tb|trial balance)\\s*' + year + '$', 'i').test(n)) return true;
-  if (new RegExp('^' + year + '\\s*(tb|trial balance)$', 'i').test(n)) return true;
+  if (new RegExp('^(tb|gl|trial balance|general ledger)\\s*' + year + '$', 'i').test(n)) return true;
+  if (new RegExp('^' + year + '\\s*(tb|gl|trial balance|general ledger)$', 'i').test(n)) return true;
   return false;
 }
-function bespokeSheetNames(names, year) { return (names || []).filter((n) => !isGlDerivedSheet(n, year)); }
+// Intercompany workpapers are never carried into a tax package — the intercompany
+// reconciliation lives in its own CloudLedger module, so any such bespoke tab in a
+// reference (e.g. "Intercompany", "IC Recon", "Eliminations") is dropped on carry.
+function isIntercompanySheet(name) {
+  const n = String(name || '').trim();
+  if (/^ic[\s_().\-]/i.test(n)) return true;
+  return /(inter[\s\-]?company|\bintercompany\b|\belimination|\bic\s*(recon|elim))/i.test(n);
+}
+function bespokeSheetNames(names, year) { return (names || []).filter((n) => !isGlDerivedSheet(n, year) && !isIntercompanySheet(n)); }
 
 // Carry mode: load the reference as the base, drop its GL-derived sheets, and add
 // freshly-built TB/GL/supporting tabs. The bespoke tabs (and their embedded
@@ -316,7 +324,7 @@ async function buildCarriedWorkbook(d, refBuf) {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(refBuf);
   for (const name of wb.worksheets.map((w) => w.name)) {
-    if (isGlDerivedSheet(name, d.p.year)) { const ws = wb.getWorksheet(name); if (ws) wb.removeWorksheet(ws.id); }
+    if (isGlDerivedSheet(name, d.p.year) || isIntercompanySheet(name)) { const ws = wb.getWorksheet(name); if (ws) wb.removeWorksheet(ws.id); }
   }
   addGlDerivedSheets(wb, d, false); // keep the reference's Org Chart, don't add a placeholder
   return wb;
