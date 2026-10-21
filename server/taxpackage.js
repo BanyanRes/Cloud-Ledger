@@ -20,9 +20,10 @@
 //   • Org Chart — a placeholder tab (the org-chart diagram is pasted in by hand).
 //
 // Two modes, same engine:
-//   • Annual  — the tax year: TB as of 12/31, GL window prior-12/31 .. 12/31 (the
-//               opening-balance JE at the prior year end shows in-window, exactly
-//               as the hand-built 2025 packages do).
+//   • Annual  — the tax year: TB as of 12/31 with prior years closed into Retained
+//               Earnings (so RE is its own line and only the current year's P&L is
+//               open), GL window 1/1 .. 12/31 with balance-sheet accounts opening
+//               at the prior year-end balance — matching the hand-built packages.
 //   • Monthly — a single month: TB as of month end, GL window month-01 .. month
 //               end, balance-sheet accounts opening at the prior month end.
 //
@@ -72,7 +73,7 @@ function resolvePeriod(dateInput, mode) {
   if (mo < 1 || mo > 12) throw new Error('period_end must be a valid date');
   if (mode === 'annual') {
     const tbAsOf = y + '-12-31';
-    const windowFrom = (y - 1) + '-12-31';
+    const windowFrom = y + '-01-01';
     return {
       mode, year: String(y), label: String(y),
       tbAsOf, periodTo: tbAsOf, windowFrom, openingAsOf: dayBefore(windowFrom),
@@ -98,23 +99,28 @@ function buildData(ctx, eid, p) {
   const ent = db.prepare('SELECT id, name, code, display_id FROM entities WHERE id = ?').get(eid);
   if (!ent) throw new Error('Entity not found');
 
-  // Trial balance as of the period end. closing = total_debit - total_credit
-  // (debit-positive; liabilities/equity/revenue therefore negative), mirroring
-  // the delivered packages exactly.
-  const balRows = computeBalances(eid, { as_of: p.tbAsOf }) || [];
+  // Trial balance as of the period end, with prior-year P&L closed into Retained
+  // Earnings (close_pl_before = Jan 1 of the year) so RE shows as its own line and
+  // only the current year's P&L is open — mirroring the delivered CLA packages.
+  // closing is debit-positive (liabilities/equity/revenue negative), derived from
+  // the sign-adjusted `balance` so the synthetic RE row (total_debit/credit = 0)
+  // is captured.
+  const balRows = computeBalances(eid, { as_of: p.tbAsOf, close_pl_before: p.year + '-01-01' }) || [];
   const meta = new Map(); // code -> { name, type }
   const tb = [];
   for (const r of balRows) {
     const code = String(r.code);
     meta.set(code, { name: r.name || '', type: r.type || '' });
-    const closing = r2((Number(r.total_debit) || 0) - (Number(r.total_credit) || 0));
+    const isDr = r.type === 'Asset' || r.type === 'Expense';
+    const closing = r2(isDr ? (Number(r.balance) || 0) : -(Number(r.balance) || 0));
     if (Math.abs(closing) >= 0.005) tb.push({ code, name: r.name || '', type: r.type || '', closing });
   }
   tb.sort((a, b) => sortByCode(a.code, b.code));
 
-  // Opening (natural) balance as of the day before the window, by account. Only
-  // used to seed balance-sheet GL blocks whose opening predates the window.
-  const openRows = computeBalances(eid, { as_of: p.openingAsOf }) || [];
+  // Opening (natural) balance as of the day before the window, by account, with
+  // prior-year P&L closed into Retained Earnings so P&L blocks open at zero and RE
+  // opens at the prior accumulated earnings. Seeds balance-sheet GL opening lines.
+  const openRows = computeBalances(eid, { as_of: p.openingAsOf, close_pl_before: p.year + '-01-01' }) || [];
   const opening = new Map();
   for (const r of openRows) { opening.set(String(r.code), r2(Number(r.balance) || 0)); if (!meta.has(String(r.code))) meta.set(String(r.code), { name: r.name || '', type: r.type || '' }); }
 
