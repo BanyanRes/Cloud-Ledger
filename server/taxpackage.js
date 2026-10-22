@@ -298,7 +298,7 @@ function addGlDerivedSheets(wb, d, includeOrgChart) {
   buildTB(wb, d);
   buildGL(wb, d);
   buildSupportTabs(wb, d, used);
-  if (includeOrgChart && !used.has('org chart')) wb.addWorksheet('Org Chart'); // placeholder — diagram pasted in by hand
+  // Org Chart tab intentionally omitted — not wanted in generated packages.
 }
 
 // A sheet in the reference is "GL-derived" (owned by this generator, regenerated
@@ -321,7 +321,10 @@ function isIntercompanySheet(name) {
   if (/^ic[\s_().\-]/i.test(n)) return true;
   return /(inter[\s\-]?company|\bintercompany\b|\belimination|\bic\s*(recon|elim))/i.test(n);
 }
-function bespokeSheetNames(names, year) { return (names || []).filter((n) => !isGlDerivedSheet(n, year) && !isIntercompanySheet(n)); }
+function bespokeSheetNames(names, year) { return (names || []).filter((n) => !isGlDerivedSheet(n, year) && !isIntercompanySheet(n) && !isOrgChartSheet(n)); }
+// Org Chart tabs are not wanted in generated packages, so a reference's Org Chart
+// tab is dropped on carry (and no placeholder is ever added).
+function isOrgChartSheet(name) { return /^org\s*chart$/i.test(String(name || '').trim()); }
 
 // Carry mode: load the reference as the base, drop its GL-derived sheets, and add
 // freshly-built TB/GL/supporting tabs. The bespoke tabs (and their embedded
@@ -330,9 +333,9 @@ async function buildCarriedWorkbook(d, refBuf) {
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(refBuf);
   for (const name of wb.worksheets.map((w) => w.name)) {
-    if (isGlDerivedSheet(name, d.p.year) || isIntercompanySheet(name)) { const ws = wb.getWorksheet(name); if (ws) wb.removeWorksheet(ws.id); }
+    if (isGlDerivedSheet(name, d.p.year) || isIntercompanySheet(name) || isOrgChartSheet(name)) { const ws = wb.getWorksheet(name); if (ws) wb.removeWorksheet(ws.id); }
   }
-  addGlDerivedSheets(wb, d, false); // keep the reference's Org Chart, don't add a placeholder
+  addGlDerivedSheets(wb, d, false); // Org Chart dropped; bespoke equity tabs carry through
   return wb;
 }
 
