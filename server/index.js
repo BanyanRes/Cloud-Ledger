@@ -706,6 +706,18 @@ if (!bcCfgCols.includes('sync_cutoff_date')) db.exec("ALTER TABLE billcom_config
 if (!bcCfgCols.includes('ap_aging_lines_json')) db.exec("ALTER TABLE billcom_config ADD COLUMN ap_aging_lines_json TEXT");
 if (!bcCfgCols.includes('ap_aging_as_of')) db.exec("ALTER TABLE billcom_config ADD COLUMN ap_aging_as_of TEXT");
 if (!bcCfgCols.includes('ap_aging_uploaded_at')) db.exec("ALTER TABLE billcom_config ADD COLUMN ap_aging_uploaded_at TEXT");
+// An A/P aging drives the Bill.com SYNC dedupe only when ap_aging_for_sync=1 —
+// i.e. it is the CUTOVER opening aging, set from the "Set sync cutoff from A/P
+// aging" flow. Reconciliation uploads (Bill.com A/P Detail for the AP Recon tab)
+// write the same lines but clear this flag, so they are read by the AP Recon and
+// NEVER suppress current bills in the sync.
+if (!bcCfgCols.includes('ap_aging_for_sync')) {
+  db.exec("ALTER TABLE billcom_config ADD COLUMN ap_aging_for_sync INTEGER DEFAULT 0");
+  // Heal existing rows: only a genuine cutover aging (as-of on/before the cutoff)
+  // may drive the sync; everything else (new-column default 0) is ignored by the
+  // sync but still read by the AP Recon.
+  db.exec("UPDATE billcom_config SET ap_aging_for_sync = 1 WHERE ap_aging_lines_json IS NOT NULL AND ap_aging_as_of IS NOT NULL AND sync_cutoff_date IS NOT NULL AND ap_aging_as_of <= sync_cutoff_date");
+}
 
 // Bank-transaction matching: link a bank line to an already-posted JE instead of
 // creating a new one. matched_entry_id holds the JE id; status becomes 'matched'.
@@ -6581,7 +6593,7 @@ app.put('/api/billcom/config/:entity_id/cutoff', auth, requireEntityAccess('enti
   const now = new Date().toISOString();
   const updater = req.user.name || req.user.email;
   if (linesJson !== null) {
-    db.prepare('UPDATE billcom_config SET sync_cutoff_date=?, ap_aging_lines_json=?, ap_aging_as_of=?, ap_aging_uploaded_at=?, updated_by=?, updated_at=? WHERE entity_id=?')
+    db.prepare('UPDATE billcom_config SET sync_cutoff_date=?, ap_aging_lines_json=?, ap_aging_as_of=?, ap_aging_uploaded_at=?, ap_aging_for_sync=1, updated_by=?, updated_at=? WHERE entity_id=?')
       .run(cutoff, linesJson, asOf, now, updater, now, req.params.entity_id);
   } else {
     db.prepare('UPDATE billcom_config SET sync_cutoff_date=?, updated_by=?, updated_at=? WHERE entity_id=?')
@@ -7840,7 +7852,7 @@ app.post('/api/billcom/ap-aging-check/:entity_id', auth, requireEntityAccess('en
   const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
   if (!cfg) return res.status(400).json({ error: 'Bill.com not configured for this entity' });
   let agingLines = [];
-  try { agingLines = cfg.ap_aging_lines_json ? JSON.parse(cfg.ap_aging_lines_json) : []; } catch (e) { agingLines = []; }
+  try { agingLines = (cfg.ap_aging_for_sync && cfg.ap_aging_lines_json) ? JSON.parse(cfg.ap_aging_lines_json) : []; } catch (e) { agingLines = []; }
   if (!agingLines.length) return res.json({ ok: true, aging_uploaded: false, aging_as_of: null, aging_lines: 0, checked_bills: 0, overlaps: [], message: 'No A/P aging has been uploaded for this entity yet. Upload one from the A/P Aging report first.' });
   const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null) return obj[k]; return null; };
   const cutoffDate = String((req.body && req.body.cutoff_date) || cfg.sync_cutoff_date || '2026-01-01');
@@ -8045,7 +8057,7 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   // matching one of these is already booked in the GL, so it's auto-skipped and
   // reported. Empty when no aging has been uploaded (feature is a no-op then).
   let agingLines = [];
-  try { agingLines = cfg.ap_aging_lines_json ? JSON.parse(cfg.ap_aging_lines_json) : []; } catch (e) { agingLines = []; }
+  try { agingLines = (cfg.ap_aging_for_sync && cfg.ap_aging_lines_json) ? JSON.parse(cfg.ap_aging_lines_json) : []; } catch (e) { agingLines = []; }
 
   let bills, payments;
   // Bill.com v3 /bills and /payments IGNORE offset pagination — nextPage returns

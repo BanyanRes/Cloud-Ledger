@@ -1632,7 +1632,7 @@ function registerOtherWorkpapersRoutes(app, ctx) {
         }).filter((l) => l.amount != null && Math.abs(l.amount) >= 0.005);
         const now = new Date().toISOString();
         const who = (req.user && (req.user.name || req.user.email)) || 'system';
-        ctx.db.prepare('UPDATE billcom_config SET ap_aging_lines_json=?, ap_aging_as_of=?, ap_aging_uploaded_at=?, updated_by=?, updated_at=? WHERE entity_id=?')
+        ctx.db.prepare('UPDATE billcom_config SET ap_aging_lines_json=?, ap_aging_as_of=?, ap_aging_uploaded_at=?, ap_aging_for_sync=0, updated_by=?, updated_at=? WHERE entity_id=?')
           .run(JSON.stringify(clean), asOf, now, who, now, eid);
         const total = Math.round(clean.reduce((a, x) => a + x.amount, 0) * 100) / 100;
         res.json({ success: true, count: clean.length, total, as_of: asOf });
