@@ -4876,13 +4876,24 @@ async function generatePackage({ statements, execSummaryBytes, execSummaryText, 
             headingEntity: (statements.meta && statements.meta.entityName) || undefined,
             headingPhase: phase || undefined,
           });
-          reqPdfBytes = Buffer.from(conv.bytes);
-          fromXlsx = true;
-          rInfo.convertedFromXlsx = true;
-          rInfo.sheetUsed = conv.sheetUsed;
-          rInfo.availableSheets = conv.availableSheets;
-          if (conv.sheetUsed.toLowerCase() !== wantSheet.toLowerCase()) {
-            info.warnings.push(label + ': workbook had no "' + wantSheet + '" sheet; used "' + conv.sheetUsed + '" instead.');
+          if (!conv.matched) {
+            // Could not locate the Budget-to-Actual tab in this workbook (the
+            // resolver had only the first sheet to fall back on). Skip the page
+            // rather than silently embedding the wrong sheet - e.g. a lender
+            // package whose first tab is "Funding Summary" (Jimmy, 2026-10-22).
+            info.warnings.push(label + ': could not locate a "' + wantSheet + '" tab in "' + (r.name || 'requisition workbook') + '" (tabs present: ' + (conv.availableSheets || []).join(', ') + '); requisition page skipped.');
+            rInfo.skipped = true;
+            rInfo.availableSheets = conv.availableSheets;
+            reqPdfBytes = null;
+          } else {
+            reqPdfBytes = Buffer.from(conv.bytes);
+            fromXlsx = true;
+            rInfo.convertedFromXlsx = true;
+            rInfo.sheetUsed = conv.sheetUsed;
+            rInfo.availableSheets = conv.availableSheets;
+            if (conv.sheetUsed.toLowerCase() !== wantSheet.toLowerCase()) {
+              info.warnings.push(label + ': used the "' + conv.sheetUsed + '" tab for the ' + wantSheet + ' report (no tab is named exactly "' + wantSheet + '").');
+            }
           }
         } catch (e) {
           info.warnings.push(label + ': could not convert requisition workbook to PDF: ' + e.message);

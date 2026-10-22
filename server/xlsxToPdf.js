@@ -24,6 +24,7 @@ const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const { readSheetFills } = require('./xlsxFills');
 const { readSheetBorders } = require('./xlsxBorders');
 const { readSheetHeaderCenter } = require('./xlsxHeader');
+const { resolveSheetName } = require('./sheetResolve');
 
 // Landscape Letter.
 const LP = { w: 792, h: 612, mL: 30, mR: 30, mT: 40, mB: 34 };
@@ -511,11 +512,14 @@ async function worksheetToPdfBytes(ws, opts = {}) {
 async function xlsxSheetToPdf(xlsxBuffer, sheetName, opts = {}) {
   // cellStyles: true so we can read bold/alignment and !cols widths faithfully.
   const wb = XLSX.read(xlsxBuffer, { type: 'buffer', cellDates: true, cellNF: true, cellText: true, cellStyles: true });
-  let name = sheetName;
-  if (!name || !wb.Sheets[name]) {
-    const found = wb.SheetNames.find(n => n.toLowerCase() === String(sheetName || '').toLowerCase());
-    name = found || wb.SheetNames[0];
-  }
+  // Locate the requested sheet with the shared resolver (the same matching the
+  // requisition engine's findSheet uses), so a per-project tab name like
+  // "Buna Budget" resolves to the Budget-to-Actual report instead of being
+  // missed. matched=false means the requested sheet was not found at all - the
+  // caller decides whether to skip the page rather than embed the first sheet.
+  let name = resolveSheetName(wb.SheetNames, sheetName);
+  const matched = !!name;
+  if (!name) name = wb.SheetNames[0];
   const ws = wb.Sheets[name];
   // Crop to the sheet's PRINT AREA when one is defined (opt-out via
   // opts.printArea === false). This makes the embedded report show exactly the
@@ -552,7 +556,7 @@ async function xlsxSheetToPdf(xlsxBuffer, sheetName, opts = {}) {
   // Pass through only an explicitly-provided title; the requisition sheet's own
   // heading is now rendered from its print header (see `heading`).
   const bytes = await worksheetToPdfBytes(ws, { title: opts.title, fills, borders, heading });
-  return { bytes, sheetUsed: name, availableSheets: wb.SheetNames };
+  return { bytes, sheetUsed: name, availableSheets: wb.SheetNames, matched };
 }
 
 // Resolve a sheet's PRINT AREA (an A1 range string like "B6:K108") from the

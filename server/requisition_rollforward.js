@@ -48,52 +48,13 @@ const { learnDevFeeSpec, applyDevFeeSpec } = require('./requisition_devfee.js');
 // the opaque "Cannot read properties of undefined (reading 'getCell')". This
 // resolver removes that whole class of failure and lets callers give a precise
 // "which tab is missing" error instead.
-const SHEET_ALIASES = {
-  'prior invoice log': ['prior inv log', 'prior log', 'prior invoices'],
-  'current invoice log': ['current inv log', 'current log', 'current invoices'],
-  'budget to actual': ['b2a', 'budget vs actual', 'budget-to-actual', 'budget to actuals', 'buna budget'],
-  'dev fee': ['development fee', 'dev fee calc', 'developer fee', 'development fee calculation', 'development fee calc'],
-  'hard cost contingency table': ['hard cost contingency', 'hard contingency table', 'hard cost contingency tbl'],
-  'soft cost contingency table': ['soft cost contingency', 'soft contingency table', 'soft cost contingency tbl'],
-};
+const { resolveSheetName } = require('./sheetResolve');
 function findSheet(workbook, canonicalName) {
-  const norm = (s) => String(s == null ? '' : s).trim().toLowerCase().replace(/\s+/g, ' ');
-  // Strip a trailing phase suffix (" P2", "-P1", " Phase 2") so Silsbee-style
-  // templates, which tag every tab with its phase, still resolve to the canonical
-  // name. Requires a separator before the token so mid-word "p" (e.g. "group 2")
-  // is not affected.
-  const stripPhase = (s) => s.replace(/[\s-]+(?:p|phase)\s*\d+$/i, '').trim();
-  const want = norm(canonicalName);
-  // 1. exact
-  let ws = workbook.getWorksheet(canonicalName);
-  if (ws) return ws;
-  // 2. normalized exact + 3. aliases (also with the phase suffix removed)
-  const aliases = SHEET_ALIASES[want] || [];
-  for (const sheet of workbook.worksheets) {
-    const n = norm(sheet.name);
-    const nb = stripPhase(n);
-    if (n === want || aliases.includes(n) || nb === want || aliases.includes(nb)) return sheet;
-  }
-  // 4. Fuzzy fallback, Budget-to-Actual only. CPAs name this one tab
-  //    inconsistently across project templates - "CLIP Phase 3 Budget",
-  //    "Budget to Actual 2B", "Budget to Actual (OP)", "Buna Budget" - often
-  //    with the phase token embedded mid-name (not a strippable suffix), so the
-  //    passes above miss it. In a requisition workbook the only tab carrying the
-  //    word "budget" is the B2A report (the invoice logs, contingency tables and
-  //    the dev-fee tab never do), so resolve on that, preferring the name closest
-  //    to the canonical. Scoped to this canonical so every other tab stays strict.
-  if (want === 'budget to actual') {
-    const isOther = (n) => /invoice log|inv log|contingency|dev(?:elopment)?\s*fee/.test(n);
-    let best, bestScore = 0;
-    for (const sheet of workbook.worksheets) {
-      const n = norm(sheet.name);
-      if (!/\bbudget\b/.test(n) || isOther(n)) continue;
-      const score = /budget\s*(?:to|vs\.?|-)?\s*actual/.test(n) ? 3 : (/\bactual\b/.test(n) ? 2 : 1);
-      if (score > bestScore) { best = sheet; bestScore = score; }
-    }
-    if (best) return best;
-  }
-  return undefined;
+  // Delegates to the shared resolver (sheetResolve.js) so the requisition engine
+  // and the financial-statement package embed locate the same tab the same way.
+  // Returns the worksheet, or undefined when no tab matches.
+  const picked = resolveSheetName(workbook.worksheets.map((w) => w.name), canonicalName);
+  return picked ? workbook.getWorksheet(picked) : undefined;
 }
 
 // Read one invoice-log sheet into an ordered list of groups. A group is a run of
