@@ -1204,8 +1204,18 @@ function monthYearLabel(asOf) {
 // restate the period already named.
 function opsHeadingLine(colLabel, curLong, priLong) {
   const word = String(colLabel || 'Month Ended').replace(/ Ended$/, '');
-  const lead = word === 'Month' ? 'One Month' : word;
-  const base = 'For the ' + lead + ' Ended ' + curLong + ' and ' + priLong;
+  if (word === 'Month') {
+    // CLA operating-entity P&L: two comparative month columns plus a calendar-
+    // YTD column. Name the two month-ends together, then the YTD span spelled
+    // out ("the Nine Months Ended ...") in place of "Year to Date Ended"
+    // (Jimmy, 2026-10-22 - all CLA entities).
+    const mi = MONTHS.indexOf(String(curLong).split(' ')[0]); // 0..11
+    const n = mi + 1;                                          // calendar-YTD months
+    const spelled = ['','One','Two','Three','Four','Five','Six','Seven','Eight','Nine','Ten','Eleven','Twelve'][n] || String(n);
+    const ytd = 'the ' + spelled + (n === 1 ? ' Month' : ' Months') + ' Ended ' + curLong;
+    return 'For the Months Ended ' + curLong + ' and ' + priLong + ', and ' + ytd;
+  }
+  const base = 'For the ' + word + ' Ended ' + curLong + ' and ' + priLong;
   return word === 'Year' ? base : base + ' and Year to Date Ended ' + curLong;
 }
 function monthsEndedLabel(asOf) {
@@ -2165,7 +2175,14 @@ async function buildStatements(getBalances, opts) {
     .filter(s => s.subs.length);
   const liabSections = BS_LIAB_ORDER
     .map(s => bsSectionFor(s, 'Liability'))
-    .filter(s => s.subs.length);
+    .filter(s => s.subs.length)
+    // SRN hyphenates its long-term debt section on the face balance sheet
+    // (Jimmy, 2026-10-22). Display only: the canonical section key stays
+    // "Long Term Liabilities" for classification, ordering, and the
+    // cash-flow debt bucket.
+    .map(s => (profile === 'srn' && s.title === 'Long Term Liabilities')
+      ? { ...s, title: 'Long-Term Liabilities' }
+      : s);
 
   // Equity: flat list of contributed-capital accounts (Members Equity subsection),
   // with Retained Earnings and Net Income surfaced as their own lines by the
@@ -3872,12 +3889,13 @@ async function renderStatementsPdf(s, outOffsets) {
     L.sectionTitle('Cash Flows from Operating Activities');
     L.row('Net Income (Loss)', [money(cf.netIncome)], { indent: 16, dollarPrefix: true });
     L.row('Adjustments to reconcile net income to net cash:', [], { indent: 16 });
-    // County Line SRN (Sabine River & Northern Railroad, SABINERI) capitalizes
-    // depreciation, so the only D&A add-back that flows through the P&L is
-    // amortization -- label it accordingly for that entity only (Jimmy, 2026-09-28).
+    // County Line SRN (Sabine River & Northern Railroad, SABINERI): present the
+    // D&A add-back as "Depreciation and Amortization" on the cash flow for that
+    // entity (Jimmy, 2026-10-22; was "Amortization" per the 2026-09-28
+    // presentation). Other entities keep "Amortization and depreciation".
     const _isSrnEntity = String(m.entityCode || '').toUpperCase() === 'SABINERI'
       || /sabine|county\s*line\s*srn/i.test(String(m.rawEntityName || m.entityName || ''));
-    const _amortLabel = _isSrnEntity ? 'Amortization' : 'Amortization and depreciation';
+    const _amortLabel = _isSrnEntity ? 'Depreciation and Amortization' : 'Amortization and depreciation';
     if (!isZero(cf.amortization)) L.row(_amortLabel, [money(cf.amortization)], { indent: 28 });
     L.space(6);
     L.row('Changes in Operating Assets and Liabilities:', [], { indent: 16 });

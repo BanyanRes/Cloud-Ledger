@@ -571,11 +571,12 @@ function buildCashFlow(s) {
   const opFeed = [];
   opFeed.push(sh.row('Net Income (Loss)', one(cf.netIncome), { indent: 16, dollar: true }));
   sh.row('Adjustments to reconcile net income to net cash:', [], { indent: 16 });
-  // County Line SRN capitalizes depreciation, so only amortization flows through
-  // the P&L add-back -- label it accordingly for that entity only (Jimmy, 2026-09-28).
+  // County Line SRN: present the D&A add-back as "Depreciation and Amortization"
+  // on the cash flow for that entity (Jimmy, 2026-10-22; was "Amortization" per
+  // the 2026-09-28 presentation). Other entities keep "Amortization and depreciation".
   const _isSrnEntity = String(m.entityCode || '').toUpperCase() === 'SABINERI'
     || /sabine|county\s*line\s*srn/i.test(String(m.rawEntityName || m.entityName || ''));
-  const _amortLabel = _isSrnEntity ? 'Amortization' : 'Amortization and depreciation';
+  const _amortLabel = _isSrnEntity ? 'Depreciation and Amortization' : 'Amortization and depreciation';
   if (!isZero(cf.amortization)) opFeed.push(sh.row(_amortLabel, one(cf.amortization), { indent: 28 }));
   sh.blank();
   sh.row('Changes in Operating Assets and Liabilities:', [], { indent: 16 });
