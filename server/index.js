@@ -7679,7 +7679,11 @@ function performPaymentReconcileCore({ entityId, apAccount, clearingAccount, cas
     // `actor` is the caller-supplied user label; there is no `req` in this
     // module-level function (referencing one threw ReferenceError on every
     // payment JE, which the per-payment catch turned into "req is not defined").
-    periods.assertPostable(db, entityId, date, { userEmail: actor || 'billcom-payment-reconcile', source: 'billcom-payment-reconcile' });
+    // Override a SOFT-closed month exactly like the bill leg, so a payment posts
+    // alongside the bill it relieves. A soft-close is overridable (logged to
+    // period_override_log); a HARD-closed year still throws above and is caught as
+    // an error (Jimmy, 2026-10-22).
+    periods.assertPostable(db, entityId, date, { userEmail: actor || 'billcom-payment-reconcile', override: true, reason: 'Bill.com payment sync', source: 'billcom-payment-reconcile' });
     const num = (db.prepare('SELECT MAX(entry_num) as m FROM journal_entries WHERE entity_id = ?').get(entityId).m || 0) + 1;
     const r = db.prepare('INSERT INTO journal_entries (entity_id, entry_num, date, memo, vendor, created_by) VALUES (?,?,?,?,?,?)')
       .run(entityId, num, date, memo, vendor || null, 'Bill.com sync');
