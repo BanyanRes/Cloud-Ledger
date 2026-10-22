@@ -820,6 +820,30 @@ const BANYANDEV_FORCE_SUBTOTAL_SECTIONS = new Set(['Other Assets']);
 // Accumulated-depreciation contra for the banyandev profile — Braker's 11025,
 // subtracted within Fixed Assets, Net the same way Silsbee's 16160/16500 are.
 const BS_CONTRA_CODES_BANYANDEV = new Set(['11025']);
+// Presentation adjacency within a sub-section (banyandev): the Allowance for
+// Doubtful Acct (12007), a contra to Accounts Receivable, prints immediately
+// under Accounts Receivable (12000) to match the CLA package, rather than in
+// natural code order (which drops it below the other receivables). Applied to
+// the face balance sheet and the consolidating schedule alike so the schedule
+// that footnotes the face statement reads with the identical row order. No-op
+// for any other profile, or when either code is absent or already adjacent;
+// 12000/12007 appear only in Other Current Assets, so it is naturally scoped to
+// that sub. Reorders presentation only — no figure or subtotal moves.
+const BANYANDEV_ACCT_ADJACENCY = [{ after: '12000', move: '12007' }];
+function applyAcctAdjacency(profile, rows) {
+  if (profile !== 'banyandev' || !Array.isArray(rows) || rows.length < 2) return rows;
+  let out = rows;
+  for (const { after, move } of BANYANDEV_ACCT_ADJACENCY) {
+    const mi = out.findIndex((r) => String(r.code) === move);
+    const ai = out.findIndex((r) => String(r.code) === after);
+    if (mi === -1 || ai === -1 || mi === ai + 1) continue;
+    if (out === rows) out = rows.slice();
+    const [m] = out.splice(mi, 1);
+    const ai2 = out.findIndex((r) => String(r.code) === after);
+    out.splice(ai2 + 1, 0, m);
+  }
+  return out;
+}
 function banyandevBsClassify(row) {
   const explicit = BS_ACCOUNT_MAP_BANYANDEV[String(row.code)];
   if (explicit) return { section: explicit[0], sub: explicit[1] };
@@ -2121,7 +2145,7 @@ async function buildStatements(getBalances, opts) {
   // accounts (accumulated amortization) keep their natural sign; the renderer
   // subtracts the subsection total at the section level.
   function bsRowsForSub(section, sub, type) {
-    return bsCodes
+    const rows = bsCodes
       .map(code => {
         const rc = colCur.map.get(code), rp = colPri.map.get(code);
         const ref = rc || rp;
@@ -2134,6 +2158,7 @@ async function buildStatements(getBalances, opts) {
         return { code, name: ref.name, cur: r2(cur), pri: r2(pri), change: r2(cur - pri), contra: contraSet.has(String(code)) };
       })
       .filter(Boolean);
+    return applyAcctAdjacency(profile, rows);
   }
 
   // Build a section as an ordered list of subsections, each with its own rows and
@@ -4340,7 +4365,7 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
       const subsMap = bySec.get(section);
       const order = subOrderMap[section] || [];
       const subNames = [...new Set([...order, ...subsMap.keys()])].filter(s => subsMap.has(s));
-      return { section, subs: subNames.map(sub => ({ sub, rows: byCode(subsMap.get(sub)) })) };
+      return { section, subs: subNames.map(sub => ({ sub, rows: applyAcctAdjacency(profile, byCode(subsMap.get(sub))) })) };
     });
   };
   // Render one grouped section: header, each subsection (header + rows +
@@ -6361,7 +6386,7 @@ function groupConsolidatingSchedule(schedules, meta) {
       const order = subOrderMap[section] || [];
       const subNames = [...new Set([...order, ...subsMap.keys()])].filter(x => subsMap.has(x));
       const subs = subNames.map(sub => {
-        const r = byCode(subsMap.get(sub));
+        const r = applyAcctAdjacency(profile, byCode(subsMap.get(sub)));
         return { sub, rows: r.map(rowObj), total: allCols(r) };
       });
       const allInSec = subs.reduce((s2, su) => s2.concat(subsMap.get(su.sub)), []);
