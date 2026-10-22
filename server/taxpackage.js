@@ -36,6 +36,7 @@ const path = require('path');
 const fs = require('fs');
 const ExcelJS = require('exceljs');
 const multer = require('multer');
+const eq = require('./taxpackage_equity');
 
 // ── Display constants (match the delivered TB & GL packages) ──────────────────
 const FONT = 'Verdana';
@@ -180,7 +181,13 @@ function buildData(ctx, eid, p) {
     .filter((t) => (t.type === 'Asset' || t.type === 'Liability') && blockByCode.has(t.code))
     .map((t) => t.code);
 
-  return { ent, p, tb, blocks, blockByCode, support };
+  // Equity rollforward + contributed-capital detail, derived from the equity
+  // accounts' GL activity (net income is NOT member-allocated). Defensive: a
+  // failure here must never break TB/GL generation.
+  let equity = null;
+  try { equity = eq.computeEquity(ctx, eid, p); } catch (e) { console.error('[tax-package] equity compute failed:', e.message); }
+
+  return { ent, p, tb, blocks, blockByCode, support, equity };
 }
 
 // ── Workbook ──────────────────────────────────────────────────────────────────
@@ -298,6 +305,8 @@ function addGlDerivedSheets(wb, d, includeOrgChart) {
   buildTB(wb, d);
   buildGL(wb, d);
   buildSupportTabs(wb, d, used);
+  // Equity Rollforward + Contributed Capital, generated from the equity accounts.
+  try { eq.renderEqRF(wb, d); eq.renderContributedCapital(wb, d); } catch (e) { console.error('[tax-package] equity render failed:', e.message); }
   // Org Chart tab intentionally omitted — not wanted in generated packages.
 }
 
@@ -308,6 +317,7 @@ function addGlDerivedSheets(wb, d, includeOrgChart) {
 function isGlDerivedSheet(name, year) {
   const n = String(name || '').trim();
   if (/^(tb|gl|trial balance|general ledger)( report)?$/i.test(n)) return true;
+  if (/^(eq rf|equity rollforward|contributed capital)$/i.test(n)) return true;
   if (/^\d+$/.test(n)) return true;
   if (new RegExp('^(tb|gl|trial balance|general ledger)\\s*' + year + '$', 'i').test(n)) return true;
   if (new RegExp('^' + year + '\\s*(tb|gl|trial balance|general ledger)$', 'i').test(n)) return true;
