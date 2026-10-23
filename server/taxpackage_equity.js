@@ -286,4 +286,35 @@ function renderFixedAssets(wb, d) {
   [3, 4, 5, 6].forEach((c) => { ws.getColumn(c).width = 15; });
 }
 
-module.exports = { computeEquity, renderEqRF, renderContributedCapital, renderFixedAssets };
+// Amortization Schedule — booked rollforward of capitalized deferred costs (loan
+// fees, financing costs) amortized via accumulated amortization into amortization
+// expense. Ties to the TB. d.amortization is computed in taxpackage.js.
+function renderAmortization(wb, d) {
+  const am = d.amortization; if (!am) return;
+  const ws = wb.addWorksheet('Amortization Schedule');
+  ws.getCell('A1').value = d.ent.name; ws.getCell('A1').font = F({ bold: true });
+  ws.getCell('A2').value = 'Amortization Schedule'; ws.getCell('A2').font = F();
+  ws.getCell('A3').value = (d.p.mode === 'monthly' ? d.p.periodLine : 'Year Ended December 31, ' + d.p.year); ws.getCell('A3').font = F();
+  ['Code', 'Account', 'Beginning', 'Additions', 'Amortization', 'Ending'].forEach((h, i) => { const c = ws.getCell(5, i + 1); c.value = h; c.font = F({ bold: true }); });
+  const num = (r, col, v, bold) => { const c = ws.getCell(r, col); c.value = r2(v); c.font = F(bold ? { bold: true } : {}); c.numFmt = ACCT; };
+  const codeCell = (r, a) => { const c = ws.getCell(r, 1); c.value = /^\d+$/.test(String(a.code)) ? Number(a.code) : a.code; c.font = F(); ws.getCell(r, 2).value = a.name; ws.getCell(r, 2).font = F(); };
+  let row = 6, tBeg = 0, tAdd = 0, tAmort = 0, tEnd = 0;
+  for (const a of am.cost) {
+    codeCell(row, a); num(row, 3, a.beginning); num(row, 4, a.additions); num(row, 6, a.ending);
+    tBeg = r2(tBeg + a.beginning); tAdd = r2(tAdd + a.additions); tEnd = r2(tEnd + a.ending); row++;
+  }
+  for (const a of am.accum) {
+    codeCell(row, a); num(row, 3, a.beginning); num(row, 5, a.amortization); num(row, 6, a.ending);
+    tBeg = r2(tBeg + a.beginning); tAmort = r2(tAmort + a.amortization); tEnd = r2(tEnd + a.ending); row++;
+  }
+  ws.getCell(row, 2).value = 'Net Deferred Cost'; ws.getCell(row, 2).font = F({ bold: true });
+  num(row, 3, tBeg, true); num(row, 4, tAdd, true); num(row, 5, tAmort, true); num(row, 6, tEnd, true); row += 2;
+  const expTotal = r2(am.expense.reduce((s, e) => s + e.amount, 0));
+  const amortRecorded = r2(-am.accum.reduce((s, a) => s + a.amortization, 0));
+  ws.getCell(row, 2).value = 'Amortization expense for the period'; ws.getCell(row, 2).font = F(); num(row, 6, expTotal); row++;
+  ws.getCell(row, 2).value = 'Accumulated amortization recorded'; ws.getCell(row, 2).font = F(); num(row, 6, amortRecorded); row++;
+  ws.getCell(row, 2).value = 'Variance'; ws.getCell(row, 2).font = F(); num(row, 6, r2(expTotal - amortRecorded));
+  ws.getColumn(1).width = 14; ws.getColumn(2).width = 42; [3, 4, 5, 6].forEach((c) => { ws.getColumn(c).width = 15; });
+}
+
+module.exports = { computeEquity, renderEqRF, renderContributedCapital, renderFixedAssets, renderAmortization };

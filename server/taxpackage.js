@@ -213,13 +213,34 @@ function buildData(ctx, eid, p) {
     }
   }
 
+  // Amortization schedule: capitalized deferred costs (loan fees, financing costs)
+  // amortized via accumulated amortization into amortization expense. A booked
+  // rollforward that ties to the TB; rendered only when the entity amortizes
+  // something.
+  const amCost = [], amAccum = [], amExp = [];
+  for (const b of blocks) {
+    const mt = meta.get(b.code) || {};
+    const n = mt.name || '';
+    const first = b.lines[0];
+    const beginning = (first && first.memo === 'Opening balance' && first.debit == null) ? (Number(first.balance) || 0) : 0;
+    const ending = Number(b.lines[b.lines.length - 1].balance) || 0;
+    if (mt.type === 'Asset' && /accumulat\w*\s*amort|acc\.?\s*amort/i.test(n)) {
+      amAccum.push({ code: b.code, name: b.name, beginning: r2(beginning), amortization: r2(ending - beginning), ending: r2(ending) });
+    } else if (mt.type === 'Asset' && /loan fee|deferred financ|deferred[\s-]*(?:loan[\s-]*)?cost|debt issuance|financing cost|organizationa?l?\s*cost|intangible/i.test(n)) {
+      amCost.push({ code: b.code, name: b.name, beginning: r2(beginning), additions: r2(ending - beginning), ending: r2(ending) });
+    } else if (mt.type === 'Expense' && /amortization/i.test(n)) {
+      amExp.push({ code: b.code, name: b.name, amount: r2(ending) });
+    }
+  }
+  const amortization = (amAccum.length || amExp.length) ? { cost: amCost, accum: amAccum, expense: amExp } : null;
+
   // Equity rollforward + contributed-capital detail, derived from the equity
   // accounts' GL activity (net income is NOT member-allocated). Defensive: a
   // failure here must never break TB/GL generation.
   let equity = null;
   try { equity = eq.computeEquity(ctx, eid, p); } catch (e) { console.error('[tax-package] equity compute failed:', e.message); }
 
-  return { ent, p, tb, blocks, blockByCode, support, fixedAssets, equity };
+  return { ent, p, tb, blocks, blockByCode, support, fixedAssets, amortization, equity };
 }
 
 // ── Workbook ──────────────────────────────────────────────────────────────────
@@ -342,8 +363,9 @@ function addGlDerivedSheets(wb, d, includeOrgChart) {
   buildTB(wb, d);
   buildGL(wb, d);
   buildSupportTabs(wb, d, used);
-  // Fixed Asset Additions + Equity Rollforward + Contributed Capital — all generated from the ledger.
+  // Fixed Asset Additions + Amortization Schedule + Equity Rollforward + Contributed Capital — all generated from the ledger.
   try { eq.renderFixedAssets(wb, d); } catch (e) { console.error('[tax-package] fixed-asset render failed:', e.message); }
+  try { eq.renderAmortization(wb, d); } catch (e) { console.error('[tax-package] amortization render failed:', e.message); }
   try { eq.renderEqRF(wb, d); eq.renderContributedCapital(wb, d); } catch (e) { console.error('[tax-package] equity render failed:', e.message); }
   // Org Chart tab intentionally omitted — not wanted in generated packages.
 }
@@ -355,7 +377,7 @@ function addGlDerivedSheets(wb, d, includeOrgChart) {
 function isGlDerivedSheet(name, year) {
   const n = String(name || '').trim();
   if (/^(tb|gl|trial balance|general ledger)( report)?$/i.test(n)) return true;
-  if (/^(eq rf|equity rollforward|contributed capital|fixed asset additions)$/i.test(n)) return true;
+  if (/^(eq rf|equity rollforward|contributed capital|fixed asset additions|amortization schedule)$/i.test(n)) return true;
   if (/^\d+$/.test(n)) return true;
   if (new RegExp('^(tb|gl|trial balance|general ledger)\\s*' + year + '$', 'i').test(n)) return true;
   if (new RegExp('^' + year + '\\s*(tb|gl|trial balance|general ledger)$', 'i').test(n)) return true;
