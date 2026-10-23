@@ -226,7 +226,7 @@ function buildData(ctx, eid, p) {
     const ending = Number(b.lines[b.lines.length - 1].balance) || 0;
     if (mt.type === 'Asset' && /accumulat\w*\s*amort|acc\.?\s*amort/i.test(n)) {
       amAccum.push({ code: b.code, name: b.name, beginning: r2(beginning), amortization: r2(ending - beginning), ending: r2(ending) });
-    } else if (mt.type === 'Asset' && /loan fee|deferred financ|deferred[\s-]*(?:loan[\s-]*)?cost|debt issuance|financing cost|organizationa?l?\s*cost|intangible/i.test(n)) {
+    } else if (mt.type === 'Asset' && /goodwill|intangible|deferred financ|debt issuance|financing cost|organizationa?l?\s*cost/i.test(n)) {
       amCost.push({ code: b.code, name: b.name, beginning: r2(beginning), additions: r2(ending - beginning), ending: r2(ending) });
     } else if (mt.type === 'Expense' && /amortization/i.test(n)) {
       amExp.push({ code: b.code, name: b.name, amount: r2(ending) });
@@ -377,7 +377,7 @@ function addGlDerivedSheets(wb, d, includeOrgChart) {
 function isGlDerivedSheet(name, year) {
   const n = String(name || '').trim();
   if (/^(tb|gl|trial balance|general ledger)( report)?$/i.test(n)) return true;
-  if (/^(eq rf|equity rollforward|contributed capital|fixed asset additions|amortization schedule)$/i.test(n)) return true;
+  if (/^(eq rf|equity rollforward|contributed capital|fixed asset additions|amortization schedule|goodwill amortization)$/i.test(n)) return true;
   if (/^\d+$/.test(n)) return true;
   if (new RegExp('^(tb|gl|trial balance|general ledger)\\s*' + year + '$', 'i').test(n)) return true;
   if (new RegExp('^' + year + '\\s*(tb|gl|trial balance|general ledger)$', 'i').test(n)) return true;
