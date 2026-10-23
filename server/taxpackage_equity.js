@@ -112,18 +112,32 @@ function computeEquity(ctx, eid, p) {
     "WHERE je.entity_id = ? AND a.type IN ('Equity','Revenue','Expense') AND je.date <= ?").get(eid, p.tbAsOf);
   const membersEquityTB = r2((tbRow && tbRow.v) || 0);
 
+  // Inception-to-date contribution detail per contributed-capital account (CLA
+  // format): every entry affecting the account, with the real GL line description
+  // (not the generic "GL detail import …" entry memo), signed so the itemized
+  // total foots to the account's GL balance for the member-vs-GL tie-out.
+  const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const cleanDescr = (s, code) => {
+    let t = String(s || '').trim(); if (!t) return '';
+    const c = escRe(code);
+    t = t.replace(new RegExp('^' + c + '\\s*-\\s*'), '');                            // leading "<code>-"
+    t = t.replace(new RegExp('\\s*-\\s*[^-]*-\\s*GJ\\s*-\\s*' + c + '$', 'i'), '');   // trailing "-<doc>-GJ-<code>"
+    t = t.replace(new RegExp('\\s*-\\s*GJ\\s*-\\s*' + c + '$', 'i'), '');             // trailing "-GJ-<code>"
+    return t.trim();
+  };
   const contribDetail = [];
   for (const [code, m] of meta) {
     if (m.cat !== 'contrib') continue;
-    let pyTotal = 0; const cur = [];
+    const items = []; let total = 0;
     for (const l of lines) {
       if (String(l.code) !== code) continue;
-      const y = yrOf(l.date); const v = r2((Number(l.credit) || 0) - (Number(l.debit) || 0));
-      if (y < curYear) pyTotal = r2(pyTotal + v);
-      else if (y === curYear) cur.push({ date: l.date, memo: l.memo || l.descr || '', amt: v });
+      const y = yrOf(l.date); if (!y || y > curYear) continue;
+      const v = r2((Number(l.credit) || 0) - (Number(l.debit) || 0));
+      if (Math.abs(v) < 0.005) continue;
+      items.push({ date: l.date, memo: cleanDescr(l.descr, code) || l.memo || '', amt: v });
+      total = r2(total + v);
     }
-    const total = r2(pyTotal + cur.reduce((s, x) => s + x.amt, 0));
-    contribDetail.push({ code, name: m.name, member: m.member, pyTotal: r2(pyTotal), cur, total });
+    contribDetail.push({ code, name: m.name, member: m.member, items, total: r2(total) });
   }
   contribDetail.sort((a, b) => (Number(a.code) - Number(b.code)) || String(a.code).localeCompare(b.code));
 
@@ -235,15 +249,18 @@ function renderContributedCapital(wb, d) {
   if (!details.length) return;
   const ws = wb.addWorksheet('Contributed Capital');
   const num = (r, col, v, bold) => { const c = ws.getCell(r, col); c.value = r2(v); c.font = F(bold ? { bold: true } : {}); c.numFmt = ACCT; };
+  // Contributed-capital balance per the general ledger (computeBalances, via d.tb),
+  // for the member-contributions-vs-GL tie-out. The TB closing is debit-positive, so
+  // an equity credit balance shows negative; the contributed-capital magnitude is -closing.
+  const tbMap = new Map((d.tb || []).map((t) => [String(t.code), Number(t.closing) || 0]));
+  const glOf = (code) => r2(-(tbMap.get(String(code)) || 0));
   let row = 1, grand = 0;
   for (const cd of details) { ws.getCell(row, 1).value = cd.name; ws.getCell(row, 1).font = F(); num(row, 2, cd.total); grand = r2(grand + cd.total); row++; }
   ws.getCell(row, 1).value = 'Total'; ws.getCell(row, 1).font = F({ bold: true }); num(row, 2, grand, true); row += 2;
   ws.getCell(row, 1).value = 'Contributions by members thru 12/31/' + d.p.year; ws.getCell(row, 1).font = F({ bold: true }); row += 2;
   for (const cd of details) {
-    ws.getCell(row, 2).value = 'Contributions made by ' + cd.member + ':'; ws.getCell(row, 2).font = F({ bold: true });
-    if (Math.abs(cd.pyTotal) >= 0.005) { num(row, 3, cd.pyTotal); ws.getCell(row, 4).value = 'PY'; ws.getCell(row, 4).font = F(); }
-    row++;
-    for (const l of cd.cur) {
+    ws.getCell(row, 2).value = 'Contributions made by ' + cd.member + ':'; ws.getCell(row, 2).font = F({ bold: true }); row++;
+    for (const l of cd.items) {
       ws.getCell(row, 1).value = l.date; ws.getCell(row, 1).font = F();
       ws.getCell(row, 2).value = l.memo; ws.getCell(row, 2).font = F();
       num(row, 3, l.amt); row++;
@@ -252,13 +269,20 @@ function renderContributedCapital(wb, d) {
   }
   ws.getCell(row, 2).value = 'Total contributions by members thru 12/31/' + d.p.year; ws.getCell(row, 2).font = F({ bold: true });
   num(row, 3, grand, true); row += 2;
+  // Member-contributions-vs-GL tie-out: the itemized contributions (from the GL
+  // detail above) vs the contributed-capital balance per the trial balance.
+  const glGrand = r2(details.reduce((s, cd) => s + glOf(cd.code), 0));
+  ws.getCell(row, 1).value = 'Reconciliation to the general ledger'; ws.getCell(row, 1).font = F({ bold: true }); row++;
+  ws.getCell(row, 2).value = 'Total contributions by members'; ws.getCell(row, 2).font = F(); num(row, 3, grand); row++;
+  ws.getCell(row, 2).value = 'Contributed Capital per general ledger'; ws.getCell(row, 2).font = F(); num(row, 3, glGrand); row++;
+  ws.getCell(row, 2).value = 'Difference'; ws.getCell(row, 2).font = F({ bold: true }); num(row, 3, r2(grand - glGrand), true); row += 2;
   ws.getCell(row, 1).value = 'Contributed Capital per GL:'; ws.getCell(row, 1).font = F({ bold: true }); row++;
   for (const cd of details) {
     ws.getCell(row, 1).value = Number(cd.code); ws.getCell(row, 1).font = F();
     ws.getCell(row, 2).value = cd.name; ws.getCell(row, 2).font = F();
-    num(row, 3, -cd.total); ws.getCell(row, 4).value = 'Trial Balance'; ws.getCell(row, 4).font = F(); row++;
+    num(row, 3, tbMap.get(String(cd.code)) || 0); ws.getCell(row, 4).value = 'Trial Balance'; ws.getCell(row, 4).font = F(); row++;
   }
-  ws.getColumn(1).width = 18; ws.getColumn(2).width = 48; ws.getColumn(3).width = 16; ws.getColumn(4).width = 20;
+  ws.getColumn(1).width = 18; ws.getColumn(2).width = 60; ws.getColumn(3).width = 16; ws.getColumn(4).width = 20;
 }
 
 // Fixed Asset Additions — current-year movement on the capitalized / PP&E asset
