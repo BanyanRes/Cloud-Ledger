@@ -26,7 +26,7 @@ const yrOf = (d) => Number(String(d || '').slice(0, 4)) || 0;
 // Entity-specific EQ RF footnotes (mirroring the CLA packages). Keyed by entity id;
 // anchored to the Beginning Balance row with a superscript marker.
 const EQ_RF_NOTES = {
-  38: { marker: 'A', text: 'The distribution to Ben, the former owner, has been reclassed to retained earnings; this reclassification does not relate to 2025 operating results or distributions.' },
+  38: { marker: 'A', text: 'The $148,117.07 distribution to Ben, the former owner, has been reclassed to retained earnings; this reclassification does not relate to 2025 operating results or distributions.' },
 };
 
 // Entity-specific EQ RF start year: roll forward from 1/1 of this year with an
@@ -217,9 +217,9 @@ function renderEqRF(wb, d) {
   num(row, totCol, eq.membersEquityTB); ws.getCell(row, totCol + 1).value = "Members' Equity (TB)"; ws.getCell(row, totCol + 1).font = F();
   num(row + 1, totCol, r2(closing - eq.membersEquityTB)); ws.getCell(row + 1, totCol + 1).value = 'Variance'; ws.getCell(row + 1, totCol + 1).font = F();
   if (eq.note) {
-    const nr = row + 3, nc = totCol + 1;
+    const nr = row + 3, nc = 2;
     ws.getCell(nr, nc).value = 'Note ' + eq.note.marker; ws.getCell(nr, nc).font = F({ bold: true });
-    try { ws.mergeCells(nr + 1, nc, nr + 6, nc + 6); } catch (e) { /* best effort */ }
+    try { ws.mergeCells(nr + 1, nc, nr + 4, nc + 6); } catch (e) { /* best effort */ }
     const tc = ws.getCell(nr + 1, nc); tc.value = eq.note.text; tc.font = F(); tc.alignment = { wrapText: true, vertical: 'top' };
   }
   ws.getColumn(2).width = 24; ws.getColumn(3).width = 20;
