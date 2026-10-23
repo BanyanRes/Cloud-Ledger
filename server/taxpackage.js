@@ -317,8 +317,13 @@ function buildSupportTabs(wb, d, used) {
     const block = blockByCode.get(code); if (!block) continue;
     const ws = wb.addWorksheet(sheetNameFor(code, used));
     titleRows(ws, ent.name, 'General Ledger', p.periodLine);
-    writeBlock(ws, 5, block);
-    glColWidths(ws);
+    // Bank accounts: show only the ending GL balance, not the transaction detail —
+    // the full GL detail report already lists every transaction.
+    const h = ws.getCell(5, 1); h.value = block.code + ' - ' + block.name; h.font = F({ bold: true });
+    ws.getCell(7, 1).value = 'Ending GL Balance as of ' + p.clsDate; ws.getCell(7, 1).font = F({ bold: true });
+    const bal = block.lines.length ? block.lines[block.lines.length - 1].balance : 0;
+    const bc = ws.getCell(7, 3); bc.value = r2(bal); bc.font = F({ bold: true }); bc.numFmt = ACCT;
+    ws.getColumn(1).width = 36; ws.getColumn(3).width = 16;
   }
 }
 
