@@ -29,6 +29,10 @@ const EQ_RF_NOTES = {
   38: { marker: 'A', text: 'Retained earnings was adjusted to correct the opening net assets acquired for a pre-acquisition distribution to the former owner; this adjustment does not relate to 2025 operating results or distributions.' },
 };
 
+// Entity-specific EQ RF start year: roll forward from 1/1 of this year with an
+// opening balance, hiding prior-year detail (e.g. an entity acquired that year).
+const EQ_RF_START = { 38: 2025 };
+
 function categorize(a) {
   const c = String(a.code || ''); const n = String(a.name || '').toLowerCase();
   if (c.startsWith('39') || c === '31000' || /retained earning/.test(n)) return 're';
@@ -123,7 +127,7 @@ function computeEquity(ctx, eid, p) {
   }
   contribDetail.sort((a, b) => (Number(a.code) - Number(b.code)) || String(a.code).localeCompare(b.code));
 
-  return { years, memberNames, memberEnd, reEnd, niByYear, reAct, act, meta, membersEquityTB, contribDetail, note: EQ_RF_NOTES[Number(eid)] || null };
+  return { years, memberNames, memberEnd, reEnd, niByYear, reAct, act, meta, membersEquityTB, contribDetail, note: EQ_RF_NOTES[Number(eid)] || null, startYear: EQ_RF_START[Number(eid)] || null };
 }
 
 function renderEqRF(wb, d) {
@@ -143,6 +147,15 @@ function renderEqRF(wb, d) {
   // allocate it to). Multi-member entities keep net income un-allocated in a
   // Retained Earnings column.
   const single = members.length === 1;
+  // Roll forward from a configured start year (e.g. an entity acquired mid-stream):
+  // the opening balance is the cumulative equity through the prior year-end, and
+  // only activity from the start year on is shown. Defaults to inception.
+  const startYear = (eq.startYear && eq.startYear > eq.years[0]) ? eq.startYear : eq.years[0];
+  const priorYear = startYear - 1;
+  const hasPrior = priorYear >= eq.years[0];
+  const beginMember = (n) => hasPrior ? (eq.memberEnd[n][priorYear] || 0) : 0;
+  const beginRE = hasPrior ? (eq.reEnd[priorYear] || 0) : 0;
+  const shownYears = eq.years.filter((y) => y >= startYear);
   const colStart = 5;
   const memCols = members.map((_, i) => colStart + i);
   const reCol = single ? null : colStart + members.length;
@@ -152,11 +165,14 @@ function renderEqRF(wb, d) {
   const tcHead = ws.getCell(6, totCol); tcHead.value = "Total Members' Equity"; tcHead.font = F({ bold: true }); tcHead.alignment = { wrapText: true, horizontal: 'center' };
   const num = (r, col, v) => { const c = ws.getCell(r, col); c.value = r2(v); c.font = F(); c.numFmt = ACCT; };
   let row = 8;
-  ws.getCell(row, 2).value = 'Beginning Balance 01/01/' + eq.years[0]; ws.getCell(row, 2).font = F({ bold: true });
-  members.forEach((n, i) => num(row, memCols[i], 0)); if (reCol) num(row, reCol, 0); num(row, totCol, 0);
+  ws.getCell(row, 2).value = 'Beginning Balance 01/01/' + startYear; ws.getCell(row, 2).font = F({ bold: true });
+  let begTot = 0;
+  members.forEach((n, i) => { const v = r2(beginMember(n) + (single ? beginRE : 0)); num(row, memCols[i], v); begTot += v; });
+  if (reCol) { num(row, reCol, beginRE); begTot += beginRE; }
+  num(row, totCol, begTot);
   if (eq.note) { const mk = ws.getCell(row, totCol + 1); mk.value = eq.note.marker; mk.font = F({ bold: true, vertAlign: 'superscript' }); }
   row += 2;
-  for (const y of eq.years) {
+  for (const y of shownYears) {
     const contribs = members.map((n) => (eq.act[y] && eq.act[y][n] && eq.act[y][n].contrib) || 0);
     if (contribs.some((v) => Math.abs(v) >= 0.005)) {
       ws.getCell(row, 3).value = 'Capital Contributed'; ws.getCell(row, 3).font = F();
