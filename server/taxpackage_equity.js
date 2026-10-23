@@ -275,13 +275,7 @@ function renderContributedCapital(wb, d) {
   ws.getCell(row, 1).value = 'Reconciliation to the general ledger'; ws.getCell(row, 1).font = F({ bold: true }); row++;
   ws.getCell(row, 2).value = 'Total contributions by members'; ws.getCell(row, 2).font = F(); num(row, 3, grand); row++;
   ws.getCell(row, 2).value = 'Contributed Capital per general ledger'; ws.getCell(row, 2).font = F(); num(row, 3, glGrand); row++;
-  ws.getCell(row, 2).value = 'Difference'; ws.getCell(row, 2).font = F({ bold: true }); num(row, 3, r2(grand - glGrand), true); row += 2;
-  ws.getCell(row, 1).value = 'Contributed Capital per GL:'; ws.getCell(row, 1).font = F({ bold: true }); row++;
-  for (const cd of details) {
-    ws.getCell(row, 1).value = Number(cd.code); ws.getCell(row, 1).font = F();
-    ws.getCell(row, 2).value = cd.name; ws.getCell(row, 2).font = F();
-    num(row, 3, tbMap.get(String(cd.code)) || 0); ws.getCell(row, 4).value = 'Trial Balance'; ws.getCell(row, 4).font = F(); row++;
-  }
+  ws.getCell(row, 2).value = 'Difference'; ws.getCell(row, 2).font = F({ bold: true }); num(row, 3, r2(grand - glGrand), true);
   ws.getColumn(1).width = 18; ws.getColumn(2).width = 60; ws.getColumn(3).width = 16; ws.getColumn(4).width = 20;
 }
 
