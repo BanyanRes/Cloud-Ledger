@@ -111,7 +111,7 @@ function buildData(ctx, eid, p) {
   const tb = [];
   for (const r of balRows) {
     const code = String(r.code);
-    meta.set(code, { name: r.name || '', type: r.type || '' });
+    meta.set(code, { name: r.name || '', type: r.type || '', bank: !!r.bank_acct });
     const isDr = r.type === 'Asset' || r.type === 'Expense';
     const closing = r2(isDr ? (Number(r.balance) || 0) : -(Number(r.balance) || 0));
     if (Math.abs(closing) >= 0.005) tb.push({ code, name: r.name || '', type: r.type || '', closing });
@@ -174,12 +174,42 @@ function buildData(ctx, eid, p) {
     blocks.push({ code, name: mt.name, type: mt.type, lines });
   }
 
-  // Which balance-sheet accounts get a "See <code>" supporting tab: every
-  // non-zero asset/liability on the TB that has a GL block.
+  // Which balance-sheet accounts get a "See <code>" supporting tab. The GL detail
+  // report already lists every transaction, so — matching the CLA packages — only
+  // cash/bank accounts and related-party due-to/due-from accounts get their own
+  // tab; everything else relies on the GL.
   const blockByCode = new Map(blocks.map((b) => [b.code, b]));
+  const needsSupport = (code, name) => {
+    const mt = meta.get(code) || {};
+    if (mt.bank) return true;
+    return /^\s*due\s+(from|to)\b/i.test(name || '');
+  };
   const support = tb
-    .filter((t) => (t.type === 'Asset' || t.type === 'Liability') && blockByCode.has(t.code))
+    .filter((t) => needsSupport(t.code, t.name) && blockByCode.has(t.code))
     .map((t) => t.code);
+
+  // Fixed-asset additions: current-year movement on the capitalized / PP&E asset
+  // accounts (type Asset, excluding cash, receivables/due-from, and prepaids), so
+  // the preparer can see what was added. Beginning + Additions − Disposals = Ending.
+  const isFixedAsset = (code) => {
+    const mt = meta.get(code) || {};
+    if (mt.type !== 'Asset' || mt.bank) return false;
+    return !/receivable|^\s*due\s+(from|to)\b|prepaid|escrow|^\s*cash\b/i.test(mt.name || '');
+  };
+  const fixedAssets = [];
+  for (const b of blocks) {
+    if (!isFixedAsset(b.code)) continue;
+    let beginning = 0, additions = 0, disposals = 0;
+    for (const ln of b.lines) {
+      if (ln.memo === 'Opening balance' && ln.debit == null && ln.credit == null) { beginning = Number(ln.balance) || 0; continue; }
+      additions = r2(additions + (Number(ln.debit) || 0));
+      disposals = r2(disposals + (Number(ln.credit) || 0));
+    }
+    if (Math.abs(additions) >= 0.005 || Math.abs(disposals) >= 0.005) {
+      const ending = Number(b.lines[b.lines.length - 1].balance) || 0;
+      fixedAssets.push({ code: b.code, name: b.name, beginning: r2(beginning), additions, disposals, ending: r2(ending) });
+    }
+  }
 
   // Equity rollforward + contributed-capital detail, derived from the equity
   // accounts' GL activity (net income is NOT member-allocated). Defensive: a
@@ -187,7 +217,7 @@ function buildData(ctx, eid, p) {
   let equity = null;
   try { equity = eq.computeEquity(ctx, eid, p); } catch (e) { console.error('[tax-package] equity compute failed:', e.message); }
 
-  return { ent, p, tb, blocks, blockByCode, support, equity };
+  return { ent, p, tb, blocks, blockByCode, support, fixedAssets, equity };
 }
 
 // ── Workbook ──────────────────────────────────────────────────────────────────
@@ -305,7 +335,8 @@ function addGlDerivedSheets(wb, d, includeOrgChart) {
   buildTB(wb, d);
   buildGL(wb, d);
   buildSupportTabs(wb, d, used);
-  // Equity Rollforward + Contributed Capital, generated from the equity accounts.
+  // Fixed Asset Additions + Equity Rollforward + Contributed Capital — all generated from the ledger.
+  try { eq.renderFixedAssets(wb, d); } catch (e) { console.error('[tax-package] fixed-asset render failed:', e.message); }
   try { eq.renderEqRF(wb, d); eq.renderContributedCapital(wb, d); } catch (e) { console.error('[tax-package] equity render failed:', e.message); }
   // Org Chart tab intentionally omitted — not wanted in generated packages.
 }
@@ -317,7 +348,7 @@ function addGlDerivedSheets(wb, d, includeOrgChart) {
 function isGlDerivedSheet(name, year) {
   const n = String(name || '').trim();
   if (/^(tb|gl|trial balance|general ledger)( report)?$/i.test(n)) return true;
-  if (/^(eq rf|equity rollforward|contributed capital)$/i.test(n)) return true;
+  if (/^(eq rf|equity rollforward|contributed capital|fixed asset additions)$/i.test(n)) return true;
   if (/^\d+$/.test(n)) return true;
   if (new RegExp('^(tb|gl|trial balance|general ledger)\\s*' + year + '$', 'i').test(n)) return true;
   if (new RegExp('^' + year + '\\s*(tb|gl|trial balance|general ledger)$', 'i').test(n)) return true;

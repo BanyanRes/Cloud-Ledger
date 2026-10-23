@@ -201,4 +201,29 @@ function renderContributedCapital(wb, d) {
   ws.getColumn(1).width = 18; ws.getColumn(2).width = 48; ws.getColumn(3).width = 16; ws.getColumn(4).width = 20;
 }
 
-module.exports = { computeEquity, renderEqRF, renderContributedCapital };
+// Fixed Asset Additions — current-year movement on the capitalized / PP&E asset
+// accounts, so the preparer sees what was added during the year. d.fixedAssets is
+// computed in taxpackage.js (Beginning + Additions − Disposals = Ending, tying to
+// the TB).
+function renderFixedAssets(wb, d) {
+  const fa = d.fixedAssets; if (!fa || !fa.length) return;
+  const ws = wb.addWorksheet('Fixed Asset Additions');
+  ws.getCell('A1').value = d.ent.name; ws.getCell('A1').font = F({ bold: true });
+  ws.getCell('A2').value = 'Fixed Asset Additions'; ws.getCell('A2').font = F();
+  ws.getCell('A3').value = 'Year Ended December 31, ' + d.p.year; ws.getCell('A3').font = F();
+  ['Code', 'Account', 'Beginning', 'Additions', 'Disposals', 'Ending'].forEach((h, i) => { const c = ws.getCell(5, i + 1); c.value = h; c.font = F({ bold: true }); });
+  const num = (r, col, v, bold) => { const c = ws.getCell(r, col); c.value = r2(v); c.font = F(bold ? { bold: true } : {}); c.numFmt = ACCT; };
+  let row = 6, tB = 0, tA = 0, tD = 0, tE = 0;
+  for (const a of fa) {
+    ws.getCell(row, 1).value = /^\d+$/.test(String(a.code)) ? Number(a.code) : a.code; ws.getCell(row, 1).font = F();
+    ws.getCell(row, 2).value = a.name; ws.getCell(row, 2).font = F();
+    num(row, 3, a.beginning); num(row, 4, a.additions); num(row, 5, a.disposals); num(row, 6, a.ending);
+    tB = r2(tB + a.beginning); tA = r2(tA + a.additions); tD = r2(tD + a.disposals); tE = r2(tE + a.ending); row++;
+  }
+  ws.getCell(row, 2).value = 'Total'; ws.getCell(row, 2).font = F({ bold: true });
+  num(row, 3, tB, true); num(row, 4, tA, true); num(row, 5, tD, true); num(row, 6, tE, true);
+  ws.getColumn(1).width = 14; ws.getColumn(2).width = 46;
+  [3, 4, 5, 6].forEach((c) => { ws.getColumn(c).width = 15; });
+}
+
+module.exports = { computeEquity, renderEqRF, renderContributedCapital, renderFixedAssets };
