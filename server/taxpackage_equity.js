@@ -23,6 +23,12 @@ const F = (o = {}) => Object.assign({ name: FONT, size: SIZE }, o);
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const yrOf = (d) => Number(String(d || '').slice(0, 4)) || 0;
 
+// Entity-specific EQ RF footnotes (mirroring the CLA packages). Keyed by entity id;
+// anchored to the Beginning Balance row with a superscript marker.
+const EQ_RF_NOTES = {
+  38: { marker: 'A', text: 'Retained earnings was adjusted to correct the opening net assets acquired for a pre-acquisition distribution to the former owner; this adjustment does not relate to 2025 operating results or distributions.' },
+};
+
 function categorize(a) {
   const c = String(a.code || ''); const n = String(a.name || '').toLowerCase();
   if (c.startsWith('39') || c === '31000' || /retained earning/.test(n)) return 're';
@@ -117,7 +123,7 @@ function computeEquity(ctx, eid, p) {
   }
   contribDetail.sort((a, b) => (Number(a.code) - Number(b.code)) || String(a.code).localeCompare(b.code));
 
-  return { years, memberNames, memberEnd, reEnd, niByYear, reAct, act, meta, membersEquityTB, contribDetail };
+  return { years, memberNames, memberEnd, reEnd, niByYear, reAct, act, meta, membersEquityTB, contribDetail, note: EQ_RF_NOTES[Number(eid)] || null };
 }
 
 function renderEqRF(wb, d) {
@@ -127,59 +133,80 @@ function renderEqRF(wb, d) {
   ws.getCell('A2').value = 'Equity Rollforward'; ws.getCell('A2').font = F();
   ws.getCell('A3').value = 'Year Ended December 31, ' + d.p.year; ws.getCell('A3').font = F();
   ws.getCell('A4').value = '(Unaudited)'; ws.getCell('A4').font = F();
+  const lastY = eq.years[eq.years.length - 1];
+  // Only members with a balance at year-end are shown (mirroring CLA — members
+  // that fully exited show nothing). Dropping zero-balance members never changes
+  // the Total, so the TB tie is preserved.
+  const members = eq.memberNames.filter((n) => Math.abs(eq.memberEnd[n][lastY] || 0) >= 0.005);
+  // Single-member entities mirror the CLA layout: no separate Retained Earnings
+  // column — the sole member column carries net income (there is no one else to
+  // allocate it to). Multi-member entities keep net income un-allocated in a
+  // Retained Earnings column.
+  const single = members.length === 1;
   const colStart = 5;
-  const memCols = eq.memberNames.map((_, i) => colStart + i);
-  const reCol = colStart + eq.memberNames.length;
-  const totCol = reCol + 1;
-  eq.memberNames.forEach((name, i) => { const c = ws.getCell(6, memCols[i]); c.value = name; c.font = F({ bold: true }); c.alignment = { wrapText: true, horizontal: 'center' }; });
-  let hc = ws.getCell(6, reCol); hc.value = 'Retained Earnings'; hc.font = F({ bold: true }); hc.alignment = { wrapText: true, horizontal: 'center' };
-  hc = ws.getCell(6, totCol); hc.value = "Total Members' Equity"; hc.font = F({ bold: true }); hc.alignment = { wrapText: true, horizontal: 'center' };
+  const memCols = members.map((_, i) => colStart + i);
+  const reCol = single ? null : colStart + members.length;
+  const totCol = single ? colStart + members.length : reCol + 1;
+  members.forEach((name, i) => { const c = ws.getCell(6, memCols[i]); c.value = name; c.font = F({ bold: true }); c.alignment = { wrapText: true, horizontal: 'center' }; });
+  if (reCol) { const c = ws.getCell(6, reCol); c.value = 'Retained Earnings'; c.font = F({ bold: true }); c.alignment = { wrapText: true, horizontal: 'center' }; }
+  const tcHead = ws.getCell(6, totCol); tcHead.value = "Total Members' Equity"; tcHead.font = F({ bold: true }); tcHead.alignment = { wrapText: true, horizontal: 'center' };
   const num = (r, col, v) => { const c = ws.getCell(r, col); c.value = r2(v); c.font = F(); c.numFmt = ACCT; };
   let row = 8;
   ws.getCell(row, 2).value = 'Beginning Balance 01/01/' + eq.years[0]; ws.getCell(row, 2).font = F({ bold: true });
-  eq.memberNames.forEach((n, i) => num(row, memCols[i], 0)); num(row, reCol, 0); num(row, totCol, 0);
+  members.forEach((n, i) => num(row, memCols[i], 0)); if (reCol) num(row, reCol, 0); num(row, totCol, 0);
+  if (eq.note) { const mk = ws.getCell(row, totCol + 1); mk.value = eq.note.marker; mk.font = F({ bold: true, vertAlign: 'superscript' }); }
   row += 2;
   for (const y of eq.years) {
-    const contribs = eq.memberNames.map((n) => (eq.act[y] && eq.act[y][n] && eq.act[y][n].contrib) || 0);
+    const contribs = members.map((n) => (eq.act[y] && eq.act[y][n] && eq.act[y][n].contrib) || 0);
     if (contribs.some((v) => Math.abs(v) >= 0.005)) {
       ws.getCell(row, 3).value = 'Capital Contributed'; ws.getCell(row, 3).font = F();
-      let tot = 0; eq.memberNames.forEach((n, i) => { num(row, memCols[i], contribs[i]); tot += contribs[i]; });
+      let tot = 0; members.forEach((n, i) => { num(row, memCols[i], contribs[i]); tot += contribs[i]; });
       num(row, totCol, tot); row++;
     }
     const ni = r2((eq.niByYear[y] || 0) + ((eq.reAct[y] && eq.reAct[y].direct) || 0));
     if (Math.abs(ni) >= 0.005) {
       ws.getCell(row, 3).value = 'Net Income (Loss)'; ws.getCell(row, 3).font = F();
-      num(row, reCol, ni); num(row, totCol, ni); row++;
+      num(row, single ? memCols[0] : reCol, ni); num(row, totCol, ni); row++;
     }
-    const distribs = eq.memberNames.map((n) => (eq.act[y] && eq.act[y][n] && eq.act[y][n].distrib) || 0);
+    const distribs = members.map((n) => (eq.act[y] && eq.act[y][n] && eq.act[y][n].distrib) || 0);
     if (distribs.some((v) => Math.abs(v) >= 0.005)) {
       ws.getCell(row, 3).value = 'Distribution'; ws.getCell(row, 3).font = F();
-      let tot = 0; eq.memberNames.forEach((n, i) => { num(row, memCols[i], distribs[i]); tot += distribs[i]; });
+      let tot = 0; members.forEach((n, i) => { num(row, memCols[i], distribs[i]); tot += distribs[i]; });
       num(row, totCol, tot); row++;
     }
     ws.getCell(row, 2).value = 'Balance at Closing 12/31/' + y; ws.getCell(row, 2).font = F({ bold: true });
-    let tot = 0; eq.memberNames.forEach((n, i) => { const v = eq.memberEnd[n][y]; num(row, memCols[i], v); tot += v; });
-    num(row, reCol, eq.reEnd[y]); tot += eq.reEnd[y]; num(row, totCol, tot);
+    let tot = 0; members.forEach((n, i) => { const v = r2(eq.memberEnd[n][y] + (single ? eq.reEnd[y] : 0)); num(row, memCols[i], v); tot += v; });
+    if (reCol) { num(row, reCol, eq.reEnd[y]); tot += eq.reEnd[y]; }
+    num(row, totCol, tot);
     row += 2;
   }
-  const lastY = eq.years[eq.years.length - 1];
-  const closing = r2(eq.memberNames.reduce((s, n) => s + eq.memberEnd[n][lastY], 0) + eq.reEnd[lastY]);
+  const closing = r2(members.reduce((s, n) => s + eq.memberEnd[n][lastY], 0) + eq.reEnd[lastY]);
   num(row, totCol, eq.membersEquityTB); ws.getCell(row, totCol + 1).value = "Members' Equity (TB)"; ws.getCell(row, totCol + 1).font = F();
   num(row + 1, totCol, r2(closing - eq.membersEquityTB)); ws.getCell(row + 1, totCol + 1).value = 'Variance'; ws.getCell(row + 1, totCol + 1).font = F();
+  if (eq.note) {
+    const nr = row + 3, nc = totCol + 1;
+    ws.getCell(nr, nc).value = 'Note ' + eq.note.marker; ws.getCell(nr, nc).font = F({ bold: true });
+    try { ws.mergeCells(nr + 1, nc, nr + 6, nc + 6); } catch (e) { /* best effort */ }
+    const tc = ws.getCell(nr + 1, nc); tc.value = eq.note.text; tc.font = F(); tc.alignment = { wrapText: true, vertical: 'top' };
+  }
   ws.getColumn(2).width = 24; ws.getColumn(3).width = 20;
-  memCols.concat([reCol, totCol]).forEach((c) => { ws.getColumn(c).width = 16; });
+  memCols.concat(reCol ? [reCol, totCol] : [totCol]).forEach((c) => { ws.getColumn(c).width = 16; });
   ws.getColumn(totCol + 1).width = 22;
 }
 
 function renderContributedCapital(wb, d) {
-  const eq = d.equity; if (!eq || !eq.contribDetail.length) return;
+  const eq = d.equity; if (!eq) return;
+  // Only members with a balance at 12/31 — zero-balance (fully returned) members
+  // are dropped.
+  const details = eq.contribDetail.filter((cd) => Math.abs(cd.total) >= 0.005);
+  if (!details.length) return;
   const ws = wb.addWorksheet('Contributed Capital');
   const num = (r, col, v, bold) => { const c = ws.getCell(r, col); c.value = r2(v); c.font = F(bold ? { bold: true } : {}); c.numFmt = ACCT; };
   let row = 1, grand = 0;
-  for (const cd of eq.contribDetail) { ws.getCell(row, 1).value = cd.name; ws.getCell(row, 1).font = F(); num(row, 2, cd.total); grand = r2(grand + cd.total); row++; }
+  for (const cd of details) { ws.getCell(row, 1).value = cd.name; ws.getCell(row, 1).font = F(); num(row, 2, cd.total); grand = r2(grand + cd.total); row++; }
   ws.getCell(row, 1).value = 'Total'; ws.getCell(row, 1).font = F({ bold: true }); num(row, 2, grand, true); row += 2;
   ws.getCell(row, 1).value = 'Contributions by members thru 12/31/' + d.p.year; ws.getCell(row, 1).font = F({ bold: true }); row += 2;
-  for (const cd of eq.contribDetail) {
+  for (const cd of details) {
     ws.getCell(row, 2).value = 'Contributions made by ' + cd.member + ':'; ws.getCell(row, 2).font = F({ bold: true });
     if (Math.abs(cd.pyTotal) >= 0.005) { num(row, 3, cd.pyTotal); ws.getCell(row, 4).value = 'PY'; ws.getCell(row, 4).font = F(); }
     row++;
@@ -193,7 +220,7 @@ function renderContributedCapital(wb, d) {
   ws.getCell(row, 2).value = 'Total contributions by members thru 12/31/' + d.p.year; ws.getCell(row, 2).font = F({ bold: true });
   num(row, 3, grand, true); row += 2;
   ws.getCell(row, 1).value = 'Contributed Capital per GL:'; ws.getCell(row, 1).font = F({ bold: true }); row++;
-  for (const cd of eq.contribDetail) {
+  for (const cd of details) {
     ws.getCell(row, 1).value = Number(cd.code); ws.getCell(row, 1).font = F();
     ws.getCell(row, 2).value = cd.name; ws.getCell(row, 2).font = F();
     num(row, 3, -cd.total); ws.getCell(row, 4).value = 'Trial Balance'; ws.getCell(row, 4).font = F(); row++;

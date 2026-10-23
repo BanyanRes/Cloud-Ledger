@@ -175,29 +175,31 @@ function buildData(ctx, eid, p) {
   }
 
   // Which balance-sheet accounts get a "See <code>" supporting tab. The GL detail
-  // report already lists every transaction, so — matching the CLA packages — only
-  // cash/bank accounts and related-party due-to/due-from accounts get their own
-  // tab; everything else relies on the GL.
+  // report already lists every transaction, so only cash/bank accounts get their
+  // own tab; intercompany due-to/due-from balances are covered by the consolidated
+  // investment reconciliation workpaper, and everything else relies on the GL.
   const blockByCode = new Map(blocks.map((b) => [b.code, b]));
-  const needsSupport = (code, name) => {
-    const mt = meta.get(code) || {};
-    if (mt.bank) return true;
-    return /^\s*due\s+(from|to)\b/i.test(name || '');
-  };
+  const needsSupport = (code) => !!(meta.get(code) || {}).bank;
   const support = tb
-    .filter((t) => needsSupport(t.code, t.name) && blockByCode.has(t.code))
+    .filter((t) => needsSupport(t.code) && blockByCode.has(t.code))
     .map((t) => t.code);
 
-  // Fixed-asset additions: current-year movement on the capitalized / PP&E asset
-  // accounts (type Asset, excluding cash, receivables/due-from, and prepaids), so
-  // the preparer can see what was added. Beginning + Additions − Disposals = Ending.
+  // Fixed-asset additions: only for entities that actually have building (PP&E)
+  // accounts — construction-in-progress / capitalized-cost accounts don't get this
+  // tab. Rows cover depreciable PP&E, not CIP. Beginning + Additions − Disposals = Ending.
+  const hasBuildings = tb.some((t) => {
+    const mt = meta.get(t.code) || {};
+    return mt.type === 'Asset' && /\bbuildings?\b/i.test(mt.name || '') && !/accumulated/i.test(mt.name || '');
+  });
   const isFixedAsset = (code) => {
     const mt = meta.get(code) || {};
     if (mt.type !== 'Asset' || mt.bank) return false;
-    return !/receivable|^\s*due\s+(from|to)\b|prepaid|escrow|^\s*cash\b/i.test(mt.name || '');
+    const n = mt.name || '';
+    if (/receivable|^\s*due\s+(from|to)\b|prepaid|escrow|^\s*cash\b|construction|\bcip\b|in progress/i.test(n)) return false;
+    return /\bbuildings?\b|improvement|\bland\b|equipment|furniture|fixture|machinery|vehicle|leasehold|depreciat|amortiz/i.test(n);
   };
   const fixedAssets = [];
-  for (const b of blocks) {
+  if (hasBuildings) for (const b of blocks) {
     if (!isFixedAsset(b.code)) continue;
     let beginning = 0, additions = 0, disposals = 0;
     for (const ln of b.lines) {
@@ -248,7 +250,7 @@ function buildTB(wb, d) {
     if (dr != null) { const c = ws.getCell(row, 4); c.value = dr; c.font = F(); c.numFmt = ACCT; }
     if (cr != null) { const c = ws.getCell(row, 5); c.value = cr; c.font = F(); c.numFmt = ACCT; }
     const fc = ws.getCell(row, 6); fc.value = { formula: 'D' + row + '-E' + row, result: t.closing }; fc.font = F(); fc.numFmt = ACCT;
-    if (supportSet.has(t.code)) { const nc = ws.getCell(row, 7); nc.value = 'See ' + t.code; nc.font = F({ bold: true }); }
+    if (supportSet.has(t.code)) { const nc = ws.getCell(row, 7); nc.value = { text: 'See ' + t.code, hyperlink: "#'" + t.code + "'!A1" }; nc.font = F({ bold: true, color: { argb: 'FF0563C1' }, underline: true }); }
     if (t.type === 'Revenue' || t.type === 'Expense') plRows.push(row);
     row++;
   }
