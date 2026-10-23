@@ -141,11 +141,17 @@ function renderEqRF(wb, d) {
   // Only members with a balance at year-end are shown (mirroring CLA — members
   // that fully exited show nothing). Dropping zero-balance members never changes
   // the Total, so the TB tie is preserved.
-  const members = eq.memberNames.filter((n) => Math.abs(eq.memberEnd[n][lastY] || 0) >= 0.005);
-  // Single-member entities mirror the CLA layout: no separate Retained Earnings
-  // column — the sole member column carries net income (there is no one else to
-  // allocate it to). Multi-member entities keep net income un-allocated in a
-  // Retained Earnings column.
+  const withBal = eq.memberNames.filter((n) => Math.abs(eq.memberEnd[n][lastY] || 0) >= 0.005);
+  // Surviving members hold positive contributed capital at year-end. A member whose
+  // capital was fully bought out during the year (a former owner) is "exited": its
+  // entire equity is folded into the opening balance (net assets acquired), mirroring
+  // how the CLA packages present a mid-year buyout — the exited member is not shown.
+  const contribEnd = (n) => eq.years.reduce((s, y) => s + ((eq.act[y] && eq.act[y][n] && eq.act[y][n].contrib) || 0), 0);
+  const survivors = withBal.filter((n) => contribEnd(n) > 0.005);
+  const members = survivors.length ? survivors : withBal;
+  const exitedEnding = r2(withBal.filter((n) => !members.includes(n)).reduce((s, n) => s + (eq.memberEnd[n][lastY] || 0), 0));
+  // Single surviving member: no separate Retained Earnings column — the sole member
+  // column carries net income and the folded-in exited equity.
   const single = members.length === 1;
   // Roll forward from a configured start year (e.g. an entity acquired mid-stream):
   // the opening balance is the cumulative equity through the prior year-end, and
@@ -166,9 +172,14 @@ function renderEqRF(wb, d) {
   const num = (r, col, v) => { const c = ws.getCell(r, col); c.value = r2(v); c.font = F(); c.numFmt = ACCT; };
   let row = 8;
   ws.getCell(row, 2).value = 'Beginning Balance 01/01/' + startYear; ws.getCell(row, 2).font = F({ bold: true });
-  let begTot = 0;
-  members.forEach((n, i) => { const v = r2(beginMember(n) + (single ? beginRE : 0)); num(row, memCols[i], v); begTot += v; });
-  if (reCol) { num(row, reCol, beginRE); begTot += beginRE; }
+  let begTot = 0, runSingle = 0;
+  if (single) {
+    const v = r2(beginMember(members[0]) + beginRE + exitedEnding);
+    num(row, memCols[0], v); begTot = v; runSingle = v;
+  } else {
+    members.forEach((n, i) => { const v = beginMember(n); num(row, memCols[i], v); begTot += v; });
+    const reBeg = r2(beginRE + exitedEnding); num(row, reCol, reBeg); begTot += reBeg;
+  }
   num(row, totCol, begTot);
   if (eq.note) { const mk = ws.getCell(row, totCol + 1); mk.value = eq.note.marker; mk.font = F({ bold: true, vertAlign: 'superscript' }); }
   row += 2;
@@ -177,26 +188,32 @@ function renderEqRF(wb, d) {
     if (contribs.some((v) => Math.abs(v) >= 0.005)) {
       ws.getCell(row, 3).value = 'Capital Contributed'; ws.getCell(row, 3).font = F();
       let tot = 0; members.forEach((n, i) => { num(row, memCols[i], contribs[i]); tot += contribs[i]; });
+      if (single) runSingle = r2(runSingle + tot);
       num(row, totCol, tot); row++;
     }
     const ni = r2((eq.niByYear[y] || 0) + ((eq.reAct[y] && eq.reAct[y].direct) || 0));
     if (Math.abs(ni) >= 0.005) {
       ws.getCell(row, 3).value = 'Net Income (Loss)'; ws.getCell(row, 3).font = F();
-      num(row, single ? memCols[0] : reCol, ni); num(row, totCol, ni); row++;
+      num(row, single ? memCols[0] : reCol, ni); num(row, totCol, ni);
+      if (single) runSingle = r2(runSingle + ni); row++;
     }
     const distribs = members.map((n) => (eq.act[y] && eq.act[y][n] && eq.act[y][n].distrib) || 0);
     if (distribs.some((v) => Math.abs(v) >= 0.005)) {
       ws.getCell(row, 3).value = 'Distribution'; ws.getCell(row, 3).font = F();
       let tot = 0; members.forEach((n, i) => { num(row, memCols[i], distribs[i]); tot += distribs[i]; });
+      if (single) runSingle = r2(runSingle + tot);
       num(row, totCol, tot); row++;
     }
     ws.getCell(row, 2).value = 'Balance at Closing 12/31/' + y; ws.getCell(row, 2).font = F({ bold: true });
-    let tot = 0; members.forEach((n, i) => { const v = r2(eq.memberEnd[n][y] + (single ? eq.reEnd[y] : 0)); num(row, memCols[i], v); tot += v; });
-    if (reCol) { num(row, reCol, eq.reEnd[y]); tot += eq.reEnd[y]; }
-    num(row, totCol, tot);
+    if (single) {
+      num(row, memCols[0], runSingle); num(row, totCol, runSingle);
+    } else {
+      let tot = 0; members.forEach((n, i) => { const v = eq.memberEnd[n][y]; num(row, memCols[i], v); tot += v; });
+      const reV = r2(eq.reEnd[y] + exitedEnding); num(row, reCol, reV); tot += reV; num(row, totCol, tot);
+    }
     row += 2;
   }
-  const closing = r2(members.reduce((s, n) => s + eq.memberEnd[n][lastY], 0) + eq.reEnd[lastY]);
+  const closing = single ? runSingle : r2(members.reduce((s, n) => s + eq.memberEnd[n][lastY], 0) + eq.reEnd[lastY] + exitedEnding);
   num(row, totCol, eq.membersEquityTB); ws.getCell(row, totCol + 1).value = "Members' Equity (TB)"; ws.getCell(row, totCol + 1).font = F();
   num(row + 1, totCol, r2(closing - eq.membersEquityTB)); ws.getCell(row + 1, totCol + 1).value = 'Variance'; ws.getCell(row + 1, totCol + 1).font = F();
   if (eq.note) {
