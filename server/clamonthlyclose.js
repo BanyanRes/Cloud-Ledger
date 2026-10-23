@@ -259,7 +259,7 @@ const CATS = [
   { key: 'cash', tab: 'Cash Leadsheet', lead: 'CASH LEADSHEET', total: 'Total Cash', type: 'Asset', label: 'Cash' },
   { key: 'ar', tab: 'AR Leadsheet', lead: 'ACCOUNTS RECEIVABLE LEADSHEET', total: 'Total Receivables', type: 'Asset', label: 'Accounts Receivable' },
   { key: 'prepaid', tab: 'Prepaid Leadsheet', lead: 'PREPAID EXPENSES LEAD SHEET', total: 'Total Prepaid Expenses', type: 'Asset', label: 'Prepaid Expenses' },
-  { key: 'fixed', tab: 'Fixed Assets Leadsheet', lead: 'FIXED ASSETS LEADSHEET', total: 'Total Fixed Assets', type: 'Asset', label: 'Fixed Assets' },
+  { key: 'fixed', tab: 'Goodwill Leadsheet', lead: 'GOODWILL AMORTIZATION', total: 'Total Goodwill', type: 'Asset', label: 'Goodwill' },
   { key: 'otherassets', tab: 'Other Assets Leadsheet', lead: 'OTHER ASSETS LEADSHEET', total: 'Total Other Assets', type: 'Asset', label: 'Other Assets', sched: 'Other Assets Schedule' },
   { key: 'invest', tab: 'Investments Leadsheet', lead: 'INVESTMENTS LEADSHEET', total: 'Total Investments', type: 'Asset', label: 'Investments', sched: 'Investments Schedule' },
   // Intercompany is intentionally omitted: intercompany accounts are reconciled in
@@ -275,7 +275,7 @@ const CATS = [
 const SECTION_FILE = {
   summary: '00_Summary', cash: '01_Cash_and_Cash_Equivalents', invest: '02_Investment_Leadsheet',
   ar: '03_Accounts_Receivable_Leadsheet', prepaid: '05_Prepaid_Expenses_Leadsheet',
-  otherassets: '06_Other_Assets_Leadsheet', fixed: '07_Fixed_Asset_Leadsheet',
+  otherassets: '06_Other_Assets_Leadsheet', fixed: '07_Goodwill_Amortization',
   ap: '08_Accounts_Payable_Leadsheet', cc: '10_Credit_Cards_Leadsheet',
   otherliab: '11_Other_Liabilities_Leadsheet', debt: '12_Debt_Leadsheet', equity: '15_Equity_Rollforward',
 };
@@ -997,7 +997,7 @@ function buildPrepaidTab(wb, a, items, en, m, used, leadTab) {
 // Fixed Asset Depreciation Schedule (one tab, grouped by asset account).
 // Returns { tab, refs: Map(assetCode -> {costRef}, depCode -> {accumRef}) }.
 function buildFixedSchedule(wb, data, en, m, used, leadTab) {
-  const tab = reserveName('Fixed Asset Schedule', used);
+  const tab = reserveName('Goodwill Schedule', used);
   const ws = wb.addWorksheet(tab, { views: [{ showGridLines: false }] });
   const n = m.monthNum; const ends = fyMonthEnds(m); const pye = (Number(m.year) - 1) + '-12-31';
   const MC0 = 9; // first month column (I)
@@ -1013,7 +1013,7 @@ function buildFixedSchedule(wb, data, en, m, used, leadTab) {
   ws.getColumn('F').width = wCost; ws.getColumn('G').width = wMon; ws.getColumn('H').width = wBeg;
   for (let k = 0; k < n; k++) ws.getColumn(colL(MC0 + k)).width = wMon;
   ws.getColumn(colL(MC0 + n)).width = wCost; ws.getColumn(colL(MC0 + n + 1)).width = wCost;
-  tabHead(ws, 'Fixed Asset Depreciation Schedule', en, 'Fiscal ' + m.year + ' through ' + spell(m.end) + ' — straight-line, monthly, from the in-service month', leadTab);
+  tabHead(ws, 'Goodwill Amortization Schedule', en, 'Fiscal ' + m.year + ' through ' + spell(m.end) + ' — straight-line, monthly, from the in-service month', leadTab);
   txt(ws, 'H7', 'Accumulated', { font: { bold: true }, align: { horizontal: 'center' } });
   txt(ws, colL(MC0) + '7', 'Depreciation / Amortization Expense', { font: { bold: true } });
   txt(ws, accumC + '7', 'Accumulated', { font: { bold: true }, align: { horizontal: 'center' } });
@@ -1383,8 +1383,8 @@ function fixedLeadsheet(ws, cd, en, m, pairs, faRefs, faTab, leadCell, reg, char
   ws.getColumn('E').width = 16; ws.getColumn('F').width = 15; ws.getColumn('G').width = 44; ws.getColumn('H').width = wNum; ws.getColumn('I').width = wNum; ws.getColumn('J').width = 16; ws.getColumn('K').width = 26;
   titleBlock(ws, en, cd.lead, m, 'L');
   txt(ws, 'G3', 'Capitalization Policy:'); txt(ws, 'H3', '>$1,000 for single item');
-  const sB = ws.getCell('B7'); sB.value = 'Fixed Asset Account Breakdown'; sB.font = F({ bold: true }); sB.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
-  const sF = ws.getCell('F7'); sF.value = 'Depreciation Account Breakdown'; sF.font = F({ bold: true }); sF.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
+  const sB = ws.getCell('B7'); sB.value = 'Goodwill Account Breakdown'; sB.font = F({ bold: true }); sB.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
+  const sF = ws.getCell('F7'); sF.value = 'Amortization Account Breakdown'; sF.font = F({ bold: true }); sF.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SECTFILL } };
   hdr(ws, 8, 2, ['Asset Acct. #', 'Asset Acct. Name', 'Asset Cost', 'FQ Anchor', 'Depreciation Account #', 'Depreciation Account Name', 'Deprec. Balance', 'Net Asset Amount', 'FQ Anchor', 'Comments']);
   ws.getCell('F8').alignment = { horizontal: 'center' };
   const depSeen = new Set(); const depCodes = [];
