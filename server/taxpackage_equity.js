@@ -26,7 +26,7 @@ const yrOf = (d) => Number(String(d || '').slice(0, 4)) || 0;
 // Entity-specific EQ RF footnotes (mirroring the CLA packages). Keyed by entity id;
 // anchored to the Beginning Balance row with a superscript marker.
 const EQ_RF_NOTES = {
-  38: { marker: 'A', text: 'Retained earnings was adjusted to correct the opening net assets acquired for a pre-acquisition distribution to the former owner; this adjustment does not relate to 2025 operating results or distributions.' },
+  38: { marker: 'A', text: 'The distribution to Ben, the former owner, has been reclassed to retained earnings; this reclassification does not relate to 2025 operating results or distributions.' },
 };
 
 // Entity-specific EQ RF start year: roll forward from 1/1 of this year with an
