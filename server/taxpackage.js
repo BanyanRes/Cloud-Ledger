@@ -240,7 +240,26 @@ function buildData(ctx, eid, p) {
   let equity = null;
   try { equity = eq.computeEquity(ctx, eid, p); } catch (e) { console.error('[tax-package] equity compute failed:', e.message); }
 
-  return { ent, p, tb, blocks, blockByCode, support, fixedAssets, amortization, equity };
+  // TB "See" references — every supporting tab must be reachable from the TB, so
+  // each balance-sheet account a tab explains links to that tab. Bank accounts
+  // point at their own per-account tab; the generated schedules point at their
+  // schedule tab. First writer wins (a per-account tab beats a schedule), and a
+  // ref is only added for a tab that is actually rendered (same gates as the
+  // renderers) so no link is ever broken.
+  const tbRefs = new Map(); // code -> { tab, label }
+  const addRef = (code, tab, label) => { const c = String(code); if (c && !tbRefs.has(c)) tbRefs.set(c, { tab, label }); };
+  for (const code of support) addRef(code, String(code), 'See ' + code);
+  if (amortization) {
+    for (const a of amortization.cost) addRef(a.code, 'Goodwill Amortization', 'See Goodwill Amortization');
+    for (const a of amortization.accum) addRef(a.code, 'Goodwill Amortization', 'See Goodwill Amortization');
+  }
+  if (fixedAssets.length) for (const a of fixedAssets) addRef(a.code, 'Fixed Asset Additions', 'See Fixed Asset Additions');
+  if (equity) {
+    for (const cd of (equity.contribDetail || [])) if (Math.abs(cd.total) >= 0.005) addRef(cd.code, 'Contributed Capital', 'See Contributed Capital');
+    for (const [code, mt] of meta) if (mt.type === 'Equity') addRef(code, 'EQ RF', 'See EQ RF');
+  }
+
+  return { ent, p, tb, blocks, blockByCode, support, tbRefs, fixedAssets, amortization, equity };
 }
 
 // ── Workbook ──────────────────────────────────────────────────────────────────
@@ -251,10 +270,9 @@ function titleRows(ws, entName, line2, line3) {
 }
 
 function buildTB(wb, d) {
-  const { ent, p, tb, support } = d;
+  const { ent, p, tb, tbRefs } = d;
   const ws = wb.addWorksheet('TB');
   titleRows(ws, ent.name, 'Trial Balance', 'As of ' + p.tbAsOf);
-  const supportSet = new Set(support);
   const HDR = ['Code', 'Account', 'Type', 'Debit', 'Credit', 'Closing Balance on ' + p.clsDate, ''];
   HDR.forEach((h, i) => {
     const c = ws.getCell(5, i + 1); c.value = h; c.font = F({ bold: true });
@@ -271,7 +289,8 @@ function buildTB(wb, d) {
     if (dr != null) { const c = ws.getCell(row, 4); c.value = dr; c.font = F(); c.numFmt = ACCT; }
     if (cr != null) { const c = ws.getCell(row, 5); c.value = cr; c.font = F(); c.numFmt = ACCT; }
     const fc = ws.getCell(row, 6); fc.value = { formula: 'D' + row + '-E' + row, result: t.closing }; fc.font = F(); fc.numFmt = ACCT;
-    if (supportSet.has(t.code)) { const nc = ws.getCell(row, 7); nc.value = { text: 'See ' + t.code, hyperlink: "#'" + t.code + "'!A1" }; nc.font = F({ bold: true, color: { argb: 'FF0563C1' }, underline: true }); }
+    const rref = tbRefs.get(t.code);
+    if (rref) { const nc = ws.getCell(row, 7); nc.value = { text: rref.label, hyperlink: "#'" + rref.tab + "'!A1" }; nc.font = F({ bold: true, color: { argb: 'FF0563C1' }, underline: true }); }
     if (t.type === 'Revenue' || t.type === 'Expense') plRows.push(row);
     row++;
   }
