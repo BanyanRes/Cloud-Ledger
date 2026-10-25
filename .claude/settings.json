@@ -1,4 +1,34 @@
 {
+  "permissions": {
+    "allow": [
+      "Read(*)",
+      "Grep(*)",
+      "Glob(*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(ls:*)",
+      "Bash(wc:*)",
+      "PowerShell(git status:*)",
+      "PowerShell(git diff:*)",
+      "PowerShell(git log:*)",
+      "PowerShell(git show:*)",
+      "PowerShell(git rev-parse:*)",
+      "PowerShell(Get-ChildItem:*)",
+      "PowerShell(Test-Path:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(git push:*)",
+      "PowerShell(git push:*)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(**/.env)",
+      "Read(**/secrets/**)"
+    ]
+  },
   "hooks": {
     "SessionStart": [
       {
@@ -10,6 +40,16 @@
             "args": ["${CLAUDE_PROJECT_DIR}/scripts/worktree-setup.js"],
             "timeout": 600,
             "statusMessage": "Preparing worktree (npm install + ports)..."
+          }
+        ]
+      },
+      {
+        "matcher": "^(startup|resume|clear|compact|fork)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"C:\\Users\\JimmyYun\\.claude\\hooks\\herdr-agent-state.ps1\" session",
+            "timeout": 10
           }
         ]
       }
