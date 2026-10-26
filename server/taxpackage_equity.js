@@ -63,13 +63,15 @@ const STANDALONE_STRIP = {
   // all mingled onto the child's books. On a standalone CLR Silsbee Property Owner
   // TB those belong to the parent, and the child's equity collapses to a single
   // owner line = the parent's investment in the property owner (17001 -> 34063).
-  // Grand Haven is removed outright: the parent books it under 34251 while the
-  // child uses 34144, so the same-code net never cancels it, and the property
-  // owner's sole member is the LLC, so no LLC-level investor belongs on its books.
+  // Grand Haven is removed outright under BOTH codes: the child's real line is
+  // 34144, but it also carries an empty 34251 matching the parent's code, so the
+  // same-code net (child 0 - parent 250,000) would otherwise leave a phantom
+  // -250,000. The property owner's sole member is the LLC, so no LLC-level
+  // investor belongs on its books either way.
   CLRSILSB2: {
     parentId: 52,
     parentNameRe: /county line rail silsbee/i,
-    remove: ['17001', '34063', '34144'],
+    remove: ['17001', '34063', '34144', '34251'],
     ccAccount: '34063',
     ccName: 'Contributed Capital - County Line Rail Silsbee LLC',
     ccMember: 'County Line Rail Silsbee LLC',
