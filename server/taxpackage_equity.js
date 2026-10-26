@@ -33,6 +33,81 @@ const EQ_RF_NOTES = {
 // opening balance, hiding prior-year detail (e.g. an entity acquired that year).
 const EQ_RF_START = { 38: 2025 };
 
+// ── Standalone strip ──────────────────────────────────────────────────────────
+// Build a child entity's tax package on its OWN (standalone) trial balance by
+// removing a parent entity's overlay that has been mingled onto the child's books.
+// Keyed by the CHILD entity code. For CLIP Property Owner (CLIPPROP), the parent
+// County Line Industrial Park (42) owns it, but County Line's bank accounts, its
+// intercompany receivable, and its member contributed-capital accounts are posted
+// onto CLIP. On a standalone CLIP TB those belong to the parent, and CLIP's equity
+// is a single owner line = the parent's investment in CLIP.
+//   remove   — codes dropped from the child outright (parent's investment-in-child
+//              asset, and the stale owner line, which is rebuilt below).
+//   ccAccount/ccName/ccMember — the single owner contributed-capital line.
+//   ccSource — the parent account whose balance becomes that owner line
+//              (County Line's "Investment in CLIP Property Owner").
+// Every OTHER parent account is subtracted from the child's same-code balance
+// (balance sheet AND income statement, per Jimmy's instruction).
+const STANDALONE_STRIP = {
+  CLIPPROP: {
+    parentId: 42,
+    parentNameRe: /county line industrial park/i,
+    remove: ['19041', '34164'],
+    ccAccount: '34164',
+    ccName: 'Contributed Capital - County Line Industrial Park LLC',
+    ccMember: 'County Line Industrial Park LLC',
+    ccSource: '19041',
+  },
+};
+
+// Resolve + validate the strip config for an entity (looked up by its code).
+// Returns the config augmented with the resolved parent row, or null when the
+// entity has no standalone strip. Throws if the configured parent is missing or
+// its name no longer matches (guards against an entity-id reshuffle).
+function resolveStrip(ctx, ent) {
+  if (!ent) return null;
+  const cfg = STANDALONE_STRIP[String(ent.code)];
+  if (!cfg) return null;
+  const parent = ctx.db.prepare('SELECT id, name, code FROM entities WHERE id = ?').get(cfg.parentId);
+  if (!parent || !cfg.parentNameRe.test(String(parent.name || ''))) {
+    throw new Error('[tax-package] standalone strip for ' + ent.code + ': parent entity id ' + cfg.parentId + ' not found or name mismatch (expected County Line Industrial Park)');
+  }
+  return Object.assign({}, cfg, { parent });
+}
+
+// Apply the balance strip to one computeBalances result set. Rows are natural-
+// signed (asset debit-positive, liability/equity credit-positive). `opts` are the
+// SAME options passed to the child's computeBalances, reused for the parent so it
+// is read at the matching as_of. Returns { rows, dropped } — `dropped` is the set
+// of child codes removed or netted to ~0, used to prune the matching GL detail.
+function applyBalanceStrip(ctx, ent, opts, childRows) {
+  let cfg;
+  try { cfg = resolveStrip(ctx, ent); } catch (e) { throw e; }
+  if (!cfg) return { rows: childRows, dropped: new Set() };
+  const parentRows = ctx.computeBalances(cfg.parentId, opts) || [];
+  const pMap = new Map(parentRows.map((r) => [String(r.code), Number(r.balance) || 0]));
+  const remove = new Set(cfg.remove);
+  const dropped = new Set();
+  const out = [];
+  for (const r of childRows) {
+    const code = String(r.code);
+    if (remove.has(code)) { dropped.add(code); continue; }
+    if (pMap.has(code)) {
+      const nb = r2((Number(r.balance) || 0) - pMap.get(code));
+      if (Math.abs(nb) < 0.005) dropped.add(code);
+      out.push(Object.assign({}, r, { balance: nb }));
+    } else {
+      out.push(r);
+    }
+  }
+  // Single owner contributed-capital line = the parent's investment in the child.
+  const cc = r2(pMap.get(cfg.ccSource) || 0);
+  if (Math.abs(cc) >= 0.005) {
+    out.push({ code: cfg.ccAccount, name: cfg.ccName, type: 'Equity', subtype: '', bank_acct: 0, balance: cc, total_debit: 0, total_credit: 0 });
+  }
+  return { rows: out, dropped };
+}
+
 function categorize(a) {
   const c = String(a.code || ''); const n = String(a.name || '').toLowerCase();
   if (c.startsWith('39') || c === '31000' || /retained earning/.test(n)) return 're';
@@ -49,11 +124,115 @@ function memberOf(a) {
   return n || String(a.code);
 }
 
+// Standalone equity: a child entity (see STANDALONE_STRIP) is presented with a
+// single owner member whose contributed capital = the parent's investment in the
+// child (ccSource), itemized from that account's GL. CLIP's own retained earnings
+// and net income are kept, stripped of the parent's overlay (child minus parent,
+// by year) so the rollforward ties to the standalone trial balance. Ties are by
+// construction: membersEquityTB = owner ending + RE ending, so EQ RF Variance = 0,
+// and the single owner total = the parent's investment = the stripped TB's owner
+// line, so Contributed Capital Difference = 0.
+function computeEquityStandalone(ctx, ent, eid, p, cfg) {
+  const { db } = ctx;
+  const curYear = Number(p.year);
+  const ownerMember = cfg.ccMember;
+
+  const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const cleanDescr = (s, code) => {
+    let t = String(s || '').trim(); if (!t) return '';
+    const c = escRe(code);
+    t = t.replace(new RegExp('^' + c + '\\s*-\\s*'), '');
+    t = t.replace(new RegExp('\\s*-\\s*[^-]*-\\s*GJ\\s*-\\s*' + c + '$', 'i'), '');
+    t = t.replace(new RegExp('\\s*-\\s*GJ\\s*-\\s*' + c + '$', 'i'), '');
+    return t.trim();
+  };
+
+  // Net income (Revenue/Expense, credit-debit) by year for one entity.
+  const niByEntity = (entId) => {
+    const m = {};
+    const rows = db.prepare(
+      "SELECT substr(je.date,1,4) AS yr, SUM(jl.credit - jl.debit) AS ni " +
+      "FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id " +
+      "JOIN accounts a ON a.entity_id = je.entity_id AND a.code = jl.account_code " +
+      "WHERE je.entity_id = ? AND a.type IN ('Revenue','Expense') GROUP BY yr").all(entId);
+    for (const r of rows) { const y = Number(r.yr); if (y && y <= curYear) m[y] = r2(Number(r.ni) || 0); }
+    return m;
+  };
+  // Direct journal activity (credit-debit) to a set of RE accounts, by year.
+  const reDirectByEntity = (entId, reCodes) => {
+    const m = {}; if (!reCodes.length) return m;
+    const ph = reCodes.map(() => '?').join(',');
+    const rows = db.prepare(
+      "SELECT substr(je.date,1,4) AS yr, SUM(jl.credit - jl.debit) AS v " +
+      "FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id " +
+      "WHERE je.entity_id = ? AND jl.account_code IN (" + ph + ") GROUP BY yr").all(entId, ...reCodes);
+    for (const r of rows) { const y = Number(r.yr); if (y && y <= curYear) m[y] = r2(Number(r.v) || 0); }
+    return m;
+  };
+  const reCodesOf = (entId) => db.prepare("SELECT code, name FROM accounts WHERE entity_id = ? AND type = 'Equity'").all(entId)
+    .filter((a) => categorize(a) === 're').map((a) => String(a.code));
+
+  const clipNI = niByEntity(eid), parentNI = niByEntity(cfg.parentId);
+  const clipREd = reDirectByEntity(eid, reCodesOf(eid));
+  const parentREd = reDirectByEntity(cfg.parentId, reCodesOf(cfg.parentId));
+
+  // Owner contributions = the parent's investment-in-child account, debit-positive
+  // (a debit to the investment is a contribution into the child's equity).
+  const invLines = db.prepare(
+    "SELECT je.date AS date, jl.debit AS debit, jl.credit AS credit, je.memo AS memo, jl.description AS descr " +
+    "FROM journal_lines jl JOIN journal_entries je ON je.id = jl.entry_id " +
+    "WHERE je.entity_id = ? AND jl.account_code = ? ORDER BY je.date, je.entry_num, jl.id").all(cfg.parentId, cfg.ccSource);
+  const ownerByYear = {}; const ownerItems = []; let ownerTotal = 0;
+  for (const l of invLines) {
+    const y = yrOf(l.date); if (!y || y > curYear) continue;
+    const v = r2((Number(l.debit) || 0) - (Number(l.credit) || 0));
+    ownerByYear[y] = r2((ownerByYear[y] || 0) + v);
+    ownerTotal = r2(ownerTotal + v);
+    if (Math.abs(v) >= 0.005) ownerItems.push({ date: l.date, memo: cleanDescr(l.descr, cfg.ccSource) || l.memo || '', amt: v });
+  }
+
+  let minYear = curYear;
+  const allY = new Set([].concat(Object.keys(clipNI), Object.keys(parentNI), Object.keys(clipREd), Object.keys(parentREd), Object.keys(ownerByYear)).map(Number));
+  for (const y of allY) if (y && y < minYear) minYear = y;
+  const years = []; for (let y = minYear; y <= curYear; y++) years.push(y);
+
+  const act = {}, reAct = {}, niByYear = {};
+  for (const y of years) {
+    act[y] = { [ownerMember]: { contrib: r2(ownerByYear[y] || 0), distrib: 0 } };
+    niByYear[y] = r2((clipNI[y] || 0) - (parentNI[y] || 0));
+    reAct[y] = { direct: r2((clipREd[y] || 0) - (parentREd[y] || 0)) };
+  }
+
+  const memberNames = [ownerMember];
+  const memberEnd = { [ownerMember]: {} };
+  const reEnd = {};
+  let mPrev = 0, rePrev = 0;
+  for (const y of years) {
+    memberEnd[ownerMember][y] = r2(mPrev + act[y][ownerMember].contrib + act[y][ownerMember].distrib);
+    mPrev = memberEnd[ownerMember][y];
+    reEnd[y] = r2(rePrev + (niByYear[y] || 0) + reAct[y].direct);
+    rePrev = reEnd[y];
+  }
+
+  const lastY = years[years.length - 1];
+  const membersEquityTB = r2((memberEnd[ownerMember][lastY] || 0) + (reEnd[lastY] || 0));
+  const contribDetail = [{ code: cfg.ccAccount, name: cfg.ccName, member: ownerMember, items: ownerItems, total: r2(memberEnd[ownerMember][lastY] || 0) }];
+
+  const meta = new Map();
+  meta.set(String(cfg.ccAccount), { name: cfg.ccName, cat: 'contrib', member: ownerMember });
+
+  return { years, memberNames, memberEnd, reEnd, niByYear, reAct, act, meta, membersEquityTB, contribDetail, note: null, startYear: null };
+}
+
 // Pull the equity picture from the ledger. Returns null when the entity has no
 // equity accounts (caller then skips both tabs).
 function computeEquity(ctx, eid, p) {
   const { db } = ctx;
   const curYear = Number(p.year);
+  // Standalone strip: present a child entity's equity as a single owner line.
+  const _ent = db.prepare('SELECT id, name, code FROM entities WHERE id = ?').get(eid);
+  const _strip = resolveStrip(ctx, _ent);
+  if (_strip) return computeEquityStandalone(ctx, _ent, eid, p, _strip);
   const eqAccts = db.prepare("SELECT code, name, type FROM accounts WHERE entity_id = ? AND type = 'Equity'").all(eid);
   if (!eqAccts.length) return null;
   const meta = new Map();
@@ -335,4 +514,4 @@ function renderAmortization(wb, d) {
   ws.getColumn(1).width = 14; ws.getColumn(2).width = 42; [3, 4, 5, 6].forEach((c) => { ws.getColumn(c).width = 15; });
 }
 
-module.exports = { computeEquity, renderEqRF, renderContributedCapital, renderFixedAssets, renderAmortization };
+module.exports = { computeEquity, renderEqRF, renderContributedCapital, renderFixedAssets, renderAmortization, applyBalanceStrip, resolveStrip };

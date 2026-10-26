@@ -106,7 +106,10 @@ function buildData(ctx, eid, p) {
   // closing is debit-positive (liabilities/equity/revenue negative), derived from
   // the sign-adjusted `balance` so the synthetic RE row (total_debit/credit = 0)
   // is captured.
-  const balRows = computeBalances(eid, { as_of: p.tbAsOf, close_pl_before: p.year + '-01-01' }) || [];
+  const _tbOpts = { as_of: p.tbAsOf, close_pl_before: p.year + '-01-01' };
+  const _tbStrip = eq.applyBalanceStrip(ctx, ent, _tbOpts, computeBalances(eid, _tbOpts) || []);
+  const balRows = _tbStrip.rows;
+  const stripDropped = _tbStrip.dropped;
   const meta = new Map(); // code -> { name, type }
   const tb = [];
   for (const r of balRows) {
@@ -121,7 +124,8 @@ function buildData(ctx, eid, p) {
   // Opening (natural) balance as of the day before the window, by account, with
   // prior-year P&L closed into Retained Earnings so P&L blocks open at zero and RE
   // opens at the prior accumulated earnings. Seeds balance-sheet GL opening lines.
-  const openRows = computeBalances(eid, { as_of: p.openingAsOf, close_pl_before: p.year + '-01-01' }) || [];
+  const _openOpts = { as_of: p.openingAsOf, close_pl_before: p.year + '-01-01' };
+  const openRows = eq.applyBalanceStrip(ctx, ent, _openOpts, computeBalances(eid, _openOpts) || []).rows;
   const opening = new Map();
   for (const r of openRows) { opening.set(String(r.code), r2(Number(r.balance) || 0)); if (!meta.has(String(r.code))) meta.set(String(r.code), { name: r.name || '', type: r.type || '' }); }
 
@@ -172,6 +176,11 @@ function buildData(ctx, eid, p) {
     }
     if (!lines.length) continue;
     blocks.push({ code, name: mt.name, type: mt.type, lines });
+  }
+  // Standalone strip: drop GL detail for parent-overlay accounts that were removed
+  // from the standalone trial balance, so the GL detail matches the stripped TB.
+  if (stripDropped && stripDropped.size) {
+    for (let i = blocks.length - 1; i >= 0; i--) if (stripDropped.has(String(blocks[i].code))) blocks.splice(i, 1);
   }
 
   // Which balance-sheet accounts get a "See <code>" supporting tab. The GL detail
