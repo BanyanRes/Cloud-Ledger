@@ -367,8 +367,13 @@ function renderEqRF(wb, d) {
   const single = members.length === 1;
   // Roll forward from a configured start year (e.g. an entity acquired mid-stream):
   // the opening balance is the cumulative equity through the prior year-end, and
-  // only activity from the start year on is shown. Defaults to inception.
-  const startYear = (eq.startYear && eq.startYear > eq.years[0]) ? eq.startYear : eq.years[0];
+  // only activity from the start year on is shown. Defaults to the first year with
+  // any activity, so leading zero-activity years (e.g. a stray early-dated entry)
+  // are not rendered as empty rows.
+  const hasActivity = (y) => eq.memberNames.some((n) => eq.act[y] && eq.act[y][n] && (Math.abs(eq.act[y][n].contrib) >= 0.005 || Math.abs(eq.act[y][n].distrib) >= 0.005))
+    || Math.abs((eq.niByYear[y] || 0) + ((eq.reAct[y] && eq.reAct[y].direct) || 0)) >= 0.005;
+  const firstActive = eq.years.find(hasActivity) || eq.years[0];
+  const startYear = (eq.startYear && eq.startYear > eq.years[0]) ? eq.startYear : firstActive;
   const priorYear = startYear - 1;
   const hasPrior = priorYear >= eq.years[0];
   const beginMember = (n) => hasPrior ? (eq.memberEnd[n][priorYear] || 0) : 0;
