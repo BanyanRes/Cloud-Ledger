@@ -22,6 +22,11 @@ const ACCT = '_(* #,##0.00_);_(* \\(#,##0.00\\);_(* "-"??_);_(@_)';
 const F = (o = {}) => Object.assign({ name: FONT, size: SIZE }, o);
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const yrOf = (d) => Number(String(d || '').slice(0, 4)) || 0;
+// Column letter for a 1-based column index (A, B, ... Z, AA, ...).
+const COL = (i) => { let s = '', n = Number(i); while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+// Write a formula cell: f is the A1 formula (no leading '='); v is its computed
+// value, cached so the workbook reads correctly until Excel recalculates.
+const fcell = (ws, r, col, f, v, bold) => { const c = ws.getCell(r, col); c.value = { formula: f, result: r2(v) }; c.font = F(bold ? { bold: true } : {}); c.numFmt = ACCT; };
 
 // Entity-specific EQ RF footnotes (mirroring the CLA packages). Keyed by entity id;
 // anchored to the Beginning Balance row with a superscript marker.
@@ -387,52 +392,76 @@ function renderEqRF(wb, d) {
   if (reCol) { const c = ws.getCell(6, reCol); c.value = 'Retained Earnings'; c.font = F({ bold: true }); c.alignment = { wrapText: true, horizontal: 'center' }; }
   const tcHead = ws.getCell(6, totCol); tcHead.value = "Total Members' Equity"; tcHead.font = F({ bold: true }); tcHead.alignment = { wrapText: true, horizontal: 'center' };
   const num = (r, col, v) => { const c = ws.getCell(r, col); c.value = r2(v); c.font = F(); c.numFmt = ACCT; };
+  const dataCols = single ? [memCols[0]] : memCols.concat([reCol]);
+  const firstDataCol = colStart, lastDataCol = dataCols[dataCols.length - 1];
+  const prevRow = {}; dataCols.forEach((c) => { prevRow[c] = 8; }); // prior closing row per column (Beginning = row 8)
   let row = 8;
   ws.getCell(row, 2).value = 'Beginning Balance 01/01/' + startYear; ws.getCell(row, 2).font = F({ bold: true });
   let begTot = 0, runSingle = 0;
   if (single) {
     const v = r2(beginMember(members[0]) + beginRE + exitedEnding);
     num(row, memCols[0], v); begTot = v; runSingle = v;
+    fcell(ws, row, totCol, COL(memCols[0]) + row, begTot);
   } else {
     members.forEach((n, i) => { const v = beginMember(n); num(row, memCols[i], v); begTot += v; });
     const reBeg = r2(beginRE + exitedEnding); num(row, reCol, reBeg); begTot += reBeg;
+    fcell(ws, row, totCol, 'SUM(' + COL(firstDataCol) + row + ':' + COL(lastDataCol) + row + ')', begTot);
   }
-  num(row, totCol, begTot);
   if (eq.note) { const mk = ws.getCell(row, totCol + 1); mk.value = eq.note.marker; mk.font = F({ bold: true, vertAlign: 'superscript' }); }
   row += 2;
+  let lastClosingTotRow = null;
   for (const y of shownYears) {
+    let contribRow = 0, niRow = 0, niCol = 0, distribRow = 0;
     const contribs = members.map((n) => (eq.act[y] && eq.act[y][n] && eq.act[y][n].contrib) || 0);
     if (contribs.some((v) => Math.abs(v) >= 0.005)) {
       ws.getCell(row, 3).value = 'Capital Contributed'; ws.getCell(row, 3).font = F();
       let tot = 0; members.forEach((n, i) => { num(row, memCols[i], contribs[i]); tot += contribs[i]; });
       if (single) runSingle = r2(runSingle + tot);
-      num(row, totCol, tot); row++;
+      fcell(ws, row, totCol, 'SUM(' + COL(memCols[0]) + row + ':' + COL(memCols[memCols.length - 1]) + row + ')', tot);
+      contribRow = row; row++;
     }
     const ni = r2((eq.niByYear[y] || 0) + ((eq.reAct[y] && eq.reAct[y].direct) || 0));
     if (Math.abs(ni) >= 0.005) {
       ws.getCell(row, 3).value = 'Net Income (Loss)'; ws.getCell(row, 3).font = F();
-      num(row, single ? memCols[0] : reCol, ni); num(row, totCol, ni);
-      if (single) runSingle = r2(runSingle + ni); row++;
+      niCol = single ? memCols[0] : reCol;
+      num(row, niCol, ni);
+      fcell(ws, row, totCol, COL(niCol) + row, ni);
+      if (single) runSingle = r2(runSingle + ni); niRow = row; row++;
     }
     const distribs = members.map((n) => (eq.act[y] && eq.act[y][n] && eq.act[y][n].distrib) || 0);
     if (distribs.some((v) => Math.abs(v) >= 0.005)) {
       ws.getCell(row, 3).value = 'Distribution'; ws.getCell(row, 3).font = F();
       let tot = 0; members.forEach((n, i) => { num(row, memCols[i], distribs[i]); tot += distribs[i]; });
       if (single) runSingle = r2(runSingle + tot);
-      num(row, totCol, tot); row++;
+      fcell(ws, row, totCol, 'SUM(' + COL(memCols[0]) + row + ':' + COL(memCols[memCols.length - 1]) + row + ')', tot);
+      distribRow = row; row++;
     }
     ws.getCell(row, 2).value = 'Balance at Closing 12/31/' + y; ws.getCell(row, 2).font = F({ bold: true });
-    if (single) {
-      num(row, memCols[0], runSingle); num(row, totCol, runSingle);
-    } else {
-      let tot = 0; members.forEach((n, i) => { const v = eq.memberEnd[n][y]; num(row, memCols[i], v); tot += v; });
-      const reV = r2(eq.reEnd[y] + exitedEnding); num(row, reCol, reV); tot += reV; num(row, totCol, tot);
+    // Each column's closing = its prior closing + this year's activity in that column
+    // (members get contributions/distributions; the RE column — or the sole member
+    // column when single — gets net income).
+    const closeVal = {};
+    if (single) { closeVal[memCols[0]] = runSingle; }
+    else { members.forEach((n, i) => { closeVal[memCols[i]] = eq.memberEnd[n][y]; }); closeVal[reCol] = r2(eq.reEnd[y] + exitedEnding); }
+    for (const col of dataCols) {
+      const parts = [COL(col) + prevRow[col]];
+      if (contribRow && memCols.includes(col)) parts.push(COL(col) + contribRow);
+      if (distribRow && memCols.includes(col)) parts.push(COL(col) + distribRow);
+      if (niRow && col === niCol) parts.push(COL(col) + niRow);
+      fcell(ws, row, col, parts.join('+'), closeVal[col]);
+      prevRow[col] = row;
     }
+    const totVal = r2(dataCols.reduce((s, c) => s + (closeVal[c] || 0), 0));
+    fcell(ws, row, totCol, 'SUM(' + COL(firstDataCol) + row + ':' + COL(lastDataCol) + row + ')', totVal);
+    lastClosingTotRow = row;
     row += 2;
   }
   const closing = single ? runSingle : r2(members.reduce((s, n) => s + eq.memberEnd[n][lastY], 0) + eq.reEnd[lastY] + exitedEnding);
   num(row, totCol, eq.membersEquityTB); ws.getCell(row, totCol + 1).value = "Members' Equity (TB)"; ws.getCell(row, totCol + 1).font = F();
-  num(row + 1, totCol, r2(closing - eq.membersEquityTB)); ws.getCell(row + 1, totCol + 1).value = 'Variance'; ws.getCell(row + 1, totCol + 1).font = F();
+  const tbRowNo = row;
+  if (lastClosingTotRow) fcell(ws, row + 1, totCol, COL(totCol) + lastClosingTotRow + '-' + COL(totCol) + tbRowNo, r2(closing - eq.membersEquityTB));
+  else num(row + 1, totCol, r2(closing - eq.membersEquityTB));
+  ws.getCell(row + 1, totCol + 1).value = 'Variance'; ws.getCell(row + 1, totCol + 1).font = F();
   if (eq.note) {
     const nr = row + 3, nc = 2;
     ws.getCell(nr, nc).value = 'Note ' + eq.note.marker; ws.getCell(nr, nc).font = F({ bold: true });
@@ -458,27 +487,38 @@ function renderContributedCapital(wb, d) {
   const tbMap = new Map((d.tb || []).map((t) => [String(t.code), Number(t.closing) || 0]));
   const glOf = (code) => r2(-(tbMap.get(String(code)) || 0));
   let row = 1, grand = 0;
+  const memberFirst = row;
   for (const cd of details) { ws.getCell(row, 1).value = cd.name; ws.getCell(row, 1).font = F(); num(row, 2, cd.total); grand = r2(grand + cd.total); row++; }
-  ws.getCell(row, 1).value = 'Total'; ws.getCell(row, 1).font = F({ bold: true }); num(row, 2, grand, true); row += 2;
+  const memberLast = row - 1;
+  ws.getCell(row, 1).value = 'Total'; ws.getCell(row, 1).font = F({ bold: true });
+  fcell(ws, row, 2, 'SUM(B' + memberFirst + ':B' + memberLast + ')', grand, true);
+  const topTotalRow = row; row += 2;
   ws.getCell(row, 1).value = 'Contributions by members thru 12/31/' + d.p.year; ws.getCell(row, 1).font = F({ bold: true }); row += 2;
   for (const cd of details) {
     ws.getCell(row, 2).value = 'Contributions made by ' + cd.member + ':'; ws.getCell(row, 2).font = F({ bold: true }); row++;
+    const itemFirst = row;
     for (const l of cd.items) {
       ws.getCell(row, 1).value = l.date; ws.getCell(row, 1).font = F();
       ws.getCell(row, 2).value = l.memo; ws.getCell(row, 2).font = F();
       num(row, 3, l.amt); row++;
     }
-    num(row, 3, cd.total, true); row += 2;
+    const itemLast = row - 1;
+    if (itemLast >= itemFirst) fcell(ws, row, 3, 'SUM(C' + itemFirst + ':C' + itemLast + ')', cd.total, true);
+    else num(row, 3, cd.total, true);
+    row += 2;
   }
   ws.getCell(row, 2).value = 'Total contributions by members thru 12/31/' + d.p.year; ws.getCell(row, 2).font = F({ bold: true });
-  num(row, 3, grand, true); row += 2;
+  fcell(ws, row, 3, 'B' + topTotalRow, grand, true); row += 2; // = the Total above
   // Member-contributions-vs-GL tie-out: the itemized contributions (from the GL
   // detail above) vs the contributed-capital balance per the trial balance.
   const glGrand = r2(details.reduce((s, cd) => s + glOf(cd.code), 0));
   ws.getCell(row, 1).value = 'Reconciliation to the general ledger'; ws.getCell(row, 1).font = F({ bold: true }); row++;
-  ws.getCell(row, 2).value = 'Total contributions by members'; ws.getCell(row, 2).font = F(); num(row, 3, grand); row++;
-  ws.getCell(row, 2).value = 'Contributed Capital per general ledger'; ws.getCell(row, 2).font = F(); num(row, 3, glGrand); row++;
-  ws.getCell(row, 2).value = 'Difference'; ws.getCell(row, 2).font = F({ bold: true }); num(row, 3, r2(grand - glGrand), true);
+  const recContribRow = row;
+  ws.getCell(row, 2).value = 'Total contributions by members'; ws.getCell(row, 2).font = F(); fcell(ws, row, 3, 'B' + topTotalRow, grand); row++;
+  const glRow = row;
+  ws.getCell(row, 2).value = 'Contributed Capital per general ledger'; ws.getCell(row, 2).font = F(); num(row, 3, glGrand); row++; // leaf: TB balance (off-sheet)
+  ws.getCell(row, 2).value = 'Difference'; ws.getCell(row, 2).font = F({ bold: true });
+  fcell(ws, row, 3, 'C' + recContribRow + '-C' + glRow, r2(grand - glGrand), true);
   ws.getColumn(1).width = 18; ws.getColumn(2).width = 60; ws.getColumn(3).width = 16; ws.getColumn(4).width = 20;
 }
 
@@ -494,15 +534,22 @@ function renderFixedAssets(wb, d) {
   ws.getCell('A3').value = 'Year Ended December 31, ' + d.p.year; ws.getCell('A3').font = F();
   ['Code', 'Account', 'Beginning', 'Additions', 'Disposals', 'Ending'].forEach((h, i) => { const c = ws.getCell(5, i + 1); c.value = h; c.font = F({ bold: true }); });
   const num = (r, col, v, bold) => { const c = ws.getCell(r, col); c.value = r2(v); c.font = F(bold ? { bold: true } : {}); c.numFmt = ACCT; };
-  let row = 6, tB = 0, tA = 0, tD = 0, tE = 0;
+  const first = 6; let row = 6, tB = 0, tA = 0, tD = 0, tE = 0;
   for (const a of fa) {
     ws.getCell(row, 1).value = /^\d+$/.test(String(a.code)) ? Number(a.code) : a.code; ws.getCell(row, 1).font = F();
     ws.getCell(row, 2).value = a.name; ws.getCell(row, 2).font = F();
-    num(row, 3, a.beginning); num(row, 4, a.additions); num(row, 5, a.disposals); num(row, 6, a.ending);
+    num(row, 3, a.beginning); num(row, 4, a.additions); num(row, 5, a.disposals);
+    fcell(ws, row, 6, 'C' + row + '+D' + row + '-E' + row, a.ending); // Ending = Beginning + Additions - Disposals
     tB = r2(tB + a.beginning); tA = r2(tA + a.additions); tD = r2(tD + a.disposals); tE = r2(tE + a.ending); row++;
   }
+  const last = row - 1;
   ws.getCell(row, 2).value = 'Total'; ws.getCell(row, 2).font = F({ bold: true });
-  num(row, 3, tB, true); num(row, 4, tA, true); num(row, 5, tD, true); num(row, 6, tE, true);
+  if (last >= first) {
+    fcell(ws, row, 3, 'SUM(C' + first + ':C' + last + ')', tB, true);
+    fcell(ws, row, 4, 'SUM(D' + first + ':D' + last + ')', tA, true);
+    fcell(ws, row, 5, 'SUM(E' + first + ':E' + last + ')', tD, true);
+    fcell(ws, row, 6, 'SUM(F' + first + ':F' + last + ')', tE, true);
+  } else { num(row, 3, tB, true); num(row, 4, tA, true); num(row, 5, tD, true); num(row, 6, tE, true); }
   ws.getColumn(1).width = 14; ws.getColumn(2).width = 46;
   [3, 4, 5, 6].forEach((c) => { ws.getColumn(c).width = 15; });
 }
@@ -519,22 +566,37 @@ function renderAmortization(wb, d) {
   ['Code', 'Account', 'Beginning', 'Additions', 'Amortization', 'Ending'].forEach((h, i) => { const c = ws.getCell(5, i + 1); c.value = h; c.font = F({ bold: true }); });
   const num = (r, col, v, bold) => { const c = ws.getCell(r, col); c.value = r2(v); c.font = F(bold ? { bold: true } : {}); c.numFmt = ACCT; };
   const codeCell = (r, a) => { const c = ws.getCell(r, 1); c.value = /^\d+$/.test(String(a.code)) ? Number(a.code) : a.code; c.font = F(); ws.getCell(r, 2).value = a.name; ws.getCell(r, 2).font = F(); };
-  let row = 6, tBeg = 0, tAdd = 0, tAmort = 0, tEnd = 0;
+  const first = 6; let row = 6, tBeg = 0, tAdd = 0, tAmort = 0, tEnd = 0;
   for (const a of am.cost) {
-    codeCell(row, a); num(row, 3, a.beginning); num(row, 4, a.additions); num(row, 6, a.ending);
+    codeCell(row, a); num(row, 3, a.beginning); num(row, 4, a.additions);
+    fcell(ws, row, 6, 'C' + row + '+D' + row, a.ending); // Ending = Beginning + Additions
     tBeg = r2(tBeg + a.beginning); tAdd = r2(tAdd + a.additions); tEnd = r2(tEnd + a.ending); row++;
   }
+  const accumFirst = row;
   for (const a of am.accum) {
-    codeCell(row, a); num(row, 3, a.beginning); num(row, 5, a.amortization); num(row, 6, a.ending);
+    codeCell(row, a); num(row, 3, a.beginning); num(row, 5, a.amortization);
+    fcell(ws, row, 6, 'C' + row + '+E' + row, a.ending); // Ending = Beginning + Amortization
     tBeg = r2(tBeg + a.beginning); tAmort = r2(tAmort + a.amortization); tEnd = r2(tEnd + a.ending); row++;
   }
+  const accumLast = row - 1, lastData = row - 1;
   ws.getCell(row, 2).value = 'Net Deferred Cost'; ws.getCell(row, 2).font = F({ bold: true });
-  num(row, 3, tBeg, true); num(row, 4, tAdd, true); num(row, 5, tAmort, true); num(row, 6, tEnd, true); row += 2;
+  if (lastData >= first) {
+    fcell(ws, row, 3, 'SUM(C' + first + ':C' + lastData + ')', tBeg, true);
+    fcell(ws, row, 4, 'SUM(D' + first + ':D' + lastData + ')', tAdd, true);
+    fcell(ws, row, 5, 'SUM(E' + first + ':E' + lastData + ')', tAmort, true);
+    fcell(ws, row, 6, 'SUM(F' + first + ':F' + lastData + ')', tEnd, true);
+  } else { num(row, 3, tBeg, true); num(row, 4, tAdd, true); num(row, 5, tAmort, true); num(row, 6, tEnd, true); }
+  row += 2;
   const expTotal = r2(am.expense.reduce((s, e) => s + e.amount, 0));
   const amortRecorded = r2(-am.accum.reduce((s, a) => s + a.amortization, 0));
-  ws.getCell(row, 2).value = 'Amortization expense for the period'; ws.getCell(row, 2).font = F(); num(row, 6, expTotal); row++;
-  ws.getCell(row, 2).value = 'Accumulated amortization recorded'; ws.getCell(row, 2).font = F(); num(row, 6, amortRecorded); row++;
-  ws.getCell(row, 2).value = 'Variance'; ws.getCell(row, 2).font = F(); num(row, 6, r2(expTotal - amortRecorded));
+  const expRow = row;
+  ws.getCell(row, 2).value = 'Amortization expense for the period'; ws.getCell(row, 2).font = F(); num(row, 6, expTotal); row++; // leaf: expense accounts not rendered as rows
+  const accRecRow = row;
+  ws.getCell(row, 2).value = 'Accumulated amortization recorded'; ws.getCell(row, 2).font = F();
+  if (am.accum.length) fcell(ws, row, 6, '-SUM(E' + accumFirst + ':E' + accumLast + ')', amortRecorded); else num(row, 6, amortRecorded);
+  row++;
+  ws.getCell(row, 2).value = 'Variance'; ws.getCell(row, 2).font = F();
+  fcell(ws, row, 6, 'F' + expRow + '-F' + accRecRow, r2(expTotal - amortRecorded));
   ws.getColumn(1).width = 14; ws.getColumn(2).width = 42; [3, 4, 5, 6].forEach((c) => { ws.getColumn(c).width = 15; });
 }
 

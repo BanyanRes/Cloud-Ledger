@@ -334,13 +334,25 @@ function writeBlock(ws, startRow, block) {
   const h = ws.getCell(row, 1); h.value = block.code + ' - ' + block.name; h.font = F({ bold: true }); row++;
   ['Date', 'JE', 'Memo', 'Debit', 'Credit', 'Balance'].forEach((t, i) => { const c = ws.getCell(row, i + 1); c.value = t; c.font = F({ bold: true }); });
   row++;
+  const dr = isDrNat(block.type); // running balance: debit-natural adds D-E, credit-natural adds E-D
+  let prevBalRow = 0;
   for (const ln of block.lines) {
     ws.getCell(row, 1).value = ln.date; ws.getCell(row, 1).font = F();
     ws.getCell(row, 2).value = ln.je; ws.getCell(row, 2).font = F();
     ws.getCell(row, 3).value = ln.memo; ws.getCell(row, 3).font = F();
     if (ln.debit != null && ln.debit !== 0) { const c = ws.getCell(row, 4); c.value = ln.debit; c.font = F(); c.numFmt = ACCT; }
     if (ln.credit != null && ln.credit !== 0) { const c = ws.getCell(row, 5); c.value = ln.credit; c.font = F(); c.numFmt = ACCT; }
-    const b = ws.getCell(row, 6); b.value = ln.balance; b.font = F(); b.numFmt = ACCT;
+    const b = ws.getCell(row, 6); b.font = F(); b.numFmt = ACCT;
+    const isOpening = (ln.debit == null && ln.credit == null); // synthesized opening-balance line (leaf)
+    if (isOpening) {
+      b.value = r2(ln.balance);
+    } else if (!prevBalRow) {
+      // First activity line with no prior balance (e.g. a P&L block has no opening).
+      b.value = { formula: dr ? ('D' + row + '-E' + row) : ('E' + row + '-D' + row), result: r2(ln.balance) };
+    } else {
+      b.value = { formula: dr ? ('F' + prevBalRow + '+D' + row + '-E' + row) : ('F' + prevBalRow + '+E' + row + '-D' + row), result: r2(ln.balance) };
+    }
+    prevBalRow = row;
     row++;
   }
   return row; // next free row
