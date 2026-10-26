@@ -37,6 +37,7 @@ const fs = require('fs');
 const ExcelJS = require('exceljs');
 const multer = require('multer');
 const eq = require('./taxpackage_equity');
+const fin = require('./financials');
 
 // ── Display constants (match the delivered TB & GL packages) ──────────────────
 const FONT = 'Verdana';
@@ -142,6 +143,18 @@ function buildData(ctx, eid, p) {
   const opening = new Map();
   for (const r of openRows) { opening.set(String(r.code), r2(Number(r.balance) || 0)); if (!meta.has(String(r.code))) meta.set(String(r.code), { name: r.name || '', type: r.type || '' }); }
 
+  // Classify accounts the way the financial statements do (financials.js) so the
+  // package matches the balance sheet: every account in "Cash and Cash Equivalents"
+  // gets its own tab, and every account in "Fixed Assets, Net" appears on the Fixed
+  // Asset Additions tab. rowByCode carries the full account row (name, type,
+  // bank_acct, fs_section) that the classifier needs.
+  const profile = fin.entityProfile({ entityName: ent.name, entityCode: ent.code });
+  const rowByCode = new Map();
+  for (const r of openRows) rowByCode.set(String(r.code), r);
+  for (const r of balRows) rowByCode.set(String(r.code), r);
+  const isBankAccount = (code) => { const r = rowByCode.get(String(code)); try { return !!(r && fin.isCashAccount(r)); } catch (e) { return false; } };
+  const fsSectionOf = (code) => { const r = rowByCode.get(String(code)); if (!r) return null; try { return fin.bsClassifyFor(profile, r).section; } catch (e) { return null; } };
+
   // GL activity within the window, grouped by account.
   const rows = db.prepare(`
     SELECT je.date AS date, je.entry_num AS entry_num, je.doc_number AS doc_number,
@@ -201,27 +214,19 @@ function buildData(ctx, eid, p) {
   // own tab; intercompany due-to/due-from balances are covered by the consolidated
   // investment reconciliation workpaper, and everything else relies on the GL.
   const blockByCode = new Map(blocks.map((b) => [b.code, b]));
-  const needsSupport = (code) => !!(meta.get(code) || {}).bank;
+  const needsSupport = (code) => isBankAccount(code); // every Cash & Cash Equivalents account (per the financials) gets its own tab
   const support = tb
     .filter((t) => needsSupport(t.code) && blockByCode.has(t.code))
     .map((t) => t.code);
 
-  // Fixed-asset additions: only for entities that actually have building (PP&E)
-  // accounts — construction-in-progress / capitalized-cost accounts don't get this
-  // tab. Rows cover depreciable PP&E, not CIP. Beginning + Additions − Disposals = Ending.
-  const hasBuildings = tb.some((t) => {
-    const mt = meta.get(t.code) || {};
-    return mt.type === 'Asset' && /\bbuildings?\b/i.test(mt.name || '') && !/accumulated/i.test(mt.name || '');
-  });
-  const isFixedAsset = (code) => {
-    const mt = meta.get(code) || {};
-    if (mt.type !== 'Asset' || mt.bank) return false;
-    const n = mt.name || '';
-    if (/receivable|^\s*due\s+(from|to)\b|prepaid|escrow|^\s*cash\b|construction|\bcip\b|in progress/i.test(n)) return false;
-    return /\bbuildings?\b|improvement|\bland\b|equipment|furniture|fixture|machinery|vehicle|leasehold|depreciat|amortiz/i.test(n);
-  };
+  // Fixed Asset Additions: every account the balance sheet classifies as
+  // "Fixed Assets, Net" (financials.js), not a name-regex guess — so Railroad
+  // Track, Switching Stations, accumulated depreciation, etc. are never missed.
+  // Each row rolls forward Beginning + Additions − Disposals = Ending from its GL
+  // block; an account is listed whenever it has a balance or any activity.
+  const isFixedAsset = (code) => fsSectionOf(code) === 'Fixed Assets, Net';
   const fixedAssets = [];
-  if (hasBuildings) for (const b of blocks) {
+  for (const b of blocks) {
     if (!isFixedAsset(b.code)) continue;
     let beginning = 0, additions = 0, disposals = 0;
     for (const ln of b.lines) {
@@ -229,10 +234,8 @@ function buildData(ctx, eid, p) {
       additions = r2(additions + (Number(ln.debit) || 0));
       disposals = r2(disposals + (Number(ln.credit) || 0));
     }
-    if (Math.abs(additions) >= 0.005 || Math.abs(disposals) >= 0.005) {
-      const ending = Number(b.lines[b.lines.length - 1].balance) || 0;
-      fixedAssets.push({ code: b.code, name: b.name, beginning: r2(beginning), additions, disposals, ending: r2(ending) });
-    }
+    const ending = Number(b.lines[b.lines.length - 1].balance) || 0;
+    fixedAssets.push({ code: b.code, name: b.name, beginning: r2(beginning), additions, disposals, ending: r2(ending) });
   }
 
   // Amortization schedule: capitalized deferred costs (loan fees, financing costs)

@@ -6466,6 +6466,8 @@ function groupConsolidatingSchedule(schedules, meta) {
 module.exports = {
   buildStatements,
   entityProfile,
+  bsClassifyFor,
+  isCashAccount,
   statementTaxonomy,
   statementLineItems,
   fundStatementTaxonomy,
