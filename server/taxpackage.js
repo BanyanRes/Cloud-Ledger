@@ -235,7 +235,7 @@ function buildData(ctx, eid, p) {
     const ending = Number(b.lines[b.lines.length - 1].balance) || 0;
     if (mt.type === 'Asset' && /accumulat\w*\s*amort|acc\.?\s*amort/i.test(n)) {
       amAccum.push({ code: b.code, name: b.name, beginning: r2(beginning), amortization: r2(ending - beginning), ending: r2(ending) });
-    } else if (mt.type === 'Asset' && /goodwill|intangible|deferred financ|debt issuance|financing cost|organizationa?l?\s*cost/i.test(n)) {
+    } else if (mt.type === 'Asset' && /goodwill|intangible|deferred financ|debt issuance|financing cost|organizationa?l?\s*cost|loan fee|loan cost|loan origination|acquisition fee|development fee|rate\s*cap|commitment fee/i.test(n)) {
       amCost.push({ code: b.code, name: b.name, beginning: r2(beginning), additions: r2(ending - beginning), ending: r2(ending) });
     } else if (mt.type === 'Expense' && /amortization/i.test(n)) {
       amExp.push({ code: b.code, name: b.name, amount: r2(ending) });
@@ -259,8 +259,8 @@ function buildData(ctx, eid, p) {
   const addRef = (code, tab, label) => { const c = String(code); if (c && !tbRefs.has(c)) tbRefs.set(c, { tab, label }); };
   for (const code of support) addRef(code, String(code), 'See ' + code);
   if (amortization) {
-    for (const a of amortization.cost) addRef(a.code, 'Goodwill Amortization', 'See Goodwill Amortization');
-    for (const a of amortization.accum) addRef(a.code, 'Goodwill Amortization', 'See Goodwill Amortization');
+    for (const a of amortization.cost) addRef(a.code, 'Amortization Schedule', 'See Amortization Schedule');
+    for (const a of amortization.accum) addRef(a.code, 'Amortization Schedule', 'See Amortization Schedule');
   }
   if (fixedAssets.length) for (const a of fixedAssets) addRef(a.code, 'Fixed Asset Additions', 'See Fixed Asset Additions');
   if (equity) {

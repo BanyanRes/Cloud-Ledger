@@ -512,9 +512,9 @@ function renderFixedAssets(wb, d) {
 // expense. Ties to the TB. d.amortization is computed in taxpackage.js.
 function renderAmortization(wb, d) {
   const am = d.amortization; if (!am) return;
-  const ws = wb.addWorksheet('Goodwill Amortization');
+  const ws = wb.addWorksheet('Amortization Schedule');
   ws.getCell('A1').value = d.ent.name; ws.getCell('A1').font = F({ bold: true });
-  ws.getCell('A2').value = 'Goodwill Amortization'; ws.getCell('A2').font = F();
+  ws.getCell('A2').value = 'Amortization Schedule'; ws.getCell('A2').font = F();
   ws.getCell('A3').value = (d.p.mode === 'monthly' ? d.p.periodLine : 'Year Ended December 31, ' + d.p.year); ws.getCell('A3').font = F();
   ['Code', 'Account', 'Beginning', 'Additions', 'Amortization', 'Ending'].forEach((h, i) => { const c = ws.getCell(5, i + 1); c.value = h; c.font = F({ bold: true }); });
   const num = (r, col, v, bold) => { const c = ws.getCell(r, col); c.value = r2(v); c.font = F(bold ? { bold: true } : {}); c.numFmt = ACCT; };
