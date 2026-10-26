@@ -56,6 +56,19 @@ const numCode = (c) => { const n = Number(String(c).replace(/[^\d.-]/g, '')); re
 const sortByCode = (a, b) => { const d = numCode(a) - numCode(b); return d !== 0 ? d : String(a).localeCompare(String(b)); };
 const dayBefore = (d) => { const [y, mo, dd] = String(d).split('-').map(Number); return new Date(Date.UTC(y, mo - 1, dd - 1)).toISOString().slice(0, 10); };
 const mdy = (d) => { const [y, mo, dd] = String(d).split('-').map(Number); return mo + '/' + dd + '/' + y; };
+// Clean a GL line's description for display: strip the "<code>-" prefix and the
+// "-<doc>-GJ-<code>" / "-GJ-<code>" suffix that the ledger import wraps around the
+// real description (same cleanup the Contributed Capital tab uses). No-op when the
+// description has no such wrapping.
+const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const cleanGlDesc = (s, code) => {
+  let t = String(s || '').trim(); if (!t) return '';
+  const c = escRe(String(code));
+  t = t.replace(new RegExp('^' + c + '\\s*-\\s*'), '');
+  t = t.replace(new RegExp('\\s*-\\s*[^-]*-\\s*GJ\\s*-\\s*' + c + '$', 'i'), '');
+  t = t.replace(new RegExp('\\s*-\\s*GJ\\s*-\\s*' + c + '$', 'i'), '');
+  return t.trim();
+};
 
 // Excel-safe sheet name (<=31 chars, unique, no illegal chars).
 function sheetNameFor(base, used) {
@@ -150,7 +163,7 @@ function buildData(ctx, eid, p) {
     act.get(code).push({
       date: r.date,
       je: (r.entry_num != null && r.entry_num !== '') ? ('JE-' + pad4(r.entry_num)) : (r.doc_number ? String(r.doc_number) : ''),
-      memo: r.memo || r.description || '',
+      memo: cleanGlDesc(r.description, code) || r.memo || '', // real line description, else the entry memo
       debit: r2(Number(r.debit) || 0), credit: r2(Number(r.credit) || 0),
     });
   }
