@@ -58,6 +58,23 @@ const STANDALONE_STRIP = {
     ccMember: 'County Line Industrial Park LLC',
     ccSource: '19041',
   },
+  // CLR Silsbee Property Owner (39): parent County Line Rail Silsbee LLC (52) holds
+  // its investment in the property owner (17001) plus the LLC-level member capital,
+  // all mingled onto the child's books. On a standalone CLR Silsbee Property Owner
+  // TB those belong to the parent, and the child's equity collapses to a single
+  // owner line = the parent's investment in the property owner (17001 -> 34063).
+  // Grand Haven is removed outright: the parent books it under 34251 while the
+  // child uses 34144, so the same-code net never cancels it, and the property
+  // owner's sole member is the LLC, so no LLC-level investor belongs on its books.
+  CLRSILSB2: {
+    parentId: 52,
+    parentNameRe: /county line rail silsbee/i,
+    remove: ['17001', '34063', '34144'],
+    ccAccount: '34063',
+    ccName: 'Contributed Capital - County Line Rail Silsbee LLC',
+    ccMember: 'County Line Rail Silsbee LLC',
+    ccSource: '17001',
+  },
 };
 
 // Resolve + validate the strip config for an entity (looked up by its code).
@@ -70,7 +87,7 @@ function resolveStrip(ctx, ent) {
   if (!cfg) return null;
   const parent = ctx.db.prepare('SELECT id, name, code FROM entities WHERE id = ?').get(cfg.parentId);
   if (!parent || !cfg.parentNameRe.test(String(parent.name || ''))) {
-    throw new Error('[tax-package] standalone strip for ' + ent.code + ': parent entity id ' + cfg.parentId + ' not found or name mismatch (expected County Line Industrial Park)');
+    throw new Error('[tax-package] standalone strip for ' + ent.code + ': parent entity id ' + cfg.parentId + ' not found or its name no longer matches ' + String(cfg.parentNameRe));
   }
   return Object.assign({}, cfg, { parent });
 }
