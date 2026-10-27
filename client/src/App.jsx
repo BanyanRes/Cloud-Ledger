@@ -1047,7 +1047,7 @@ export default function App(){
       ...(isCLRF?[{id:'wp_other',label:'Other Workpapers',icon:'🗂️',section:'workpapers'}]:[]),
       ...(isBanyanRes?[{id:'wp_insalloc',label:'Insurance Allocation',icon:'🩺',section:'workpapers'}]:[]),
       ...(canClaClose?[{id:'wp_cla_monthlyclose',label:(quarterlyCla?'Quarterly':'Monthly')+' Closing Workpapers',icon:'📑',section:'workpapers'}]:[]),
-      ...(!isShellEntity?[{id:'wp_taxpackage',label:'Tax Packages',icon:'🧾',section:'workpapers'}]:[]),
+      {id:'wp_taxpackage',label:'Tax Packages',icon:'🧾',section:'workpapers'},
     ]}]:[]),
     {key:'ADMINISTRATION',adminOnly:true,label:'Administration',icon:'⚙️',items:[
       {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
