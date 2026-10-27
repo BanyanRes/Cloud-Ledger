@@ -12240,10 +12240,13 @@ function computeIcArAp(asOf) {
   for (const E of entities) {
     try {
       const aging = arMod.buildAging(db, E.id, asOf);
+      const cpByCust = new Map(
+        db.prepare('SELECT name, counterparty_entity_id FROM ar_customers WHERE entity_id = ? AND counterparty_entity_id IS NOT NULL').all(E.id)
+          .map(c => [c.name, Number(c.counterparty_entity_id)]));
       for (const r of (aging.rows || [])) {
         const open = Number(r.total) || 0;
         if (Math.abs(open) < 0.005) continue;
-        const toId = matchEntity(r.customer);
+        const toId = cpByCust.get(r.customer) ?? matchEntity(r.customer);
         if (toId == null || toId === E.id) continue;
         const k = E.id + '>' + toId; arByPair.set(k, round2((arByPair.get(k) || 0) + open));
       }
@@ -12252,7 +12255,7 @@ function computeIcArAp(asOf) {
       for (const d of (aging.detail || [])) {
         const open = Number(d.open) || 0;
         if (Math.abs(open) < 0.005) continue;
-        const toId = matchEntity(d.customer);
+        const toId = cpByCust.get(d.customer) ?? matchEntity(d.customer);
         if (toId == null || toId === E.id) continue;
         arInvoices.push({ creditor: E.id, debtor: toId, doc: d.invoice_num, date: d.invoice_date, memo: memoMap[d.invoice_num] || '', amount: round2(open) });
       }
@@ -12413,10 +12416,13 @@ app.get('/api/intercompany/ic-arap-comparison.xlsx', auth, requireRole('Admin', 
     for (const E of entities) {
       try {
         const aging = arMod.buildAging(db, E.id, asOf);
+        const cpByCust = new Map(
+          db.prepare('SELECT name, counterparty_entity_id FROM ar_customers WHERE entity_id = ? AND counterparty_entity_id IS NOT NULL').all(E.id)
+            .map(c => [c.name, Number(c.counterparty_entity_id)]));
         for (const r of (aging.rows || [])) {
           const open = Number(r.total) || 0;
           if (Math.abs(open) < 0.005) continue;
-          const toId = matchEntity(r.customer);
+          const toId = cpByCust.get(r.customer) ?? matchEntity(r.customer);
           if (toId == null || toId === E.id) continue;
           arDetail.push({ fromId: E.id, name: r.customer, toId, open: round2(open) });
           const k = E.id + '>' + toId; arByPair.set(k, round2((arByPair.get(k) || 0) + open));
@@ -12426,7 +12432,7 @@ app.get('/api/intercompany/ic-arap-comparison.xlsx', auth, requireRole('Admin', 
         for (const d of (aging.detail || [])) {
           const open = Number(d.open) || 0;
           if (Math.abs(open) < 0.005) continue;
-          const toId = matchEntity(d.customer);
+          const toId = cpByCust.get(d.customer) ?? matchEntity(d.customer);
           if (toId == null || toId === E.id) continue;
           arInvoices.push({ creditor: E.id, debtor: toId, doc: d.invoice_num, date: d.invoice_date, memo: memoMap[d.invoice_num] || '', amount: round2(open) });
         }
