@@ -2927,6 +2927,9 @@ function CustomersManager({entityId,entityName,entities,canEdit}){
   return(<div><div style={{marginBottom:20,display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
     <div><div style={S.h1}>Customers</div><div style={S.sub}>{entityName} — bill-to parties for the invoices you send. Email here is where invoices go.</div></div>
     {canEdit&&<button style={S.btnP} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add Customer'}</button>}</div>
+    <div style={{background:T.accentDim,border:'1px solid '+T.accent+'30',borderLeft:'3px solid '+T.accent,borderRadius:T.radiusXs,padding:'10px 14px',marginBottom:16,fontSize:12.5,color:T.text,lineHeight:1.55}}>
+      <b>Setting a customer’s entity (for intercompany billing).</b> If this customer is another one of your CloudLedger entities — you are billing an affiliated company, not an outside party — open it with <b>+ Add Customer</b> or <b>Edit</b> and pick that entity in the <b>Counterparty entity</b> dropdown. Choose the matching entity even when its name here differs from the customer name (for example “County Line Rail Buna LLC” maps to the entity “CLR Buna Property Owner”). That link is what makes the customer’s invoices show up on the Intercompany A/R vs A/P reconciliation; leave it on “— none (outside customer) —” for genuine third-party customers.
+    </div>
     {customers.length>0&&<div style={{marginBottom:12,display:'flex',alignItems:'center',gap:10}}>
       <input style={{...S.input,maxWidth:320}} placeholder="Search customers…" value={query} onChange={e=>setQuery(e.target.value)}/>
       {query&&<span style={{fontSize:12,color:T.textMuted}}>{shown.length} of {customers.length}</span>}
