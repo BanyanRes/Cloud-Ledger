@@ -2911,6 +2911,7 @@ function CustomersManager({entityId,entityName,entities,canEdit}){
   const[showAdd,setShowAdd]=useState(false);
   const blank={name:'',email:'',address:'',terms_days:30,counterparty_entity_id:''};
   const[form,setForm]=useState(blank);const[err,setErr]=useState('');
+  const[query,setQuery]=useState('');
   const[editing,setEditing]=useState(null);const[editForm,setEditForm]=useState(blank);const[editErr,setEditErr]=useState('');
   const entOpts=[...(entities||[])].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{sensitivity:'base'}));
   const billFor=id=>{const e=(entities||[]).find(x=>x.id===Number(id));return e?e.bill_inbox_email:null;};
@@ -2922,9 +2923,15 @@ function CustomersManager({entityId,entityName,entities,canEdit}){
   const save=async()=>{if(!editForm.name.trim()){setEditErr('Name required');return;}try{await api.updateArCustomer(entityId,editing,{name:editForm.name.trim(),email:editForm.email.trim()||null,address:editForm.address.trim()||null,terms_days:+editForm.terms_days||30,counterparty_entity_id:editForm.counterparty_entity_id?Number(editForm.counterparty_entity_id):null});setEditing(null);await load();}catch(e){setEditErr(e.message);}};
   const toggleActive=async c=>{try{await api.updateArCustomer(entityId,c.id,{active:c.active?0:1});await load();}catch(e){alert(e.message);}};
   const del=async c=>{if(!confirm('Delete "'+c.name+'"? (Only possible if no invoices exist.)'))return;try{await api.deleteArCustomer(entityId,c.id);await load();}catch(e){alert(e.message);}};
+  const _q=query.trim().toLowerCase(),shown=_q?customers.filter(c=>((c.name||'').toLowerCase().includes(_q)||(c.email||'').toLowerCase().includes(_q)||(c.counterparty_entity_id?entName2(c.counterparty_entity_id):'').toLowerCase().includes(_q))):customers;
   return(<div><div style={{marginBottom:20,display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
     <div><div style={S.h1}>Customers</div><div style={S.sub}>{entityName} — bill-to parties for the invoices you send. Email here is where invoices go.</div></div>
     {canEdit&&<button style={S.btnP} onClick={()=>{setShowAdd(!showAdd);setErr('');}}>{showAdd?'Cancel':'+ Add Customer'}</button>}</div>
+    {customers.length>0&&<div style={{marginBottom:12,display:'flex',alignItems:'center',gap:10}}>
+      <input style={{...S.input,maxWidth:320}} placeholder="Search customers…" value={query} onChange={e=>setQuery(e.target.value)}/>
+      {query&&<span style={{fontSize:12,color:T.textMuted}}>{shown.length} of {customers.length}</span>}
+      {query&&<button style={{...S.btnGhost,fontSize:11}} onClick={()=>setQuery('')}>Clear</button>}
+    </div>}
     {showAdd&&<div style={{...S.card,borderColor:T.green+'40',padding:16,marginBottom:16}}>
       <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
         <div style={{flex:'1 1 220px'}}><label style={S.label}>Customer name</label><input style={S.input} value={form.name} onChange={e=>setForm(f=>({...f,name:e.target.value}))} autoFocus/></div>
@@ -2944,7 +2951,8 @@ function CustomersManager({entityId,entityName,entities,canEdit}){
       <tbody>
         {loading&&<tr><td colSpan={canEdit?5:4} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>Loading…</td></tr>}
         {!loading&&customers.length===0&&<tr><td colSpan={canEdit?5:4} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>No customers yet — add one to start invoicing.</td></tr>}
-        {!loading&&customers.map(c=>editing===c.id?
+        {!loading&&customers.length>0&&shown.length===0&&<tr><td colSpan={canEdit?5:4} style={{...S.td,textAlign:'center',color:T.textMuted,padding:18}}>No customers match “{query}”.</td></tr>}
+        {!loading&&shown.map(c=>editing===c.id?
           <tr key={c.id} style={{background:T.accentDim}}>
             <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))}/>
               <select style={{...S.input,marginTop:4,fontSize:12}} value={editForm.counterparty_entity_id||''} onChange={e=>setEditForm(f=>({...f,counterparty_entity_id:e.target.value}))}>
