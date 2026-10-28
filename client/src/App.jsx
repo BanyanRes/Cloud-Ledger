@@ -2958,6 +2958,7 @@ function CustomersManager({entityId,entityName,entities,canEdit}){
         {!loading&&shown.map(c=>editing===c.id?
           <tr key={c.id} style={{background:T.accentDim}}>
             <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))}/>
+              <div style={{...S.label,marginTop:6,marginBottom:2}}>CloudLedger Entity Name</div>
               <select style={{...S.input,marginTop:4,fontSize:12}} value={editForm.counterparty_entity_id||''} onChange={e=>setEditForm(f=>({...f,counterparty_entity_id:e.target.value}))}>
                 <option value=''>— no counterparty —</option>
                 {entOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></td>
