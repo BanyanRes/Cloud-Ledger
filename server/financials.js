@@ -3497,6 +3497,15 @@ async function renderStatementsPdf(s, outOffsets) {
       // set via Reports > Ask Claude). Empty for almost every entity, so this is
       // a no-op by default and changes nothing about existing statements.
       if (Array.isArray(m.sectionBreaks) && m.sectionBreaks.includes(sec.title)) L.pageBreakBefore();
+      // Presentation overrides (fs_presentation, set via Reports > Ask Claude):
+      // section/subsection RENAMING and extra SPACE before a section. All empty
+      // by default, so this changes nothing about existing statements. Renaming
+      // only affects the printed label, never which figures roll into the line,
+      // and the section-total rule-below still keys off the ORIGINAL label.
+      const P = m.presentation || {};
+      const secLabel = (P.sectionLabel && P.sectionLabel[sec.title]) || sec.title;
+      const subLabelOf = (su) => (P.subLabel && P.subLabel[sec.title + '||' + su.title]) || su.title;
+      const spaceBefore = Math.max(0, Math.min(48, (P.sectionSpaceBefore && +P.sectionSpaceBefore[sec.title]) || 0));
       const showSubHeaders = sec.subs.length > 1 || sec.subs.some(su => su.contra) || m.profile === 'bsfrgp' || m.profile === 'banyan';
       // Keep each balance-sheet section together so its header is never left
       // stranded at the bottom of a page while the rest of the section flows to
@@ -3515,9 +3524,9 @@ async function renderStatementsPdf(s, outOffsets) {
         _nL += 1; // section total
         L.keepTogether(_nL * 13 + 14);
       }
-      L.row(sec.title, [], { indent: 6, boldRow: true });
+      L.row(secLabel, [], { indent: 6, boldRow: true, gapBefore: spaceBefore });
       for (const su of sec.subs) {
-        if (showSubHeaders) L.row(su.title, [], { indent: 16 });
+        if (showSubHeaders) L.row(subLabelOf(su), [], { indent: 16 });
         const rowIndent = showSubHeaders ? 26 : 16;
         for (const r of su.rows) {
           L.row(r.name, bsCells(r.cur, r.pri), { indent: rowIndent, dollarPrefix: bsFirstRow });
@@ -3527,10 +3536,10 @@ async function renderStatementsPdf(s, outOffsets) {
         if (showSubHeaders && (su.rows.length > 1 || forceSub)) {
           // GL balances are already signed; a contra subtotal (accumulated
           // amortization) is naturally negative and prints in parentheses.
-          L.row('Total ' + su.title, bsCells(su.subtotal.cur, su.subtotal.pri), { indent: 20, ruleAbove: true });
+          L.row('Total ' + subLabelOf(su), bsCells(su.subtotal.cur, su.subtotal.pri), { indent: 20, ruleAbove: true });
         }
       }
-      L.row(sectionTotalLabel, bsCells(sec.total.cur, sec.total.pri), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: RULE_BELOW_SECTIONS.test(sectionTotalLabel), gapAfter: 6, keepWithNext: reserveTail });
+      L.row('Total ' + secLabel, bsCells(sec.total.cur, sec.total.pri), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: RULE_BELOW_SECTIONS.test(sectionTotalLabel), gapAfter: 6, keepWithNext: reserveTail });
     };
     // Turnkey (CLA presentation): a flat list of bare rows under Assets, with
     // only Contract Assets and Fixed Assets carrying a header and a subtotal.

@@ -863,6 +863,16 @@ db.exec(`CREATE TABLE IF NOT EXISTS fs_section_breaks (
   PRIMARY KEY (entity_id, section)
 )`);
 console.log('[db migrate] fs_section_breaks ensured');
+db.exec(`CREATE TABLE IF NOT EXISTS fs_presentation (
+  entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  scope TEXT NOT NULL,
+  scope_key TEXT NOT NULL,
+  prop TEXT NOT NULL,
+  value TEXT NOT NULL,
+  created_by TEXT, created_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (entity_id, scope, scope_key, prop)
+)`);
+console.log('[db migrate] fs_presentation ensured');
 // Dimension code columns (name was the only label originally; code added for reporting/sorting)
 const dcCols = db.prepare("PRAGMA table_info(dim_classes)").all().map(c => c.name);
 if (!dcCols.includes('code')) { db.exec("ALTER TABLE dim_classes ADD COLUMN code TEXT"); console.log('[db migrate] dim_classes.code added'); }
@@ -13134,6 +13144,15 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       // Per-section "start on a new page" overrides (Reports > Ask Claude). Attached
       // to meta so renderStatementsPdf's balance-sheet renderer can honor them.
       try { statements.meta.sectionBreaks = db.prepare('SELECT section FROM fs_section_breaks WHERE entity_id=?').all(eid).map(r => r.section); } catch (_e) { statements.meta.sectionBreaks = []; }
+      try {
+        const _pres = { sectionLabel: {}, subLabel: {}, sectionSpaceBefore: {} };
+        for (const r of db.prepare('SELECT scope, scope_key, prop, value FROM fs_presentation WHERE entity_id=?').all(eid)) {
+          if (r.scope === 'section' && r.prop === 'label') _pres.sectionLabel[r.scope_key] = r.value;
+          else if (r.scope === 'section' && r.prop === 'space_before') _pres.sectionSpaceBefore[r.scope_key] = +r.value || 0;
+          else if (r.scope === 'subsection' && r.prop === 'label') _pres.subLabel[r.scope_key] = r.value;
+        }
+        statements.meta.presentation = _pres;
+      } catch (_e) { statements.meta.presentation = {}; }
       const consolSchedules = (isConsolidated && !isMidcoPkg) ? consolidation.buildScheduleSet(db, consolGroup, asOf, (id, oo) => computeBalances(id, oo)) : null;
 
       const files = req.files || {};

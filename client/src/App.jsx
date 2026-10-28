@@ -6985,7 +6985,7 @@ function ReportAssistant({entityId,entityName,canEdit}){
     if(!sel.length&&!selPres.length)return;
     setMessages(ms=>ms.map((m,i)=>i===mi?{...m,applying:true,applyErr:''}:m));
     try{
-      const body={changes:sel.map(c=>({code:c.code,fs_section:c.to_section,fs_subsection:c.to_subsection})),new_subsections:msg.proposal.new_subsections||[],presentation:selPres.map(pz=>({section:pz.section,page_break_before:pz.page_break_before}))};
+      const body={changes:sel.map(c=>({code:c.code,fs_section:c.to_section,fs_subsection:c.to_subsection})),new_subsections:msg.proposal.new_subsections||[],presentation:selPres.map(pz=>({action:pz.action,section:pz.section,subsection:pz.subsection,value:pz.value}))};
       const r=await api.assistantApply(entityId,body);
       setMessages(ms=>ms.map((m,i)=>i===mi?{...m,applying:false,applied:r}:m));
     }catch(e){
@@ -7006,7 +7006,6 @@ function ReportAssistant({entityId,entityName,canEdit}){
     const anyValid=p.changes.some(c=>c.valid)||pres.some(pz=>pz.valid);
     const selCount=p.changes.filter(c=>c.valid&&c.selected).length+pres.filter(pz=>pz.valid&&pz.selected).length;
     const applied=m.applied;
-    const pbText=(pz)=> pz.page_break_before?'start on a new page':'no longer forced to a new page';
     return (<div style={{marginTop:10,border:'1px solid '+T.border,borderRadius:T.radiusSm,background:T.bgCard,overflow:'hidden'}}>
       <div style={{padding:'8px 12px',background:T.bgElevated,borderBottom:'1px solid '+T.border,fontSize:11,fontWeight:700,color:T.textBright,textTransform:'uppercase',letterSpacing:'0.05em'}}>Proposed changes</div>
       {p.changes.length?(<div style={{overflowX:'auto'}}>
@@ -7035,11 +7034,11 @@ function ReportAssistant({entityId,entityName,canEdit}){
         </table>
       </div>):null}
       {pres.length?(<div style={{borderTop:p.changes.length?'1px solid '+T.border:'none'}}>
-        <div style={{padding:'8px 12px 4px',fontSize:10.5,fontWeight:700,color:T.textMuted,textTransform:'uppercase',letterSpacing:'0.05em'}}>Page breaks</div>
+        <div style={{padding:'8px 12px 4px',fontSize:10.5,fontWeight:700,color:T.textMuted,textTransform:'uppercase',letterSpacing:'0.05em'}}>Presentation</div>
         {pres.map((pz,ri)=>(<div key={ri} style={{display:'flex',alignItems:'flex-start',gap:8,padding:'2px 12px 8px',opacity:pz.valid?1:0.6}}>
           <input type="checkbox" style={{...S.checkbox,marginTop:2}} checked={!!(pz.valid&&pz.selected)} disabled={!pz.valid||!!applied} onChange={()=>togglePres(mi,ri)}/>
           <div style={{fontSize:13,lineHeight:1.45}}>
-            <span style={{fontWeight:600,color:T.textBright}}>{pz.section}</span> <span style={{color:T.textDim}}>→</span> <span style={{color:pz.valid?T.green:T.red,fontWeight:600}}>{pbText(pz)}</span>
+            <span style={{color:pz.valid?T.textBright:T.red,fontWeight:600}}>{pz.desc}</span>
             {pz.reason?<span style={{color:T.textMuted}}> — {pz.reason}</span>:null}
             {!pz.valid&&pz.issue?<div style={{color:T.red,fontSize:11,marginTop:2}}>{pz.issue}</div>:null}
           </div>
@@ -7053,7 +7052,7 @@ function ReportAssistant({entityId,entityName,canEdit}){
       <div style={{padding:'10px 12px',borderTop:'1px solid '+T.border,display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
         {applied?(
           <span style={{color:T.green,fontSize:12,fontWeight:600}}>
-            ✓ Applied {applied.applied} grouping change{applied.applied===1?'':'s'}{applied.page_breaks_applied?(' · '+applied.page_breaks_applied+' page break'+(applied.page_breaks_applied===1?'':'s')):''}{applied.subsections_created?(' · '+applied.subsections_created+' new subtotal'+(applied.subsections_created===1?'':'s')):''}. The statements and reports now reflect the change.
+            ✓ Applied {applied.applied} grouping change{applied.applied===1?'':'s'}{applied.presentation_applied?(' · '+applied.presentation_applied+' presentation change'+(applied.presentation_applied===1?'':'s')):''}{applied.subsections_created?(' · '+applied.subsections_created+' new subtotal'+(applied.subsections_created===1?'':'s')):''}. The statements and reports now reflect the change.
             {([...(applied.results||[]),...(applied.presentation_results||[])]).some(x=>!x.ok)?(<div style={{color:T.orange,fontWeight:500,marginTop:4}}>Skipped: {[...(applied.results||[]),...(applied.presentation_results||[])].filter(x=>!x.ok).map(x=>(x.code||x.section)+' ('+x.error+')').join('; ')}</div>):null}
           </span>
         ):(<>
