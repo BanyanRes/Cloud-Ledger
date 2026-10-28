@@ -1936,8 +1936,10 @@ app.put('/api/entities/:id', auth, requireRole('Admin','Accountant'), (req, res)
   }
   let displayId = ent.display_id;
   if (req.body.display_id !== undefined) displayId = (req.body.display_id || '').trim() || null;
-  db.prepare('UPDATE entities SET name = ?, entity_type = ?, display_id = ? WHERE id = ?').run(name, entityType, displayId, id);
-  res.json({ id, code: ent.code, name, entity_type: entityType, display_id: displayId });
+  let billInbox = ent.bill_inbox_email;
+  if (req.body.bill_inbox_email !== undefined) billInbox = (req.body.bill_inbox_email || '').trim() || null;
+  db.prepare('UPDATE entities SET name = ?, entity_type = ?, display_id = ?, bill_inbox_email = ? WHERE id = ?').run(name, entityType, displayId, billInbox, id);
+  res.json({ id, code: ent.code, name, entity_type: entityType, display_id: displayId, bill_inbox_email: billInbox });
 });
 app.post('/api/entities/bulk', auth, requireRole('Admin','Accountant'), (req, res) => {
   const { entities } = req.body; if (!Array.isArray(entities)) return res.status(400).json({ error: 'Invalid' });
