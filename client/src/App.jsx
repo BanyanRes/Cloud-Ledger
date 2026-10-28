@@ -1015,7 +1015,6 @@ export default function App(){
       {id:'ic_mapping',label:'IC Mapping',icon:'🗺️',section:'intercompany'},
     ]},
     {key:'REPORTS',label:'Reports',icon:'📊',items:[
-      {id:'assistant',label:'Ask Claude',icon:'💬',section:'reports'},
       // CLRF is a pure LP fund: its statement package is the ASC 946 set under
       // Fund Reporting, not the generic GL/Members'-Equity package. Hide the
       // generic Financial Statements report for it so the wrong one isn't run.
@@ -1063,8 +1062,7 @@ export default function App(){
   const visibleItems=cat=>(cat.adminOnly&&user.role!=='Admin')?[]:cat.items.filter(n=>n.section==='all'?user.role==='Admin':canAccess(n.section));
   const orderedItems=cat=>{
     const ord=navOrder[cat.key]||[];
-    // Ask Claude is pinned to the top of its category for every user, regardless of saved order.
-    const rank=id=>{if(id==='assistant')return -1;const i=ord.indexOf(id);return i<0?1e6:i;};
+    const rank=id=>{const i=ord.indexOf(id);return i<0?1e6:i;};
     return visibleItems(cat).slice().sort((a,b)=>rank(a.id)-rank(b.id));
   };
   const navCats=navTree.filter(c=>visibleItems(c).length>0);
@@ -1158,7 +1156,6 @@ export default function App(){
         {page==='wp_finstmts'&&activeEntity&&!isCLRF&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
-        {page==='assistant'&&activeEntity&&<ReportAssistant entityId={activeEntity} entityName={entityName} canEdit={canEdit} key={activeEntity+'-asst-'+rk}/>}
         {page==='fundrep'&&activeEntity&&isCLRF&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
         {page==='fundrep'&&activeEntity&&!isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Fund Reporting is only for fund entities</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is not a limited-partnership fund. The ASC 946 fund statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) applies to fund entities only. Use <strong>Reports &rsaquo; Financial Statements</strong> for this entity&rsquo;s GL statement package.</div></div>}
         {page==='rep_pcapstmt'&&activeEntity&&isCLRF&&<PcapStatementsReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-ps-'+rk}/>}
@@ -6868,241 +6865,6 @@ function FundReporting({entityId,entityName}){
 }
 
 // ═══ Trailing 12 Months — P&L with 12 monthly columns + a Total column ═══
-// ═══ Reports › Ask Claude — conversational reporting assistant ═══
-// A chat panel where the user talks to Claude about this entity's financial-
-// statement groupings/presentation. When Claude proposes grouping changes
-// (account fs_section/fs_subsection), they render as a reviewable diff the user
-// can apply; Apply re-validates server-side and writes via the same fields the
-// Chart-of-Accounts section picker uses. Backend: server/reportAssistant.js.
-// ═══ Reports › Ask Claude — conversational reporting assistant ═══
-// A chat panel where the user talks to Claude about this entity's financial-
-// statement groupings/presentation. The user can paste or attach a screenshot
-// (e.g. a CPA statement or a layout to match). When Claude proposes grouping
-// changes (account fs_section/fs_subsection), they render as a reviewable diff
-// the user can apply; Apply re-validates server-side and writes via the same
-// fields the Chart-of-Accounts section picker uses. Backend: reportAssistant.js.
-function ReportAssistant({entityId,entityName,canEdit}){
-  const greeting=()=>({role:'assistant',content:"Hi — I'm your reporting assistant for "+(entityName||'this entity')+". Ask me anything about how this entity's financial statements are grouped and presented, or tell me a change you'd like. You can also paste a screenshot (Ctrl+V) — e.g. a statement whose grouping you want to match. For example:\n• \"Move Merchant Fees into Other Income (Expense).\"\n• \"Group all the insurance accounts under an Insurance subtotal.\"\n• \"Here's our CPA's statement — match this grouping.\" (paste the image)\nWhen a change is involved, I'll show you exactly what would move before anything is applied."});
-  const[messages,setMessages]=useState([greeting()]);
-  const[input,setInput]=useState('');
-  const[pics,setPics]=useState([]);
-  const[sending,setSending]=useState(false);
-  const[err,setErr]=useState('');
-  const scrollRef=useRef(null);
-  const fileRef=useRef(null);
-  useEffect(()=>{setMessages([greeting()]);setInput('');setPics([]);setErr('');},[entityId,entityName]);
-  useEffect(()=>{const el=scrollRef.current;if(el)el.scrollTop=el.scrollHeight;},[messages,sending,pics]);
-
-  const ALLOWED_IMG=['image/png','image/jpeg','image/gif','image/webp'];
-  // Read a File into { media_type, data } where data is bare base64 (no prefix).
-  const fileToImage=(file)=>new Promise((resolve,reject)=>{
-    const r=new FileReader();
-    r.onload=()=>{const res=String(r.result||'');const m=/^data:([^;]+);base64,(.*)$/.exec(res);if(!m)return reject(new Error('Unsupported image'));resolve({media_type:m[1],data:m[2]});};
-    r.onerror=()=>reject(new Error('Could not read the image'));
-    r.readAsDataURL(file);
-  });
-  const addFiles=async(files)=>{
-    setErr('');
-    for(const f of files){
-      try{
-        const im=await fileToImage(f);
-        if(!ALLOWED_IMG.includes(im.media_type)){setErr('Unsupported image type ('+im.media_type+'). Use PNG, JPEG, GIF, or WEBP.');continue;}
-        if(im.data.length>7*1024*1024){setErr('That image is too large (max ~5 MB). Try a smaller snip.');continue;}
-        setPics(ps=>ps.length>=10?ps:[...ps,im]);
-      }catch(e){setErr(e.message||'Could not read the image');}
-    }
-  };
-  const onPaste=(e)=>{
-    const items=(e.clipboardData&&e.clipboardData.items)?Array.from(e.clipboardData.items):[];
-    const files=items.filter(it=>it.kind==='file'&&/^image\//.test(it.type)).map(it=>it.getAsFile()).filter(Boolean);
-    if(!files.length)return; // let normal text paste proceed
-    e.preventDefault();
-    addFiles(files);
-  };
-  const onAttach=(e)=>{const fs=Array.from(e.target.files||[]);if(fs.length)addFiles(fs);e.target.value='';};
-
-  // Turn a stored message into Anthropic content blocks (text + base64 images).
-  const toBlocks=(m)=>{
-    const blocks=[];
-    if(m.content&&m.content.trim())blocks.push({type:'text',text:m.content});
-    if(m.images&&m.images.length)for(const im of m.images)blocks.push({type:'image',source:{type:'base64',media_type:im.media_type,data:im.data}});
-    return blocks;
-  };
-  // Build an API-safe transcript: drop the leading greeting, start with a user
-  // turn, and merge consecutive same-role turns (the Messages API requires
-  // alternating roles beginning with the user).
-  const normalizeForApi=(msgs)=>{
-    const out=[];
-    for(const m of msgs){
-      if(m.role!=='user'&&m.role!=='assistant')continue;
-      if(!out.length&&m.role!=='user')continue;
-      const blocks=toBlocks(m);
-      if(!blocks.length)continue;
-      if(out.length&&out[out.length-1].role===m.role){out[out.length-1].content=out[out.length-1].content.concat(blocks);}
-      else out.push({role:m.role,content:blocks});
-    }
-    return out;
-  };
-
-  const send=async()=>{
-    const text=input.trim();
-    if((!text&&!pics.length)||sending)return;
-    setErr('');
-    const userMsg={role:'user',content:text,images:pics};
-    const payload=normalizeForApi([...messages,userMsg]);
-    setMessages(m=>[...m,userMsg]);
-    setInput('');setPics([]);setSending(true);
-    try{
-      const r=await api.assistantChat(entityId,payload);
-      const proposal=r&&r.proposal?{...r.proposal,changes:(r.proposal.changes||[]).map(c=>({...c,selected:!!c.valid})),presentation:(r.proposal.presentation||[]).map(pz=>({...pz,selected:!!pz.valid}))}:null;
-      setMessages(m=>[...m,{role:'assistant',content:r&&r.reply?r.reply:'(no response)',proposal,model:r&&r.model}]);
-    }catch(e){
-      setErr(e.message||'Request failed');
-      setMessages(m=>[...m,{role:'assistant',content:"Sorry — I hit an error and couldn't answer: "+(e.message||'request failed')}]);
-    }finally{setSending(false);}
-  };
-
-  const onKey=(e)=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}};
-
-  const placed=(sec,sub)=> sec?(sec+(sub?' › '+sub:'')):'default placement';
-
-  const toggleRow=(mi,ri)=>setMessages(ms=>ms.map((m,i)=>{
-    if(i!==mi||!m.proposal)return m;
-    const changes=m.proposal.changes.map((c,j)=>j===ri&&c.valid?{...c,selected:!c.selected}:c);
-    return {...m,proposal:{...m.proposal,changes}};
-  }));
-
-  const togglePres=(mi,ri)=>setMessages(ms=>ms.map((m,i)=>{
-    if(i!==mi||!m.proposal)return m;
-    const presentation=(m.proposal.presentation||[]).map((pz,j)=>j===ri&&pz.valid?{...pz,selected:!pz.selected}:pz);
-    return {...m,proposal:{...m.proposal,presentation}};
-  }));
-  const applyProposal=async(mi)=>{
-    const msg=messages[mi];
-    if(!msg||!msg.proposal)return;
-    const sel=msg.proposal.changes.filter(c=>c.valid&&c.selected);
-    const selPres=(msg.proposal.presentation||[]).filter(pz=>pz.valid&&pz.selected);
-    if(!sel.length&&!selPres.length)return;
-    setMessages(ms=>ms.map((m,i)=>i===mi?{...m,applying:true,applyErr:''}:m));
-    try{
-      const body={changes:sel.map(c=>({code:c.code,fs_section:c.to_section,fs_subsection:c.to_subsection})),new_subsections:msg.proposal.new_subsections||[],presentation:selPres.map(pz=>({action:pz.action,section:pz.section,subsection:pz.subsection,value:pz.value}))};
-      const r=await api.assistantApply(entityId,body);
-      setMessages(ms=>ms.map((m,i)=>i===mi?{...m,applying:false,applied:r}:m));
-    }catch(e){
-      setMessages(ms=>ms.map((m,i)=>i===mi?{...m,applying:false,applyErr:e.message||'Apply failed'}:m));
-    }
-  };
-
-  const bubble=(role)=>({
-    maxWidth:'82%',padding:'10px 14px',borderRadius:12,fontSize:13,lineHeight:1.55,whiteSpace:'pre-wrap',
-    ...(role==='user'
-      ?{background:T.accent,color:'#fff',borderBottomRightRadius:4}
-      :{background:T.bgElevated,color:T.text,border:'1px solid '+T.border,borderBottomLeftRadius:4}),
-  });
-
-  const renderProposal=(m,mi)=>{
-    const p=m.proposal; if(!p)return null;
-    const pres=p.presentation||[];
-    const anyValid=p.changes.some(c=>c.valid)||pres.some(pz=>pz.valid);
-    const selCount=p.changes.filter(c=>c.valid&&c.selected).length+pres.filter(pz=>pz.valid&&pz.selected).length;
-    const applied=m.applied;
-    return (<div style={{marginTop:10,border:'1px solid '+T.border,borderRadius:T.radiusSm,background:T.bgCard,overflow:'hidden'}}>
-      <div style={{padding:'8px 12px',background:T.bgElevated,borderBottom:'1px solid '+T.border,fontSize:11,fontWeight:700,color:T.textBright,textTransform:'uppercase',letterSpacing:'0.05em'}}>Proposed changes</div>
-      {p.changes.length?(<div style={{overflowX:'auto'}}>
-        <table style={{...S.table,marginBottom:0}}>
-          <thead><tr>
-            <th style={{...S.thC,width:34}}></th>
-            <th style={S.th}>Account</th>
-            <th style={S.th}>Change</th>
-            <th style={S.th}>Why</th>
-          </tr></thead>
-          <tbody>
-            {p.changes.map((c,ri)=>(<tr key={ri} style={{opacity:c.valid?1:0.6}}>
-              <td style={{...S.tdC,width:34}}>
-                <input type="checkbox" style={S.checkbox} checked={!!(c.valid&&c.selected)} disabled={!c.valid||!!applied} onChange={()=>toggleRow(mi,ri)}/>
-              </td>
-              <td style={{...S.td,whiteSpace:'normal'}}><span style={{fontWeight:600,color:T.textBright}}>{c.code}</span> {c.name}</td>
-              <td style={{...S.td,whiteSpace:'normal'}}>
-                <span style={{color:T.textMuted}}>{placed(c.from_section,c.from_subsection)}</span>
-                <span style={{color:T.textDim}}> → </span>
-                <span style={{color:c.valid?T.green:T.red,fontWeight:600}}>{placed(c.to_section,c.to_subsection)}</span>
-                {!c.valid&&c.issue?<div style={{color:T.red,fontSize:11,marginTop:2}}>{c.issue}</div>:null}
-              </td>
-              <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{c.reason}</td>
-            </tr>))}
-          </tbody>
-        </table>
-      </div>):null}
-      {pres.length?(<div style={{borderTop:p.changes.length?'1px solid '+T.border:'none'}}>
-        <div style={{padding:'8px 12px 4px',fontSize:10.5,fontWeight:700,color:T.textMuted,textTransform:'uppercase',letterSpacing:'0.05em'}}>Presentation</div>
-        {pres.map((pz,ri)=>(<div key={ri} style={{display:'flex',alignItems:'flex-start',gap:8,padding:'2px 12px 8px',opacity:pz.valid?1:0.6}}>
-          <input type="checkbox" style={{...S.checkbox,marginTop:2}} checked={!!(pz.valid&&pz.selected)} disabled={!pz.valid||!!applied} onChange={()=>togglePres(mi,ri)}/>
-          <div style={{fontSize:13,lineHeight:1.45}}>
-            <span style={{color:pz.valid?T.textBright:T.red,fontWeight:600}}>{pz.desc}</span>
-            {pz.reason?<span style={{color:T.textMuted}}> — {pz.reason}</span>:null}
-            {!pz.valid&&pz.issue?<div style={{color:T.red,fontSize:11,marginTop:2}}>{pz.issue}</div>:null}
-          </div>
-        </div>))}
-      </div>):null}
-      {p.new_subsections&&p.new_subsections.length?(
-        <div style={{padding:'8px 12px',fontSize:12,color:T.textMuted,borderTop:'1px solid '+T.borderLight}}>
-          New subtotal{p.new_subsections.length>1?'s':''} to be created: {p.new_subsections.map(s=>s.section+' › '+s.subsection).join(', ')}
-        </div>
-      ):null}
-      <div style={{padding:'10px 12px',borderTop:'1px solid '+T.border,display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
-        {applied?(
-          <span style={{color:T.green,fontSize:12,fontWeight:600}}>
-            ✓ Applied {applied.applied} grouping change{applied.applied===1?'':'s'}{applied.presentation_applied?(' · '+applied.presentation_applied+' presentation change'+(applied.presentation_applied===1?'':'s')):''}{applied.subsections_created?(' · '+applied.subsections_created+' new subtotal'+(applied.subsections_created===1?'':'s')):''}. The statements and reports now reflect the change.
-            {([...(applied.results||[]),...(applied.presentation_results||[])]).some(x=>!x.ok)?(<div style={{color:T.orange,fontWeight:500,marginTop:4}}>Skipped: {[...(applied.results||[]),...(applied.presentation_results||[])].filter(x=>!x.ok).map(x=>(x.code||x.section)+' ('+x.error+')').join('; ')}</div>):null}
-          </span>
-        ):(<>
-          <button style={{...S.btnP,opacity:(!canEdit||!anyValid||!selCount||m.applying)?0.5:1,cursor:(!canEdit||!anyValid||!selCount||m.applying)?'default':'pointer'}} disabled={!canEdit||!anyValid||!selCount||m.applying} onClick={()=>applyProposal(mi)}>
-            {m.applying?'Applying…':('Apply '+selCount+' selected change'+(selCount===1?'':'s'))}
-          </button>
-          {!canEdit?<span style={{fontSize:12,color:T.textMuted}}>You have view-only access, so changes can't be applied.</span>:null}
-          {canEdit&&!anyValid?<span style={{fontSize:12,color:T.textMuted}}>Nothing here can be applied automatically.</span>:null}
-        </>)}
-        {m.applyErr?<span style={{...S.err,marginTop:0}}>{m.applyErr}</span>:null}
-      </div>
-    </div>);
-  };
-
-  return (<div>
-    <div style={S.h1}>Ask Claude</div>
-    <div style={S.sub}>Talk to Claude about {entityName||'this entity'}'s report groupings and presentation. Proposed changes are shown for your review before anything is applied.</div>
-    <div style={S.card}>
-      {err?<div style={{...S.err,marginTop:0,marginBottom:10}}>{err}</div>:null}
-      <div ref={scrollRef} style={{maxHeight:'calc(100vh - 400px)',minHeight:260,overflowY:'auto',display:'flex',flexDirection:'column',gap:12,padding:'4px 2px 8px'}}>
-        {messages.map((m,mi)=>(
-          <div key={mi} style={{display:'flex',flexDirection:'column',alignItems:m.role==='user'?'flex-end':'flex-start'}}>
-            <div style={bubble(m.role)}>
-              {m.content?<div>{m.content}</div>:null}
-              {m.images&&m.images.length?(<div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:m.content?8:0}}>
-                {m.images.map((im,k)=>(<img key={k} src={'data:'+im.media_type+';base64,'+im.data} alt="attachment" style={{maxWidth:180,maxHeight:180,borderRadius:6,border:'1px solid '+(m.role==='user'?'#ffffff55':T.border)}}/>))}
-              </div>):null}
-            </div>
-            {m.role==='assistant'&&m.proposal?<div style={{width:'100%'}}>{renderProposal(m,mi)}</div>:null}
-          </div>
-        ))}
-        {sending?<div style={{alignSelf:'flex-start',color:T.textMuted,fontSize:12,fontStyle:'italic',padding:'2px 6px'}}>Claude is thinking…</div>:null}
-      </div>
-      {pics.length?(<div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:12}}>
-        {pics.map((im,k)=>(<div key={k} style={{position:'relative'}}>
-          <img src={'data:'+im.media_type+';base64,'+im.data} alt="pending" style={{width:60,height:60,objectFit:'cover',borderRadius:6,border:'1px solid '+T.border}}/>
-          <button title="Remove" onClick={()=>setPics(ps=>ps.filter((_,j)=>j!==k))} style={{position:'absolute',top:-7,right:-7,width:18,height:18,borderRadius:9,border:'none',background:T.red,color:'#fff',fontSize:12,lineHeight:'18px',padding:0,cursor:'pointer'}}>×</button>
-        </div>))}
-      </div>):null}
-      <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple style={{display:'none'}} onChange={onAttach}/>
-      <div style={{display:'flex',gap:10,marginTop:14,alignItems:'flex-end'}}>
-        <button title="Attach image" onClick={()=>fileRef.current&&fileRef.current.click()} style={{...S.btnS,height:44,padding:'0 14px',fontSize:16}}>📎</button>
-        <textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={onKey} onPaste={onPaste} rows={2} placeholder="Ask a question, describe a grouping or page-break change, or paste a screenshot…" style={{...S.input,resize:'vertical',minHeight:44,fontFamily:'inherit'}}/>
-        <button style={{...S.btnP,height:44,opacity:((!input.trim()&&!pics.length)||sending)?0.5:1,cursor:((!input.trim()&&!pics.length)||sending)?'default':'pointer'}} disabled={(!input.trim()&&!pics.length)||sending} onClick={send}>Send</button>
-      </div>
-      <div style={{fontSize:11,color:T.textDim,marginTop:8}}>Paste a screenshot (Ctrl+V) or use 📎 to attach one. Claude can regroup accounts and set section page breaks; it never changes any dollar amount. Review each proposal before applying.</div>
-    </div>
-  </div>);
-}
-
 function TrailingTwelveMonths({entityId,entityName}){
   const[asOf,setAsOf]=useState(today());
   const[data,setData]=useState(null);

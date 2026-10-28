@@ -11750,15 +11750,6 @@ require('./letterhead').registerLetterheadRoutes(app, {
   templatesDir: path.join(dataDir, 'templates'),
 });
 
-// ═══ Reports › Ask Claude — conversational reporting assistant ═══
-// Chat endpoint that proposes & applies financial-statement grouping changes
-// (account fs_section/fs_subsection). See server/reportAssistant.js.
-require('./reportAssistant').registerReportAssistantRoutes(app, {
-  db,
-  auth,
-  requireEntityAccess,
-  requireRole,
-});
 
 // ═══ Financial Statements package generator ═══
 // Generates GL-derived financial statements (Balance Sheet, Operations, Cash
@@ -13141,19 +13132,6 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       // deliverable, so they are NOT appended to the PDF here.
       const isMidcoPkg = isConsolidated && consolParent && (/clr?fi?\s*midco\s*i/i.test(consolParent.name || '') || String(consolParent.code || '') === 'CLRFIMID');
       const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: fsEntityCode, entityType: fsEntityType, isConsolidated, nci, lenderMode: isMidcoPkg });
-      // Per-section "start on a new page" overrides (Reports > Ask Claude). Attached
-      // to meta so renderStatementsPdf's balance-sheet renderer can honor them.
-      try { statements.meta.sectionBreaks = db.prepare('SELECT section FROM fs_section_breaks WHERE entity_id=?').all(eid).map(r => r.section); } catch (_e) { statements.meta.sectionBreaks = []; }
-      try {
-        const _pres = { sectionLabel: {}, subLabel: {}, sectionSpaceBefore: {}, order: {} };
-        for (const r of db.prepare('SELECT scope, scope_key, prop, value FROM fs_presentation WHERE entity_id=?').all(eid)) {
-          if (r.scope === 'section' && r.prop === 'label') _pres.sectionLabel[r.scope_key] = r.value;
-          else if (r.scope === 'section' && r.prop === 'space_before') _pres.sectionSpaceBefore[r.scope_key] = +r.value || 0;
-          else if (r.scope === 'subsection' && r.prop === 'label') _pres.subLabel[r.scope_key] = r.value;
-          else if (r.scope === 'side' && r.prop === 'order') { try { _pres.order[r.scope_key] = JSON.parse(r.value); } catch (_e2) {} }
-        }
-        statements.meta.presentation = _pres;
-      } catch (_e) { statements.meta.presentation = {}; }
       const consolSchedules = (isConsolidated && !isMidcoPkg) ? consolidation.buildScheduleSet(db, consolGroup, asOf, (id, oo) => computeBalances(id, oo)) : null;
 
       const files = req.files || {};
