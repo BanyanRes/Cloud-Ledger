@@ -2941,7 +2941,7 @@ function CustomersManager({entityId,entityName,entities,canEdit}){
         <div style={{flex:'1 1 220px'}}><label style={S.label}>Email (invoice recipient)</label><input style={S.input} type="email" placeholder="ar@customer.com" value={form.email} onChange={e=>setForm(f=>({...f,email:e.target.value}))}/></div>
         <div style={{flex:'0 0 120px'}}><label style={S.label}>Terms (days)</label><input style={S.input} type="number" value={form.terms_days} onChange={e=>setForm(f=>({...f,terms_days:e.target.value}))}/></div>
         <div style={{flex:'1 1 240px'}}><label style={S.label}>Counterparty entity <span style={{color:T.textMuted}}>(intercompany only)</span></label>
-          <select style={S.input} value={form.counterparty_entity_id||''} onChange={e=>setForm(f=>({...f,counterparty_entity_id:e.target.value}))}>
+          <select style={S.input} value={form.counterparty_entity_id||''} onChange={e=>{const v=e.target.value;const be=billFor(v);setForm(f=>({...f,counterparty_entity_id:v,...(be?{email:be}:{})}));}}>
             <option value=''>— none (outside customer) —</option>
             {entOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select>
           {form.counterparty_entity_id&&<div style={{fontSize:11.5,marginTop:4,color:billFor(form.counterparty_entity_id)?T.textMuted:T.orange}}>{billFor(form.counterparty_entity_id)?('Routes to '+billFor(form.counterparty_entity_id)):'No Bill.com address on file for this entity.'}</div>}</div>
@@ -2959,7 +2959,7 @@ function CustomersManager({entityId,entityName,entities,canEdit}){
           <tr key={c.id} style={{background:T.accentDim}}>
             <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.name} onChange={e=>setEditForm(f=>({...f,name:e.target.value}))}/>
               <div style={{...S.label,marginTop:6,marginBottom:2}}>CloudLedger Entity Name</div>
-              <select style={{...S.input,marginTop:4,fontSize:12}} value={editForm.counterparty_entity_id||''} onChange={e=>setEditForm(f=>({...f,counterparty_entity_id:e.target.value}))}>
+              <select style={{...S.input,marginTop:4,fontSize:12}} value={editForm.counterparty_entity_id||''} onChange={e=>{const v=e.target.value;const be=billFor(v);setEditForm(f=>({...f,counterparty_entity_id:v,...(be?{email:be}:{})}));}}>
                 <option value=''>— no counterparty —</option>
                 {entOpts.map(x=><option key={x.id} value={x.id}>{x.name}</option>)}</select></td>
             <td style={{padding:'6px 8px'}}><input style={S.input} value={editForm.email} onChange={e=>setEditForm(f=>({...f,email:e.target.value}))}/></td>
