@@ -32,9 +32,8 @@ module.exports = {
     { account_code: '12922', date_paid: '2025-09-02', vendor: 'Armstrong', expense_account: '65000', description: 'Inv#30126, Cyber Liability - Coalition', start_date: '2025-09-21', end_date: '2026-09-21', monthly: 267.00, opening_balance: 2403.00, premium: null },
     { account_code: '12922', date_paid: '2025-09-08', vendor: 'Armstrong', expense_account: '65000', description: 'Inv#30141, Cyber Liability - Ategrity', start_date: '2025-09-21', end_date: '2026-09-21', monthly: 216.58, opening_balance: 1949.20, premium: null },
     { account_code: '12922', date_paid: '2026-03-01', vendor: 'Armstrong', expense_account: '65000', description: "Certain Underwriters at Lloyd's London", start_date: '2026-03-30', end_date: '2027-03-30', monthly: 2307.69, opening_balance: 0, premium: 27692.31 },
-    // 13003 — Prepaid Rent (reclassed from 61000 by JE dated 7/31/2026; no
-    // amortization schedule set — monthly 0 until start/end/monthly are filled in)
-    { account_code: '13003', date_paid: '2026-07-31', vendor: 'Continental', expense_account: '61000', description: 'Rent - paid to Continental (reclass from 61000, JE 7/31/2026)', start_date: null, end_date: null, monthly: 0, opening_balance: 0, premium: 7408.05 },
+    // Office rent is a recurring monthly expense, not a prepaid — it is NOT seeded
+    // as a prepaid item (account 13003 Prepaid Rent nets to zero each month).
   ],
 
   fixedAssets: [
