@@ -3486,8 +3486,25 @@ async function renderStatementsPdf(s, outOffsets) {
     // lines), which is a different thing.
     const RULE_BELOW_SECTIONS = /^Total (Current Assets|Fixed Assets, Net)$/;
     const renderBsSection = (sec, sectionTotalLabel, reserveTail = 0) => {
-      L.row(sec.title, [], { indent: 6, boldRow: true });
       const showSubHeaders = sec.subs.length > 1 || sec.subs.some(su => su.contra) || m.profile === 'bsfrgp' || m.profile === 'banyan';
+      // Keep each balance-sheet section together so its header is never left
+      // stranded at the bottom of a page while the rest of the section flows to
+      // the next one (Jimmy 10/2026 — "move the Fixed Assets section to the top
+      // of the next page"). keepTogether only forces a break when the whole
+      // section fits on a fresh usable page; a section taller than a page still
+      // flows across pages normally, so this never emits blank pages.
+      {
+        let _nL = 1; // section header
+        for (const _su of sec.subs) {
+          if (showSubHeaders) _nL += 1;
+          _nL += _su.rows.length;
+          const _fs = m.profile === 'banyandev' && BANYANDEV_FORCE_SUBTOTAL_SECTIONS.has(sec.title);
+          if (showSubHeaders && (_su.rows.length > 1 || _fs)) _nL += 1;
+        }
+        _nL += 1; // section total
+        L.keepTogether(_nL * 13 + 14);
+      }
+      L.row(sec.title, [], { indent: 6, boldRow: true });
       for (const su of sec.subs) {
         if (showSubHeaders) L.row(su.title, [], { indent: 16 });
         const rowIndent = showSubHeaders ? 26 : 16;
