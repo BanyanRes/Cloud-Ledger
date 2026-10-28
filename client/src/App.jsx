@@ -1025,7 +1025,7 @@ export default function App(){
       {id:'trial',label:'Trial Balance',icon:NI.trial,section:'reports'},
       {id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
       ...(!isCLRF?[{id:'ttm',label:'Trailing 12 Months',icon:'📈',section:'reports'}]:[]),
-      {id:'fundrep',label:'Fund Reporting',icon:'🏦',section:'reports'},
+      ...(isCLRF?[{id:'fundrep',label:'Fund Reporting',icon:'🏦',section:'reports'}]:[]),
       {id:'org_structure',label:'Org Structure',icon:'🏛️',section:'intercompany'},
       {id:'consolidation',label:'Consolidation',icon:'🧩',section:'consolidation'},
       ...(isCLRF?[{id:'rep_pcapstmt',label:'PCAP Statements',icon:'📄',section:'reports'}]:[]),
@@ -1158,7 +1158,8 @@ export default function App(){
         {page==='wp_finstmts'&&activeEntity&&!isCLRF&&<FinancialStatements entityId={activeEntity} entityName={entityName} entityCode={_activeEnt&&_activeEnt.code} canEdit={canEdit} isDevEntity={isReqEntity} isDev={isDevEntity} budgetEligible={(_activeEnt&&_activeEnt.entity_type==='rail_assets')||isTurnkeyEntity} key={activeEntity+'-'+rk}/>}
         {page==='wp_finstmts'&&activeEntity&&isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Use Fund Reporting for this fund</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is a limited-partnership fund. Its statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) is generated under <strong>Reports &rsaquo; Fund Reporting</strong>, not the generic Financial Statements report.</div></div>}
         {page==='ttm'&&activeEntity&&<TrailingTwelveMonths entityId={activeEntity} entityName={entityName} key={activeEntity+'-'+rk}/>}
-        {page==='fundrep'&&activeEntity&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
+        {page==='fundrep'&&activeEntity&&isCLRF&&<FundReporting entityId={activeEntity} entityName={entityName} key={activeEntity+'-fr-'+rk}/>}
+        {page==='fundrep'&&activeEntity&&!isCLRF&&<div style={{...S.card}}><div style={{fontSize:15,fontWeight:600,color:T.textBright,marginBottom:6}}>Fund Reporting is only for fund entities</div><div style={{fontSize:13,color:T.textMuted,lineHeight:1.5,maxWidth:640}}>{entityName} is not a limited-partnership fund. The ASC 946 fund statement package (Statement of Assets, Liabilities &amp; Partners&rsquo; Capital, Schedule of Investments, Statement of Operations, Statement of Changes in Partners&rsquo; Capital, and Statement of Cash Flows) applies to fund entities only. Use <strong>Reports &rsaquo; Financial Statements</strong> for this entity&rsquo;s GL statement package.</div></div>}
         {page==='rep_pcapstmt'&&activeEntity&&isCLRF&&<PcapStatementsReport entityId={activeEntity} entityName={entityName} key={activeEntity+'-ps-'+rk}/>}
       </>})()}</div></div>
     {showJE&&activeEntity&&<JournalEntryModal entityId={activeEntity} entityName={_activeEnt?_activeEnt.name:''} isTurnkeyEntity={isTurnkeyEntity} dimsEnabled={dimsEnabled} user={user} onClose={()=>setShowJE(false)} onPosted={()=>setRk(k=>k+1)} form={jeForm} setForm={setJeForm} pendingFiles={jePendingFiles} setPendingFiles={setJePendingFiles}/>}
