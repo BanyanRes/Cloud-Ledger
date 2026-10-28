@@ -90,6 +90,9 @@ export const api = {
   deleteAccount: (eid, code) => request('/entities/' + eid + '/accounts/' + encodeURIComponent(code), { method: 'DELETE' }),
   getStatementSections: (eid) => request('/entities/' + eid + '/statement-sections'),
   addStatementSubsection: (eid, data) => request('/entities/' + eid + '/statement-subsections', { method: 'POST', body: data }),
+  // Reports › Ask Claude — conversational reporting assistant
+  assistantChat: (eid, messages) => request('/entities/' + eid + '/assistant/chat', { method: 'POST', body: { messages } }),
+  assistantApply: (eid, body) => request('/entities/' + eid + '/assistant/apply', { method: 'POST', body }),
 
   // Journal Entries
   getEntries: (eid, from, to) => {

@@ -11733,6 +11733,16 @@ require('./letterhead').registerLetterheadRoutes(app, {
   templatesDir: path.join(dataDir, 'templates'),
 });
 
+// ═══ Reports › Ask Claude — conversational reporting assistant ═══
+// Chat endpoint that proposes & applies financial-statement grouping changes
+// (account fs_section/fs_subsection). See server/reportAssistant.js.
+require('./reportAssistant').registerReportAssistantRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+});
+
 // ═══ Financial Statements package generator ═══
 // Generates GL-derived financial statements (Balance Sheet, Operations, Cash
 // Flows, Members' Equity) for an entity as of a date, on a monthly/quarterly/
