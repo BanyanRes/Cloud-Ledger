@@ -1027,8 +1027,6 @@ export default function App(){
       {id:'ledger',label:'General Ledger',icon:NI.ledger,section:'reports'},
       ...(!isCLRF?[{id:'ttm',label:'Trailing 12 Months',icon:'📈',section:'reports'}]:[]),
       ...(isCLRF?[{id:'fundrep',label:'Fund Reporting',icon:'🏦',section:'reports'}]:[]),
-      {id:'org_structure',label:'Org Structure',icon:'🏛️',section:'intercompany'},
-      {id:'consolidation',label:'Consolidation',icon:'🧩',section:'consolidation'},
       ...(isCLRF?[{id:'rep_pcapstmt',label:'PCAP Statements',icon:'📄',section:'reports'}]:[]),
       {id:'customdetail',label:'Custom Detail',icon:'📋',section:'reports'},
       ...(dimsEnabled?[{id:'pivot',label:'Pivot Summary',icon:'📊',section:'reports'}]:[]),
