@@ -3420,6 +3420,21 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
 // If an `outOffsets` array is passed, it is filled with { label, page } entries
 // giving each statement's 0-based starting page index within this PDF (used to
 // compute Table-of-Contents page references).
+// Reorder balance-sheet sections per a presentation override (fs_presentation,
+// scope 'side'). Sections named in `ord` come first in that order; any not
+// named keep their original relative order after them. Display-only: totals
+// are already computed, so this never affects the tie-out.
+function reorderSide(arr, ord) {
+  if (!Array.isArray(ord) || !ord.length || !Array.isArray(arr)) return arr;
+  const pos = new Map(ord.map((n, i) => [n, i]));
+  const orig = new Map(arr.map((s, i) => [s, i]));
+  return arr.slice().sort((a, b) => {
+    const pa = pos.has(a.title) ? pos.get(a.title) : (1000 + orig.get(a));
+    const pb = pos.has(b.title) ? pos.get(b.title) : (1000 + orig.get(b));
+    return pa - pb;
+  });
+}
+
 async function renderStatementsPdf(s, outOffsets) {
   const track = (label, tocLabel) => { if (outOffsets) outOffsets.push({ label: (tocLabel || label), page: pdf.getPageCount() }); };
   const pdf = await PDFDocument.create();
@@ -3588,7 +3603,7 @@ async function renderStatementsPdf(s, outOffsets) {
       // the grand total's height (BS_GRAND_RESERVE), so if both won't fit they
       // break to the next page together (CLA/Jimmy 8/28 — "move the closest
       // subtotal with the total line to the subsequent page").
-      const asecs = s.balanceSheet.assetSections;
+      const asecs = reorderSide(s.balanceSheet.assetSections, (m.presentation && m.presentation.order && m.presentation.order.assets));
       asecs.forEach((sec, i) => renderBsSection(sec, 'Total ' + sec.title, i === asecs.length - 1 ? BS_GRAND_RESERVE : 0));
       if (asecs.length) lastAssetSectionRuledBelow = RULE_BELOW_SECTIONS.test('Total ' + asecs[asecs.length - 1].title);
     }
@@ -3597,7 +3612,7 @@ async function renderStatementsPdf(s, outOffsets) {
     L.sectionTitle('LIABILITIES AND ' + meEquity.toUpperCase());
     bsFirstRow = wantDollar;
     if (tkBs) renderTkBlocks(tkBs.liabBlocks);
-    else for (const sec of s.balanceSheet.liabSections) renderBsSection(sec, 'Total ' + sec.title);
+    else for (const sec of reorderSide(s.balanceSheet.liabSections, (m.presentation && m.presentation.order && m.presentation.order.liabilities))) renderBsSection(sec, 'Total ' + sec.title);
     L.row('Total Liabilities', bsCells(s.balanceSheet.totalLiab.cur, s.balanceSheet.totalLiab.pri), { indent: 6, boldRow: true, ruleAbove: true, ruleBelow: true, gapAfter: 6 });
     // Keep the whole Members' Equity section on one page \u2014 never split it so
     // that only its totals spill to a near-empty continuation page (CLA/Jimmy

@@ -13145,11 +13145,12 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       // to meta so renderStatementsPdf's balance-sheet renderer can honor them.
       try { statements.meta.sectionBreaks = db.prepare('SELECT section FROM fs_section_breaks WHERE entity_id=?').all(eid).map(r => r.section); } catch (_e) { statements.meta.sectionBreaks = []; }
       try {
-        const _pres = { sectionLabel: {}, subLabel: {}, sectionSpaceBefore: {} };
+        const _pres = { sectionLabel: {}, subLabel: {}, sectionSpaceBefore: {}, order: {} };
         for (const r of db.prepare('SELECT scope, scope_key, prop, value FROM fs_presentation WHERE entity_id=?').all(eid)) {
           if (r.scope === 'section' && r.prop === 'label') _pres.sectionLabel[r.scope_key] = r.value;
           else if (r.scope === 'section' && r.prop === 'space_before') _pres.sectionSpaceBefore[r.scope_key] = +r.value || 0;
           else if (r.scope === 'subsection' && r.prop === 'label') _pres.subLabel[r.scope_key] = r.value;
+          else if (r.scope === 'side' && r.prop === 'order') { try { _pres.order[r.scope_key] = JSON.parse(r.value); } catch (_e2) {} }
         }
         statements.meta.presentation = _pres;
       } catch (_e) { statements.meta.presentation = {}; }
