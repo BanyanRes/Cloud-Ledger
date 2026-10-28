@@ -6875,37 +6875,84 @@ function FundReporting({entityId,entityName}){
 // (account fs_section/fs_subsection), they render as a reviewable diff the user
 // can apply; Apply re-validates server-side and writes via the same fields the
 // Chart-of-Accounts section picker uses. Backend: server/reportAssistant.js.
+// ═══ Reports › Ask Claude — conversational reporting assistant ═══
+// A chat panel where the user talks to Claude about this entity's financial-
+// statement groupings/presentation. The user can paste or attach a screenshot
+// (e.g. a CPA statement or a layout to match). When Claude proposes grouping
+// changes (account fs_section/fs_subsection), they render as a reviewable diff
+// the user can apply; Apply re-validates server-side and writes via the same
+// fields the Chart-of-Accounts section picker uses. Backend: reportAssistant.js.
 function ReportAssistant({entityId,entityName,canEdit}){
-  const greeting=()=>({role:'assistant',content:"Hi — I'm your reporting assistant for "+(entityName||'this entity')+". Ask me anything about how this entity's financial statements are grouped and presented, or tell me a change you'd like. For example:\n• \"Move Merchant Fees into Other Income (Expense).\"\n• \"Group all the insurance accounts under an Insurance subtotal.\"\n• \"Why is interest income showing in operating revenue?\"\nWhen a change is involved, I'll show you exactly what would move before anything is applied."});
+  const greeting=()=>({role:'assistant',content:"Hi — I'm your reporting assistant for "+(entityName||'this entity')+". Ask me anything about how this entity's financial statements are grouped and presented, or tell me a change you'd like. You can also paste a screenshot (Ctrl+V) — e.g. a statement whose grouping you want to match. For example:\n• \"Move Merchant Fees into Other Income (Expense).\"\n• \"Group all the insurance accounts under an Insurance subtotal.\"\n• \"Here's our CPA's statement — match this grouping.\" (paste the image)\nWhen a change is involved, I'll show you exactly what would move before anything is applied."});
   const[messages,setMessages]=useState([greeting()]);
   const[input,setInput]=useState('');
+  const[pics,setPics]=useState([]);
   const[sending,setSending]=useState(false);
   const[err,setErr]=useState('');
   const scrollRef=useRef(null);
-  useEffect(()=>{setMessages([greeting()]);setInput('');setErr('');},[entityId,entityName]);
-  useEffect(()=>{const el=scrollRef.current;if(el)el.scrollTop=el.scrollHeight;},[messages,sending]);
+  const fileRef=useRef(null);
+  useEffect(()=>{setMessages([greeting()]);setInput('');setPics([]);setErr('');},[entityId,entityName]);
+  useEffect(()=>{const el=scrollRef.current;if(el)el.scrollTop=el.scrollHeight;},[messages,sending,pics]);
 
+  const ALLOWED_IMG=['image/png','image/jpeg','image/gif','image/webp'];
+  // Read a File into { media_type, data } where data is bare base64 (no prefix).
+  const fileToImage=(file)=>new Promise((resolve,reject)=>{
+    const r=new FileReader();
+    r.onload=()=>{const res=String(r.result||'');const m=/^data:([^;]+);base64,(.*)$/.exec(res);if(!m)return reject(new Error('Unsupported image'));resolve({media_type:m[1],data:m[2]});};
+    r.onerror=()=>reject(new Error('Could not read the image'));
+    r.readAsDataURL(file);
+  });
+  const addFiles=async(files)=>{
+    setErr('');
+    for(const f of files){
+      try{
+        const im=await fileToImage(f);
+        if(!ALLOWED_IMG.includes(im.media_type)){setErr('Unsupported image type ('+im.media_type+'). Use PNG, JPEG, GIF, or WEBP.');continue;}
+        if(im.data.length>7*1024*1024){setErr('That image is too large (max ~5 MB). Try a smaller snip.');continue;}
+        setPics(ps=>ps.length>=10?ps:[...ps,im]);
+      }catch(e){setErr(e.message||'Could not read the image');}
+    }
+  };
+  const onPaste=(e)=>{
+    const items=(e.clipboardData&&e.clipboardData.items)?Array.from(e.clipboardData.items):[];
+    const files=items.filter(it=>it.kind==='file'&&/^image\//.test(it.type)).map(it=>it.getAsFile()).filter(Boolean);
+    if(!files.length)return; // let normal text paste proceed
+    e.preventDefault();
+    addFiles(files);
+  };
+  const onAttach=(e)=>{const fs=Array.from(e.target.files||[]);if(fs.length)addFiles(fs);e.target.value='';};
+
+  // Turn a stored message into Anthropic content blocks (text + base64 images).
+  const toBlocks=(m)=>{
+    const blocks=[];
+    if(m.content&&m.content.trim())blocks.push({type:'text',text:m.content});
+    if(m.images&&m.images.length)for(const im of m.images)blocks.push({type:'image',source:{type:'base64',media_type:im.media_type,data:im.data}});
+    return blocks;
+  };
   // Build an API-safe transcript: drop the leading greeting, start with a user
-  // turn, and merge any consecutive same-role turns (the Messages API requires
+  // turn, and merge consecutive same-role turns (the Messages API requires
   // alternating roles beginning with the user).
   const normalizeForApi=(msgs)=>{
     const out=[];
     for(const m of msgs){
       if(m.role!=='user'&&m.role!=='assistant')continue;
       if(!out.length&&m.role!=='user')continue;
-      if(out.length&&out[out.length-1].role===m.role){out[out.length-1]={role:m.role,content:out[out.length-1].content+'\n\n'+m.content};}
-      else out.push({role:m.role,content:m.content});
+      const blocks=toBlocks(m);
+      if(!blocks.length)continue;
+      if(out.length&&out[out.length-1].role===m.role){out[out.length-1].content=out[out.length-1].content.concat(blocks);}
+      else out.push({role:m.role,content:blocks});
     }
     return out;
   };
 
   const send=async()=>{
     const text=input.trim();
-    if(!text||sending)return;
+    if((!text&&!pics.length)||sending)return;
     setErr('');
-    const payload=normalizeForApi([...messages,{role:'user',content:text}]);
-    setMessages(m=>[...m,{role:'user',content:text}]);
-    setInput('');setSending(true);
+    const userMsg={role:'user',content:text,images:pics};
+    const payload=normalizeForApi([...messages,userMsg]);
+    setMessages(m=>[...m,userMsg]);
+    setInput('');setPics([]);setSending(true);
     try{
       const r=await api.assistantChat(entityId,payload);
       const proposal=r&&r.proposal?{...r.proposal,changes:(r.proposal.changes||[]).map(c=>({...c,selected:!!c.valid}))}:null;
@@ -7008,20 +7055,33 @@ function ReportAssistant({entityId,entityName,canEdit}){
     <div style={S.sub}>Talk to Claude about {entityName||'this entity'}'s report groupings and presentation. Proposed changes are shown for your review before anything is applied.</div>
     <div style={S.card}>
       {err?<div style={{...S.err,marginTop:0,marginBottom:10}}>{err}</div>:null}
-      <div ref={scrollRef} style={{maxHeight:'calc(100vh - 380px)',minHeight:260,overflowY:'auto',display:'flex',flexDirection:'column',gap:12,padding:'4px 2px 8px'}}>
+      <div ref={scrollRef} style={{maxHeight:'calc(100vh - 400px)',minHeight:260,overflowY:'auto',display:'flex',flexDirection:'column',gap:12,padding:'4px 2px 8px'}}>
         {messages.map((m,mi)=>(
           <div key={mi} style={{display:'flex',flexDirection:'column',alignItems:m.role==='user'?'flex-end':'flex-start'}}>
-            <div style={bubble(m.role)}>{m.content}</div>
+            <div style={bubble(m.role)}>
+              {m.content?<div>{m.content}</div>:null}
+              {m.images&&m.images.length?(<div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:m.content?8:0}}>
+                {m.images.map((im,k)=>(<img key={k} src={'data:'+im.media_type+';base64,'+im.data} alt="attachment" style={{maxWidth:180,maxHeight:180,borderRadius:6,border:'1px solid '+(m.role==='user'?'#ffffff55':T.border)}}/>))}
+              </div>):null}
+            </div>
             {m.role==='assistant'&&m.proposal?<div style={{width:'100%'}}>{renderProposal(m,mi)}</div>:null}
           </div>
         ))}
         {sending?<div style={{alignSelf:'flex-start',color:T.textMuted,fontSize:12,fontStyle:'italic',padding:'2px 6px'}}>Claude is thinking…</div>:null}
       </div>
+      {pics.length?(<div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:12}}>
+        {pics.map((im,k)=>(<div key={k} style={{position:'relative'}}>
+          <img src={'data:'+im.media_type+';base64,'+im.data} alt="pending" style={{width:60,height:60,objectFit:'cover',borderRadius:6,border:'1px solid '+T.border}}/>
+          <button title="Remove" onClick={()=>setPics(ps=>ps.filter((_,j)=>j!==k))} style={{position:'absolute',top:-7,right:-7,width:18,height:18,borderRadius:9,border:'none',background:T.red,color:'#fff',fontSize:12,lineHeight:'18px',padding:0,cursor:'pointer'}}>×</button>
+        </div>))}
+      </div>):null}
+      <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple style={{display:'none'}} onChange={onAttach}/>
       <div style={{display:'flex',gap:10,marginTop:14,alignItems:'flex-end'}}>
-        <textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={onKey} rows={2} placeholder="Ask a question or describe a grouping change…" style={{...S.input,resize:'vertical',minHeight:44,fontFamily:'inherit'}}/>
-        <button style={{...S.btnP,height:44,opacity:(!input.trim()||sending)?0.5:1,cursor:(!input.trim()||sending)?'default':'pointer'}} disabled={!input.trim()||sending} onClick={send}>Send</button>
+        <button title="Attach image" onClick={()=>fileRef.current&&fileRef.current.click()} style={{...S.btnS,height:44,padding:'0 14px',fontSize:16}}>📎</button>
+        <textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={onKey} onPaste={onPaste} rows={2} placeholder="Ask a question, describe a grouping change, or paste a screenshot…" style={{...S.input,resize:'vertical',minHeight:44,fontFamily:'inherit'}}/>
+        <button style={{...S.btnP,height:44,opacity:((!input.trim()&&!pics.length)||sending)?0.5:1,cursor:((!input.trim()&&!pics.length)||sending)?'default':'pointer'}} disabled={(!input.trim()&&!pics.length)||sending} onClick={send}>Send</button>
       </div>
-      <div style={{fontSize:11,color:T.textDim,marginTop:8}}>Claude can regroup accounts (where a line appears and which subtotal it rolls into); it never changes any dollar amount. Review each proposal before applying.</div>
+      <div style={{fontSize:11,color:T.textDim,marginTop:8}}>Paste a screenshot (Ctrl+V) or use 📎 to attach one. Claude can regroup accounts (where a line appears and which subtotal it rolls into); it never changes any dollar amount. Review each proposal before applying.</div>
     </div>
   </div>);
 }

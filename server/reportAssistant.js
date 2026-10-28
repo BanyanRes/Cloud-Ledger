@@ -103,6 +103,35 @@ function stripCodeFences(text) {
   return String(text || '').replace(/```[\s\S]*?```/g, '').replace(/\n{3,}/g, '\n\n').trim();
 }
 
+// ── Allowed inbound image types for pasted/attached screenshots, and a size cap
+//    on the base64 payload (~5 MB binary) so a huge paste can't blow up a request.
+const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const MAX_IMAGE_B64 = 7 * 1024 * 1024;
+
+// ── Sanitize one message's content. Accepts a plain string, or an array of
+//    content blocks (text + base64 image) as the Anthropic Messages API expects.
+//    Returns a cleaned string / block-array, or null when nothing is usable.
+function sanitizeContent(content) {
+  if (typeof content === 'string') { const t = content.slice(0, 8000); return t.trim() ? t : null; }
+  if (Array.isArray(content)) {
+    const blocks = [];
+    let imgCount = 0;
+    for (const b of content) {
+      if (!b || typeof b !== 'object') continue;
+      if (b.type === 'text' && typeof b.text === 'string' && b.text.trim()) {
+        blocks.push({ type: 'text', text: b.text.slice(0, 8000) });
+      } else if (b.type === 'image' && b.source && b.source.type === 'base64'
+          && ALLOWED_IMAGE_TYPES.has(b.source.media_type) && typeof b.source.data === 'string'
+          && b.source.data.length <= MAX_IMAGE_B64 && imgCount < 10) {
+        blocks.push({ type: 'image', source: { type: 'base64', media_type: b.source.media_type, data: b.source.data } });
+        imgCount++;
+      }
+    }
+    return blocks.length ? blocks : null;
+  }
+  return null;
+}
+
 function buildSystemPrompt(ent, pick, accounts) {
   const lines = [];
   lines.push('You are CloudLedger\u2019s reporting assistant for the entity "' + ent.name + '" (reporting profile: ' + pick.profile + ').');
@@ -149,10 +178,13 @@ function registerReportAssistantRoutes(app, deps) {
       if (!apiKey) return res.status(503).json({ error: 'The assistant is not configured (ANTHROPIC_API_KEY missing on the server).' });
 
       const rawMsgs = Array.isArray(req.body && req.body.messages) ? req.body.messages : [];
-      const messages = rawMsgs
-        .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string' && m.content.trim())
-        .map(m => ({ role: m.role, content: String(m.content).slice(0, 8000) }))
-        .slice(-20);
+      let messages = [];
+      for (const m of rawMsgs) {
+        if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+        const c = sanitizeContent(m.content);
+        if (c) messages.push({ role: m.role, content: c });
+      }
+      messages = messages.slice(-20);
       if (!messages.length || messages[messages.length - 1].role !== 'user') {
         return res.status(400).json({ error: 'Expected a conversation ending with a user message.' });
       }
