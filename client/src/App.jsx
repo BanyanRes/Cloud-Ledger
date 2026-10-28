@@ -6954,7 +6954,7 @@ function ReportAssistant({entityId,entityName,canEdit}){
     setInput('');setPics([]);setSending(true);
     try{
       const r=await api.assistantChat(entityId,payload);
-      const proposal=r&&r.proposal?{...r.proposal,changes:(r.proposal.changes||[]).map(c=>({...c,selected:!!c.valid}))}:null;
+      const proposal=r&&r.proposal?{...r.proposal,changes:(r.proposal.changes||[]).map(c=>({...c,selected:!!c.valid})),presentation:(r.proposal.presentation||[]).map(pz=>({...pz,selected:!!pz.valid}))}:null;
       setMessages(m=>[...m,{role:'assistant',content:r&&r.reply?r.reply:'(no response)',proposal,model:r&&r.model}]);
     }catch(e){
       setErr(e.message||'Request failed');
@@ -6972,14 +6972,20 @@ function ReportAssistant({entityId,entityName,canEdit}){
     return {...m,proposal:{...m.proposal,changes}};
   }));
 
+  const togglePres=(mi,ri)=>setMessages(ms=>ms.map((m,i)=>{
+    if(i!==mi||!m.proposal)return m;
+    const presentation=(m.proposal.presentation||[]).map((pz,j)=>j===ri&&pz.valid?{...pz,selected:!pz.selected}:pz);
+    return {...m,proposal:{...m.proposal,presentation}};
+  }));
   const applyProposal=async(mi)=>{
     const msg=messages[mi];
     if(!msg||!msg.proposal)return;
     const sel=msg.proposal.changes.filter(c=>c.valid&&c.selected);
-    if(!sel.length)return;
+    const selPres=(msg.proposal.presentation||[]).filter(pz=>pz.valid&&pz.selected);
+    if(!sel.length&&!selPres.length)return;
     setMessages(ms=>ms.map((m,i)=>i===mi?{...m,applying:true,applyErr:''}:m));
     try{
-      const body={changes:sel.map(c=>({code:c.code,fs_section:c.to_section,fs_subsection:c.to_subsection})),new_subsections:msg.proposal.new_subsections||[]};
+      const body={changes:sel.map(c=>({code:c.code,fs_section:c.to_section,fs_subsection:c.to_subsection})),new_subsections:msg.proposal.new_subsections||[],presentation:selPres.map(pz=>({section:pz.section,page_break_before:pz.page_break_before}))};
       const r=await api.assistantApply(entityId,body);
       setMessages(ms=>ms.map((m,i)=>i===mi?{...m,applying:false,applied:r}:m));
     }catch(e){
@@ -6996,12 +7002,14 @@ function ReportAssistant({entityId,entityName,canEdit}){
 
   const renderProposal=(m,mi)=>{
     const p=m.proposal; if(!p)return null;
-    const anyValid=p.changes.some(c=>c.valid);
-    const selCount=p.changes.filter(c=>c.valid&&c.selected).length;
+    const pres=p.presentation||[];
+    const anyValid=p.changes.some(c=>c.valid)||pres.some(pz=>pz.valid);
+    const selCount=p.changes.filter(c=>c.valid&&c.selected).length+pres.filter(pz=>pz.valid&&pz.selected).length;
     const applied=m.applied;
+    const pbText=(pz)=> pz.page_break_before?'start on a new page':'no longer forced to a new page';
     return (<div style={{marginTop:10,border:'1px solid '+T.border,borderRadius:T.radiusSm,background:T.bgCard,overflow:'hidden'}}>
-      <div style={{padding:'8px 12px',background:T.bgElevated,borderBottom:'1px solid '+T.border,fontSize:11,fontWeight:700,color:T.textBright,textTransform:'uppercase',letterSpacing:'0.05em'}}>Proposed grouping changes</div>
-      <div style={{overflowX:'auto'}}>
+      <div style={{padding:'8px 12px',background:T.bgElevated,borderBottom:'1px solid '+T.border,fontSize:11,fontWeight:700,color:T.textBright,textTransform:'uppercase',letterSpacing:'0.05em'}}>Proposed changes</div>
+      {p.changes.length?(<div style={{overflowX:'auto'}}>
         <table style={{...S.table,marginBottom:0}}>
           <thead><tr>
             <th style={{...S.thC,width:34}}></th>
@@ -7025,7 +7033,18 @@ function ReportAssistant({entityId,entityName,canEdit}){
             </tr>))}
           </tbody>
         </table>
-      </div>
+      </div>):null}
+      {pres.length?(<div style={{borderTop:p.changes.length?'1px solid '+T.border:'none'}}>
+        <div style={{padding:'8px 12px 4px',fontSize:10.5,fontWeight:700,color:T.textMuted,textTransform:'uppercase',letterSpacing:'0.05em'}}>Page breaks</div>
+        {pres.map((pz,ri)=>(<div key={ri} style={{display:'flex',alignItems:'flex-start',gap:8,padding:'2px 12px 8px',opacity:pz.valid?1:0.6}}>
+          <input type="checkbox" style={{...S.checkbox,marginTop:2}} checked={!!(pz.valid&&pz.selected)} disabled={!pz.valid||!!applied} onChange={()=>togglePres(mi,ri)}/>
+          <div style={{fontSize:13,lineHeight:1.45}}>
+            <span style={{fontWeight:600,color:T.textBright}}>{pz.section}</span> <span style={{color:T.textDim}}>→</span> <span style={{color:pz.valid?T.green:T.red,fontWeight:600}}>{pbText(pz)}</span>
+            {pz.reason?<span style={{color:T.textMuted}}> — {pz.reason}</span>:null}
+            {!pz.valid&&pz.issue?<div style={{color:T.red,fontSize:11,marginTop:2}}>{pz.issue}</div>:null}
+          </div>
+        </div>))}
+      </div>):null}
       {p.new_subsections&&p.new_subsections.length?(
         <div style={{padding:'8px 12px',fontSize:12,color:T.textMuted,borderTop:'1px solid '+T.borderLight}}>
           New subtotal{p.new_subsections.length>1?'s':''} to be created: {p.new_subsections.map(s=>s.section+' › '+s.subsection).join(', ')}
@@ -7034,8 +7053,8 @@ function ReportAssistant({entityId,entityName,canEdit}){
       <div style={{padding:'10px 12px',borderTop:'1px solid '+T.border,display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
         {applied?(
           <span style={{color:T.green,fontSize:12,fontWeight:600}}>
-            ✓ Applied {applied.applied} change{applied.applied===1?'':'s'}{applied.subsections_created?(' · '+applied.subsections_created+' new subtotal'+(applied.subsections_created===1?'':'s')):''}. The statements and reports now reflect the new grouping.
-            {(applied.results||[]).some(x=>!x.ok)?(<div style={{color:T.orange,fontWeight:500,marginTop:4}}>Skipped: {(applied.results||[]).filter(x=>!x.ok).map(x=>x.code+' ('+x.error+')').join('; ')}</div>):null}
+            ✓ Applied {applied.applied} grouping change{applied.applied===1?'':'s'}{applied.page_breaks_applied?(' · '+applied.page_breaks_applied+' page break'+(applied.page_breaks_applied===1?'':'s')):''}{applied.subsections_created?(' · '+applied.subsections_created+' new subtotal'+(applied.subsections_created===1?'':'s')):''}. The statements and reports now reflect the change.
+            {([...(applied.results||[]),...(applied.presentation_results||[])]).some(x=>!x.ok)?(<div style={{color:T.orange,fontWeight:500,marginTop:4}}>Skipped: {[...(applied.results||[]),...(applied.presentation_results||[])].filter(x=>!x.ok).map(x=>(x.code||x.section)+' ('+x.error+')').join('; ')}</div>):null}
           </span>
         ):(<>
           <button style={{...S.btnP,opacity:(!canEdit||!anyValid||!selCount||m.applying)?0.5:1,cursor:(!canEdit||!anyValid||!selCount||m.applying)?'default':'pointer'}} disabled={!canEdit||!anyValid||!selCount||m.applying} onClick={()=>applyProposal(mi)}>
@@ -7077,10 +7096,10 @@ function ReportAssistant({entityId,entityName,canEdit}){
       <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple style={{display:'none'}} onChange={onAttach}/>
       <div style={{display:'flex',gap:10,marginTop:14,alignItems:'flex-end'}}>
         <button title="Attach image" onClick={()=>fileRef.current&&fileRef.current.click()} style={{...S.btnS,height:44,padding:'0 14px',fontSize:16}}>📎</button>
-        <textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={onKey} onPaste={onPaste} rows={2} placeholder="Ask a question, describe a grouping change, or paste a screenshot…" style={{...S.input,resize:'vertical',minHeight:44,fontFamily:'inherit'}}/>
+        <textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={onKey} onPaste={onPaste} rows={2} placeholder="Ask a question, describe a grouping or page-break change, or paste a screenshot…" style={{...S.input,resize:'vertical',minHeight:44,fontFamily:'inherit'}}/>
         <button style={{...S.btnP,height:44,opacity:((!input.trim()&&!pics.length)||sending)?0.5:1,cursor:((!input.trim()&&!pics.length)||sending)?'default':'pointer'}} disabled={(!input.trim()&&!pics.length)||sending} onClick={send}>Send</button>
       </div>
-      <div style={{fontSize:11,color:T.textDim,marginTop:8}}>Paste a screenshot (Ctrl+V) or use 📎 to attach one. Claude can regroup accounts (where a line appears and which subtotal it rolls into); it never changes any dollar amount. Review each proposal before applying.</div>
+      <div style={{fontSize:11,color:T.textDim,marginTop:8}}>Paste a screenshot (Ctrl+V) or use 📎 to attach one. Claude can regroup accounts and set section page breaks; it never changes any dollar amount. Review each proposal before applying.</div>
     </div>
   </div>);
 }

@@ -3101,6 +3101,7 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
 
   const layout = {
     _subline: null,
+    _pageTopY: null,   // y just below the column headers on the current page
     setSubline(s) { this._subline = s; },
     // Draw a centered "<d1> and <d2>" line at the current cursor with ONLY the
     // two dates underlined. Used by the Balance Sheets page.
@@ -3265,7 +3266,13 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
       // the two rules visibly collided whenever a page break put a "Total ..."
       // row first on a continuation page.
       y = uy - HDR_TRAIL_GAP;
+      layout._pageTopY = y;
     },
+    // Force the next content onto a fresh page unless we are already at the top
+    // of one (nothing drawn since the column headers). Honors an explicit
+    // per-section "start on a new page" presentation override; never emits a
+    // blank page because it no-ops when the cursor is already at the page top.
+    pageBreakBefore() { if (layout._pageTopY != null && y < layout._pageTopY - 1) newPage(); },
     sectionTitle(str) {
       // A section title is a non-total boundary: it re-arms the top rule for
       // the next subtotal (clears the stacked-total adjacency latch).
@@ -3486,6 +3493,10 @@ async function renderStatementsPdf(s, outOffsets) {
     // lines), which is a different thing.
     const RULE_BELOW_SECTIONS = /^Total (Current Assets|Fixed Assets, Net)$/;
     const renderBsSection = (sec, sectionTotalLabel, reserveTail = 0) => {
+      // Explicit "start this section on a new page" override (fs_section_breaks,
+      // set via Reports > Ask Claude). Empty for almost every entity, so this is
+      // a no-op by default and changes nothing about existing statements.
+      if (Array.isArray(m.sectionBreaks) && m.sectionBreaks.includes(sec.title)) L.pageBreakBefore();
       const showSubHeaders = sec.subs.length > 1 || sec.subs.some(su => su.contra) || m.profile === 'bsfrgp' || m.profile === 'banyan';
       // Keep each balance-sheet section together so its header is never left
       // stranded at the bottom of a page while the rest of the section flows to

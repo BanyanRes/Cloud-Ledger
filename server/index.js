@@ -856,6 +856,13 @@ db.exec(`CREATE TABLE IF NOT EXISTS statement_subsections (
   UNIQUE(entity_id, section, subsection)
 )`);
 console.log('[db migrate] statement_subsections ensured');
+db.exec(`CREATE TABLE IF NOT EXISTS fs_section_breaks (
+  entity_id INTEGER NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
+  section TEXT NOT NULL,
+  created_by TEXT, created_at TEXT DEFAULT (datetime('now')),
+  PRIMARY KEY (entity_id, section)
+)`);
+console.log('[db migrate] fs_section_breaks ensured');
 // Dimension code columns (name was the only label originally; code added for reporting/sorting)
 const dcCols = db.prepare("PRAGMA table_info(dim_classes)").all().map(c => c.name);
 if (!dcCols.includes('code')) { db.exec("ALTER TABLE dim_classes ADD COLUMN code TEXT"); console.log('[db migrate] dim_classes.code added'); }
@@ -13124,6 +13131,9 @@ app.post('/api/workpapers/financial-statements/:entity_id/generate', auth, requi
       // deliverable, so they are NOT appended to the PDF here.
       const isMidcoPkg = isConsolidated && consolParent && (/clr?fi?\s*midco\s*i/i.test(consolParent.name || '') || String(consolParent.code || '') === 'CLRFIMID');
       const statements = await financials.buildStatements(getBalances, { asOf, period, entityName: fsEntityName, entityCode: fsEntityCode, entityType: fsEntityType, isConsolidated, nci, lenderMode: isMidcoPkg });
+      // Per-section "start on a new page" overrides (Reports > Ask Claude). Attached
+      // to meta so renderStatementsPdf's balance-sheet renderer can honor them.
+      try { statements.meta.sectionBreaks = db.prepare('SELECT section FROM fs_section_breaks WHERE entity_id=?').all(eid).map(r => r.section); } catch (_e) { statements.meta.sectionBreaks = []; }
       const consolSchedules = (isConsolidated && !isMidcoPkg) ? consolidation.buildScheduleSet(db, consolGroup, asOf, (id, oo) => computeBalances(id, oo)) : null;
 
       const files = req.files || {};
