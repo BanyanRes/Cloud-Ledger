@@ -1015,11 +1015,11 @@ export default function App(){
       {id:'ic_mapping',label:'IC Mapping',icon:'🗺️',section:'intercompany'},
     ]},
     {key:'REPORTS',label:'Reports',icon:'📊',items:[
+      {id:'assistant',label:'Ask Claude',icon:'💬',section:'reports'},
       // CLRF is a pure LP fund: its statement package is the ASC 946 set under
       // Fund Reporting, not the generic GL/Members'-Equity package. Hide the
       // generic Financial Statements report for it so the wrong one isn't run.
       ...(!isCLRF?[{id:'wp_finstmts',label:'Financial Statements',icon:'📑',section:'reports'}]:[]),
-      {id:'assistant',label:'Ask Claude',icon:'💬',section:'reports'},
       {id:'bs',label:'Balance Sheet',icon:NI.bs,section:'reports'},
       {id:'is',label:'Income Statement',icon:NI.is,section:'reports'},
       ...(!isCLRF?[{id:'b2a',label:'Operating Budget to Actual',icon:'🎯',section:'reports'}]:[]),
@@ -1063,7 +1063,8 @@ export default function App(){
   const visibleItems=cat=>(cat.adminOnly&&user.role!=='Admin')?[]:cat.items.filter(n=>n.section==='all'?user.role==='Admin':canAccess(n.section));
   const orderedItems=cat=>{
     const ord=navOrder[cat.key]||[];
-    const rank=id=>{const i=ord.indexOf(id);return i<0?1e6:i;};
+    // Ask Claude is pinned to the top of its category for every user, regardless of saved order.
+    const rank=id=>{if(id==='assistant')return -1;const i=ord.indexOf(id);return i<0?1e6:i;};
     return visibleItems(cat).slice().sort((a,b)=>rank(a.id)-rank(b.id));
   };
   const navCats=navTree.filter(c=>visibleItems(c).length>0);
