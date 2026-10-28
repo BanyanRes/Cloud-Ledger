@@ -3137,6 +3137,15 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     // emitting an endless run of blank pages.
     keepTogether(space) {
       const usable = (PH - PAGE.mT) - (PAGE.mB + 8);
+      // Don't force a break when the cursor is still at the top of the page
+      // body (nothing but at most a section title drawn since the column
+      // headers). Every page of a statement repeats the same header +
+      // column-header stack, so a fresh page offers no more body room than we
+      // already have here — breaking would only strand the section heading
+      // (e.g. "ASSETS") alone on the near-empty prior page while the whole
+      // section jumps to the next (the empty-first-page bug). Let the section
+      // flow from here and break mid-section instead.
+      if (layout._pageTopY != null && y >= layout._pageTopY - (ROW_H + 4)) return;
       if (space <= usable) ensure(space);
     },
     // Column layout: array of right-edge x positions for numeric columns.
