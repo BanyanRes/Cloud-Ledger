@@ -11439,6 +11439,19 @@ require('./pcap').registerPcapRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ Administration: USC Partner Capital Account Statements (CLIP + Silsbee) ═══
+// Quarterly one-page statement for USC's interest in CLIP Property Owner (54) and
+// CLR Silsbee Property Owner (39), plus the cover email / Outlook draft. Carry-
+// forward annual inputs validated against the live GL. See server/usccapital.js.
+require('./usccapital').registerUscCapitalRoutes(app, {
+  db,
+  auth,
+  requireEntityAccess,
+  requireRole,
+  workpapersDir: WORKPAPERS_DIR,
+  computeBalances: (eid, opts) => computeBalances(eid, opts),
+});
+
 // ═══ CLRF workpaper: ILPA Fee Reporting Template (GCM Grosvenor investors) ═══
 // One tab per GCM sleeve, reproducing the vendor ILPA template exactly and
 // filling only the blue input cells from the GL. See server/ilpafee.js.

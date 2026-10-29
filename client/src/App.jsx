@@ -1049,6 +1049,7 @@ export default function App(){
     ]}]:[]),
     {key:'ADMINISTRATION',adminOnly:true,label:'Administration',icon:'⚙️',items:[
       {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
+      {id:'usc_capital',label:'USC Capital Statements',icon:'📄',section:'administration'},
       {id:'letterhead',label:'Letterhead',icon:'📄',section:'administration'},
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
       {id:'users',label:'Users',icon:NI.users,section:'all'},
@@ -1126,6 +1127,7 @@ export default function App(){
         {page==='ic_recon'&&canAccess('intercompany')&&<IntercompanyReconciliation entities={entities} activeEntity={activeEntity} setPage={setPage} key={'icr-'+rk}/>}
         {page==='org_structure'&&canAccess('intercompany')&&<OrgStructurePage entities={entities} canEdit={canEdit} key={'org-'+rk}/>}
         {page==='assignment'&&canAccess('administration')&&<AssignmentPage entities={entities} user={user} key={'asg-'+rk}/>}
+        {page==='usc_capital'&&canAccess('administration')&&<UscCapitalStatements user={user} key={'usc-'+rk}/>}
         {page==='letterhead'&&canAccess('administration')&&<LetterheadPage user={user} key={'lh-'+rk}/>}
         {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
@@ -6739,6 +6741,81 @@ function MgmtFeeWorkpaper({entityId,entityName,canEdit=true}){
 }
 
 // ═══ Fund Reporting — CLRF-style LP fund statement package (config + generate) ═══
+function UscCapitalStatements({user}){
+  const defQE=(()=>{const n=new Date();const iso=n.toISOString().slice(0,10);const y=n.getFullYear();const c=[y+'-12-31',y+'-09-30',y+'-06-30',y+'-03-31',(y-1)+'-12-31'];return c.find(e=>e<=iso)||((y-1)+'-12-31');})();
+  const[asOf,setAsOf]=useState(defQE);
+  const[busy,setBusy]=useState(false);
+  const[err,setErr]=useState('');
+  const[result,setResult]=useState(null);
+  const fmt=(n)=>{const v=Math.round(Number(n)||0);if(v===0)return '-';const s=Math.abs(v).toLocaleString('en-US');return v<0?'('+s+')':s;};
+  const pctf=(f,d)=>((Number(f)||0)*100).toFixed(d==null?3:d)+'%';
+  const run=async()=>{
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(asOf)){setErr('Pick a quarter-end date (3/31, 6/30, 9/30 or 12/31)');return;}
+    setBusy(true);setErr('');setResult(null);
+    try{const out=await api.runUscCapital(asOf);setResult(out);}
+    catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+  const dl=async(eid)=>{
+    try{const out=await api.getUscCapitalStatementPdf(eid,asOf);if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);}
+    catch(e){setErr(e.message);}
+  };
+  const bd='1px solid #e2e8f0';
+  const td={padding:'6px 8px',textAlign:'right',borderBottom:bd};
+  const emailText=result?('To: '+result.email.to.join(', ')+'\nCc: '+result.email.cc.join(', ')+'\nSubject: '+result.email.subject+'\n\n'+result.email.body_text):'';
+  return(<div>
+    <div style={{marginBottom:8}}>
+      <div style={S.h1}>USC Capital Statements</div>
+      <div style={S.sub}>Quarterly partner capital account statements for the University of Southern California — County Line Industrial Park LLC (CLIP) and County Line Rail Silsbee LLC — plus the cover email to BNY Mellon.</div>
+    </div>
+    {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
+    <div style={{...S.card}}>
+      <div style={S.h2}>Run report</div>
+      <div style={{display:'flex',gap:10,alignItems:'flex-end',marginTop:10,flexWrap:'wrap'}}>
+        <div><label style={S.label}>As of (quarter-end)</label><input type='date' value={asOf} onChange={e=>setAsOf(e.target.value)} style={{...S.input,width:170}}/></div>
+        <button style={{...S.btnP,opacity:busy?0.6:1}} disabled={busy} onClick={run}>{busy?'Running…':'Run Report'}</button>
+      </div>
+      <div style={{fontSize:12,color:T.textMuted,marginTop:8}}>Committed capital and year-to-date contributions are validated live against each entity&rsquo;s general ledger (account 34261). Beginning balance, ownership %, and year-end allocations carry from the capital-account schedule (seeded from the 2Q2026 statement).</div>
+    </div>
+    {result&&<div style={{...S.card,marginTop:12}}>
+      <div style={S.h2}>Statements &middot; {result.quarter}</div>
+      {(result.warnings||[]).map((w,i)=><div key={i} style={{...S.err,marginTop:8}}>{w}</div>)}
+      <div style={{overflowX:'auto'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',marginTop:10,fontSize:13,minWidth:760}}>
+        <thead><tr>
+          {['Entity','Committed','Ownership %','Beginning 1/1','Contribution','Distribution','Chg Unrealized','Net Loss','Ending','PDF'].map((h,i)=>
+            <th key={i} style={{textAlign:i===0?'left':(i===9?'center':'right'),padding:'6px 8px',borderBottom:'2px solid #cbd5e1',color:T.textMuted,fontWeight:600,whiteSpace:'nowrap'}}>{h}</th>)}
+        </tr></thead>
+        <tbody>
+          {result.statements.map((s)=>(<tr key={s.entity_id}>
+            <td style={{padding:'6px 8px',borderBottom:bd}}>{s.legal_name}</td>
+            <td style={td}>${fmt(s.committed)}</td>
+            <td style={td}>{pctf(s.ownership_pct)}</td>
+            <td style={td}>{fmt(s.beginning)}</td>
+            <td style={td}>{fmt(s.contribution)}</td>
+            <td style={td}>{fmt(s.distribution)}</td>
+            <td style={td}>{fmt(s.unrealized)}</td>
+            <td style={td}>{fmt(s.net_loss)}</td>
+            <td style={{...td,fontWeight:700}}>{fmt(s.ending)}</td>
+            <td style={{padding:'6px 8px',textAlign:'center',borderBottom:bd}}><button style={{...S.btnP,padding:'3px 10px',fontSize:12}} onClick={()=>dl(s.entity_id)}>Download</button></td>
+          </tr>))}
+        </tbody>
+      </table>
+      </div>
+      <div style={{marginTop:16}}>
+        <div style={{fontWeight:600,marginBottom:6}}>Outlook draft</div>
+        {result.draft&&result.draft.created
+          ? <div style={{fontSize:13}}>Draft created in {result.draft.mailbox||'your mailbox'}.{result.draft.webLink&&<> <a href={result.draft.webLink} target='_blank' rel='noreferrer'>Open in Outlook &rarr;</a></>}{result.draft.partial&&<div style={{...S.err,marginTop:6}}>{result.draft.reason}</div>}</div>
+          : <div style={{fontSize:13,color:T.textMuted}}>Not auto-created &mdash; {result.draft?result.draft.reason:'n/a'} The statements are saved to Workpapers and the cover email is below; download the two PDFs and attach them in Outlook.</div>}
+      </div>
+      <div style={{marginTop:16}}>
+        <div style={{fontWeight:600,marginBottom:6}}>Cover email</div>
+        <div style={{fontSize:12,color:T.textMuted,lineHeight:1.6,whiteSpace:'pre-wrap',background:'#f8fafc',border:bd,borderRadius:6,padding:'10px 12px'}}>{emailText}</div>
+      </div>
+    </div>}
+  </div>);
+}
+
 function PcapStatementsReport({entityId,entityName}){
   const[asOf,setAsOf]=useState(today());
   const[busy,setBusy]=useState(false);
