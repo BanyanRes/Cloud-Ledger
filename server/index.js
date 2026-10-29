@@ -11452,6 +11452,18 @@ require('./usccapital').registerUscCapitalRoutes(app, {
   computeBalances: (eid, opts) => computeBalances(eid, opts),
 });
 
+// ═══ Administration: Muha Invoice (contractor semi-monthly invoices) ═══
+// Builds Muha K. Kim's semi-monthly contractor invoices from the agreement terms
+// and emails each one to the Bill.com inbox N calendar days before its invoice
+// date (in-process scheduler, one send per invoice). See server/muhainvoice.js.
+require('./muhainvoice').registerMuhaInvoiceRoutes(app, {
+  db,
+  auth,
+  requireRole,
+  getResendKey: () => RESEND_API_KEY,
+  getFromEmail: () => (process.env.AR_FROM_EMAIL || RESET_FROM_EMAIL),
+});
+
 // ═══ CLRF workpaper: ILPA Fee Reporting Template (GCM Grosvenor investors) ═══
 // One tab per GCM sleeve, reproducing the vendor ILPA template exactly and
 // filling only the blue input cells from the GL. See server/ilpafee.js.

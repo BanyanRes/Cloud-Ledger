@@ -212,6 +212,23 @@ export const api = {
     return { blob, filename };
   },
   getTtmPL: (eid, asOf) => request('/entities/' + eid + '/ttm-pl?as_of=' + asOf),
+  // Administration: Muha Invoice (semi-monthly contractor invoices -> Bill.com inbox)
+  getMuhaInvoices: () => request('/admin/muha-invoice'),
+  saveMuhaInvoiceConfig: (cfg) => request('/admin/muha-invoice/config', { method: 'PUT', body: cfg }),
+  sendMuhaInvoice: (no, force) => request('/admin/muha-invoice/' + encodeURIComponent(no) + '/send', { method: 'POST', body: { force: !!force } }),
+  skipMuhaInvoice: (no, skip) => request('/admin/muha-invoice/' + encodeURIComponent(no) + '/skip', { method: 'POST', body: { skip: !!skip } }),
+  getMuhaInvoicePdf: async (no) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/admin/muha-invoice/' + encodeURIComponent(no) + '/pdf', { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) { let d = {}; try { d = await res.json(); } catch {} throw new Error(d.error || 'Download failed'); }
+    const cd = res.headers.get('content-disposition') || '';
+    const mm = cd.match(/filename="?([^"]+)"?/);
+    const filename = mm ? mm[1] : 'Invoice_' + no + '.pdf';
+    const blob = await res.blob();
+    return { blob, filename };
+  },
   analyzeTtmPL: async (eid, asOf) => {
     const token = getToken();
     const res = await fetch(API_BASE + '/entities/' + eid + '/ttm-pl/analyze', {

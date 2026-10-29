@@ -1050,6 +1050,7 @@ export default function App(){
     {key:'ADMINISTRATION',adminOnly:true,label:'Administration',icon:'⚙️',items:[
       {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
       {id:'usc_capital',label:'USC Capital Statements',icon:'📄',section:'administration'},
+      {id:'muha_invoice',label:'Muha Invoice',icon:'🧾',section:'administration'},
       {id:'letterhead',label:'Letterhead',icon:'📄',section:'administration'},
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
       {id:'users',label:'Users',icon:NI.users,section:'all'},
@@ -1128,6 +1129,7 @@ export default function App(){
         {page==='org_structure'&&canAccess('intercompany')&&<OrgStructurePage entities={entities} canEdit={canEdit} key={'org-'+rk}/>}
         {page==='assignment'&&canAccess('administration')&&<AssignmentPage entities={entities} user={user} key={'asg-'+rk}/>}
         {page==='usc_capital'&&canAccess('administration')&&<UscCapitalStatements user={user} key={'usc-'+rk}/>}
+        {page==='muha_invoice'&&canAccess('administration')&&<MuhaInvoice user={user} key={'muha-'+rk}/>}
         {page==='letterhead'&&canAccess('administration')&&<LetterheadPage user={user} key={'lh-'+rk}/>}
         {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
@@ -6817,6 +6819,115 @@ function UscCapitalStatements({user}){
           : <div style={{fontSize:13,color:T.textMuted}}>Not filed to SharePoint &mdash; {sp?sp.reason:'n/a'} (statements saved to Workpapers; configure Microsoft Graph to auto-file).</div>}
       </div>
     </div>}
+  </div>);
+}
+
+// ═══ Administration: Muha Invoice — semi-monthly contractor invoices, auto-emailed to Bill.com ═══
+function MuhaInvoice({user}){
+  const[data,setData]=useState(null);
+  const[err,setErr]=useState('');
+  const[msg,setMsg]=useState('');
+  const[busy,setBusy]=useState('');
+  const[cfg,setCfg]=useState(null);
+  const[showCfg,setShowCfg]=useState(false);
+  const isAdmin=user&&user.role==='Admin';
+  const load=async()=>{try{const d=await api.getMuhaInvoices();setData(d);setCfg(d.config);}catch(e){setErr(e.message);}};
+  useEffect(()=>{load();},[]);
+  const money=(n)=>'$'+(Number(n)||0).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const mdy=(s)=>s?(s.slice(5,7)+'/'+s.slice(8,10)+'/'+s.slice(0,4)):'';
+  const dl=async(no)=>{
+    try{const out=await api.getMuhaInvoicePdf(no);if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);}
+    catch(e){setErr(e.message);}
+  };
+  const send=async(r)=>{
+    const resend=r.status==='sent';
+    if(!window.confirm((resend?'Re-send':'Send')+' invoice '+r.invoice_no+' ('+money(r.total)+') to '+data.config.send_to+' now?'))return;
+    setBusy(r.invoice_no);setErr('');setMsg('');
+    try{await api.sendMuhaInvoice(r.invoice_no,resend);setMsg('Sent '+r.invoice_no+' to '+data.config.send_to+'.');await load();}
+    catch(e){setErr(e.message);}finally{setBusy('');}
+  };
+  const skip=async(r,on)=>{
+    setBusy(r.invoice_no);setErr('');setMsg('');
+    try{await api.skipMuhaInvoice(r.invoice_no,on);await load();}catch(e){setErr(e.message);}finally{setBusy('');}
+  };
+  const saveCfg=async()=>{
+    setBusy('cfg');setErr('');setMsg('');
+    try{await api.saveMuhaInvoiceConfig(cfg);setMsg('Settings saved.');setShowCfg(false);await load();}
+    catch(e){setErr(e.message);}finally{setBusy('');}
+  };
+  const STAT={sent:['Sent','#166534','#dcfce7'],failed:['Failed','#991b1b','#fee2e2'],skipped:['Skipped','#475569','#e2e8f0'],sending:['Sending','#1e40af','#dbeafe'],due:['Due','#92400e','#fef3c7'],scheduled:['Scheduled','#334155','#f1f5f9']};
+  const bd='1px solid #e2e8f0';
+  const td={padding:'6px 8px',borderBottom:bd,whiteSpace:'nowrap'};
+  const tdr={...td,textAlign:'right'};
+  if(!data)return(<div><div style={S.h1}>Muha Invoice</div>{err?<div style={S.err}>{err}</div>:<div style={S.sub}>Loading…</div>}</div>);
+  const c=data.config;
+  const fld=(k,label,type,w)=>(<div><label style={S.label}>{label}</label><input type={type||'text'} value={cfg[k]==null?'':cfg[k]} onChange={e=>setCfg({...cfg,[k]:e.target.value})} style={{...S.input,width:w||170}}/></div>);
+  return(<div>
+    <div style={{marginBottom:8}}>
+      <div style={S.h1}>Muha Invoice</div>
+      <div style={S.sub}>Semi-monthly invoices for {c.contractor_name} (independent contractor). Each invoice is emailed to <b>{c.send_to}</b>{c.cc?<> (cc {c.cc})</>:null} {c.lead_days} calendar days before its invoice date. Auto-send is <b>{c.auto_send?'ON':'OFF'}</b>.</div>
+    </div>
+    {!data.email_configured&&<div style={{...S.err,marginBottom:12}}>Email is not configured on the server (RESEND_API_KEY missing) &mdash; invoices cannot be sent.</div>}
+    {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
+    {msg&&<div style={{marginBottom:12,padding:'8px 12px',background:'#dcfce7',color:'#166534',borderRadius:6,fontSize:13}}>{msg}</div>}
+    <div style={{...S.card}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
+        <div style={S.h2}>Terms</div>
+        {isAdmin&&<button style={{...S.btnP,padding:'5px 12px',fontSize:13}} onClick={()=>{setCfg(data.config);setShowCfg(!showCfg);}}>{showCfg?'Cancel':'Edit settings'}</button>}
+      </div>
+      {!showCfg&&<div style={{fontSize:13,marginTop:8,lineHeight:1.7}}>
+        Effective {mdy(c.effective_date)}{c.termination_date?<> &middot; terminates {mdy(c.termination_date)}</>:null} &middot; Retainer {money(c.monthly_fee)}/month ({money(c.monthly_fee/2)} per half-month) &middot; Laptop allowance {money(c.monthly_allowance)}/month for {c.allowance_months} months &middot; Wire fee {money(c.wire_fee)} per invoice &middot; Partial periods prorated by working days in the billing period.
+      </div>}
+      {showCfg&&cfg&&<div style={{marginTop:10}}>
+        <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+          {fld('effective_date','Effective date','date')}
+          {fld('termination_date','Termination date (blank = ongoing)','date')}
+          {fld('monthly_fee','Monthly retainer','number',120)}
+          {fld('monthly_allowance','Monthly allowance','number',120)}
+          {fld('allowance_months','Allowance months','number',110)}
+          {fld('wire_fee','Wire fee / invoice','number',120)}
+          {fld('lead_days','Send days before invoice date','number',110)}
+          {fld('send_to','Send to','text',240)}
+          {fld('cc','CC (comma-separated)','text',240)}
+          <div><label style={S.label}>Auto-send</label><select value={cfg.auto_send?1:0} onChange={e=>setCfg({...cfg,auto_send:Number(e.target.value)})} style={{...S.input,width:100}}><option value={1}>On</option><option value={0}>Off</option></select></div>
+        </div>
+        <div style={{display:'flex',gap:10,flexWrap:'wrap',marginTop:10}}>
+          <div><label style={S.label}>Contractor address (one line per row)</label><textarea value={cfg.contractor_address||''} onChange={e=>setCfg({...cfg,contractor_address:e.target.value})} style={{...S.input,width:320,height:80}}/></div>
+          <div><label style={S.label}>Bill to (one line per row)</label><textarea value={cfg.bill_to||''} onChange={e=>setCfg({...cfg,bill_to:e.target.value})} style={{...S.input,width:320,height:80}}/></div>
+        </div>
+        <button style={{...S.btnP,marginTop:10,opacity:busy==='cfg'?0.6:1}} disabled={busy==='cfg'} onClick={saveCfg}>{busy==='cfg'?'Saving…':'Save settings'}</button>
+      </div>}
+    </div>
+    <div style={{...S.card,marginTop:12}}>
+      <div style={S.h2}>Invoice schedule</div>
+      <div style={{overflowX:'auto'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',marginTop:10,fontSize:13,minWidth:900}}>
+        <thead><tr>
+          {['Invoice No.','Service period','Invoice date','Send date','Retainer','Allowance','Wire fee','Total','Status',''].map((h,i)=>
+            <th key={i} style={{textAlign:(i>=4&&i<=7)?'right':'left',padding:'6px 8px',borderBottom:'2px solid #cbd5e1',color:T.textMuted,fontWeight:600,whiteSpace:'nowrap'}}>{h}</th>)}
+        </tr></thead>
+        <tbody>
+          {data.rows.map(r=>{const st=STAT[r.status]||STAT.scheduled;return(<tr key={r.invoice_no}>
+            <td style={td}>{r.invoice_no}</td>
+            <td style={td}>{mdy(r.active_start)} &ndash; {mdy(r.active_end)}{r.prorated?<span style={{color:T.textMuted}}> ({r.wd_active}/{r.wd_period} days)</span>:null}</td>
+            <td style={td}>{mdy(r.invoice_date)}</td>
+            <td style={td}>{mdy(r.send_date)}</td>
+            <td style={tdr}>{money(r.fee)}</td>
+            <td style={tdr}>{money(r.allowance)}</td>
+            <td style={tdr}>{money(r.wire_fee)}</td>
+            <td style={{...tdr,fontWeight:700}}>{money(r.total)}</td>
+            <td style={td}><span title={r.error||(r.sent_at?('at '+r.sent_at+' UTC'+(r.trigger?' ('+r.trigger+')':'')):'')} style={{padding:'2px 8px',borderRadius:10,fontSize:12,color:st[1],background:st[2]}}>{st[0]}</span>{r.status==='sent'&&r.sent_at?<span style={{color:T.textMuted,fontSize:12}}> {r.sent_at.slice(0,10)}</span>:null}</td>
+            <td style={td}>
+              <button style={{...S.btnP,padding:'3px 10px',fontSize:12}} onClick={()=>dl(r.invoice_no)}>PDF</button>
+              {isAdmin&&<button style={{...S.btnP,padding:'3px 10px',fontSize:12,marginLeft:6,opacity:busy===r.invoice_no?0.6:1}} disabled={!!busy||r.status==='sending'} onClick={()=>send(r)}>{r.status==='sent'?'Re-send':'Send now'}</button>}
+              {isAdmin&&r.status!=='sent'&&r.status!=='sending'&&<button style={{...S.btnP,padding:'3px 10px',fontSize:12,marginLeft:6,background:'#64748b'}} disabled={!!busy} onClick={()=>skip(r,r.status!=='skipped')}>{r.status==='skipped'?'Unskip':'Skip'}</button>}
+            </td>
+          </tr>);})}
+        </tbody>
+      </table>
+      </div>
+    </div>
   </div>);
 }
 
