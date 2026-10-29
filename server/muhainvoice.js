@@ -78,6 +78,11 @@ function ensureTables(db) {
     );`);
   const row = db.prepare('SELECT id FROM muha_invoice_config WHERE id = 1').get();
   if (!row) db.prepare('INSERT INTO muha_invoice_config (id, data, updated_by) VALUES (1, ?, ?)').run(JSON.stringify(DEFAULTS), 'seed');
+  // MK-2026-11A was sent to Bill.com outside CloudLedger before this page went
+  // live (per Jimmy, 2026-10-29). Record it as sent so the scheduler never sends
+  // it again. INSERT OR IGNORE: a no-op once the row exists.
+  db.prepare("INSERT OR IGNORE INTO muha_invoice_sends (invoice_no, status, amount, sent_to, send_trigger, sent_by) "
+    + "VALUES ('MK-2026-11A', 'sent', 477.49, 'banyanresidential@bill.com', 'external', 'sent outside CloudLedger')").run();
 }
 
 function getConfig(db) {
