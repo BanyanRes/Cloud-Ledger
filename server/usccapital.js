@@ -26,7 +26,9 @@
 // This reproduces the Q2-2026 statement to the dollar and rolls the date forward.
 //
 // Prepared like the CLRF workpapers (pcap.js): buildData -> render PDF ->
-// saveToWorkpapers; plus an email composer and an optional Microsoft Graph draft.
+// saveToWorkpapers, plus a "Download All" zip and an optional filing of both
+// statements into SharePoint (Accounting > General > Investors > Capital
+// Statements > USC > <quarter>) when Microsoft Graph is configured.
 
 const path = require('path');
 const fs = require('fs');
@@ -36,24 +38,12 @@ const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
   'August', 'September', 'October', 'November', 'December'];
 
-// Fixed CC distribution list and sender signature, lifted verbatim from the
-// administrator's cover email (Irvin Bermudez, 2Q2026) with Jimmy's signature.
-const MAIL_TO = ['piaasstatements@bnymellon.com'];
-const MAIL_CC = [
-  'brian.j.johnson@usc.edu', 'real.assets@usc.edu', 'rohanesi@usc.edu',
-  'usclps@bnymellon.com', 'bnylpaasconnect@canoeintelligence.com',
-  'dsdata@burgiss.com', 'uscconnect@canoeintelligence.com',
-  'JYun@banyanres.com', 'bbrosseau@banyanres.com', 'jrucker@banyanres.com',
-  'WMyers@banyanres.com',
-];
-const CONFIDENTIALITY = 'IMPORTANT: This message is confidential. It may also be '
-  + 'privileged or otherwise protected by work product immunity or other legal '
-  + 'rules. If you have received it by mistake, please let us know by e-mail reply '
-  + 'and delete it from your system; you may not copy this message or disclose its '
-  + 'contents to anyone. The integrity and security of this message cannot be '
-  + 'guaranteed on the Internet.';
-const SIG_LINES = ['Jimmy Yun', 'Chief Accounting Officer', 'M: 714.321.6021',
-  '2381 Rosecrans Ave Suite 425, El Segundo, CA 90245'];
+// SharePoint target (the investor Capital Statements library). driveId and base
+// folder are overridable by env; a dated subfolder (e.g. 9-30-26) is created per
+// quarter to match the existing filing convention.
+const SP_DRIVE_ID = process.env.USC_SP_DRIVE_ID
+  || 'b!xwItU4t_F0ytk_y7mfLzczKCgKnLYEZEn631Bad3dowjH1fJ6JpNQp29UcjVRg0R';
+const SP_BASE_PATH = process.env.USC_SP_BASE_PATH || 'General/Investors/Capital Statements/USC';
 
 function resolveQuarter(asOf) {
   if (!isDate(asOf)) throw new Error('as_of must be a date in YYYY-MM-DD form');
@@ -192,45 +182,23 @@ async function renderStatementPdf(ent, q) {
 
 function fileNameFor(ent, q) { return 'USC ' + ent.short_name + ' Capital Statements ' + q.fileDate + '.pdf'; }
 
-// ── Email composer (cover email, administrator format, Jimmy's signature) ─────
-function composeEmail(data, pdfs) {
-  const q = data.quarter;
-  const subject = 'USC Capital Statements for CLIP and Silsbee ' + q.label;
-  const sigTextLines = [...SIG_LINES, 'banyanres.com'];
-  const bodyText = [
-    'Hello,', '',
-    'Attached please find ' + q.ordinal + ' QTR ' + q.year + ' USC capital statements for CLIP and Silsbee.', '',
-    'Please let us know if you have any questions.', '',
-    'Thanks', '',
-    ...sigTextLines, '',
-    CONFIDENTIALITY, '',
-  ].join('\n');
-  const sigHtml = SIG_LINES.map((l) => escapeHtml(l)).join('<br>')
-    + '<br><a href="https://banyanres.com">banyanres.com</a>';
-  const bodyHtml = [
-    '<p>Hello,</p>',
-    '<p>Attached please find ' + q.ordinal + ' QTR ' + q.year + ' USC capital statements for CLIP and Silsbee.</p>',
-    '<p>Please let us know if you have any questions.</p>',
-    '<p>Thanks</p>',
-    '<p>' + sigHtml + '</p>',
-    '<p>' + escapeHtml(CONFIDENTIALITY) + '</p>',
-  ].join('');
-  return {
-    to: MAIL_TO, cc: MAIL_CC, subject, bodyText, bodyHtml,
-    attachments: pdfs.map((p) => ({ filename: p.filename, mime: 'application/pdf', b64: p.buf.toString('base64') })),
-  };
+// ── "Download All" zip (both statements) ─────────────────────────────────────
+async function buildZip(data) {
+  const JSZip = require('jszip');
+  const zip = new JSZip();
+  for (const ent of data.entities) {
+    const buf = await renderStatementPdf(ent, data.quarter);
+    zip.file(fileNameFor(ent, data.quarter), buf);
+  }
+  return zip.generateAsync({ type: 'nodebuffer' });
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-// ── Optional: create the Outlook draft in the user's mailbox via MS Graph ─────
+// ── Optional: file both statements into SharePoint via MS Graph ──────────────
 // App-only (client credentials). Requires MS_TENANT_ID / MS_CLIENT_ID /
-// MS_CLIENT_SECRET and the Graph application permission Mail.ReadWrite (admin
-// consent). USC_DRAFT_MAILBOX selects the mailbox (default JYun@banyanres.com).
-// Degrades gracefully when unconfigured: the statements are still generated,
-// saved and returned with the composed email.
+// MS_CLIENT_SECRET and the Graph application permission Sites.ReadWrite.All
+// (admin consent). Targets the investor library at SP_BASE_PATH, creating a
+// dated subfolder per quarter. Degrades gracefully when unconfigured: the
+// statements are still generated, saved to Workpapers and returned.
 async function graphToken() {
   const t = process.env.MS_TENANT_ID, c = process.env.MS_CLIENT_ID, s = process.env.MS_CLIENT_SECRET;
   if (!t || !c || !s) return null;
@@ -242,29 +210,35 @@ async function graphToken() {
   return (await r.json()).access_token;
 }
 
-async function createOutlookDraft(email) {
-  const mailbox = process.env.USC_DRAFT_MAILBOX || 'JYun@banyanres.com';
+const spEncode = (p) => p.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+
+async function uploadToSharePoint(pdfs, q) {
+  const driveId = SP_DRIVE_ID;
+  if (!driveId) return { uploaded: false, reason: 'USC_SP_DRIVE_ID not set.' };
   let token;
-  try { token = await graphToken(); } catch (e) { return { created: false, reason: e.message }; }
-  if (!token) return { created: false, reason: 'Microsoft Graph not configured (set MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET, optionally USC_DRAFT_MAILBOX).' };
-  const base = 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(mailbox);
-  const payload = {
-    subject: email.subject,
-    body: { contentType: 'HTML', content: email.bodyHtml },
-    toRecipients: email.to.map((a) => ({ emailAddress: { address: a } })),
-    ccRecipients: email.cc.map((a) => ({ emailAddress: { address: a } })),
-  };
-  const cr = await fetch(base + '/messages', { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-  if (!cr.ok) return { created: false, reason: 'create message ' + cr.status + ': ' + (await cr.text()).slice(0, 300) };
-  const msg = await cr.json();
-  for (const att of email.attachments) {
-    const ar = await fetch(base + '/messages/' + msg.id + '/attachments', {
-      method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ '@odata.type': '#microsoft.graph.fileAttachment', name: att.filename, contentType: att.mime, contentBytes: att.b64 }),
+  try { token = await graphToken(); } catch (e) { return { uploaded: false, reason: e.message }; }
+  if (!token) return { uploaded: false, reason: 'Microsoft Graph not configured (set MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET).' };
+  const auth = { Authorization: 'Bearer ' + token };
+  const driveRoot = 'https://graph.microsoft.com/v1.0/drives/' + driveId;
+  // Ensure the dated subfolder exists (idempotent: a 409 means it is already there).
+  try {
+    const mk = await fetch(driveRoot + '/root:/' + spEncode(SP_BASE_PATH) + ':/children', {
+      method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json' }, auth),
+      body: JSON.stringify({ name: q.fileDate, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' }),
     });
-    if (!ar.ok) return { created: true, partial: true, webLink: msg.webLink, mailbox, reason: 'attachment "' + att.filename + '" failed ' + ar.status };
+    if (!mk.ok && mk.status !== 409) return { uploaded: false, reason: 'create folder ' + mk.status + ': ' + (await mk.text()).slice(0, 200) };
+  } catch (e) { return { uploaded: false, reason: e.message }; }
+  const folderPath = SP_BASE_PATH + '/' + q.fileDate;
+  const files = [];
+  for (const p of pdfs) {
+    const up = await fetch(driveRoot + '/root:/' + spEncode(folderPath + '/' + p.filename) + ':/content', {
+      method: 'PUT', headers: Object.assign({ 'Content-Type': 'application/pdf' }, auth), body: p.buf,
+    });
+    if (!up.ok) return { uploaded: false, partial: files.length > 0, folder: folderPath, files, reason: 'upload "' + p.filename + '" ' + up.status + ': ' + (await up.text()).slice(0, 200) };
+    const j = await up.json().catch(() => ({}));
+    files.push({ filename: p.filename, webUrl: j.webUrl });
   }
-  return { created: true, id: msg.id, webLink: msg.webLink, mailbox };
+  return { uploaded: true, folder: folderPath, files };
 }
 
 // ── Persist each statement into the entity's Workpapers ───────────────────────
@@ -321,9 +295,20 @@ function registerUscCapitalRoutes(app, ctx) {
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
 
-  // Run report: generate both statements, save to Workpapers, compose the email,
-  // and create the Outlook draft (if Graph is configured). Returns everything so
-  // the page can preview/download and the draft can be opened.
+  // Download All — both statements as a single zip.
+  app.get('/api/admin/usc-capital/statements.zip', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
+    try {
+      const q = resolveQuarter((req.query && req.query.as_of) || '');
+      const data = buildData(ctx, q);
+      const buf = await buildZip(data);
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', 'attachment; filename="USC Capital Statements ' + q.fileDate + '.zip"');
+      res.send(buf);
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+
+  // Run report: generate both statements, save to Workpapers, and file them to
+  // SharePoint (if Graph is configured). Returns the figures + save status.
   app.post('/api/admin/usc-capital/run', auth, requireRole('Admin', 'Accountant'), async (req, res) => {
     try {
       const q = resolveQuarter((req.body && req.body.as_of) || '');
@@ -336,9 +321,8 @@ function registerUscCapitalRoutes(app, ctx) {
         const savedTo = saveToWorkpapers(ctx, ent.entity_id, q, filename, buf, who);
         pdfs.push({ entity_id: ent.entity_id, short_name: ent.short_name, filename, buf, saved_to: savedTo });
       }
-      const email = composeEmail(data, pdfs);
-      const makeDraft = !req.body || req.body.create_draft !== false;
-      const draft = makeDraft ? await createOutlookDraft(email) : { created: false, reason: 'skipped' };
+      const makeSp = !req.body || req.body.file_to_sharepoint !== false;
+      const sharepoint = makeSp ? await uploadToSharePoint(pdfs, q) : { uploaded: false, reason: 'skipped' };
       res.json({
         quarter: q.label, as_of: q.end,
         statements: data.entities.map((e) => ({
@@ -347,9 +331,8 @@ function registerUscCapitalRoutes(app, ctx) {
           contribution: e.contribution, distribution: e.distribution, unrealized: e.unrealized,
           net_loss: e.netLoss, ending: e.ending,
         })),
-        files: pdfs.map((p) => ({ entity_id: p.entity_id, filename: p.filename, saved_to: p.saved_to, b64: p.buf.toString('base64') })),
-        email: { to: email.to, cc: email.cc, subject: email.subject, body_text: email.bodyText },
-        draft, warnings: data.warnings,
+        files: pdfs.map((p) => ({ entity_id: p.entity_id, filename: p.filename, saved_to: p.saved_to })),
+        sharepoint, warnings: data.warnings,
       });
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
@@ -357,5 +340,5 @@ function registerUscCapitalRoutes(app, ctx) {
 
 module.exports = {
   resolveQuarter, ensureConfig, getConfig, buildData, renderStatementPdf,
-  composeEmail, createOutlookDraft, fileNameFor, registerUscCapitalRoutes,
+  buildZip, uploadToSharePoint, fileNameFor, registerUscCapitalRoutes,
 };

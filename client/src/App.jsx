@@ -6760,13 +6760,18 @@ function UscCapitalStatements({user}){
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);}
     catch(e){setErr(e.message);}
   };
+  const dlAll=async()=>{
+    try{const out=await api.getUscCapitalStatementsZip(asOf);if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);}
+    catch(e){setErr(e.message);}
+  };
   const bd='1px solid #e2e8f0';
   const td={padding:'6px 8px',textAlign:'right',borderBottom:bd};
-  const emailText=result?('To: '+result.email.to.join(', ')+'\nCc: '+result.email.cc.join(', ')+'\nSubject: '+result.email.subject+'\n\n'+result.email.body_text):'';
+  const sp=result&&result.sharepoint;
   return(<div>
     <div style={{marginBottom:8}}>
       <div style={S.h1}>USC Capital Statements</div>
-      <div style={S.sub}>Quarterly partner capital account statements for the University of Southern California — County Line Industrial Park LLC (CLIP) and County Line Rail Silsbee LLC — plus the cover email to BNY Mellon.</div>
+      <div style={S.sub}>Quarterly partner capital account statements for the University of Southern California &mdash; County Line Industrial Park LLC (CLIP) and County Line Rail Silsbee LLC. Filed to the SharePoint USC folder and saved to Workpapers.</div>
     </div>
     {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
     <div style={{...S.card}}>
@@ -6778,7 +6783,10 @@ function UscCapitalStatements({user}){
       <div style={{fontSize:12,color:T.textMuted,marginTop:8}}>Committed capital and year-to-date contributions are validated live against each entity&rsquo;s general ledger (account 34261). Beginning balance, ownership %, and year-end allocations carry from the capital-account schedule (seeded from the 2Q2026 statement).</div>
     </div>
     {result&&<div style={{...S.card,marginTop:12}}>
-      <div style={S.h2}>Statements &middot; {result.quarter}</div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
+        <div style={S.h2}>Statements &middot; {result.quarter}</div>
+        <button style={{...S.btnP,padding:'5px 12px',fontSize:13}} onClick={dlAll}>Download All (.zip)</button>
+      </div>
       {(result.warnings||[]).map((w,i)=><div key={i} style={{...S.err,marginTop:8}}>{w}</div>)}
       <div style={{overflowX:'auto'}}>
       <table style={{width:'100%',borderCollapse:'collapse',marginTop:10,fontSize:13,minWidth:760}}>
@@ -6803,14 +6811,10 @@ function UscCapitalStatements({user}){
       </table>
       </div>
       <div style={{marginTop:16}}>
-        <div style={{fontWeight:600,marginBottom:6}}>Outlook draft</div>
-        {result.draft&&result.draft.created
-          ? <div style={{fontSize:13}}>Draft created in {result.draft.mailbox||'your mailbox'}.{result.draft.webLink&&<> <a href={result.draft.webLink} target='_blank' rel='noreferrer'>Open in Outlook &rarr;</a></>}{result.draft.partial&&<div style={{...S.err,marginTop:6}}>{result.draft.reason}</div>}</div>
-          : <div style={{fontSize:13,color:T.textMuted}}>Not auto-created &mdash; {result.draft?result.draft.reason:'n/a'} The statements are saved to Workpapers and the cover email is below; download the two PDFs and attach them in Outlook.</div>}
-      </div>
-      <div style={{marginTop:16}}>
-        <div style={{fontWeight:600,marginBottom:6}}>Cover email</div>
-        <div style={{fontSize:12,color:T.textMuted,lineHeight:1.6,whiteSpace:'pre-wrap',background:'#f8fafc',border:bd,borderRadius:6,padding:'10px 12px'}}>{emailText}</div>
+        <div style={{fontWeight:600,marginBottom:6}}>SharePoint</div>
+        {sp&&sp.uploaded
+          ? <div style={{fontSize:13}}>Filed to <code style={{fontSize:12}}>{sp.folder}</code>.{(sp.files||[]).some(f=>f.webUrl)&&<> {(sp.files||[]).filter(f=>f.webUrl).map((f,i)=><span key={i}>{i>0?' · ':' '}<a href={f.webUrl} target='_blank' rel='noreferrer'>{f.filename}</a></span>)}</>}</div>
+          : <div style={{fontSize:13,color:T.textMuted}}>Not filed to SharePoint &mdash; {sp?sp.reason:'n/a'} (statements saved to Workpapers; configure Microsoft Graph to auto-file).</div>}
       </div>
     </div>}
   </div>);
