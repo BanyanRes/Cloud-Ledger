@@ -12,7 +12,7 @@
 //   • builds the invoice schedule from the stored terms (muha_invoice_config),
 //   • renders each invoice PDF (pdf-lib), matching the approved invoice layout,
 //   • emails each invoice to the Bill.com inbox (Resend) N calendar days before
-//     its invoice date (default 5), via an in-process scheduler, and
+//     its invoice date (default 7), via an in-process scheduler, and
 //   • logs every send in muha_invoice_sends so an invoice can never go out twice.
 //
 // Invoice date = last day of the billing period (the 15th or month end).
@@ -35,7 +35,7 @@ const DEFAULTS = {
   invoice_prefix: 'MK',
   send_to: 'banyanresidential@bill.com',
   cc: 'jyun@banyanres.com',
-  lead_days: 5,
+  lead_days: 7,
   auto_send: 1,
 };
 
@@ -78,6 +78,18 @@ function ensureTables(db) {
     );`);
   const row = db.prepare('SELECT id FROM muha_invoice_config WHERE id = 1').get();
   if (!row) db.prepare('INSERT INTO muha_invoice_config (id, data, updated_by) VALUES (1, ?, ?)').run(JSON.stringify(DEFAULTS), 'seed');
+  // One-time: Jimmy changed the send lead time from 5 to 7 calendar days
+  // (2026-10-29). Applied once (tracked in data._migrations) so a later edit on
+  // the settings page is never overwritten.
+  {
+    const cur = db.prepare('SELECT data FROM muha_invoice_config WHERE id = 1').get();
+    let d = {}; try { d = JSON.parse(cur.data); } catch (e) { d = {}; }
+    const done = Array.isArray(d._migrations) ? d._migrations : [];
+    if (!done.includes('lead_days_7')) {
+      d.lead_days = 7; d._migrations = done.concat('lead_days_7');
+      db.prepare("UPDATE muha_invoice_config SET data = ?, updated_by = 'migration lead_days_7', updated_at = datetime('now') WHERE id = 1").run(JSON.stringify(d));
+    }
+  }
   // MK-2026-11A was sent to Bill.com outside CloudLedger before this page went
   // live (per Jimmy, 2026-10-29). Record it as sent so the scheduler never sends
   // it again. INSERT OR IGNORE: a no-op once the row exists.
@@ -100,6 +112,7 @@ function saveConfig(db, patch, who) {
   ['monthly_fee', 'monthly_allowance', 'wire_fee'].forEach((k) => { next[k] = r2(next[k]); });
   ['allowance_months', 'lead_days'].forEach((k) => { next[k] = Math.max(0, Math.round(Number(next[k]) || 0)); });
   next.auto_send = next.auto_send ? 1 : 0;
+  if (Array.isArray(cur._migrations)) next._migrations = cur._migrations; // keep one-time migration markers
   if (!isDate(next.effective_date)) throw new Error('Effective date must be YYYY-MM-DD');
   if (next.termination_date && !isDate(next.termination_date)) throw new Error('Termination date must be YYYY-MM-DD or blank');
   if (!/^[^@\s]+@[^@\s]+$/.test(String(next.send_to || ''))) throw new Error('Send-to must be an email address');
