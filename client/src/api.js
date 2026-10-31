@@ -217,6 +217,20 @@ export const api = {
   saveMuhaInvoiceConfig: (cfg) => request('/admin/muha-invoice/config', { method: 'PUT', body: cfg }),
   sendMuhaInvoice: (no, force) => request('/admin/muha-invoice/' + encodeURIComponent(no) + '/send', { method: 'POST', body: { force: !!force } }),
   skipMuhaInvoice: (no, skip) => request('/admin/muha-invoice/' + encodeURIComponent(no) + '/skip', { method: 'POST', body: { skip: !!skip } }),
+  // Administration: AM Fee Invoices (Banyan Residential asset-management fees)
+  getAmFee: () => request('/admin/am-fee'),
+  saveAmFeeConfig: (cfg) => request('/admin/am-fee/config', { method: 'PUT', body: cfg }),
+  saveAmFeeBilling: (key, patch) => request('/admin/am-fee/' + encodeURIComponent(key), { method: 'PUT', body: patch }),
+  issueAmFee: (key, period, force) => request('/admin/am-fee/' + encodeURIComponent(key) + '/issue', { method: 'POST', body: { period, force: !!force } }),
+  getAmFeeCalc: (key, period) => request('/admin/am-fee/' + encodeURIComponent(key) + '/calc?period=' + encodeURIComponent(period||'')),
+  getAmFeePreviewPdf: async (key, period) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/admin/am-fee/' + encodeURIComponent(key) + '/preview.pdf?period=' + encodeURIComponent(period||''), { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) { let d = {}; try { d = await res.json(); } catch {} throw new Error(d.error || 'Preview failed'); }
+    const blob = await res.blob(); return { blob, filename: 'preview_' + key + '.pdf' };
+  },
   getMuhaInvoicePdf: async (no) => {
     const token = getToken();
     const res = await fetch(API_BASE + '/admin/muha-invoice/' + encodeURIComponent(no) + '/pdf', { headers: token ? { Authorization: 'Bearer ' + token } : {} });

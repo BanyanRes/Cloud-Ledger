@@ -178,6 +178,18 @@ function ensureTables(db) {
     const ex = db.prepare('SELECT key FROM amfee_billings WHERE key = ?').get(b.key);
     if (!ex) db.prepare('INSERT INTO amfee_billings (key, data, updated_by) VALUES (?, ?, ?)').run(b.key, JSON.stringify(b), 'seed');
   }
+  // Invoices already issued outside CloudLedger (the old manual Excel process),
+  // recorded so the scheduler never re-sends them and the page shows them as done.
+  const EXT_SENT = [
+    ['48th', '2026-09', 'September 2026', '0038', 5504.88],
+    ['48th', '2026-10', 'October 2026', '0039', 5504.88],
+    ['north_tempe', '2026-Q4', 'Q4 2026', '0076', 18797.51],
+    ['orchards', '2026-09', 'September 2026', '0034', 1040],
+    ['south_mountain', '2026-09', 'September 2026', '0034', 1660],
+    ['skye_canyon', '2026-09', 'September 2026', '0034', 3038],
+  ];
+  const insExt = db.prepare("INSERT OR IGNORE INTO amfee_issues (billing_key, period_key, status, period_label, invoice_no, amount, trigger, by_who, sent_at) VALUES (?,?,'sent',?,?,?,'external','sent outside CloudLedger', datetime('now'))");
+  for (const row of EXT_SENT) insExt.run(row[0], row[1], row[2], row[3], row[4]);
 }
 
 function getConfig(db) {

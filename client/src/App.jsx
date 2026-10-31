@@ -1052,6 +1052,7 @@ export default function App(){
       {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
       {id:'usc_capital',label:'USC Capital Statements',icon:'📄',section:'administration'},
       {id:'muha_invoice',label:'Muha Invoice',icon:'🧾',section:'administration'},
+      {id:'am_fee',label:'AM Fee Invoices',icon:'🧾',section:'administration'},
       {id:'letterhead',label:'Letterhead',icon:'📄',section:'administration'},
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
       {id:'users',label:'Users',icon:NI.users,section:'all'},
@@ -1131,6 +1132,7 @@ export default function App(){
         {page==='assignment'&&canAccess('administration')&&<AssignmentPage entities={entities} user={user} key={'asg-'+rk}/>}
         {page==='usc_capital'&&canAccess('administration')&&<UscCapitalStatements user={user} key={'usc-'+rk}/>}
         {page==='muha_invoice'&&canAccess('administration')&&<MuhaInvoice user={user} key={'muha-'+rk}/>}
+        {page==='am_fee'&&canAccess('administration')&&<AmFeeInvoices user={user} key={'amfee-'+rk}/>}
         {page==='letterhead'&&canAccess('administration')&&<LetterheadPage user={user} key={'lh-'+rk}/>}
         {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
@@ -6823,6 +6825,73 @@ function UscCapitalStatements({user}){
   </div>);
 }
 
+// === Administration: AM Fee Invoices - Banyan Residential asset-management fees ===
+function AmFeeInvoices({user}){
+  const[data,setData]=useState(null);
+  const[err,setErr]=useState('');
+  const[msg,setMsg]=useState('');
+  const[busy,setBusy]=useState('');
+  const isAdmin=user&&user.role==='Admin';
+  const load=async()=>{try{const d=await api.getAmFee();setData(d);}catch(e){setErr(e.message);}};
+  useEffect(()=>{load();},[]);
+  const money=(n,c)=>'$'+(Number(n)||0).toLocaleString('en-US',{minimumFractionDigits:c?2:0,maximumFractionDigits:c?2:0});
+  const bd='1px solid #e2e8f0';
+  const td={padding:'6px 8px',borderBottom:bd,whiteSpace:'nowrap'};
+  const tdr={...td,textAlign:'right'};
+  const nb={padding:'3px 8px',fontSize:12,border:bd,borderRadius:6,background:'#fff',cursor:'pointer',marginRight:6};
+  const STAT={sent:['Sent','#166534','#dcfce7'],failed:['Failed','#991b1b','#fee2e2'],skipped:['Skipped','#475569','#e2e8f0'],issuing:['Issuing','#1e40af','#dbeafe'],due:['Due','#92400e','#fef3c7']};
+  const pill=(st)=>{const m=STAT[st]||[st,'#334155','#f1f5f9'];return(<span style={{background:m[2],color:m[1],padding:'1px 8px',borderRadius:10,fontSize:12}}>{m[0]}</span>);};
+  const preview=async(key,period)=>{setErr('');setMsg('');try{const out=await api.getAmFeePreviewPdf(key,period);if(!out)return;const url=URL.createObjectURL(out.blob);window.open(url,'_blank');setTimeout(()=>URL.revokeObjectURL(url),30000);}catch(e){setErr(e.message);}};
+  const testCalc=async(key,period)=>{setBusy(key+period);setErr('');setMsg('');try{const c=await api.getAmFeeCalc(key,period);setMsg(key+' '+period+': net collections '+money(c.netColl,true)+' x '+((c.rate||0.01)*100)+'% = '+money(c.feeRaw,true)+' -> invoiced '+money(c.fee)+(c.source_folder?(' (from '+c.source_folder+')'):''));}catch(e){setErr(e.message);}finally{setBusy('');}};
+  const issue=async(b,period,status)=>{const re=status==='sent'||status==='failed';
+    if(!window.confirm((re?'RE-ISSUE':'Issue')+' the '+period+' '+b.property+' invoice now?\n\nThis posts a journal entry in Banyan Residential (Dr A/R, Cr Asset Management Fee) and EMAILS it to '+b.recipients.to+' and '+((b.recipients.cc||[]).length)+' cc recipients.'))return;
+    setBusy(b.key+period);setErr('');setMsg('');
+    try{const o=await api.issueAmFee(b.key,period,re);setMsg('Issued '+b.property+' '+period+' as invoice #'+o.invoice_no+' ('+money(o.amount,true)+')'+(o.file_warning?(' - note: not filed to SharePoint ('+o.file_warning+')'):''));await load();}
+    catch(e){setErr(e.message);}finally{setBusy('');}};
+  const toggle=async(b)=>{setBusy('en'+b.key);setErr('');setMsg('');try{await api.saveAmFeeBilling(b.key,{enabled:b.enabled?0:1});await load();}catch(e){setErr(e.message);}finally{setBusy('');}};
+  const toggleSched=async()=>{setBusy('sched');setErr('');setMsg('');try{await api.saveAmFeeConfig({scheduler_on:data.config.scheduler_on?0:1});await load();}catch(e){setErr(e.message);}finally{setBusy('');}};
+  if(!data)return(<div><div style={S.h1}>AM Fee Invoices</div>{err?<div style={S.err}>{err}</div>:<div style={S.sub}>Loading...</div>}</div>);
+  return(<div>
+    <div style={{marginBottom:8}}>
+      <div style={S.h1}>AM Fee Invoices</div>
+      <div style={S.sub}>Monthly &amp; quarterly asset-management fee invoices issued by Banyan Residential, LLC. Each is created as an A/R invoice (Dr A/R, Cr Asset Management Fee Revenue), emailed to the recipients, and filed to the AM Fees SharePoint folder. Scheduler is <b>{data.config.scheduler_on?'ON':'OFF'}</b>.</div>
+    </div>
+    {!data.email_configured&&<div style={{...S.err,marginBottom:12}}>Email is not configured on the server (RESEND_API_KEY) &mdash; invoices cannot be sent.</div>}
+    {!data.graph_configured&&<div style={{marginBottom:12,padding:'8px 12px',background:'#fef3c7',color:'#92400e',borderRadius:6,fontSize:13}}>Microsoft Graph / SharePoint is not configured. Invoices still email &amp; post, but PDFs will not be filed to the AM Fees folder, and the calculated (Carlyle) invoices cannot read their financials until it is set.</div>}
+    {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
+    {msg&&<div style={{marginBottom:12,padding:'8px 12px',background:'#dcfce7',color:'#166534',borderRadius:6,fontSize:13}}>{msg}</div>}
+    {isAdmin&&<div style={{marginBottom:12}}><button style={{...S.btnP,padding:'5px 12px',fontSize:13}} disabled={busy==='sched'} onClick={toggleSched}>{data.config.scheduler_on?'Turn scheduler OFF':'Turn scheduler ON'}</button></div>}
+    {data.billings.map(b=>(<div key={b.key} style={{...S.card,marginBottom:12}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}}>
+        <div>
+          <div style={S.h2}>{b.property} <span style={{fontSize:12,fontWeight:400,color:b.enabled?'#166534':'#92400e',marginLeft:6}}>{b.enabled?'auto-send ON':'auto-send OFF'}</span></div>
+          <div style={{fontSize:12,color:'#64748b'}}>{b.client_name} &middot; {b.cadence} &middot; {b.fee_type==='fixed'?('fixed '+money(b.fixed_amount,true)):'1% of net rent collections'} &middot; to {b.recipients.to} (+{(b.recipients.cc||[]).length} cc)</div>
+        </div>
+        {isAdmin&&<button style={nb} disabled={busy==='en'+b.key} onClick={()=>toggle(b)}>{b.enabled?'Disable auto-send':'Enable auto-send'}</button>}
+      </div>
+      <table style={{width:'100%',borderCollapse:'collapse',marginTop:10,fontSize:13}}>
+        <thead><tr><th style={{...td,textAlign:'left'}}>Period</th><th style={{...td,textAlign:'left'}}>Status</th><th style={tdr}>Invoice #</th><th style={tdr}>Amount</th><th style={{...td}}></th></tr></thead>
+        <tbody>
+          {(b.due||[]).map(p=>(<tr key={p.key}>
+            <td style={td}>{p.label}</td>
+            <td style={td}>{pill(p.status)}{p.error?<span title={p.error} style={{color:'#991b1b',marginLeft:6,cursor:'help'}}>!</span>:null}</td>
+            <td style={tdr}>{p.invoice_no||''}</td>
+            <td style={tdr}>{p.amount!=null?money(p.amount,true):''}</td>
+            <td style={{...td,textAlign:'right'}}>
+              <button style={nb} onClick={()=>preview(b.key,p.key)}>Preview</button>
+              {b.fee_type==='calc'&&<button style={nb} disabled={busy===b.key+p.key} onClick={()=>testCalc(b.key,p.key)}>Test calc</button>}
+              {isAdmin&&p.status!=='sent'&&<button style={{...S.btnP,padding:'3px 8px',fontSize:12}} disabled={busy===b.key+p.key||!data.email_configured} onClick={()=>issue(b,p.key,p.status)}>Issue now</button>}
+            </td>
+          </tr>))}
+        </tbody>
+      </table>
+      {(b.history&&b.history.length>0)&&<details style={{marginTop:8}}><summary style={{fontSize:12,color:'#64748b',cursor:'pointer'}}>History</summary>
+        <table style={{width:'100%',borderCollapse:'collapse',marginTop:6,fontSize:12}}><tbody>
+          {b.history.map(h=>(<tr key={h.period_key}><td style={td}>{h.period_label||h.period_key}</td><td style={td}>{pill(h.status)}</td><td style={tdr}>{h.invoice_no||''}</td><td style={tdr}>{h.amount!=null?money(h.amount,true):''}</td><td style={td}>{h.sent_at?(''+h.sent_at).slice(0,10):''}</td></tr>))}
+        </tbody></table></details>}
+    </div>))}
+  </div>);
+}
 // ═══ Administration: Muha Invoice — semi-monthly contractor invoices, auto-emailed to Bill.com ═══
 function MuhaInvoice({user}){
   const[data,setData]=useState(null);
