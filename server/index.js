@@ -11464,6 +11464,18 @@ require('./muhainvoice').registerMuhaInvoiceRoutes(app, {
   getFromEmail: () => (process.env.AR_FROM_EMAIL || RESET_FROM_EMAIL),
 });
 
+// ═══ Administration: AM Fee Invoices (monthly/quarterly asset-management fees) ═══
+// Issues Banyan Residential's asset-management fee invoices as native A/R
+// invoices, renders the client-facing PDF, emails them (Resend), and files them
+// into the AM Fees SharePoint folder. In-process scheduler. See server/amfee.js.
+require('./amfee').registerAmFeeRoutes(app, {
+  db,
+  auth,
+  requireRole,
+  getResendKey: () => RESEND_API_KEY,
+  getFromEmail: () => (process.env.AR_FROM_EMAIL || RESET_FROM_EMAIL),
+});
+
 // ═══ CLRF workpaper: ILPA Fee Reporting Template (GCM Grosvenor investors) ═══
 // One tab per GCM sleeve, reproducing the vendor ILPA template exactly and
 // filling only the blue input cells from the GL. See server/ilpafee.js.
