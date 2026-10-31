@@ -241,6 +241,22 @@ function quarterlyPeriodsDue(b, today) {
   });
 }
 function periodsDue(b, today) { return b.cadence === 'quarterly' ? quarterlyPeriodsDue(b, today) : monthlyPeriodsDue(b, today); }
+// Build a period object for an explicit key (YYYY-MM or YYYY-Qn), independent of today.
+function resolvePeriod(b, key) {
+  if (!key) return null;
+  if (b.cadence === 'quarterly') {
+    const m = String(key).match(/^(\d{4})-Q([1-4])$/); if (!m) return null;
+    const y = +m[1], q = +m[2];
+    const sched = (b.schedule || []).find((s) => s.period === key);
+    const fallback = (q === 4 ? (y + 1) + '-01' : y + '-' + String(q * 3 + 1).padStart(2, '0')) + '-01';
+    return { key, label: 'Q' + q + ' ' + y, y, quarter: q, issueDate: sched ? sched.issue : fallback };
+  }
+  const m = String(key).match(/^(\d{4})-(\d{2})$/); if (!m) return null;
+  const y = +m[1], mo = +m[2];
+  const iss = new Date(Date.UTC(y, (mo - 1) + (b.period === 'prior' ? 1 : 0), 1));
+  const iy = iss.getUTCFullYear(), im = iss.getUTCMonth() + 1;
+  return { key, label: MON[mo - 1] + ' ' + y, y, m: mo, issueDate: iy + '-' + String(im).padStart(2, '0') + '-' + String(b.issue_dom || 1).padStart(2, '0') };
+}
 
 // ── MS Graph (app-only) ───────────────────────────────────────────────────────
 function spDriveId(cfg) { return (cfg && cfg.sp_drive_id) || process.env.AMFEE_SP_DRIVE_ID || process.env.USC_SP_DRIVE_ID || ''; }
@@ -590,7 +606,7 @@ function registerAmFeeRoutes(app, ctx) {
     try {
       const b = getBilling(db, req.params.key); if (!b) return res.status(404).json({ error: 'No billing ' + req.params.key });
       const today = pacificToday().date;
-      const period = (periodsDue(b, '2999-12-31').find((p) => p.key === req.query.period)) || periodsDue(b, today)[0] || monthlyPeriodsDue(Object.assign({ issue_dom: 1, period: 'current' }, b), today)[0];
+      const period = resolvePeriod(b, req.query.period) || periodsDue(b, today)[0];
       if (!period) return res.status(400).json({ error: 'No period to preview' });
       const cfg = getConfig(db);
       let amount = b.fee_type === 'fixed' ? r2(b.fixed_amount) : (await computeCalc(cfg, b, period)).fee;
@@ -606,7 +622,7 @@ function registerAmFeeRoutes(app, ctx) {
     try {
       const b = getBilling(db, req.params.key); if (!b) return res.status(404).json({ error: 'No billing ' + req.params.key });
       if (b.fee_type !== 'calc') return res.json({ fee_type: 'fixed', amount: b.fixed_amount });
-      const period = periodsDue(b, req.query.today || '2999-12-31').find((p) => p.key === req.query.period) || periodsDue(b, pacificToday().date)[0];
+      const period = resolvePeriod(b, req.query.period) || periodsDue(b, pacificToday().date)[0];
       if (!period) return res.status(400).json({ error: 'No period' });
       res.json(await computeCalc(getConfig(db), b, period));
     } catch (e) { res.status(400).json({ error: e.message }); }
@@ -624,7 +640,7 @@ function registerAmFeeRoutes(app, ctx) {
     try {
       const b = getBilling(db, req.params.key); if (!b) return res.status(404).json({ error: 'No billing ' + req.params.key });
       const today = pacificToday().date;
-      const period = periodsDue(b, '2999-12-31').find((p) => p.key === (req.body && req.body.period)) || periodsDue(b, today)[0] || monthlyPeriodsDue(b, today)[0];
+      const period = resolvePeriod(b, req.body && req.body.period) || periodsDue(b, today)[0];
       if (!period) return res.status(400).json({ error: 'No period to issue' });
       if (req.body && req.body.force) db.prepare("UPDATE amfee_issues SET status='failed' WHERE billing_key=? AND period_key=? AND status!='sent'").run(b.key, period.key);
       const out = await issueOne(ctx, b, period, 'manual', who(req));
