@@ -309,6 +309,17 @@ async function clFetch(cl, p, opts = {}) {
   if (!r.ok) throw new Error('CloudLedger ' + p.split('?')[0] + ' -> HTTP ' + r.status + ' ' + (await r.text()).slice(0, 200));
   return r;
 }
+// Account balances from the CloudLedger GL: {as_of} = balance at a date,
+// {from,to} = activity in a period. balance is debit-positive.
+async function clBalances(cl, ent, q) {
+  const qs2 = Object.entries(q).map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
+  return (await clFetch(cl, '/api/entities/' + ent.id + '/balances?' + qs2)).json();
+}
+// cash interest on the BOT loan = interest expense + interest capitalized to the project
+const isInterestExp = (r) => r.type === 'Expense' && /interest/i.test(r.name || '') && !/income/i.test(r.name || '');
+const isCapInterest = (r) => r.type === 'Asset' && (/^(12321|12325)\b/.test(String(r.code)) || /construction period interest|capitalized interest/i.test(r.name || ''));
+const isBotLoan = (r) => /^25063\b/.test(String(r.code)) || (r.type === 'Liability' && /loan payable/i.test(r.name || '') && /(bot|bank of texas|midco)/i.test(r.name || ''));
+
 // Quarterly financial statements PDF (Workpapers > Financial Statements generator)
 async function clQuarterlyFs(cl, ent, asOf) {
   const fd = new FormData(); fd.append('as_of', asOf); fd.append('period', 'quarterly');
@@ -613,30 +624,68 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
     win.forEach((p, i) => {
       const r = 4 + i; ia.getCell(r, 1).value = mLabel(p);
     });
-    for (let i = 0; i < win.length; i++) {
-      const p = win[i], r = 4 + i;
-      const dir = await findMonthDir(store, 'cla', '61 Midco I/Loan Bank Statements', p.y, p.m);
-      const f = await findFile(store, 'cla', dir, /interest allocation/i, /\.xlsx$/i);
-      if (!f) { pending.push('Interest allocation ' + mLabel(p) + ' not found'); ia.getCell(r, 7).value = 'MISSING'; ia.getRow(r).fill = YEL; continue; }
-      const rows = sheetRows(await store.read('cla', f)); const got = {};
-      rows.slice(0, 40).forEach((R) => { const k = lab((R || [])[1]); if (k in intTot && !(k in got)) got[k] = num(R[3]) || 0; });
-      ['CLIP', 'Silsbee', 'SRN', 'Buna'].forEach((k, j) => { const c = ia.getCell(r, 2 + j); c.value = got[k] || 0; c.numFmt = NF; intTot[k] += got[k] || 0; });
-      setF(ia, 'F' + r, `SUM(B${r}:E${r})`, Object.values(got).reduce((a, b) => a + b, 0), NF); ia.getCell(r, 7).value = path.posix.basename(f);
+    const clIaEnts = cl ? ['CLIP', 'Silsbee', 'SRN', 'Buna'].map((k) => [k, clEntity(cl, k)]) : [];
+    if (cl && clIaEnts.every(([, e2]) => e2)) {
+      // primary: interest per entity per month straight from the CloudLedger GL
+      ia.getCell('A1').value = 'CLRFI Midco I - BOT loan cash interest by month, from the CloudLedger GL (interest expense + capitalized construction-period interest)';
+      const accts = {};
+      for (let i = 0; i < win.length; i++) {
+        const p = win[i], r = 4 + i;
+        const from = p.y + '-' + pad2(p.m) + '-01', to = new Date(Date.UTC(p.y, p.m, 0)).toISOString().slice(0, 10);
+        let rowTot = 0;
+        for (let j = 0; j < clIaEnts.length; j++) {
+          const [k, e2] = clIaEnts[j];
+          const rows = await clBalances(cl, e2, { from, to });
+          const hits = (rows || []).filter((x) => isInterestExp(x) || isCapInterest(x));
+          const v = hits.reduce((a, x) => a + (+x.balance || 0), 0);
+          hits.forEach((x) => { (accts[k] = accts[k] || new Set()).add(x.code + ' ' + x.name); });
+          const c = ia.getCell(r, 2 + j); c.value = v; c.numFmt = NF; intTot[k] += v; rowTot += v;
+        }
+        setF(ia, 'F' + r, `SUM(B${r}:E${r})`, rowTot, NF); ia.getCell(r, 7).value = 'CloudLedger GL ' + from + ' to ' + to;
+      }
+      let ar = 5 + win.length; ia.getCell(ar, 1).value = 'Accounts used'; ia.getCell(ar, 1).font = { bold: true };
+      Object.entries(accts).forEach(([k, set]) => { ar++; ia.getCell(ar, 1).value = k; ia.getCell(ar, 2).value = [...set].join('; '); });
+    } else {
+      for (let i = 0; i < win.length; i++) {
+        const p = win[i], r = 4 + i;
+        const dir = await findMonthDir(store, 'cla', '61 Midco I/Loan Bank Statements', p.y, p.m);
+        const f = await findFile(store, 'cla', dir, /interest allocation/i, /\.xlsx$/i);
+        if (!f) { pending.push('Interest allocation ' + mLabel(p) + ' not found'); ia.getCell(r, 7).value = 'MISSING'; ia.getRow(r).fill = YEL; continue; }
+        const rows = sheetRows(await store.read('cla', f)); const got = {};
+        rows.slice(0, 40).forEach((R) => { const k = lab((R || [])[1]); if (k in intTot && !(k in got)) got[k] = num(R[3]) || 0; });
+        ['CLIP', 'Silsbee', 'SRN', 'Buna'].forEach((k, j) => { const c = ia.getCell(r, 2 + j); c.value = got[k] || 0; c.numFmt = NF; intTot[k] += got[k] || 0; });
+        setF(ia, 'F' + r, `SUM(B${r}:E${r})`, Object.values(got).reduce((a, b) => a + b, 0), NF); ia.getCell(r, 7).value = path.posix.basename(f);
+      }
     }
     const iaLast = 3 + win.length; ia.getColumn(1).width = 12; ia.getColumn(7).width = 50; [2, 3, 4, 5, 6].forEach((c) => { ia.getColumn(c).width = 15; });
     // loan balance at quarter end (BOT statements bracketing the quarter end)
     let loan = null, loanSrc = '';
-    for (const p of [Q.back(-1), QE]) {
-      const dir = await findMonthDir(store, 'cla', '61 Midco I/Loan Bank Statements', p.y, p.m); if (!dir || loan) continue;
-      const kids = (await store.list('cla', dir)) || [];
-      for (const k of kids.filter((x) => !x.folder && /loan/i.test(x.name) && /\.pdf$/i.test(x.name))) {
-        const t = (await pdfPagesText(await store.read('cla', dir + '/' + k.name))).join(' ');
-        const re = /(\d\d)-(\d\d)-(\d\d)\s*(\d\d)-(\d\d)-(\d\d)\s*(\d+)\s*\$([\d,]+\.\d\d)/g; let m;
-        while ((m = re.exec(t))) {
-          const from = '20' + m[3] + '-' + m[1] + '-' + m[2], to = '20' + m[6] + '-' + m[4] + '-' + m[5];
-          if (from <= Q.iso && Q.iso < to) { loan = +m[8].replace(/,/g, ''); loanSrc = k.name + ' (accrual ' + from + ' to ' + to + ')'; break; }
+    const clLnEnts = cl ? ['CLIP', 'Silsbee', 'SRN', 'Buna'].map((k) => [k, clEntity(cl, k)]) : [];
+    if (cl && clLnEnts.every(([, e2]) => e2)) {
+      // primary: BOT loan payable (25063) on each borrower's balance sheet in CloudLedger
+      const parts = [];
+      for (const [k, e2] of clLnEnts) {
+        const rows = await clBalances(cl, e2, { as_of: Q.iso });
+        const v = -(rows || []).filter(isBotLoan).reduce((a, x) => a + (+x.balance || 0), 0);
+        if (v) parts.push(k + ' ' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+        loan = (loan || 0) + v;
+      }
+      loanSrc = 'CloudLedger GL - Loan Payable BOT (25063) at ' + Q.iso + ': ' + parts.join(', ');
+      if (!loan) { loan = null; out.warnings.push('Midco: no BOT loan balance (25063) found in CloudLedger at ' + Q.iso + ' - checked the BOT loan statements instead'); }
+    }
+    if (loan == null) {   // fallback: BOT loan statements in SharePoint
+      for (const p of [Q.back(-1), QE]) {
+        const dir = await findMonthDir(store, 'cla', '61 Midco I/Loan Bank Statements', p.y, p.m); if (!dir || loan) continue;
+        const kids = (await store.list('cla', dir)) || [];
+        for (const k of kids.filter((x) => !x.folder && /loan/i.test(x.name) && /\.pdf$/i.test(x.name))) {
+          const t = (await pdfPagesText(await store.read('cla', dir + '/' + k.name))).join(' ');
+          const re = /(\d\d)-(\d\d)-(\d\d)\s*(\d\d)-(\d\d)-(\d\d)\s*(\d+)\s*\$([\d,]+\.\d\d)/g; let m;
+          while ((m = re.exec(t))) {
+            const from = '20' + m[3] + '-' + m[1] + '-' + m[2], to = '20' + m[6] + '-' + m[4] + '-' + m[5];
+            if (from <= Q.iso && Q.iso < to) { loan = +m[8].replace(/,/g, ''); loanSrc = k.name + ' (accrual ' + from + ' to ' + to + ')'; break; }
+          }
+          if (loan) break;
         }
-        if (loan) break;
       }
     }
     if (loan == null) pending.push('Loan balance at ' + Q.iso + ' not found in BOT loan statements - enter on "Loan Balance" tab');
