@@ -660,6 +660,7 @@ function ensureSchema(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS compliance_cert_config (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL, updated_by TEXT, updated_at TEXT DEFAULT (datetime('now')));
     CREATE TABLE IF NOT EXISTS compliance_cert_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, quarter_end TEXT NOT NULL, status TEXT NOT NULL, log TEXT, result TEXT, error TEXT,
       by_who TEXT, started_at TEXT DEFAULT (datetime('now')), finished_at TEXT);`);
+  try { db.exec('ALTER TABLE compliance_cert_runs ADD COLUMN claimed_at TEXT'); } catch (e) { /* already there */ }
   if (!db.prepare('SELECT id FROM compliance_cert_config WHERE id = 1').get()) {
     const d = JSON.parse(JSON.stringify(Object.assign({}, DEFAULTS, { midco: Object.assign({}, DEFAULTS.midco, { entities: undefined }) })));
     db.prepare('INSERT INTO compliance_cert_config (id, data, updated_by) VALUES (1, ?, ?)').run(JSON.stringify(d), 'seed');
@@ -678,13 +679,28 @@ function lastQuarterEnd(today = new Date()) {
 function registerComplianceCertRoutes(app, ctx) {
   const { db, auth, requireRole } = ctx;
   ensureSchema(db);
-  const running = new Map();
-  const who = (req) => (req.user && (req.user.email || req.user.username || req.user.name)) || 'unknown';
+  // How reports execute:
+  //   sharepoint - in this server, via Microsoft Graph (MS_TENANT_ID/CLIENT_ID/CLIENT_SECRET set)
+  //   local      - in this server, against OneDrive-synced folders (CC_LOCAL_ROOT; dev machine)
+  //   runner     - queued for the runner program on Jimmy's PC (CC_RUNNER_KEY set), which
+  //                builds the package from the PC's OneDrive folders (scripts/compliance-runner.js)
+  const runnerKey = () => process.env.CC_RUNNER_KEY || '';
+  const mode = () => (graphConfigured() ? 'sharepoint' : (process.env.CC_STORAGE === 'local' || process.env.CC_LOCAL_ROOT) ? 'local' : runnerKey() ? 'runner' : 'none');
+  let runnerSeen = 0, runnerHost = '';
+  const crypto = require('crypto');
+  const runnerAuth = (req, res, next) => {
+    const k = runnerKey(), got = String(req.get('x-runner-key') || '');
+    if (!k || got.length !== k.length || !crypto.timingSafeEqual(Buffer.from(got), Buffer.from(k))) return res.status(401).json({ error: 'invalid runner key' });
+    runnerSeen = Date.now(); runnerHost = String(req.get('x-runner-host') || '').slice(0, 80); next();
+  };
+  const publicConfig = () => { const c = JSON.parse(JSON.stringify(getConfig(db))); if (c.midco) delete c.midco.entities; return c; };
 
   app.get('/api/admin/compliance-certs', auth, requireRole('Admin', 'Accountant'), (req, res) => {
     const cfg = getConfig(db); const c = JSON.parse(JSON.stringify(cfg)); if (c.midco) delete c.midco.entities;
     const runs = db.prepare('SELECT id, quarter_end, status, by_who, started_at, finished_at, error FROM compliance_cert_runs ORDER BY id DESC LIMIT 15').all();
-    res.json({ config: c, graph_configured: graphConfigured(), storage: (process.env.CC_STORAGE === 'local' || (!graphConfigured() && process.env.CC_LOCAL_ROOT)) ? 'local' : 'sharepoint',
+    res.json({ config: c, graph_configured: graphConfigured(), storage: mode(),
+      runner_configured: !!runnerKey(), runner_online: Date.now() - runnerSeen < 45000, runner_host: runnerHost,
+      runner_last_seen: runnerSeen ? new Date(runnerSeen).toISOString() : null,
       default_quarter_end: lastQuarterEnd(), dest_base: DEST_BASE, runs });
   });
   app.put('/api/admin/compliance-certs/config', auth, requireRole('Admin'), (req, res) => {
@@ -695,7 +711,14 @@ function registerComplianceCertRoutes(app, ctx) {
   });
   app.post('/api/admin/compliance-certs/report', auth, requireRole('Admin', 'Accountant'), (req, res) => {
     let Q; try { Q = parseQuarterEnd((req.body || {}).quarter_end); } catch (e) { return res.status(400).json({ error: e.message }); }
-    if ([...running.values()].some((r) => r.quarter_end === Q.iso)) return res.status(409).json({ error: 'A report for ' + Q.label + ' is already running' });
+    if ([...running.values()].some((r) => r.quarter_end === Q.iso) ||
+        db.prepare("SELECT id FROM compliance_cert_runs WHERE quarter_end = ? AND status IN ('queued','running')").get(Q.iso))
+      return res.status(409).json({ error: 'A report for ' + Q.label + ' is already queued or running' });
+    if (mode() === 'none') return res.status(400).json({ error: 'Report runner is not configured (set CC_RUNNER_KEY, or Microsoft Graph credentials)' });
+    if (mode() === 'runner') {
+      const qid = db.prepare("INSERT INTO compliance_cert_runs (quarter_end, status, log, by_who) VALUES (?, 'queued', '', ?)").run(Q.iso, who(req)).lastInsertRowid;
+      return res.json({ id: qid, quarter: Q.label, queued: true });
+    }
     const id = db.prepare("INSERT INTO compliance_cert_runs (quarter_end, status, log, by_who) VALUES (?, 'running', '', ?)").run(Q.iso, who(req)).lastInsertRowid;
     const state = { quarter_end: Q.iso, log: [] }; running.set(id, state);
     const upd = db.prepare('UPDATE compliance_cert_runs SET log = ? WHERE id = ?');
@@ -705,6 +728,32 @@ function registerComplianceCertRoutes(app, ctx) {
       .finally(() => running.delete(id));
     res.json({ id, quarter: Q.label });
   });
+  // ── endpoints used by the runner on Jimmy's PC (authenticated by CC_RUNNER_KEY) ──
+  app.post('/api/compliance-runner/heartbeat', runnerAuth, (req, res) => res.json({ ok: true }));
+  app.post('/api/compliance-runner/claim', runnerAuth, (req, res) => {
+    // a job claimed more than 30 minutes ago without finishing is treated as abandoned
+    db.prepare("UPDATE compliance_cert_runs SET status = 'failed', error = 'Runner stopped before finishing (timed out)', finished_at = datetime('now') WHERE status = 'running' AND claimed_at IS NOT NULL AND claimed_at < datetime('now', '-30 minutes')").run();
+    const job = db.transaction(() => {
+      const r = db.prepare("SELECT id, quarter_end FROM compliance_cert_runs WHERE status = 'queued' ORDER BY id LIMIT 1").get();
+      if (!r) return null;
+      db.prepare("UPDATE compliance_cert_runs SET status = 'running', claimed_at = datetime('now'), log = ? WHERE id = ?").run('Picked up by ' + (runnerHost || 'runner'), r.id);
+      return r;
+    })();
+    res.json({ job: job ? { id: job.id, quarter_end: job.quarter_end, config: publicConfig() } : null });
+  });
+  app.post('/api/compliance-runner/runs/:id/log', runnerAuth, (req, res) => {
+    const r = db.prepare('SELECT log FROM compliance_cert_runs WHERE id = ?').get(+req.params.id); if (!r) return res.status(404).json({ error: 'not found' });
+    const lines = ((req.body || {}).lines || []).map(String).slice(0, 200);
+    db.prepare('UPDATE compliance_cert_runs SET log = ? WHERE id = ?').run([r.log || ''].concat(lines).filter(Boolean).join('\n'), +req.params.id);
+    res.json({ ok: true });
+  });
+  app.post('/api/compliance-runner/runs/:id/finish', runnerAuth, (req, res) => {
+    const b = req.body || {};
+    if (b.ok) db.prepare("UPDATE compliance_cert_runs SET status = 'done', result = ?, finished_at = datetime('now') WHERE id = ?").run(JSON.stringify(b.result || {}), +req.params.id);
+    else db.prepare("UPDATE compliance_cert_runs SET status = 'failed', error = ?, finished_at = datetime('now') WHERE id = ?").run(String(b.error || 'unknown error').slice(0, 2000), +req.params.id);
+    res.json({ ok: true });
+  });
+
   app.get('/api/admin/compliance-certs/runs/:id', auth, requireRole('Admin', 'Accountant'), (req, res) => {
     const r = db.prepare('SELECT * FROM compliance_cert_runs WHERE id = ?').get(+req.params.id);
     if (!r) return res.status(404).json({ error: 'not found' });

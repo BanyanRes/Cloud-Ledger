@@ -6835,14 +6835,14 @@ function ComplianceCertificates({user}){
   const[busy,setBusy]=useState(false);
   const load=async()=>{try{const d=await api.getComplianceCerts();setData(d);setQe(q=>q||d.default_quarter_end);}catch(e){setErr(e.message);}};
   useEffect(()=>{load();},[]);
-  const poll=async(id)=>{try{const r=await api.getComplianceRun(id);setRun(r);if(r.status==='running'){setTimeout(()=>poll(id),2500);}else{setBusy(false);load();}}catch(e){setErr(e.message);setBusy(false);}};
+  const poll=async(id)=>{try{const r=await api.getComplianceRun(id);setRun(r);if(r.status==='running'||r.status==='queued'){setTimeout(()=>poll(id),2500);}else{setBusy(false);load();}}catch(e){setErr(e.message);setBusy(false);}};
   const report=async()=>{setErr('');setRun(null);setBusy(true);try{const o=await api.runComplianceReport(qe);poll(o.id);}catch(e){setErr(e.message);setBusy(false);}};
   const money=(n)=>n==null?'n/a':'$'+(Number(n)||0).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0});
   const pct=(x)=>x==null?'n/a':(x*100).toFixed(2)+'%';
   const xx=(x)=>x==null?'n/a':Number(x).toFixed(2)+'x';
   const bd='1px solid #e2e8f0';
   const td={padding:'6px 8px',borderBottom:bd,verticalAlign:'top'};
-  const STAT={created:['Created','#166534','#dcfce7'],copied:['Copied','#166534','#dcfce7'],missing:['Missing','#92400e','#fef3c7'],error:['Error','#991b1b','#fee2e2'],running:['Running','#1e40af','#dbeafe'],done:['Done','#166534','#dcfce7'],failed:['Failed','#991b1b','#fee2e2']};
+  const STAT={created:['Created','#166534','#dcfce7'],copied:['Copied','#166534','#dcfce7'],missing:['Missing','#92400e','#fef3c7'],error:['Error','#991b1b','#fee2e2'],queued:['Waiting for PC','#92400e','#fef3c7'],running:['Running','#1e40af','#dbeafe'],done:['Done','#166534','#dcfce7'],failed:['Failed','#991b1b','#fee2e2']};
   const pill=(st)=>{const m=STAT[st]||[st,'#334155','#f1f5f9'];return(<span style={{background:m[2],color:m[1],padding:'1px 8px',borderRadius:10,fontSize:12,whiteSpace:'nowrap'}}>{m[0]}</span>);};
   const pf=(ok)=>ok==null?null:<span style={{marginLeft:6,padding:'1px 8px',borderRadius:10,fontSize:12,background:ok?'#dcfce7':'#fee2e2',color:ok?'#166534':'#991b1b'}}>{ok?'Pass':'Fail'}</span>;
   const box={border:bd,borderRadius:8,padding:'10px 14px',minWidth:220,flex:'1 1 220px'};
@@ -6853,7 +6853,8 @@ function ComplianceCertificates({user}){
       <div style={S.h1}>Compliance Certificates</div>
       <div style={S.sub}>Builds the quarterly lender reporting packages for the quarter you pick: Skye Canyon and South Mountain/Orchards (Trimont), Silo Ridge (JPM DSCR + Wells Fargo), and Midco I (Bank of Texas covenant calc). Source reports are read from SharePoint and the finished files are saved to <b>{data.dest_base}/&lt;year&gt;/Q&lt;n&gt;</b>. Certificates are created unsigned; nothing is emailed.</div>
     </div>
-    {!data.graph_configured&&data.storage!=='local'&&<div style={{marginBottom:12,padding:'8px 12px',background:'#fef3c7',color:'#92400e',borderRadius:6,fontSize:13}}>Microsoft Graph / SharePoint is not configured on the server (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET). Reports cannot read or save files until it is set.</div>}
+    {data.storage==='none'&&<div style={{marginBottom:12,padding:'8px 12px',background:'#fef3c7',color:'#92400e',borderRadius:6,fontSize:13}}>The report runner is not set up yet (CC_RUNNER_KEY is missing on the server), so reports cannot run.</div>}
+    {data.storage==='runner'&&(data.runner_online?<div style={{marginBottom:12,padding:'8px 12px',background:'#dcfce7',color:'#166534',borderRadius:6,fontSize:13}}>Your PC is connected{data.runner_host?' ('+data.runner_host+')':''} &mdash; reports run there from your OneDrive folders and sync to SharePoint.</div>:<div style={{marginBottom:12,padding:'8px 12px',background:'#fef3c7',color:'#92400e',borderRadius:6,fontSize:13}}>Your PC is not connected right now{data.runner_last_seen?' (last seen '+new Date(data.runner_last_seen).toLocaleString()+')':''}. You can still click Report &mdash; it will run as soon as your computer is on and signed in.</div>)}
     {data.storage==='local'&&<div style={{marginBottom:12,padding:'8px 12px',background:'#dbeafe',color:'#1e40af',borderRadius:6,fontSize:13}}>Running against the local OneDrive-synced folders (CC_LOCAL_ROOT).</div>}
     {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
     <div style={{...S.card,marginBottom:12,display:'flex',alignItems:'flex-end',gap:12,flexWrap:'wrap'}}>
@@ -6864,6 +6865,7 @@ function ComplianceCertificates({user}){
       <button style={{...S.btnP,padding:'7px 18px'}} disabled={busy||!qe} onClick={report}>{busy?'Running...':'Report'}</button>
       <div style={{fontSize:12,color:'#64748b'}}>Must be a quarter end (Mar 31, Jun 30, Sep 30, Dec 31). Re-running a quarter overwrites that quarter's generated files.</div>
     </div>
+    {run&&run.status==='queued'&&<div style={{...S.card,marginBottom:12}}><div style={S.h2}>Waiting for your PC to pick up {run.quarter_end}...</div><div style={{fontSize:12,color:'#64748b'}}>This starts automatically once your computer is on and signed in.</div></div>}
     {run&&run.status==='running'&&<div style={{...S.card,marginBottom:12}}>
       <div style={S.h2}>Working on {run.quarter_end}...</div>
       <div style={{fontFamily:'monospace',fontSize:12,color:'#475569',whiteSpace:'pre-wrap'}}>{(run.log||[]).slice(-10).join('\n')||'Starting...'}</div>
