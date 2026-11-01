@@ -684,7 +684,8 @@ function registerComplianceCertRoutes(app, ctx) {
   //   local      - in this server, against OneDrive-synced folders (CC_LOCAL_ROOT; dev machine)
   //   runner     - queued for the runner program on Jimmy's PC (CC_RUNNER_KEY set), which
   //                builds the package from the PC's OneDrive folders (scripts/compliance-runner.js)
-  const runnerKey = () => process.env.CC_RUNNER_KEY || '';
+  // accept the variable name in any capitalization (e.g. CC_Runner_key) and ignore stray whitespace
+  const runnerKey = () => { const n = Object.keys(process.env).find((k) => k.toUpperCase() === 'CC_RUNNER_KEY'); return n ? String(process.env[n]).trim() : ''; };
   const mode = () => (graphConfigured() ? 'sharepoint' : (process.env.CC_STORAGE === 'local' || process.env.CC_LOCAL_ROOT) ? 'local' : runnerKey() ? 'runner' : 'none');
   let runnerSeen = 0, runnerHost = '';
   const crypto = require('crypto');
