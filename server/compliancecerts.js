@@ -522,28 +522,35 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
   // 5a. entity financial statements
   for (const e of ents) {
     await safe('Midco I', e.key + ' FS', async () => {
-      const dir = await findMonthDir(store, 'cla', e.fin, QE.y, QE.m);
-      const f = await findFile(store, 'cla', dir, e.fs, /\.pdf$/i);
-      if (f) { await copy('Midco I', 'midco', 'cla', f); return; }
       const ent = clEntity(cl, e.key);
-      if (!ent) { item('Midco I', e.key + ' quarterly financial statements', 'missing', 'not found in ' + (dir || e.fin + '/' + QE.y + '/' + pad2(QE.m) + '*') + (cl ? ' and no matching CloudLedger entity' : '')); return; }
+      if (!ent) {   // CloudLedger not reachable from this run - fall back to the SharePoint folders
+        const dir = await findMonthDir(store, 'cla', e.fin, QE.y, QE.m);
+        const f = await findFile(store, 'cla', dir, e.fs, /\.pdf$/i);
+        if (f) await copy('Midco I', 'midco', 'cla', f);
+        else item('Midco I', e.key + ' quarterly financial statements', 'missing', cl ? 'no matching CloudLedger entity' : 'CloudLedger not available and not found in ' + (dir || e.fin));
+        return;
+      }
       await put('Midco I', 'midco', ent.name.replace(/[\\/:*?"<>|,]/g, '') + ' - Quarterly Financial Statements ' + pad2(QE.m) + '.' + QE.y + '.pdf',
         await clQuarterlyFs(cl, ent, Q.iso), 'generated from CloudLedger (' + ent.name + ')');
     });
   }
   await safe('Midco I', 'CLRFI Midco I consolidated FS', async () => {
-    const f = await findFile(store, 'cla', '61 Midco I/00 Financials/' + QE.y, new RegExp('consolidated financial statements ' + pad2(QE.m) + '\\.' + QE.y, 'i'), /\.pdf$/i);
-    if (f) { await copy('Midco I', 'midco', 'cla', f); return; }
     const ent = clEntity(cl, 'Midco');
-    if (!ent) { item('Midco I', 'CLRFI Midco I consolidated FS', 'missing', 'not found in 61 Midco I/00 Financials/' + QE.y); return; }
+    if (!ent) {
+      const f = await findFile(store, 'cla', '61 Midco I/00 Financials/' + QE.y, new RegExp('consolidated financial statements ' + pad2(QE.m) + '\\.' + QE.y, 'i'), /\.pdf$/i);
+      if (f) await copy('Midco I', 'midco', 'cla', f); else item('Midco I', 'CLRFI Midco I consolidated FS', 'missing', cl ? 'no matching CloudLedger entity' : 'CloudLedger not available');
+      return;
+    }
     await put('Midco I', 'midco', 'CLRFI Midco I LLC - Consolidated Financial Statements ' + pad2(QE.m) + '.' + QE.y + '.pdf',
       await clQuarterlyFs(cl, ent, Q.iso), 'generated from CloudLedger (' + ent.name + ', lender package)');
   });
   await safe('Midco I', 'CLRF quarterly FS', async () => {
-    const f = await findFile(store, 'cla', '30 County Line Rail Fund/Financial Statements/' + QE.y + ' Q' + Q.q + ' Financials', /FS SCF Wksht_Final/i, /\.pdf$/i);
-    if (f) { await copy('Midco I', 'midco', 'cla', f); return; }
     const ent = clEntity(cl, 'CLRF');
-    if (!ent) { item('Midco I', 'CLRF Q' + Q.q + ' FS SCF Wksht', 'missing', 'not found in 30 County Line Rail Fund/Financial Statements/' + QE.y + ' Q' + Q.q + ' Financials'); return; }
+    if (!ent) {
+      const f = await findFile(store, 'cla', '30 County Line Rail Fund/Financial Statements/' + QE.y + ' Q' + Q.q + ' Financials', /FS SCF Wksht_Final/i, /\.pdf$/i);
+      if (f) await copy('Midco I', 'midco', 'cla', f); else item('Midco I', 'CLRF quarterly FS', 'missing', cl ? 'no matching CloudLedger entity' : 'CloudLedger not available');
+      return;
+    }
     await put('Midco I', 'midco', 'CLRF - Q' + Q.q + ' ' + QE.y + ' Financial Statements.pdf',
       await clFundFs(cl, ent, Q.iso), 'generated from CloudLedger (' + ent.name + ' fund statements)');
   });
@@ -561,18 +568,17 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
     const res = {};
     // T12 per entity
     for (const e of ents) {
-      let f = null, srcMonth = null;
-      for (let k = 0; k < 3 && !f; k++) {   // QE month, else the latest month in the quarter (flag pending)
-        const p = Q.back(k); const dir = await findMonthDir(store, 'cla', e.fin, p.y, p.m);
-        f = await findFile(store, 'cla', dir, /trailing.?12|\bT12\b/i, /\.xlsx$/i); if (f) srcMonth = p;
+      let f = null, srcMonth = null, rows = null, tab = null;
+      const clEnt = clEntity(cl, e.key);
+      if (clEnt) {   // primary source: the CloudLedger GL
+        try { rows = await clT12Rows(cl, clEnt, Q.iso); tab = (e.key + ' T12 ' + mLabel(QE)).slice(0, 31); f = 'CloudLedger: ' + clEnt.name; }
+        catch (err) { out.warnings.push('Midco: ' + e.key + ' T12 from CloudLedger failed (' + err.message + ') - fell back to the SharePoint T12'); rows = null; }
       }
-      let rows = null, tab = null;
-      const clEnt = (!f || srcMonth.m !== QE.m || srcMonth.y !== QE.y) ? clEntity(cl, e.key) : null;
-      if (clEnt) {
-        try {
-          rows = await clT12Rows(cl, clEnt, Q.iso); tab = (e.key + ' T12 ' + mLabel(QE) + ' (CL)').slice(0, 31); f = 'CloudLedger: ' + clEnt.name;
-          out.warnings.push('Midco: ' + e.key + ' T12 through ' + mLabel(QE) + ' taken from the CloudLedger GL (the folder T12 was not ready) - confirm ' + mLabel(QE) + ' is closed for ' + e.key + '.');
-        } catch (err) { out.warnings.push('Midco: ' + e.key + ' T12 from CloudLedger failed (' + err.message + ') - using the folder T12'); rows = null; }
+      if (!rows) {   // fallback: latest T12 export in the SharePoint folders
+        for (let k = 0; k < 3 && !f; k++) {
+          const p = Q.back(k); const dir = await findMonthDir(store, 'cla', e.fin, p.y, p.m);
+          f = await findFile(store, 'cla', dir, /trailing.?12|\bT12\b/i, /\.xlsx$/i); if (f) srcMonth = p;
+        }
       }
       if (!rows && !f) { pending.push(e.key + ': no T12 found'); res[e.key] = null; continue; }
       if (!rows) { rows = sheetRows(await store.read('cla', f)); tab = (e.key + ' T12 ' + mLabel(srcMonth)).slice(0, 31); }
@@ -640,6 +646,21 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
     const ir = wb.addWorksheet('Interest Reserve'); ir.getCell('A1').value = 'Interest Reserve (acct 13100) at ' + Q.iso; ir.getRow(3).values = ['Entity', 'Balance', 'Source']; ir.getRow(3).font = { bold: true };
     let irTot = 0, irRow = 4;
     for (const e of ents) {
+      const clEnt = clEntity(cl, e.key);
+      if (clEnt) {
+        let bal = null, ok = false;
+        try {
+          const rows = await (await clFetch(cl, '/api/entities/' + clEnt.id + '/balances?as_of=' + Q.iso)).json(); ok = true;
+          const hit = (rows || []).filter((r) => /^13100\b/.test(String(r.code)));
+          if (hit.length) bal = hit.reduce((a, r) => a + (+r.balance || 0), 0);
+        } catch (err) { out.warnings.push('Midco: ' + e.key + ' interest reserve from CloudLedger failed (' + err.message + ')'); }
+        if (ok) {   // CloudLedger answered: no 13100 account means no reserve
+          if (bal == null) bal = 0;
+          ir.getCell(irRow, 1).value = e.key; const c = ir.getCell(irRow, 2); c.value = bal; c.numFmt = NF;
+          ir.getCell(irRow, 3).value = 'CloudLedger GL - ' + clEnt.name + ', acct 13100 at ' + Q.iso;
+          irTot += bal; irRow++; continue;
+        }
+      }
       const dir = await findMonthDir(store, 'cla', e.fin, QE.y, QE.m);
       let f = await findFile(store, 'cla', dir, /(\bTB\b|trial balance)/i, /\.xlsx$/i), draft = false;
       if (!f && e.req) { const d2 = await findMonthDir(store, 'cla', e.req, QE.y, QE.m); f = await findFile(store, 'cla', d2, /TB_Activity/i, /\.xlsx$/i); draft = !!f; }
