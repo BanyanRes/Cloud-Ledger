@@ -679,6 +679,8 @@ function lastQuarterEnd(today = new Date()) {
 function registerComplianceCertRoutes(app, ctx) {
   const { db, auth, requireRole } = ctx;
   ensureSchema(db);
+  const running = new Map();
+  const who = (req) => (req.user && (req.user.email || req.user.username || req.user.name)) || 'unknown';
   // How reports execute:
   //   sharepoint - in this server, via Microsoft Graph (MS_TENANT_ID/CLIENT_ID/CLIENT_SECRET set)
   //   local      - in this server, against OneDrive-synced folders (CC_LOCAL_ROOT; dev machine)
