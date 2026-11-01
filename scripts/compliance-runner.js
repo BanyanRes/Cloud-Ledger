@@ -77,7 +77,8 @@ async function runJob(job) {
     const cc = loadModule();
     const sv = job.config || {};
     const conf = Object.assign({}, cc.DEFAULTS, sv, { midco: Object.assign({}, cc.DEFAULTS.midco, sv.midco || {}, { entities: cc.DEFAULTS.midco.entities }) });
-    const result = await cc.runReport(job.quarter_end, conf, (line) => { buf.push(line); log('  ' + line); });
+    const clOpt = job.cl ? { url: cfg.url, token: job.cl.token, entities: job.cl.entities } : null;
+    const result = await cc.runReport(job.quarter_end, conf, (line) => { buf.push(line); log('  ' + line); }, { cl: clOpt });
     clearInterval(timer); await flush();
     await api('/api/compliance-runner/runs/' + job.id + '/finish', { ok: true, result });
     log('Job ' + job.id + ' done: ' + JSON.stringify(result.counts || {}));

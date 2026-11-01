@@ -11480,7 +11480,8 @@ require('./amfee').registerAmFeeRoutes(app, {
 // Enter a quarter-end date -> rebuilds the Skye Canyon, South Mountain/Orchards,
 // Silo Ridge (JPM + Wells Fargo) and Midco I packages from SharePoint into
 // Accounting > General/3. Projects/Compliance Certificates/{YYYY}/Q{n}. See server/compliancecerts.js.
-require('./compliancecerts').registerComplianceCertRoutes(app, { db, auth, requireRole });
+require('./compliancecerts').registerComplianceCertRoutes(app, { db, auth, requireRole,
+  signToken: (u) => jwt.sign({ id: u.id, name: u.name, email: u.email, role: u.role }, JWT_SECRET, { expiresIn: '2h' }) });
 
 // ═══ CLRF workpaper: ILPA Fee Reporting Template (GCM Grosvenor investors) ═══
 // One tab per GCM sleeve, reproducing the vendor ILPA template exactly and

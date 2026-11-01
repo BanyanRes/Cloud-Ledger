@@ -283,10 +283,67 @@ async function stampCertificate(key, values) {
   return Buffer.from(await doc.save());
 }
 
+
+// ── CloudLedger as a source ────────────────────────────────────────────────
+// When a statement isn't in the SharePoint folders yet, generate it straight from
+// CloudLedger with the same generators used by hand (Workpapers > Financial
+// Statements, the CLRF fund statements, the Trailing 12 Months P&L).
+// opts.cl = { url, token, entities:[{id,code,name,entity_type}] } is supplied by
+// the runner (token = short-lived login of the person who clicked Report).
+const CL_ENT = {
+  CLIP: (e) => /county line industrial park/i.test(e.name) || /^clip property owner/i.test(e.name),
+  Silsbee: (e) => /silsbee/i.test(e.name) && !/sponsor/i.test(e.name),
+  SRN: (e) => /county line srn|sabine river/i.test(e.name),
+  Buna: (e) => /buna property owner/i.test(e.name),
+  Midco: (e) => String(e.code || '') === 'CLRFIMID' || (/midco\s*i\b/i.test(e.name) && !/midco\s*ii/i.test(e.name)),
+  CLRF: (e) => /county line rail fund/i.test(e.name) && !/llc|midco|sponsor/i.test(e.name),
+};
+function clEntity(cl, key) {
+  if (!cl || !cl.entities) return null;
+  const hits = cl.entities.filter(CL_ENT[key]);
+  if (key === 'CLIP') hits.sort((a, b) => (/industrial park/i.test(b.name) ? 1 : 0) - (/industrial park/i.test(a.name) ? 1 : 0));
+  return hits[0] || null;
+}
+async function clFetch(cl, p, opts = {}) {
+  const r = await fetch(cl.url.replace(/\/$/, '') + p, { method: opts.method || 'GET', headers: { Authorization: 'Bearer ' + cl.token }, body: opts.body });
+  if (!r.ok) throw new Error('CloudLedger ' + p.split('?')[0] + ' -> HTTP ' + r.status + ' ' + (await r.text()).slice(0, 200));
+  return r;
+}
+// Quarterly financial statements PDF (Workpapers > Financial Statements generator)
+async function clQuarterlyFs(cl, ent, asOf) {
+  const fd = new FormData(); fd.append('as_of', asOf); fd.append('period', 'quarterly');
+  const r = await clFetch(cl, '/api/workpapers/financial-statements/' + ent.id + '/generate', { method: 'POST', body: fd });
+  return Buffer.from(await r.arrayBuffer());
+}
+async function clFundFs(cl, ent, asOf) {
+  const r = await clFetch(cl, '/api/entities/' + ent.id + '/fund-statements.pdf?as_of=' + asOf);
+  return Buffer.from(await r.arrayBuffer());
+}
+// Trailing 12 Months P&L -> rows in the same shape as the folder T12 exports
+// (row 5 = month headers; column A labels incl. Total Revenue / Gross Profit /
+// Total Operating Expenses / Depreciation Expense / Amortization Expense).
+async function clT12Rows(cl, ent, asOf) {
+  const t = await (await clFetch(cl, '/api/entities/' + ent.id + '/ttm-pl?as_of=' + asOf)).json();
+  const months = t.meta.months.map((m) => m.label);
+  const row = (label, o) => [label].concat(o ? o.vals : months.map(() => null)).concat([o ? o.total : null]);
+  const sum = (lines) => { const v = months.map(() => 0); let tot = 0; lines.forEach((l) => { l.vals.forEach((x, i) => { v[i] += x || 0; }); tot += l.total || 0; }); return { vals: v, total: tot }; };
+  const opex = t.opex || [];
+  const rows = [[ent.name], ['Trailing 12 Months'], [t.meta.periodLabel + ' (from CloudLedger)'], [], [''].concat(months).concat(['Total'])];
+  rows.push(['Revenue']); (t.revenue || []).forEach((l) => rows.push(row(l.name, l))); rows.push(row('Total Revenue', t.totRev));
+  if (t.hasCogs) { (t.cogs || []).forEach((l) => rows.push(row(l.name, l))); rows.push(row('Gross Profit', t.grossProfit)); }
+  rows.push(['Operating Expenses']);
+  (t.opexGroups || []).forEach((g) => { rows.push([g.title]); g.lines.forEach((l) => rows.push(row(l.name, l))); });
+  rows.push(row('Depreciation Expense', sum(opex.filter((l) => /depreciation/i.test(l.name)))));
+  rows.push(row('Amortization Expense', sum(opex.filter((l) => /amortization/i.test(l.name)))));
+  rows.push(row('Total Operating Expenses', t.totOpex));
+  rows.push(row('Net Income (Loss)', t.netIncome));
+  return rows;
+}
 // ════════════════════════════════════════════════════════════════════════════
 // The report job
 // ════════════════════════════════════════════════════════════════════════════
-async function runReport(quarterEnd, cfg, log) {
+async function runReport(quarterEnd, cfg, log, opts = {}) {
+  const cl = opts.cl && opts.cl.token ? opts.cl : null;
   const Q = parseQuarterEnd(quarterEnd);
   const store = makeStore(cfg);
   const out = { quarter_end: Q.iso, quarter: Q.label, storage: store.kind, dest: DEST_BASE + '/' + Q.y + '/Q' + Q.q, items: [], metrics: {}, warnings: [] };
@@ -467,17 +524,28 @@ async function runReport(quarterEnd, cfg, log) {
     await safe('Midco I', e.key + ' FS', async () => {
       const dir = await findMonthDir(store, 'cla', e.fin, QE.y, QE.m);
       const f = await findFile(store, 'cla', dir, e.fs, /\.pdf$/i);
-      if (!f) item('Midco I', e.key + ' quarterly financial statements', 'missing', 'not found in ' + (dir || e.fin + '/' + QE.y + '/' + pad2(QE.m) + '*'));
-      else await copy('Midco I', 'midco', 'cla', f);
+      if (f) { await copy('Midco I', 'midco', 'cla', f); return; }
+      const ent = clEntity(cl, e.key);
+      if (!ent) { item('Midco I', e.key + ' quarterly financial statements', 'missing', 'not found in ' + (dir || e.fin + '/' + QE.y + '/' + pad2(QE.m) + '*') + (cl ? ' and no matching CloudLedger entity' : '')); return; }
+      await put('Midco I', 'midco', ent.name.replace(/[\\/:*?"<>|,]/g, '') + ' - Quarterly Financial Statements ' + pad2(QE.m) + '.' + QE.y + '.pdf',
+        await clQuarterlyFs(cl, ent, Q.iso), 'generated from CloudLedger (' + ent.name + ')');
     });
   }
   await safe('Midco I', 'CLRFI Midco I consolidated FS', async () => {
     const f = await findFile(store, 'cla', '61 Midco I/00 Financials/' + QE.y, new RegExp('consolidated financial statements ' + pad2(QE.m) + '\\.' + QE.y, 'i'), /\.pdf$/i);
-    if (!f) item('Midco I', 'CLRFI Midco I consolidated FS', 'missing', 'not found in 61 Midco I/00 Financials/' + QE.y); else await copy('Midco I', 'midco', 'cla', f);
+    if (f) { await copy('Midco I', 'midco', 'cla', f); return; }
+    const ent = clEntity(cl, 'Midco');
+    if (!ent) { item('Midco I', 'CLRFI Midco I consolidated FS', 'missing', 'not found in 61 Midco I/00 Financials/' + QE.y); return; }
+    await put('Midco I', 'midco', 'CLRFI Midco I LLC - Consolidated Financial Statements ' + pad2(QE.m) + '.' + QE.y + '.pdf',
+      await clQuarterlyFs(cl, ent, Q.iso), 'generated from CloudLedger (' + ent.name + ', lender package)');
   });
   await safe('Midco I', 'CLRF quarterly FS', async () => {
     const f = await findFile(store, 'cla', '30 County Line Rail Fund/Financial Statements/' + QE.y + ' Q' + Q.q + ' Financials', /FS SCF Wksht_Final/i, /\.pdf$/i);
-    if (!f) item('Midco I', 'CLRF Q' + Q.q + ' FS SCF Wksht', 'missing', 'not found in 30 County Line Rail Fund/Financial Statements/' + QE.y + ' Q' + Q.q + ' Financials'); else await copy('Midco I', 'midco', 'cla', f);
+    if (f) { await copy('Midco I', 'midco', 'cla', f); return; }
+    const ent = clEntity(cl, 'CLRF');
+    if (!ent) { item('Midco I', 'CLRF Q' + Q.q + ' FS SCF Wksht', 'missing', 'not found in 30 County Line Rail Fund/Financial Statements/' + QE.y + ' Q' + Q.q + ' Financials'); return; }
+    await put('Midco I', 'midco', 'CLRF - Q' + Q.q + ' ' + QE.y + ' Financial Statements.pdf',
+      await clFundFs(cl, ent, Q.iso), 'generated from CloudLedger (' + ent.name + ' fund statements)');
   });
   await safe('Midco I', 'certificate', async () => {
     await put('Midco I', 'midco', 'CLRFI Blank Compliance Certificate_' + Q.label.replace(/^Q(\d) /, 'Q$1 ') + '.pdf',
@@ -498,9 +566,16 @@ async function runReport(quarterEnd, cfg, log) {
         const p = Q.back(k); const dir = await findMonthDir(store, 'cla', e.fin, p.y, p.m);
         f = await findFile(store, 'cla', dir, /trailing.?12|\bT12\b/i, /\.xlsx$/i); if (f) srcMonth = p;
       }
-      if (!f) { pending.push(e.key + ': no T12 found'); res[e.key] = null; continue; }
-      const rows = sheetRows(await store.read('cla', f));
-      const tab = (e.key + ' T12 ' + mLabel(srcMonth)).slice(0, 31);
+      let rows = null, tab = null;
+      const clEnt = (!f || srcMonth.m !== QE.m || srcMonth.y !== QE.y) ? clEntity(cl, e.key) : null;
+      if (clEnt) {
+        try {
+          rows = await clT12Rows(cl, clEnt, Q.iso); tab = (e.key + ' T12 ' + mLabel(QE) + ' (CL)').slice(0, 31); f = 'CloudLedger: ' + clEnt.name;
+          out.warnings.push('Midco: ' + e.key + ' T12 through ' + mLabel(QE) + ' taken from the CloudLedger GL (the folder T12 was not ready) - confirm ' + mLabel(QE) + ' is closed for ' + e.key + '.');
+        } catch (err) { out.warnings.push('Midco: ' + e.key + ' T12 from CloudLedger failed (' + err.message + ') - using the folder T12'); rows = null; }
+      }
+      if (!rows && !f) { pending.push(e.key + ': no T12 found'); res[e.key] = null; continue; }
+      if (!rows) { rows = sheetRows(await store.read('cla', f)); tab = (e.key + ' T12 ' + mLabel(srcMonth)).slice(0, 31); }
       const ws = wb.addWorksheet(tab);
       rows.forEach((R, r) => (R || []).forEach((v, c) => { if (v != null) { const cell = ws.getCell(r + 1, c + 1); cell.value = v instanceof Date ? v : v; if (typeof v === 'number') cell.numFmt = NF; } }));
       ws.getColumn(1).width = 40;
@@ -742,7 +817,15 @@ function registerComplianceCertRoutes(app, ctx) {
       db.prepare("UPDATE compliance_cert_runs SET status = 'running', claimed_at = datetime('now'), log = ? WHERE id = ?").run('Picked up by ' + (runnerHost || 'runner'), r.id);
       return r;
     })();
-    res.json({ job: job ? { id: job.id, quarter_end: job.quarter_end, config: publicConfig() } : null });
+    let cl = null;
+    if (job && ctx.signToken) {
+      const by = db.prepare('SELECT by_who FROM compliance_cert_runs WHERE id = ?').get(job.id);
+      const u = by && db.prepare('SELECT id, name, email, role FROM users WHERE email = ?').get(by.by_who);
+      if (u && (u.role === 'Admin' || u.role === 'Accountant')) {
+        cl = { token: ctx.signToken(u), entities: db.prepare('SELECT id, code, name, entity_type FROM entities').all() };
+      }
+    }
+    res.json({ job: job ? { id: job.id, quarter_end: job.quarter_end, config: publicConfig(), cl } : null });
   });
   app.post('/api/compliance-runner/runs/:id/log', runnerAuth, (req, res) => {
     const r = db.prepare('SELECT log FROM compliance_cert_runs WHERE id = ?').get(+req.params.id); if (!r) return res.status(404).json({ error: 'not found' });
