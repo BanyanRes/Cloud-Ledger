@@ -218,6 +218,11 @@ export const api = {
   sendMuhaInvoice: (no, force) => request('/admin/muha-invoice/' + encodeURIComponent(no) + '/send', { method: 'POST', body: { force: !!force } }),
   skipMuhaInvoice: (no, skip) => request('/admin/muha-invoice/' + encodeURIComponent(no) + '/skip', { method: 'POST', body: { skip: !!skip } }),
   // Administration: AM Fee Invoices (Banyan Residential asset-management fees)
+  // Administration: Compliance Certificates (quarterly lender reporting packages)
+  getComplianceCerts: () => request('/admin/compliance-certs'),
+  saveComplianceCertsConfig: (cfg) => request('/admin/compliance-certs/config', { method: 'PUT', body: cfg }),
+  runComplianceReport: (quarter_end) => request('/admin/compliance-certs/report', { method: 'POST', body: { quarter_end } }),
+  getComplianceRun: (id) => request('/admin/compliance-certs/runs/' + encodeURIComponent(id)),
   getAmFee: () => request('/admin/am-fee'),
   saveAmFeeConfig: (cfg) => request('/admin/am-fee/config', { method: 'PUT', body: cfg }),
   saveAmFeeBilling: (key, patch) => request('/admin/am-fee/' + encodeURIComponent(key), { method: 'PUT', body: patch }),

@@ -1052,7 +1052,7 @@ export default function App(){
       {id:'assignment',label:'Assignment of Interest',icon:'📝',section:'administration'},
       {id:'usc_capital',label:'USC Capital Statements',icon:'📄',section:'administration'},
       {id:'muha_invoice',label:'Muha Invoice',icon:'🧾',section:'administration'},
-      {id:'am_fee',label:'AM Fee Invoices',icon:'🧾',section:'administration'},
+      {id:'am_fee',label:'AM Fee Invoices',icon:'🧾',section:'administration'},{id:'compliance_certs',label:'Compliance Certificates',icon:'📑',section:'administration'},
       {id:'letterhead',label:'Letterhead',icon:'📄',section:'administration'},
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
       {id:'users',label:'Users',icon:NI.users,section:'all'},
@@ -1133,6 +1133,7 @@ export default function App(){
         {page==='usc_capital'&&canAccess('administration')&&<UscCapitalStatements user={user} key={'usc-'+rk}/>}
         {page==='muha_invoice'&&canAccess('administration')&&<MuhaInvoice user={user} key={'muha-'+rk}/>}
         {page==='am_fee'&&canAccess('administration')&&<AmFeeInvoices user={user} key={'amfee-'+rk}/>}
+        {page==='compliance_certs'&&canAccess('administration')&&<ComplianceCertificates user={user} key={'cc-'+rk}/>}
         {page==='letterhead'&&canAccess('administration')&&<LetterheadPage user={user} key={'lh-'+rk}/>}
         {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
@@ -6826,6 +6827,96 @@ function UscCapitalStatements({user}){
 }
 
 // === Administration: AM Fee Invoices - Banyan Residential asset-management fees ===
+function ComplianceCertificates({user}){
+  const[data,setData]=useState(null);
+  const[qe,setQe]=useState('');
+  const[run,setRun]=useState(null);
+  const[err,setErr]=useState('');
+  const[busy,setBusy]=useState(false);
+  const load=async()=>{try{const d=await api.getComplianceCerts();setData(d);setQe(q=>q||d.default_quarter_end);}catch(e){setErr(e.message);}};
+  useEffect(()=>{load();},[]);
+  const poll=async(id)=>{try{const r=await api.getComplianceRun(id);setRun(r);if(r.status==='running'){setTimeout(()=>poll(id),2500);}else{setBusy(false);load();}}catch(e){setErr(e.message);setBusy(false);}};
+  const report=async()=>{setErr('');setRun(null);setBusy(true);try{const o=await api.runComplianceReport(qe);poll(o.id);}catch(e){setErr(e.message);setBusy(false);}};
+  const money=(n)=>n==null?'n/a':'$'+(Number(n)||0).toLocaleString('en-US',{minimumFractionDigits:0,maximumFractionDigits:0});
+  const pct=(x)=>x==null?'n/a':(x*100).toFixed(2)+'%';
+  const xx=(x)=>x==null?'n/a':Number(x).toFixed(2)+'x';
+  const bd='1px solid #e2e8f0';
+  const td={padding:'6px 8px',borderBottom:bd,verticalAlign:'top'};
+  const STAT={created:['Created','#166534','#dcfce7'],copied:['Copied','#166534','#dcfce7'],missing:['Missing','#92400e','#fef3c7'],error:['Error','#991b1b','#fee2e2'],running:['Running','#1e40af','#dbeafe'],done:['Done','#166534','#dcfce7'],failed:['Failed','#991b1b','#fee2e2']};
+  const pill=(st)=>{const m=STAT[st]||[st,'#334155','#f1f5f9'];return(<span style={{background:m[2],color:m[1],padding:'1px 8px',borderRadius:10,fontSize:12,whiteSpace:'nowrap'}}>{m[0]}</span>);};
+  const pf=(ok)=>ok==null?null:<span style={{marginLeft:6,padding:'1px 8px',borderRadius:10,fontSize:12,background:ok?'#dcfce7':'#fee2e2',color:ok?'#166534':'#991b1b'}}>{ok?'Pass':'Fail'}</span>;
+  const box={border:bd,borderRadius:8,padding:'10px 14px',minWidth:220,flex:'1 1 220px'};
+  if(!data)return(<div><div style={S.h1}>Compliance Certificates</div>{err?<div style={S.err}>{err}</div>:<div style={S.sub}>Loading...</div>}</div>);
+  const res=run&&run.result; const m=(res&&res.metrics)||{};
+  return(<div>
+    <div style={{marginBottom:8}}>
+      <div style={S.h1}>Compliance Certificates</div>
+      <div style={S.sub}>Builds the quarterly lender reporting packages for the quarter you pick: Skye Canyon and South Mountain/Orchards (Trimont), Silo Ridge (JPM DSCR + Wells Fargo), and Midco I (Bank of Texas covenant calc). Source reports are read from SharePoint and the finished files are saved to <b>{data.dest_base}/&lt;year&gt;/Q&lt;n&gt;</b>. Certificates are created unsigned; nothing is emailed.</div>
+    </div>
+    {!data.graph_configured&&data.storage!=='local'&&<div style={{marginBottom:12,padding:'8px 12px',background:'#fef3c7',color:'#92400e',borderRadius:6,fontSize:13}}>Microsoft Graph / SharePoint is not configured on the server (MS_TENANT_ID, MS_CLIENT_ID, MS_CLIENT_SECRET). Reports cannot read or save files until it is set.</div>}
+    {data.storage==='local'&&<div style={{marginBottom:12,padding:'8px 12px',background:'#dbeafe',color:'#1e40af',borderRadius:6,fontSize:13}}>Running against the local OneDrive-synced folders (CC_LOCAL_ROOT).</div>}
+    {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
+    <div style={{...S.card,marginBottom:12,display:'flex',alignItems:'flex-end',gap:12,flexWrap:'wrap'}}>
+      <div>
+        <div style={{fontSize:12,color:'#64748b',marginBottom:4}}>Quarter-end date</div>
+        <input type="date" value={qe} onChange={e=>setQe(e.target.value)} style={{padding:'6px 8px',border:bd,borderRadius:6,fontSize:14}}/>
+      </div>
+      <button style={{...S.btnP,padding:'7px 18px'}} disabled={busy||!qe} onClick={report}>{busy?'Running...':'Report'}</button>
+      <div style={{fontSize:12,color:'#64748b'}}>Must be a quarter end (Mar 31, Jun 30, Sep 30, Dec 31). Re-running a quarter overwrites that quarter's generated files.</div>
+    </div>
+    {run&&run.status==='running'&&<div style={{...S.card,marginBottom:12}}>
+      <div style={S.h2}>Working on {run.quarter_end}...</div>
+      <div style={{fontFamily:'monospace',fontSize:12,color:'#475569',whiteSpace:'pre-wrap'}}>{(run.log||[]).slice(-10).join('\n')||'Starting...'}</div>
+    </div>}
+    {run&&run.status==='failed'&&<div style={{...S.err,marginBottom:12}}>Report failed: {run.error}</div>}
+    {res&&<div>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:12}}>
+        {m.silo_jpm&&<div style={box}>
+          <div style={{fontWeight:600,marginBottom:4}}>Silo Ridge &mdash; JPM DSCR</div>
+          <div style={{fontSize:22,fontWeight:700}}>{xx(m.silo_jpm.dscr)}</div>
+          <div style={{fontSize:12,color:'#64748b'}}>NOI {money(m.silo_jpm.noi)} / interest {money(m.silo_jpm.interest)} ({res.quarter})</div>
+        </div>}
+        {m.midco&&<div style={box}>
+          <div style={{fontWeight:600,marginBottom:4}}>Midco I &mdash; Bank of Texas ({m.midco.basis})</div>
+          <div style={{fontSize:13,lineHeight:'22px'}}>
+            DSCR <b>{xx(m.midco.dscr)}</b> vs {xx(m.midco.dscr_min)} min{pf(m.midco.dscr_pass)}<br/>
+            Loan-to-value <b>{pct(m.midco.ltv)}</b> vs {pct(m.midco.ltv_max)} max{pf(m.midco.ltv_pass)}<br/>
+            Debt yield <b>{pct(m.midco.debt_yield)}</b> vs {pct(m.midco.debt_yield_min)} min{pf(m.midco.dy_pass)}
+          </div>
+          <div style={{fontSize:12,color:'#64748b'}}>Window {m.midco.window} &middot; loan {money(m.midco.loan_balance)}</div>
+          {(m.midco.pending||[]).length>0&&<div style={{fontSize:12,color:'#92400e',marginTop:4}}>Draft &mdash; {m.midco.pending.length} input(s) pending (yellow cells in the workbook).</div>}
+        </div>}
+      </div>
+      <div style={{...S.card,marginBottom:12}}>
+        <div style={S.h2}>{res.quarter} files &mdash; {Object.entries(res.counts||{}).map(([k,v])=>v+' '+k).join(', ')}</div>
+        <div style={{fontSize:12,color:'#64748b',marginBottom:6}}>Saved to {res.dest}{res.report_url&&String(res.report_url).startsWith('http')&&<> &middot; <a href={res.report_url} target="_blank" rel="noreferrer">summary workbook</a></>}</div>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+          <thead><tr><th style={{...td,textAlign:'left'}}>Package</th><th style={{...td,textAlign:'left'}}>File</th><th style={{...td,textAlign:'left'}}>Status</th><th style={{...td,textAlign:'left'}}>Note</th></tr></thead>
+          <tbody>{res.items.map((it,i)=>(<tr key={i}>
+            <td style={{...td,whiteSpace:'nowrap'}}>{it.pkg}</td>
+            <td style={td}>{it.url&&String(it.url).startsWith('http')?<a href={it.url} target="_blank" rel="noreferrer">{it.file}</a>:it.file}</td>
+            <td style={td}>{pill(it.status)}</td>
+            <td style={{...td,color:'#64748b',fontSize:12}}>{it.note}</td>
+          </tr>))}</tbody>
+        </table>
+      </div>
+      {(res.warnings||[]).length>0&&<div style={{...S.card,marginBottom:12}}>
+        <div style={S.h2}>Needs attention</div>
+        <ul style={{margin:'4px 0 0 18px',fontSize:13}}>{res.warnings.map((w,i)=>(<li key={i}>{w}</li>))}</ul>
+      </div>}
+    </div>}
+    {(data.runs||[]).length>0&&<div style={S.card}>
+      <div style={S.h2}>Recent runs</div>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+        <thead><tr><th style={{...td,textAlign:'left'}}>Quarter end</th><th style={{...td,textAlign:'left'}}>Status</th><th style={{...td,textAlign:'left'}}>By</th><th style={{...td,textAlign:'left'}}>Started</th><th style={td}></th></tr></thead>
+        <tbody>{data.runs.map(r=>(<tr key={r.id}>
+          <td style={td}>{r.quarter_end}</td><td style={td}>{pill(r.status)}</td><td style={td}>{r.by_who}</td><td style={td}>{r.started_at}</td>
+          <td style={{...td,textAlign:'right'}}><button style={{padding:'3px 8px',fontSize:12,border:bd,borderRadius:6,background:'#fff',cursor:'pointer'}} onClick={()=>poll(r.id)}>View</button></td>
+        </tr>))}</tbody>
+      </table>
+    </div>}
+  </div>);
+}
 function AmFeeInvoices({user}){
   const[data,setData]=useState(null);
   const[err,setErr]=useState('');

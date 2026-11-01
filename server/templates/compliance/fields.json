@@ -1,0 +1,122 @@
+{
+ "rentroll_skye": {
+  "file": "rentroll_skye.pdf",
+  "page": 0,
+  "fields": [
+   {
+    "name": "asof",
+    "x": 399.0,
+    "w": 61.8,
+    "y": 603.3,
+    "h": 15.9,
+    "baseline": 607.78,
+    "size": 12
+   },
+   {
+    "name": "signdate",
+    "x": 149.9,
+    "w": 61.0,
+    "y": 465.5,
+    "h": 17.4,
+    "baseline": 469.92,
+    "size": 12
+   }
+  ]
+ },
+ "rentroll_orchards": {
+  "file": "rentroll_orchards.pdf",
+  "page": 0,
+  "fields": [
+   {
+    "name": "asof",
+    "x": 394.7,
+    "w": 61.0,
+    "y": 604.3,
+    "h": 17.4,
+    "baseline": 608.68,
+    "size": 12
+   },
+   {
+    "name": "signdate",
+    "x": 161.0,
+    "w": 54.4,
+    "y": 471.1,
+    "h": 17.4,
+    "baseline": 475.53,
+    "size": 12
+   }
+  ]
+ },
+ "rentroll_sm": {
+  "file": "rentroll_sm.pdf",
+  "page": 0,
+  "fields": [
+   {
+    "name": "asof",
+    "x": 395.3,
+    "w": 61.1,
+    "y": 604.9,
+    "h": 17.4,
+    "baseline": 609.34,
+    "size": 12
+   },
+   {
+    "name": "signdate",
+    "x": 153.8,
+    "w": 61.1,
+    "y": 466.8,
+    "h": 17.4,
+    "baseline": 471.23,
+    "size": 12
+   }
+  ]
+ },
+ "wf_silo": {
+  "file": "wf_silo.pdf",
+  "page": 0,
+  "fields": [
+   {
+    "name": "testdate",
+    "x": 226.5,
+    "w": 334.2,
+    "y": 237.9,
+    "h": 15.9,
+    "baseline": 241.78,
+    "size": 11
+   },
+   {
+    "name": "delivered",
+    "x": 143.9,
+    "w": 107.9,
+    "y": 174.7,
+    "h": 15.9,
+    "baseline": 178.57,
+    "size": 11
+   }
+  ]
+ },
+ "bot_clrfi": {
+  "file": "bot_clrfi.pdf",
+  "page": 0,
+  "fields": [
+   {
+    "name": "qend",
+    "x": 318.1,
+    "w": 49.3,
+    "y": 646.9,
+    "h": 16.0,
+    "baseline": 650.96,
+    "size": 9.5
+   },
+   {
+    "name": "yy",
+    "x": 402.0,
+    "w": 13.6,
+    "y": 646.9,
+    "h": 16.0,
+    "baseline": 648.12,
+    "size": 9.5
+   }
+  ]
+ }
+}

@@ -11476,6 +11476,12 @@ require('./amfee').registerAmFeeRoutes(app, {
   getFromEmail: () => (process.env.AR_FROM_EMAIL || RESET_FROM_EMAIL),
 });
 
+// ═══ Administration: Compliance Certificates (quarterly lender packages) ═══
+// Enter a quarter-end date -> rebuilds the Skye Canyon, South Mountain/Orchards,
+// Silo Ridge (JPM + Wells Fargo) and Midco I packages from SharePoint into
+// Accounting > General/3. Projects/Compliance Certificates/{YYYY}/Q{n}. See server/compliancecerts.js.
+require('./compliancecerts').registerComplianceCertRoutes(app, { db, auth, requireRole });
+
 // ═══ CLRF workpaper: ILPA Fee Reporting Template (GCM Grosvenor investors) ═══
 // One tab per GCM sleeve, reproducing the vendor ILPA template exactly and
 // filling only the blue input cells from the GL. See server/ilpafee.js.
