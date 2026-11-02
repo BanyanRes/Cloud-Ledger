@@ -392,34 +392,83 @@ async function buildCalcWorkbook(b, period, calc) {
 
 // ── PDF (client-facing, matches the approved invoice layout) ──────────────────
 async function renderInvoicePdf(inv) {
-  const { PDFDocument, StandardFonts } = require('pdf-lib');
+  const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
   const pdf = await PDFDocument.create();
-  pdf.setTitle('AM Fee Invoice ' + inv.invoice_no);
+  pdf.setTitle('Invoice ' + inv.invoice_no + ' — ' + ISSUER.name);
+  pdf.setAuthor(ISSUER.name);
   const reg = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const W = 612, H = 792, L = 60, R = 552;
+  const W = 612, H = 792, L = 54, R = 558;
   const page = pdf.addPage([W, H]);
-  const txt = (s, x, y, f, size) => page.drawText(String(s), { x, y, size, font: f });
-  const ctr = (s, y, f, size) => txt(s, (W - f.widthOfTextAtSize(String(s), size)) / 2, y, f, size);
-  const rt = (s, xR, y, f, size) => txt(s, xR - f.widthOfTextAtSize(String(s), size), y, f, size);
-  const line = (x0, x1, y, th) => page.drawLine({ start: { x: x0, y }, end: { x: x1, y }, thickness: th || 0.6 });
+
+  const ACCENT = rgb(0.067, 0.325, 0.235);
+  const INK = rgb(0.13, 0.15, 0.14);
+  const MUT = rgb(0.42, 0.45, 0.43);
+  const LINE = rgb(0.85, 0.87, 0.85);
+  const BAND = rgb(0.949, 0.961, 0.953);
+  const WHITE = rgb(1, 1, 1);
+
+  const txt = (s, x, y, f, size, color) => page.drawText(String(s), { x, y, size, font: f, color: color || INK });
+  const wid = (s, f, size) => f.widthOfTextAtSize(String(s), size);
+  const rt = (s, xR, y, f, size, color) => txt(s, xR - wid(s, f, size), y, f, size, color);
+  const hline = (x0, x1, y, th, color) => page.drawLine({ start: { x: x0, y }, end: { x: x1, y }, thickness: th || 0.7, color: color || LINE });
+  const rect = (x, y, w, h, fill, border) => page.drawRectangle({ x, y, width: w, height: h, color: fill, borderColor: border, borderWidth: border ? 0.7 : 0 });
   const money = (v, cents) => '$' + (Number(v) || 0).toLocaleString('en-US', { minimumFractionDigits: cents ? 2 : 0, maximumFractionDigits: cents ? 2 : 0 });
 
-  let y = H - 70;
-  ctr(ISSUER.name, y, bold, 16); y -= 20;
-  ctr(ISSUER.address + '  Telephone: ' + ISSUER.phone, y, reg, 9); y -= 34;
-  txt('Date: ' + mdy(inv.issue_date), L, y, reg, 10); y -= 16;
-  txt('Invoice #: ' + inv.invoice_no, L, y, reg, 10); y -= 16;
-  txt('Client Name: ' + inv.client_name, L, y, reg, 10); y -= 28;
+  // top accent bar
+  rect(0, H - 6, W, 6, ACCENT);
 
-  txt('Line Item', L, y, bold, 10); rt('Cost', R, y, bold, 10); line(L, R, y - 4, 0.6); y -= 20;
-  txt(inv.line_desc, L, y, reg, 10); rt(money(inv.amount, inv.cents), R, y, reg, 10); y -= 20;
-  line(L, R, y + 4, 0.4);
-  txt('Total Payment Due', L, y, bold, 11); rt(money(inv.amount, inv.cents), R, y, bold, 11); y -= 50;
+  // header
+  let y = H - 72;
+  txt(ISSUER.name, L, y, bold, 17, ACCENT);
+  rt('INVOICE', R, y + 1, bold, 26, rgb(0.82, 0.85, 0.83));
+  y -= 15;
+  txt(ISSUER.address, L, y, reg, 8.5, MUT); y -= 11;
+  txt('Telephone: ' + ISSUER.phone, L, y, reg, 8.5, MUT);
 
+  // meta (right)
+  let my = H - 96;
+  const meta = (lbl, val) => { rt(lbl, R - 96, my, reg, 9, MUT); rt(val, R, my, bold, 9, INK); my -= 15; };
+  meta('Invoice No.', inv.invoice_no);
+  meta('Invoice Date', mdy(inv.issue_date));
+
+  y -= 24; hline(L, R, y, 1, LINE); y -= 26;
+
+  // bill to
+  txt('BILL TO', L, y, bold, 8.5, MUT); y -= 15;
+  txt(inv.client_name, L, y, bold, 11, INK); y -= 34;
+
+  // line items
+  rect(L, y - 6, R - L, 22, BAND);
+  txt('DESCRIPTION', L + 12, y, bold, 8.5, ACCENT);
+  rt('AMOUNT', R - 12, y, bold, 8.5, ACCENT);
+  y -= 24;
+  txt(inv.line_desc, L + 12, y, reg, 10.5, INK);
+  rt(money(inv.amount, inv.cents), R - 12, y, reg, 10.5, INK);
+  y -= 12; hline(L, R, y, 0.7, LINE); y -= 20;
+
+  // total bar
+  const tbX = R - 240;
+  rect(tbX, y - 9, R - tbX, 28, ACCENT);
+  txt('TOTAL DUE', tbX + 14, y, bold, 10, WHITE);
+  rt(money(inv.amount, inv.cents), R - 14, y, bold, 12.5, WHITE);
+  y -= 58;
+
+  // payment instructions
   const w = ISSUER.wiring;
-  ctr('Wiring Instructions', y, bold, 11); y -= 18;
-  for (const lnStr of ['Name: ' + w.name, w.bank, 'Account#: ' + w.account, 'Routing#: ' + w.routing, 'Bank Address: ' + w.address, w.city]) { ctr(lnStr, y, reg, 10); y -= 16; }
+  const rows = [['Beneficiary', w.name], ['Bank', w.bank], ['Account Number', w.account], ['Routing Number', w.routing], ['Bank Address', w.address + ', ' + w.city]];
+  const boxH = 30 + rows.length * 16 + 10;
+  const boxTop = y;
+  rect(L, boxTop - boxH, R - L, boxH, rgb(0.985, 0.99, 0.985), LINE);
+  let py = boxTop - 21;
+  txt('PAYMENT INSTRUCTIONS', L + 14, py, bold, 9, ACCENT); py -= 21;
+  for (const [k, v] of rows) { txt(k, L + 14, py, reg, 9, MUT); txt(v, L + 154, py, bold, 9, INK); py -= 16; }
+
+  // footer
+  hline(L, R, 72, 0.7, LINE);
+  txt('Thank you for your business.  ' + ISSUER.name, L, 59, reg, 8.5, MUT);
+  rt('Remit per the payment instructions above.', R, 59, reg, 8.5, MUT);
+
   return Buffer.from(await pdf.save());
 }
 
