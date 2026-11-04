@@ -57,12 +57,15 @@ const DEFAULTS = {};   // no editable configuration today; kept for route symmet
 
 // Who signs which line on each person's report:
 //   employee  — the person whose report it is signs the Employee Signature line
-//   approver  — the "Approved By CAO/CEO" line is signed by the person who
-//               approves: the CEO (Ben) approves the CAO's (Jimmy's) report;
-//               the CAO (Jimmy) approves the Controller's (Irvin's) report.
-// Signature images (transparent PNGs) live locally, never in git.
+//   approver  — the "Approved By CAO/CEO" line is signed by the approver, where
+//               we hold that person's signature on file. The CAO (Jimmy)
+//               approves the Controller's (Irvin's) report. The CEO's (Ben's)
+//               approval of the CAO's (Jimmy's) own report is NOT stamped — that
+//               line is left blank for Ben to sign off by hand (approver: null).
+// A null/absent approver leaves that line blank. Signature images (transparent
+// PNGs) live locally, never in git.
 const SIGN = {
-  jimmy: { employee: 'jimmy', approver: 'ben' },
+  jimmy: { employee: 'jimmy', approver: null },
   irvin: { employee: 'irvin', approver: 'jimmy' },
 };
 function signaturesDir() {
