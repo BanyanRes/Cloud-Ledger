@@ -52,6 +52,14 @@ const DEFAULTS = {
   sp_drives: { accounting: '', cla: '', shared: '' },   // blank = env or auto-discover
   sp_sites: { accounting: 'Accounting', cla: 'CLA', shared: 'Banyan Res Shared Drive' },
   sfr_base: 'Projects/Asset Management/SFR/Financials',
+  // draft email sent with the Silo Ridge DSCR calc (saved as an unsent .eml next to it)
+  silo_jpm_email: {
+    to: ['REA Finance Operations CASE <rea.finance.case@jpmorgan.com>', 'Kale Easterling <kale.easterling@greystar.com>',
+      'Michael Bie <michael.bie@greystar.com>', 'Banyan Silo Ridge Manager <siloridgemgr@greystar.com>',
+      'Shea Johnson <shea.johnson@greystar.com>', 'Rachel Raiford <rraiford@greystar.com>', 'Chandan Singh <chandan.singh@greystar.com>'],
+    cc: ['REA Finance - CASE <REA_Finance_-_CASE@jpmorgan.com>', 'Irvin Bermudez <IBermudez@banyanres.com>'],
+    from: 'Jimmy Yun <JYun@banyanres.com>',
+  },
   midco: {
     dscr_months: 6,            // §10.1: trailing 6 months annualized until the Reserve Account Release Date
     dscr_min_through_2026: 1.10,
@@ -354,6 +362,30 @@ async function clT12Rows(cl, ent, asOf) {
   rows.push(row('Net Income (Loss)', t.netIncome));
   return rows;
 }
+// ── unsent email draft (.eml) ──────────────────────────────────────────────
+// X-Unsent: 1 makes Outlook open the file as a new editable message (with the
+// attachment) instead of a received one. Nothing is sent.
+function buildDraftEml({ from, to, cc, subject, text, html, attachments }) {
+  const enc = (v) => (/^[\x20-\x7e]*$/.test(v) ? v : '=?UTF-8?B?' + Buffer.from(v, 'utf8').toString('base64') + '?=');
+  const b64 = (buf) => buf.toString('base64').replace(/.{76}/g, '$&\r\n');
+  const mix = 'mix_' + Date.now().toString(36), alt = 'alt_' + Date.now().toString(36);
+  const L = [];
+  L.push('X-Unsent: 1', 'MIME-Version: 1.0', 'From: ' + from, 'To: ' + to.join(', '));
+  if (cc && cc.length) L.push('Cc: ' + cc.join(', '));
+  L.push('Subject: ' + enc(subject), 'Content-Type: multipart/mixed; boundary="' + mix + '"', '');
+  L.push('--' + mix, 'Content-Type: multipart/alternative; boundary="' + alt + '"', '');
+  L.push('--' + alt, 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '', b64(Buffer.from(text, 'utf8')));
+  L.push('--' + alt, 'Content-Type: text/html; charset=utf-8', 'Content-Transfer-Encoding: base64', '', b64(Buffer.from(html, 'utf8')));
+  L.push('--' + alt + '--', '');
+  for (const a of attachments || []) {
+    L.push('--' + mix, 'Content-Type: ' + a.type + '; name="' + a.name + '"', 'Content-Transfer-Encoding: base64',
+      'Content-Disposition: attachment; filename="' + a.name + '"', '', b64(a.data));
+  }
+  L.push('--' + mix + '--', '');
+  return Buffer.from(L.join('\r\n'), 'utf8');
+}
+const SIGNATURE_TEXT = ['Jimmy Yun', 'Chief Accounting Officer', 'M: 714.321.6021', '2381 Rosecrans Ave Suite 425, El Segundo, CA 90245', 'banyanres.com'];
+
 // ════════════════════════════════════════════════════════════════════════════
 // The report job
 // ════════════════════════════════════════════════════════════════════════════
@@ -532,7 +564,19 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
     calc.getColumn(1).width = 13; calc.getColumn(2).width = 40.18; calc.getColumn(3).width = 16.18;
     calc.views = [{ zoomScale: 120 }];
     out.metrics.silo_jpm = { revenue: rev, opex, noi, interest: int, dscr };
-    await put('Silo Ridge - JPM', 'jpm', 'Silo Ridge DSCR Calc_' + Q.tag + '.xlsx', await wb.xlsx.writeBuffer(), 'DSCR ' + (dscr ? dscr.toFixed(2) : 'n/a') + 'x');
+    const xlsxName = 'Silo Ridge DSCR Calc_' + Q.tag + '.xlsx';
+    const xlsxBuf = Buffer.from(await wb.xlsx.writeBuffer());
+    await put('Silo Ridge - JPM', 'jpm', xlsxName, xlsxBuf, 'DSCR ' + (dscr ? dscr.toFixed(2) : 'n/a') + 'x');
+    // draft email to JPM / Greystar with the calc attached (same recipients as the prior quarter's reply)
+    const em = Object.assign({}, DEFAULTS.silo_jpm_email, cfg.silo_jpm_email || {});
+    const subject = "Silo Ridge - Q" + Q.q + "'" + Q.y + ' Debt Covenant';
+    const msgLine = 'Please see the attached ' + Q.label + ' debt covenant (DSCR) calculation for Silo Ridge.';
+    const text = 'Hi Team,\r\n\r\n' + msgLine + '\r\n\r\nThanks.\r\n\r\n' + SIGNATURE_TEXT.join('\r\n') + '\r\n';
+    const html = '<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt">Hi Team,<br><br>' + msgLine + '<br><br>Thanks.<br><br>' +
+      '<b>' + SIGNATURE_TEXT[0] + '</b><br>' + SIGNATURE_TEXT.slice(1).join('<br>') + '</div>';
+    await put('Silo Ridge - JPM', 'jpm', subject + '.eml', buildDraftEml({ from: em.from, to: em.to, cc: em.cc, subject, text, html,
+      attachments: [{ name: xlsxName, type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', data: xlsxBuf }] }),
+      'draft email - open in Outlook, review and send');
   });
 
   // ── 4. Silo Ridge - Wells Fargo ───────────────────────────────────────────
