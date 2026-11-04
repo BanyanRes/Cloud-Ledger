@@ -14,8 +14,13 @@
 //                                    stale copy-pasted title is corrected).
 //        - "Month" field (B7)    -> the new month/year, keeping the template's
 //                                    own style (abbreviated vs. full).
-//        - Signature / Approval  -> the run date (an unsigned worksheet is
-//          dates                    prepared; the person signs it afterwards).
+//        - Signature / Approval  -> the run date; each person's on-file
+//          dates                    signature image is stamped onto the
+//                                   employee line, and the approver's signature
+//                                   (Ben for Jimmy's report, Jimmy for Irvin's)
+//                                   onto the "Approved By CAO/CEO" line. Images
+//                                   live locally in ~/.cloudledger/signatures
+//                                   (never committed to git).
 //   3. Writes  {Name}'s .xlsx and a print-faithful .pdf into
 //        Accounting - Documents / General / 2. Monthly Time Allocation / {Year}
 //
@@ -24,7 +29,8 @@
 // Excel itself (COM, scripts/xlsx-to-pdf.ps1) so it matches a hand-made
 // "Save as PDF" exactly — honoring the sheet's landscape / fit-to-one-page /
 // A1:D## print area. OneDrive then syncs the files up to SharePoint.
-// Nothing is emailed or signed.
+// Nothing is emailed; the reports are stamped with each person's on-file
+// signature so they come out signed in one pass.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const path = require('path');
@@ -48,6 +54,25 @@ const PEOPLE = [
 ];
 
 const DEFAULTS = {};   // no editable configuration today; kept for route symmetry
+
+// Who signs which line on each person's report:
+//   employee  — the person whose report it is signs the Employee Signature line
+//   approver  — the "Approved By CAO/CEO" line is signed by the person who
+//               approves: the CEO (Ben) approves the CAO's (Jimmy's) report;
+//               the CAO (Jimmy) approves the Controller's (Irvin's) report.
+// Signature images (transparent PNGs) live locally, never in git.
+const SIGN = {
+  jimmy: { employee: 'jimmy', approver: 'ben' },
+  irvin: { employee: 'irvin', approver: 'jimmy' },
+};
+function signaturesDir() {
+  return process.env.TA_SIGNATURES_DIR || path.join(os.homedir(), '.cloudledger', 'signatures');
+}
+// PNG intrinsic size from the IHDR chunk (width @ byte 16, height @ 20, BE).
+function pngSize(buf) {
+  if (!buf || buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47) return null;
+  return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+}
 
 // ── month-end helpers ───────────────────────────────────────────────────────
 function parseMonthEnd(s) {
@@ -124,8 +149,8 @@ function makeStore() {
 
 // ── workbook date roll-forward (ExcelJS) ────────────────────────────────────
 // The template keeps all of its own formatting, merges, column widths and page
-// setup; only the dated cells are changed.
-function rollForward(ws, person, T, runDate) {
+// setup; only the dated cells are changed, then the signatures are stamped.
+function rollForward(wb, ws, person, T, runDate, out, say) {
   // 1) Title (row 1, master A1) — set canonically so a stale title is fixed.
   ws.getCell('A1').value = T.monthFull + ' ' + T.year + ' Portfolio Company Time Allocation - ' + person.name;
 
@@ -151,6 +176,41 @@ function rollForward(ws, person, T, runDate) {
     if (c.value && typeof c.value === 'object' && c.value.formula) continue;
     c.value = new Date(Date.UTC(runDate.getFullYear(), runDate.getMonth(), runDate.getDate()));
   }
+  // 4) Stamp the signature images onto the employee and approval lines.
+  applySignatures(wb, ws, person, labelRow, out, say);
+}
+
+// Anchor each person's on-file signature image over the value cell (column B,
+// merged B:D) of its signature row. The image floats above the cell, sized to a
+// natural signature width with its own aspect preserved; it rotates and scales
+// with the sheet on PDF export, so Jimmy's rotated page is handled the same way.
+function applySignatures(wb, ws, person, labelRow, out, say) {
+  const map = SIGN[person.key];
+  if (!map) return;
+  const dir = signaturesDir();
+  const empRow = labelRow['employee signature'];
+  let apprRow = null;
+  for (const [k, r] of Object.entries(labelRow)) { if (/^approved by\b/.test(k)) { apprRow = r; break; } }
+
+  const place = (sigKey, row, slot) => {
+    if (!sigKey || !row) return;
+    const file = path.join(dir, sigKey + '.png');
+    let buf; try { buf = fs.readFileSync(file); }
+    catch (e) { if (out) out.warnings.push(person.name + ': ' + slot + ' line left blank — signature ' + sigKey + '.png not found'); return; }
+    const sz = pngSize(buf);
+    const targetW = 150;                                   // ~1.5in at 96dpi
+    const h = sz ? Math.max(12, Math.round(targetW * sz.h / sz.w)) : 24;
+    const imageId = wb.addImage({ buffer: buf, extension: 'png' });
+    // tl is 0-based col/row with a fractional inset into column B of the row.
+    ws.addImage(imageId, {
+      tl: { col: 1.12, row: (row - 1) + 0.12 },
+      ext: { width: targetW, height: h },
+      editAs: 'oneCell',
+    });
+    if (say) say(person.name + ': signed ' + slot + ' (' + sigKey + ')');
+  };
+  place(map.employee, empRow, 'employee');
+  place(map.approver, apprRow, 'approver');
 }
 
 // ── Excel COM (PDF) ─────────────────────────────────────────────────────────
@@ -203,7 +263,7 @@ async function runReport(monthEnd, cfg, log) {
       const wb = new ExcelJS.Workbook();
       await wb.xlsx.load(store.readFull(tpl.full));
       const ws = wb.worksheets.find((w) => (w.pageSetup && w.pageSetup.printArea)) || wb.worksheets[0];
-      rollForward(ws, person, T, runDate);
+      rollForward(wb, ws, person, T, runDate, out, say);
 
       const stem = T.monthFull + ' ' + T.year + ' Portfolio Company Time Allocation - ' + person.name;
       const xlsxRel = T.year + '/' + stem + '.xlsx';
