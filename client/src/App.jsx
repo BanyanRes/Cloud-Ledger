@@ -6940,7 +6940,7 @@ function TimeAllocation({user}){
   return(<div>
     <div style={{marginBottom:8}}>
       <div style={S.h1}>Time Allocation</div>
-      <div style={S.sub}>Rolls the monthly Portfolio Company Time Allocation reports forward to the month-end you pick, for <b>{(data.people||[]).join(' and ')}</b>. Each person's most recent report is reused and only the date is updated (title, month, and signature/approval dates) &mdash; the allocation itself is unchanged. The .xlsx and a matching .pdf are saved to <b>{data.dest_base}/&lt;year&gt;</b>. Reports are produced unsigned.</div>
+      <div style={S.sub}>Rolls the monthly Portfolio Company Time Allocation reports forward to the month-end you pick, for <b>{(data.people||[]).join(' and ')}</b>. Each person's most recent report is reused and only the date is updated (title, month, and signature/approval dates) &mdash; the allocation itself is unchanged. The .xlsx and a matching .pdf are saved to <b>{data.dest_base}/&lt;year&gt;</b>. Each report is stamped with its on-file signatures (employee and approver), so it comes out signed.</div>
     </div>
     {data.storage==='none'&&<div style={{marginBottom:12,padding:'8px 12px',background:'#fef3c7',color:'#92400e',borderRadius:6,fontSize:13}}>The report runner is not set up yet (CC_RUNNER_KEY is missing on the server), so reports cannot run.</div>}
     {data.storage==='runner'&&(data.runner_online?null:<div style={{marginBottom:12,padding:'8px 12px',background:'#fef3c7',color:'#92400e',borderRadius:6,fontSize:13}}>Your PC is not connected right now{data.runner_last_seen?' (last seen '+new Date(data.runner_last_seen).toLocaleString()+')':''}. You can still click Report &mdash; it will run as soon as your computer is on and signed in.</div>)}
