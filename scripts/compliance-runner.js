@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// CloudLedger - Compliance Certificates runner (runs on Jimmy's PC)
+// CloudLedger - reports runner (runs on Jimmy's PC)
 //
-// Waits for "Report" clicks on CloudLedger's Admin > Compliance Certificates page.
+// Waits for "Report" clicks on CloudLedger's Admin > Compliance Certificates and
+// Admin > Time Allocation pages.
 // When one is queued, it builds that quarter's lender packages from the
 // OneDrive-synced SharePoint folders on this PC (same code as the server:
 // server/compliancecerts.js) and saves them into
@@ -67,6 +68,11 @@ function loadModule() {
   delete require.cache[require.resolve(mod)];
   return require(mod);
 }
+function loadTAModule() {
+  const mod = path.join(__dirname, '..', 'server', 'timeallocation.js');
+  delete require.cache[require.resolve(mod)];
+  return require(mod);
+}
 
 async function runJob(job) {
   log('Job ' + job.id + ': quarter end ' + job.quarter_end);
@@ -89,14 +95,42 @@ async function runJob(job) {
   }
 }
 
+async function runTAJob(job) {
+  log('Time Allocation job ' + job.id + ': month end ' + job.month_end);
+  let buf = [], flushing = Promise.resolve();
+  const flush = () => { if (!buf.length) return flushing; const lines = buf; buf = []; flushing = flushing.then(() => api('/api/time-allocation-runner/runs/' + job.id + '/log', { lines }).catch((e) => log('log post failed: ' + e.message))); return flushing; };
+  const timer = setInterval(flush, 2000);
+  try {
+    const ta = loadTAModule();
+    const result = await ta.runReport(job.month_end, {}, (line) => { buf.push(line); log('  ' + line); });
+    clearInterval(timer); await flush();
+    await api('/api/time-allocation-runner/runs/' + job.id + '/finish', { ok: true, result });
+    log('Time Allocation job ' + job.id + ' done: ' + JSON.stringify(result.counts || {}));
+  } catch (e) {
+    clearInterval(timer); await flush();
+    log('Time Allocation job ' + job.id + ' FAILED: ' + (e && e.stack || e));
+    await api('/api/time-allocation-runner/runs/' + job.id + '/finish', { ok: false, error: String(e && e.message || e) }).catch((x) => log('finish post failed: ' + x.message));
+  }
+}
+
 let lastBeat = 0, busy = false, lastErr = '';
 async function tick() {
   if (busy) return;
   busy = true;
   try {
-    if (Date.now() - lastBeat > HEARTBEAT_MS) { await api('/api/compliance-runner/heartbeat'); lastBeat = Date.now(); }
+    if (Date.now() - lastBeat > HEARTBEAT_MS) {
+      await api('/api/compliance-runner/heartbeat');
+      await api('/api/time-allocation-runner/heartbeat').catch(() => {});   // endpoint may not exist until deployed
+      lastBeat = Date.now();
+    }
     const { job } = await api('/api/compliance-runner/claim');
     if (job) await runJob(job);
+    // time-allocation queue (same runner key); tolerate the endpoint being absent
+    // during a deploy window so the compliance poll is never disturbed.
+    let ta = null;
+    try { ta = await api('/api/time-allocation-runner/claim'); }
+    catch (e) { if (!/-> HTTP 404\b/.test(e.message)) throw e; }
+    if (ta && ta.job) await runTAJob(ta.job);
     if (lastErr) { log('connection restored'); lastErr = ''; }
   } catch (e) {
     if (e.message !== lastErr) { log('poll error: ' + e.message); lastErr = e.message; }   // log each distinct error once

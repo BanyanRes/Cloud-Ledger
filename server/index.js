@@ -11483,6 +11483,12 @@ require('./amfee').registerAmFeeRoutes(app, {
 require('./compliancecerts').registerComplianceCertRoutes(app, { db, auth, requireRole,
   signToken: (u) => jwt.sign({ id: u.id, name: u.name, email: u.email, role: u.role }, JWT_SECRET, { expiresIn: '2h' }) });
 
+// ═══ Administration: Monthly Time Allocation ═══
+// Enter a month-end date -> rolls each person's latest time allocation .xlsx
+// forward (date only) and re-renders the .pdf (Excel COM) into
+// Accounting > General/2. Monthly Time Allocation/{YYYY}. See server/timeallocation.js.
+require('./timeallocation').registerTimeAllocationRoutes(app, { db, auth, requireRole });
+
 // ═══ CLRF workpaper: ILPA Fee Reporting Template (GCM Grosvenor investors) ═══
 // One tab per GCM sleeve, reproducing the vendor ILPA template exactly and
 // filling only the blue input cells from the GL. See server/ilpafee.js.

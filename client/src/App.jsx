@@ -1053,6 +1053,7 @@ export default function App(){
       {id:'usc_capital',label:'USC Capital Statements',icon:'📄',section:'administration'},
       {id:'muha_invoice',label:'Muha Invoice',icon:'🧾',section:'administration'},
       {id:'am_fee',label:'AM Fee Invoices',icon:'🧾',section:'administration'},{id:'compliance_certs',label:'Compliance Certificates',icon:'📑',section:'administration'},
+      {id:'time_allocation',label:'Time Allocation',icon:'⏱️',section:'administration'},
       {id:'letterhead',label:'Letterhead',icon:'📄',section:'administration'},
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
       {id:'users',label:'Users',icon:NI.users,section:'all'},
@@ -1134,6 +1135,7 @@ export default function App(){
         {page==='muha_invoice'&&canAccess('administration')&&<MuhaInvoice user={user} key={'muha-'+rk}/>}
         {page==='am_fee'&&canAccess('administration')&&<AmFeeInvoices user={user} key={'amfee-'+rk}/>}
         {page==='compliance_certs'&&canAccess('administration')&&<ComplianceCertificates user={user} key={'cc-'+rk}/>}
+        {page==='time_allocation'&&canAccess('administration')&&<TimeAllocation user={user} key={'ta-'+rk}/>}
         {page==='letterhead'&&canAccess('administration')&&<LetterheadPage user={user} key={'lh-'+rk}/>}
         {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
@@ -6913,6 +6915,76 @@ function ComplianceCertificates({user}){
         <thead><tr><th style={{...td,textAlign:'left'}}>Quarter end</th><th style={{...td,textAlign:'left'}}>Status</th><th style={{...td,textAlign:'left'}}>By</th><th style={{...td,textAlign:'left'}}>Started</th><th style={td}></th></tr></thead>
         <tbody>{data.runs.map(r=>(<tr key={r.id}>
           <td style={td}>{r.quarter_end}</td><td style={td}>{pill(r.status)}</td><td style={td}>{r.by_who}</td><td style={td}>{r.started_at}</td>
+          <td style={{...td,textAlign:'right'}}><button style={{padding:'3px 8px',fontSize:12,border:bd,borderRadius:6,background:'#fff',cursor:'pointer'}} onClick={()=>poll(r.id)}>View</button></td>
+        </tr>))}</tbody>
+      </table>
+    </div>}
+  </div>);
+}
+function TimeAllocation({user}){
+  const[data,setData]=useState(null);
+  const[me,setMe]=useState('');
+  const[run,setRun]=useState(null);
+  const[err,setErr]=useState('');
+  const[busy,setBusy]=useState(false);
+  const load=async()=>{try{const d=await api.getTimeAllocation();setData(d);setMe(m=>m||d.default_month_end);}catch(e){setErr(e.message);}};
+  useEffect(()=>{load();},[]);
+  const poll=async(id)=>{try{const r=await api.getTimeAllocationRun(id);setRun(r);if(r.status==='running'||r.status==='queued'){setTimeout(()=>poll(id),2500);}else{setBusy(false);load();}}catch(e){setErr(e.message);setBusy(false);}};
+  const report=async()=>{setErr('');setRun(null);setBusy(true);try{const o=await api.runTimeAllocation(me);poll(o.id);}catch(e){setErr(e.message);setBusy(false);}};
+  const bd='1px solid #e2e8f0';
+  const td={padding:'6px 8px',borderBottom:bd,verticalAlign:'top'};
+  const STAT={created:['Created','#166534','#dcfce7'],error:['Error','#991b1b','#fee2e2'],queued:['Waiting for PC','#92400e','#fef3c7'],running:['Running','#1e40af','#dbeafe'],done:['Done','#166534','#dcfce7'],failed:['Failed','#991b1b','#fee2e2']};
+  const pill=(st)=>{const m=STAT[st]||[st,'#334155','#f1f5f9'];return(<span style={{background:m[2],color:m[1],padding:'1px 8px',borderRadius:10,fontSize:12,whiteSpace:'nowrap'}}>{m[0]}</span>);};
+  if(!data)return(<div><div style={S.h1}>Time Allocation</div>{err?<div style={S.err}>{err}</div>:<div style={S.sub}>Loading...</div>}</div>);
+  const res=run&&run.result;
+  return(<div>
+    <div style={{marginBottom:8}}>
+      <div style={S.h1}>Time Allocation</div>
+      <div style={S.sub}>Rolls the monthly Portfolio Company Time Allocation reports forward to the month-end you pick, for <b>{(data.people||[]).join(' and ')}</b>. Each person's most recent report is reused and only the date is updated (title, month, and signature/approval dates) &mdash; the allocation itself is unchanged. The .xlsx and a matching .pdf are saved to <b>{data.dest_base}/&lt;year&gt;</b>. Reports are produced unsigned.</div>
+    </div>
+    {data.storage==='none'&&<div style={{marginBottom:12,padding:'8px 12px',background:'#fef3c7',color:'#92400e',borderRadius:6,fontSize:13}}>The report runner is not set up yet (CC_RUNNER_KEY is missing on the server), so reports cannot run.</div>}
+    {data.storage==='runner'&&(data.runner_online?null:<div style={{marginBottom:12,padding:'8px 12px',background:'#fef3c7',color:'#92400e',borderRadius:6,fontSize:13}}>Your PC is not connected right now{data.runner_last_seen?' (last seen '+new Date(data.runner_last_seen).toLocaleString()+')':''}. You can still click Report &mdash; it will run as soon as your computer is on and signed in.</div>)}
+    {data.storage==='local'&&<div style={{marginBottom:12,padding:'8px 12px',background:'#dbeafe',color:'#1e40af',borderRadius:6,fontSize:13}}>Running against the local OneDrive-synced folders.</div>}
+    {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
+    <div style={{...S.card,marginBottom:12,display:'flex',alignItems:'flex-end',gap:12,flexWrap:'wrap'}}>
+      <div>
+        <div style={{fontSize:12,color:'#64748b',marginBottom:4}}>Month-end date</div>
+        <input type="date" value={me} onChange={e=>setMe(e.target.value)} style={{padding:'6px 8px',border:bd,borderRadius:6,fontSize:14}}/>
+      </div>
+      <button style={{...S.btnP,padding:'7px 18px'}} disabled={busy||!me} onClick={report}>{busy?'Running...':'Report'}</button>
+      <div style={{fontSize:12,color:'#64748b'}}>Must be the last day of a month. Re-running a month overwrites that month's generated files.</div>
+    </div>
+    {run&&run.status==='queued'&&<div style={{...S.card,marginBottom:12}}><div style={S.h2}>Waiting for your PC to pick up {run.month_end}...</div><div style={{fontSize:12,color:'#64748b'}}>This starts automatically once your computer is on and signed in.</div></div>}
+    {run&&run.status==='running'&&<div style={{...S.card,marginBottom:12}}>
+      <div style={S.h2}>Working on {run.month_end}...</div>
+      <div style={{fontFamily:'monospace',fontSize:12,color:'#475569',whiteSpace:'pre-wrap'}}>{(run.log||[]).slice(-10).join('\n')||'Starting...'}</div>
+    </div>}
+    {run&&run.status==='failed'&&<div style={{...S.err,marginBottom:12}}>Report failed: {run.error}</div>}
+    {res&&<div>
+      <div style={{...S.card,marginBottom:12}}>
+        <div style={S.h2}>{res.month} files &mdash; {Object.entries(res.counts||{}).map(([k,v])=>v+' '+k).join(', ')}</div>
+        <div style={{fontSize:12,color:'#64748b',marginBottom:6}}>Saved to {res.dest}</div>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+          <thead><tr><th style={{...td,textAlign:'left'}}>Person</th><th style={{...td,textAlign:'left'}}>File</th><th style={{...td,textAlign:'left'}}>Status</th><th style={{...td,textAlign:'left'}}>Note</th></tr></thead>
+          <tbody>{res.items.map((it,i)=>(<tr key={i}>
+            <td style={{...td,whiteSpace:'nowrap'}}>{it.pkg}</td>
+            <td style={td}>{it.file}</td>
+            <td style={td}>{pill(it.status)}</td>
+            <td style={{...td,color:'#64748b',fontSize:12}}>{it.note}</td>
+          </tr>))}</tbody>
+        </table>
+      </div>
+      {(res.warnings||[]).length>0&&<div style={{...S.card,marginBottom:12}}>
+        <div style={S.h2}>Needs attention</div>
+        <ul style={{margin:'4px 0 0 18px',fontSize:13}}>{res.warnings.map((w,i)=>(<li key={i}>{w}</li>))}</ul>
+      </div>}
+    </div>}
+    {(data.runs||[]).length>0&&<div style={S.card}>
+      <div style={S.h2}>Recent runs</div>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
+        <thead><tr><th style={{...td,textAlign:'left'}}>Month end</th><th style={{...td,textAlign:'left'}}>Status</th><th style={{...td,textAlign:'left'}}>By</th><th style={{...td,textAlign:'left'}}>Started</th><th style={td}></th></tr></thead>
+        <tbody>{data.runs.map(r=>(<tr key={r.id}>
+          <td style={td}>{r.month_end}</td><td style={td}>{pill(r.status)}</td><td style={td}>{r.by_who}</td><td style={td}>{r.started_at}</td>
           <td style={{...td,textAlign:'right'}}><button style={{padding:'3px 8px',fontSize:12,border:bd,borderRadius:6,background:'#fff',cursor:'pointer'}} onClick={()=>poll(r.id)}>View</button></td>
         </tr>))}</tbody>
       </table>

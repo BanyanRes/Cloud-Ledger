@@ -223,6 +223,10 @@ export const api = {
   saveComplianceCertsConfig: (cfg) => request('/admin/compliance-certs/config', { method: 'PUT', body: cfg }),
   runComplianceReport: (quarter_end) => request('/admin/compliance-certs/report', { method: 'POST', body: { quarter_end } }),
   getComplianceRun: (id) => request('/admin/compliance-certs/runs/' + encodeURIComponent(id)),
+  // Administration: Monthly Time Allocation (Jimmy & Irvin portfolio-company time)
+  getTimeAllocation: () => request('/admin/time-allocation'),
+  runTimeAllocation: (month_end) => request('/admin/time-allocation/report', { method: 'POST', body: { month_end } }),
+  getTimeAllocationRun: (id) => request('/admin/time-allocation/runs/' + encodeURIComponent(id)),
   getAmFee: () => request('/admin/am-fee'),
   saveAmFeeConfig: (cfg) => request('/admin/am-fee/config', { method: 'PUT', body: cfg }),
   saveAmFeeBilling: (key, patch) => request('/admin/am-fee/' + encodeURIComponent(key), { method: 'PUT', body: patch }),
