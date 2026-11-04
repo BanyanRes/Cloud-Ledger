@@ -481,17 +481,47 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
     ws.getColumn(1).width = 13; ws.getColumn(2).width = 44; [3, 4, 5, 6].forEach((c) => { ws.getColumn(c).width = 15; });
     const rev = tot['Total Revenue'], opex = tot['Total Operating Expenses'], int = tot['Total Interest Expense'];
     const noi = rev - opex, dscr = int ? noi / int : null;
-    calc.getCell('B2').value = 'Silo Ridge'; calc.getCell('C2').value = Q.label;
+    // Calc tab - same layout/format as the hand-built JPM DSCR workbook
     const T = qs(tabName);
-    calc.getCell('B3').value = 'Total Revenue'; setF(calc, 'C3', `SUM(${T}!C${rowOf['Total Revenue']}:E${rowOf['Total Revenue']})`, rev, NF);
-    calc.getCell('B4').value = 'Less: Operating Expenses'; setF(calc, 'C4', `-SUM(${T}!C${rowOf['Total Operating Expenses']}:E${rowOf['Total Operating Expenses']})`, -opex, NF);
-    calc.getCell('B5').value = 'Add back: Reserve Account Balance'; calc.getCell('C5').value = 0;
-    calc.getCell('B6').value = 'Total Net Operating Income'; setF(calc, 'C6', 'SUM(C3:C5)', noi, NF);
-    calc.getCell('B8').value = 'Cash Interest Expense'; setF(calc, 'C8', `SUM(${T}!C${rowOf['Total Interest Expense']}:E${rowOf['Total Interest Expense']})`, int, NF);
-    calc.getCell('B9').value = 'Principal Payments Paid'; calc.getCell('C9').value = 0;
-    calc.getCell('B10').value = 'Total Debt Service'; setF(calc, 'C10', '+C8+C9', int, NF);
-    calc.getCell('B12').value = 'DSCR'; setF(calc, 'C12', 'C6/C10', dscr, '0.00"x"');
-    calc.getColumn(2).width = 34; calc.getColumn(3).width = 16;
+    const NUM0 = '_(* #,##0_);_(* \\(#,##0\\);_(* "-"_);_(@_)';
+    const BLUE = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2E75B6' } };
+    const GRAY = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFBFBFBF' } };
+    const thin = { style: 'thin' };
+    const put2 = (addr, v, o = {}) => {
+      const c = calc.getCell(addr);
+      c.value = v && v.f ? { formula: v.f, result: v.r } : v;
+      c.font = { name: 'Calibri', size: 11, bold: !!o.b, italic: !!o.i, color: o.white ? { argb: 'FFFFFFFF' } : undefined };
+      if (o.nf) c.numFmt = o.nf; if (o.fill) c.fill = o.fill; if (o.center) c.alignment = { horizontal: 'center' };
+      return c;
+    };
+    put2('B2', 'Silo Ridge', { b: true, white: true, fill: BLUE });
+    put2('C2', Q.label, { b: true, white: true, fill: BLUE, center: true });
+    put2('B3', 'Total Revenue', { b: true });
+    put2('C3', { f: `SUM(${T}!C${rowOf['Total Revenue']}:E${rowOf['Total Revenue']})`, r: rev }, { b: true, nf: NUM0 });
+    put2('B4', 'Less: Operating Expenses', { i: true });
+    put2('C4', { f: `-SUM(${T}!C${rowOf['Total Operating Expenses']}:E${rowOf['Total Operating Expenses']})`, r: -opex }, { nf: NUM0 });
+    put2('B5', 'Add back: Reserve Account Balance', { i: true }); put2('C5', 0, { nf: NUM0 });
+    put2('B6', 'Total Net Operating Income', { b: true });
+    put2('C6', { f: 'SUM(C3:C5)', r: noi }, { b: true, nf: NUM0 });
+    put2('B8', 'Cash Interest Expense');
+    put2('C8', { f: `SUM(${T}!C${rowOf['Total Interest Expense']}:E${rowOf['Total Interest Expense']})`, r: int }, { nf: NUM0 });
+    put2('B9', 'Principal Payments Paid'); put2('C9', 0, { nf: NUM0 });
+    put2('B10', 'Total Debt Service', { b: true });
+    put2('C10', { f: '+C8+C9', r: int }, { nf: NUM0 });
+    put2('B12', 'DSCR');
+    put2('C12', { f: 'C6/C10', r: dscr }, { nf: '0.00', fill: GRAY });
+    put2('C13', null, { fill: GRAY });
+    calc.getRow(5).hidden = true; calc.getRow(9).hidden = true;   // kept for the formulas, hidden as in the original
+    // borders: outer box B2:C13, rule above the totals and above DSCR
+    for (let r = 2; r <= 13; r++) {
+      const bc = calc.getCell('B' + r), cc = calc.getCell('C' + r);
+      const top = (r === 2 || r === 6 || r === 10 || r === 12) ? thin : undefined;
+      const bottom = r === 13 ? thin : undefined;
+      bc.border = { left: thin, top, bottom };
+      cc.border = { right: thin, top, bottom: bottom || ((r === 4 || r === 5 || r === 8 || r === 9) ? thin : undefined) };
+    }
+    calc.getColumn(1).width = 13; calc.getColumn(2).width = 40.18; calc.getColumn(3).width = 16.18;
+    calc.views = [{ zoomScale: 120 }];
     out.metrics.silo_jpm = { revenue: rev, opex, noi, interest: int, dscr };
     await put('Silo Ridge - JPM', 'jpm', 'Silo Ridge DSCR Calc_' + Q.tag + '.xlsx', await wb.xlsx.writeBuffer(), 'DSCR ' + (dscr ? dscr.toFixed(2) : 'n/a') + 'x');
   });
