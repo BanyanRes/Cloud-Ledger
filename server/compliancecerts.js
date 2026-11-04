@@ -290,19 +290,23 @@ async function stampCertificate(key, values) {
 // Statements, the CLRF fund statements, the Trailing 12 Months P&L).
 // opts.cl = { url, token, entities:[{id,code,name,entity_type}] } is supplied by
 // the runner (token = short-lived login of the person who clicked Report).
-const CL_ENT = {
-  CLIP: (e) => /county line industrial park/i.test(e.name) || /^clip property owner/i.test(e.name),
-  Silsbee: (e) => /silsbee/i.test(e.name) && !/sponsor/i.test(e.name),
-  SRN: (e) => /county line srn|sabine river/i.test(e.name),
-  Buna: (e) => /buna property owner/i.test(e.name),
-  Midco: (e) => String(e.code || '') === 'CLRFIMID' || (/midco\s*i\b/i.test(e.name) && !/midco\s*ii/i.test(e.name)),
-  CLRF: (e) => /county line rail fund/i.test(e.name) && !/llc|midco|sponsor/i.test(e.name),
+// CloudLedger entities. 'fs' = the entity whose quarterly statements go in the
+// lender package (as in the Q2 2026 package); 'ops' = the entity that carries the
+// operating numbers used in the covenant calc (T12, loan, reserve, interest).
+// Matched by exact name first, then by entity code.
+const CL_MAP = {
+  CLIP: { fs: ['County Line Industrial Park', 'COUNTYLI2'], ops: ['CLIP Property Owner', 'CLIPPROP'] },
+  Silsbee: { fs: ['County Line Rail Silsbee', 'COUNTYLI5'], ops: ['CLR Silsbee Property Owner', 'CLRSILSB2'] },
+  SRN: { fs: ['Sabine River & Northern Railroad', 'SABINERI'], ops: ['Sabine River & Northern Railroad', 'SABINERI'] },
+  Buna: { fs: ['CLR Buna Property Owner', 'CLRBUNAP'], ops: ['CLR Buna Property Owner', 'CLRBUNAP'] },
+  Midco: { fs: ['CLRFI Midco I', 'CLRFIMID'] },
+  CLRF: { fs: ['County Line Rail Fund', 'COUNTYLI1'] },
 };
-function clEntity(cl, key) {
-  if (!cl || !cl.entities) return null;
-  const hits = cl.entities.filter(CL_ENT[key]);
-  if (key === 'CLIP') hits.sort((a, b) => (/industrial park/i.test(b.name) ? 1 : 0) - (/industrial park/i.test(a.name) ? 1 : 0));
-  return hits[0] || null;
+function clEntity(cl, key, role = 'ops') {
+  if (!cl || !cl.entities || !CL_MAP[key]) return null;
+  const want = CL_MAP[key][role] || CL_MAP[key].fs; if (!want) return null;
+  const norm = (x) => String(x || '').trim().toLowerCase().replace(/,?\s*(llc|lp|l\.p\.)$/, '');
+  return cl.entities.find((e) => norm(e.name) === norm(want[0])) || cl.entities.find((e) => String(e.code) === want[1]) || null;
 }
 async function clFetch(cl, p, opts = {}) {
   const r = await fetch(cl.url.replace(/\/$/, '') + p, { method: opts.method || 'GET', headers: { Authorization: 'Bearer ' + cl.token }, body: opts.body });
@@ -361,7 +365,12 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
   const say = (s) => { if (log) log(s); };
   const item = (pkg, file, status, note, url) => { out.items.push({ pkg, file, status, note: note || '', url: url || null }); say(pkg + ': ' + status + ' - ' + file + (note ? ' (' + note + ')' : '')); };
   const destPath = (dir, f) => out.dest + '/' + DIRS[dir] + '/' + f;
-  async function put(pkg, dir, fname, buf, note) { const url = await store.write('accounting', destPath(dir, fname), buf); item(pkg, fname, 'created', note, url); }
+  async function put(pkg, dir, fname, buf, note) {
+    let url;
+    try { url = await store.write('accounting', destPath(dir, fname), buf); }
+    catch (e) { if (/EBUSY|EPERM|locked/i.test(e.message)) throw new Error('the file is open (probably in Excel) - close it and click Report again'); throw e; }
+    item(pkg, fname, 'created', note, url);
+  }
   async function copy(pkg, dir, lib, src, fname, note) {
     if (!src) { item(pkg, fname, 'missing', note || 'source file not found'); return false; }
     const buf = await store.read(lib, src);
@@ -563,7 +572,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
   // 5a. entity financial statements
   for (const e of ents) {
     await safe('Midco I', e.key + ' FS', async () => {
-      const ent = clEntity(cl, e.key);
+      const ent = clEntity(cl, e.key, 'fs');
       if (!ent) {   // CloudLedger not reachable from this run - fall back to the SharePoint folders
         const dir = await findMonthDir(store, 'cla', e.fin, QE.y, QE.m);
         const f = await findFile(store, 'cla', dir, e.fs, /\.pdf$/i);
@@ -576,7 +585,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
     });
   }
   await safe('Midco I', 'CLRFI Midco I consolidated FS', async () => {
-    const ent = clEntity(cl, 'Midco');
+    const ent = clEntity(cl, 'Midco', 'fs');
     if (!ent) {
       const f = await findFile(store, 'cla', '61 Midco I/00 Financials/' + QE.y, new RegExp('consolidated financial statements ' + pad2(QE.m) + '\\.' + QE.y, 'i'), /\.pdf$/i);
       if (f) await copy('Midco I', 'midco', 'cla', f); else item('Midco I', 'CLRFI Midco I consolidated FS', 'missing', cl ? 'no matching CloudLedger entity' : 'CloudLedger not available');
@@ -586,7 +595,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
       await clQuarterlyFs(cl, ent, Q.iso), 'generated from CloudLedger (' + ent.name + ', lender package)');
   });
   await safe('Midco I', 'CLRF quarterly FS', async () => {
-    const ent = clEntity(cl, 'CLRF');
+    const ent = clEntity(cl, 'CLRF', 'fs');
     if (!ent) {
       const f = await findFile(store, 'cla', '30 County Line Rail Fund/Financial Statements/' + QE.y + ' Q' + Q.q + ' Financials', /FS SCF Wksht_Final/i, /\.pdf$/i);
       if (f) await copy('Midco I', 'midco', 'cla', f); else item('Midco I', 'CLRF quarterly FS', 'missing', cl ? 'no matching CloudLedger entity' : 'CloudLedger not available');
@@ -667,7 +676,8 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
           const [k, e2] = clIaEnts[j];
           const rows = await clBalances(cl, e2, { from, to });
           const hits = (rows || []).filter((x) => isInterestExp(x) || isCapInterest(x));
-          const v = hits.reduce((a, x) => a + (+x.balance || 0), 0);
+          // expense accounts: net debits; capitalized interest: additions only (credits are reclasses to fixed assets)
+          const v = hits.reduce((a, x) => a + (isCapInterest(x) ? (+x.total_debit || 0) : ((+x.total_debit || 0) - (+x.total_credit || 0))), 0);
           hits.forEach((x) => { (accts[k] = accts[k] || new Set()).add(x.code + ' ' + x.name); });
           const c = ia.getCell(r, 2 + j); c.value = v; c.numFmt = NF; intTot[k] += v; rowTot += v;
         }
@@ -696,7 +706,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
       const parts = [];
       for (const [k, e2] of clLnEnts) {
         const rows = await clBalances(cl, e2, { as_of: Q.iso });
-        const v = -(rows || []).filter(isBotLoan).reduce((a, x) => a + (+x.balance || 0), 0);
+        const v = (rows || []).filter(isBotLoan).reduce((a, x) => a + ((+x.total_credit || 0) - (+x.total_debit || 0)), 0);
         if (v) parts.push(k + ' ' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
         loan = (loan || 0) + v;
       }
@@ -731,7 +741,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
         try {
           const rows = await (await clFetch(cl, '/api/entities/' + clEnt.id + '/balances?as_of=' + Q.iso)).json(); ok = true;
           const hit = (rows || []).filter((r) => /^13100\b/.test(String(r.code)));
-          if (hit.length) bal = hit.reduce((a, r) => a + (+r.balance || 0), 0);
+          if (hit.length) bal = hit.reduce((a, r) => a + ((+r.total_debit || 0) - (+r.total_credit || 0)), 0);
         } catch (err) { out.warnings.push('Midco: ' + e.key + ' interest reserve from CloudLedger failed (' + err.message + ')'); }
         if (ok) {   // CloudLedger answered: no 13100 account means no reserve
           if (bal == null) bal = 0;
