@@ -6952,6 +6952,7 @@ function TimeAllocation({user}){
         <input type="date" value={me} onChange={e=>setMe(e.target.value)} style={{padding:'6px 8px',border:bd,borderRadius:6,fontSize:14}}/>
       </div>
       <button style={{...S.btnP,padding:'7px 18px'}} disabled={busy||!me} onClick={report}>{busy?'Running...':'Report'}</button>
+      {run&&run.status==='done'&&res&&(res.warnings||[]).length===0&&!busy&&<span style={{color:'#166534',fontSize:14,fontWeight:600,whiteSpace:'nowrap'}}>&#10003; Completed</span>}
       <div style={{fontSize:12,color:'#64748b'}}>Must be the last day of a month. Re-running a month overwrites that month's generated files.</div>
     </div>
     {run&&run.status==='queued'&&<div style={{...S.card,marginBottom:12}}><div style={S.h2}>Waiting for your PC to pick up {run.month_end}...</div><div style={{fontSize:12,color:'#64748b'}}>This starts automatically once your computer is on and signed in.</div></div>}
