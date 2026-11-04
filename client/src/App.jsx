@@ -6960,34 +6960,9 @@ function TimeAllocation({user}){
       <div style={{fontFamily:'monospace',fontSize:12,color:'#475569',whiteSpace:'pre-wrap'}}>{(run.log||[]).slice(-10).join('\n')||'Starting...'}</div>
     </div>}
     {run&&run.status==='failed'&&<div style={{...S.err,marginBottom:12}}>Report failed: {run.error}</div>}
-    {res&&<div>
-      <div style={{...S.card,marginBottom:12}}>
-        <div style={S.h2}>{res.month} files &mdash; {Object.entries(res.counts||{}).map(([k,v])=>v+' '+k).join(', ')}</div>
-        <div style={{fontSize:12,color:'#64748b',marginBottom:6}}>Saved to {res.dest}</div>
-        <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
-          <thead><tr><th style={{...td,textAlign:'left'}}>Person</th><th style={{...td,textAlign:'left'}}>File</th><th style={{...td,textAlign:'left'}}>Status</th><th style={{...td,textAlign:'left'}}>Note</th></tr></thead>
-          <tbody>{res.items.map((it,i)=>(<tr key={i}>
-            <td style={{...td,whiteSpace:'nowrap'}}>{it.pkg}</td>
-            <td style={td}>{it.file}</td>
-            <td style={td}>{pill(it.status)}</td>
-            <td style={{...td,color:'#64748b',fontSize:12}}>{it.note}</td>
-          </tr>))}</tbody>
-        </table>
-      </div>
-      {(res.warnings||[]).length>0&&<div style={{...S.card,marginBottom:12}}>
-        <div style={S.h2}>Needs attention</div>
-        <ul style={{margin:'4px 0 0 18px',fontSize:13}}>{res.warnings.map((w,i)=>(<li key={i}>{w}</li>))}</ul>
-      </div>}
-    </div>}
-    {(data.runs||[]).length>0&&<div style={S.card}>
-      <div style={S.h2}>Recent runs</div>
-      <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
-        <thead><tr><th style={{...td,textAlign:'left'}}>Month end</th><th style={{...td,textAlign:'left'}}>Status</th><th style={{...td,textAlign:'left'}}>By</th><th style={{...td,textAlign:'left'}}>Started</th><th style={td}></th></tr></thead>
-        <tbody>{data.runs.map(r=>(<tr key={r.id}>
-          <td style={td}>{r.month_end}</td><td style={td}>{pill(r.status)}</td><td style={td}>{r.by_who}</td><td style={td}>{r.started_at}</td>
-          <td style={{...td,textAlign:'right'}}><button style={{padding:'3px 8px',fontSize:12,border:bd,borderRadius:6,background:'#fff',cursor:'pointer'}} onClick={()=>poll(r.id)}>View</button></td>
-        </tr>))}</tbody>
-      </table>
+    {res&&(res.warnings||[]).length>0&&<div style={{...S.card,marginBottom:12}}>
+      <div style={S.h2}>Needs attention</div>
+      <ul style={{margin:'4px 0 0 18px',fontSize:13}}>{res.warnings.map((w,i)=>(<li key={i}>{w}</li>))}</ul>
     </div>}
   </div>);
 }
