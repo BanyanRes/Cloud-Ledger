@@ -908,6 +908,8 @@ function registerComplianceCertRoutes(app, ctx) {
   });
   // ── endpoints used by the runner on Jimmy's PC (authenticated by CC_RUNNER_KEY) ──
   app.post('/api/compliance-runner/heartbeat', runnerAuth, (req, res) => res.json({ ok: true }));
+  // entity list (names/types only) so entity matching can be checked from the PC
+  app.post('/api/compliance-runner/entities', runnerAuth, (req, res) => { const cols = db.prepare('PRAGMA table_info(entities)').all().map((c) => c.name); const pick = ['id', 'code', 'name', 'entity_type', 'parent_id', 'consolidation_group_id', 'status', 'is_active'].filter((c) => cols.includes(c)); res.json({ columns: cols, entities: db.prepare('SELECT ' + pick.join(', ') + ' FROM entities ORDER BY id').all() }); });
   app.post('/api/compliance-runner/claim', runnerAuth, (req, res) => {
     // a job claimed more than 30 minutes ago without finishing is treated as abandoned
     db.prepare("UPDATE compliance_cert_runs SET status = 'failed', error = 'Runner stopped before finishing (timed out)', finished_at = datetime('now') WHERE status = 'running' AND claimed_at IS NOT NULL AND claimed_at < datetime('now', '-30 minutes')").run();
