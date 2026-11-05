@@ -11489,6 +11489,22 @@ require('./compliancecerts').registerComplianceCertRoutes(app, { db, auth, requi
 // Accounting > General/2. Monthly Time Allocation/{YYYY}. See server/timeallocation.js.
 require('./timeallocation').registerTimeAllocationRoutes(app, { db, auth, requireRole });
 
+// ═══ Administration: Backups (full data-volume archive + automatic daily backup) ═══
+// GET /api/admin/backup/full streams a gzip tarball of the whole data volume
+// (consistent DB snapshot + attachments/ + entity_files/); the daily 9am job on
+// Jimmy's PC pulls this. An in-process scheduler also writes the same archive to
+// <volume>/backups once a day, space-guarded (prunes old archives; falls back to a
+// DB-only snapshot if a full archive will not fit) so the live volume can never be
+// pushed to SQLITE_FULL. See server/backup.js.
+require('./backup').registerBackupRoutes(app, {
+  db,
+  dataDir,
+  attachmentsDir: UPLOAD_DIR,
+  entityFilesDir: WORKPAPERS_DIR,
+  jwt,
+  jwtSecret: JWT_SECRET,
+});
+
 // ═══ CLRF workpaper: ILPA Fee Reporting Template (GCM Grosvenor investors) ═══
 // One tab per GCM sleeve, reproducing the vendor ILPA template exactly and
 // filling only the blue input cells from the GL. See server/ilpafee.js.
