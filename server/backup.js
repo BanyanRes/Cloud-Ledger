@@ -76,7 +76,10 @@ function buildFullArchive(ctx, outPath) {
         for (const d of [attachmentsDir, entityFilesDir]) {
           if (d && fs.existsSync(d)) extras.push(path.basename(d));
         }
-        if (extras.length) args.push('-C', dataDir, ...extras);
+        // tar's -C is cumulative; the first -C (stage) is absolute, so this one
+        // must be absolute too or it resolves relative to the stage dir. dataDir
+        // can be a relative path (e.g. "data") on Railway.
+        if (extras.length) args.push('-C', path.resolve(dataDir), ...extras);
 
         const p = spawn('tar', args, { stdio: ['ignore', 'ignore', 'pipe'] });
         let err = '';
