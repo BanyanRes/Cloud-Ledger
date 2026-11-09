@@ -3846,6 +3846,11 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
   const toggleActive=async n=>{try{await api.updateBankCodingNote(entityId,n.id,{active:!n.active});load();}catch(e){setErr(e.message);}};
   const acctName=code=>{const a=accounts.find(x=>x.code===code);return a?acctLabel(a.code,a.name):code;};
   const bankName=code=>{if(!code)return'Any account';const a=(bankAccts||[]).find(x=>x.code===code);return a?acctLabel(a.code,a.name):code;};
+  const statusText=n=>n.matched_count>0?('Matched '+n.matched_count+'×'):(n.active?'Waiting':'Inactive');
+  const exportNotes=()=>{
+    const header=['Bank Account','Date','Wire Amount','Tolerance (±$)','Keyword','Codes To','Dimension','Memo','Note','Attachments','Status','Type','Last Matched'];
+    const rows=notes.map(n=>[bankName(n.bank_account_code),n.date_from||n.date_to||'',Number(n.match_amount),Number(n.amount_tolerance)||0,n.desc_keyword||'',n.account_code?acctName(n.account_code):'',dimLabel(n)||'',n.memo||'',n.note||'',(n.attachments&&n.attachments.length)||0,statusText(n),n.one_shot?'One-time':'Recurring',n.last_matched_at||'']);
+    exportToExcel([header,...rows],'Wire_Notes.xlsx',{plainCols:[1,9,12]});};
 
   return(<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{...S.modalBox,maxWidth:920}} onClick={e=>e.stopPropagation()}>
     <button style={S.modalClose} onClick={onClose}>&times;</button>
@@ -3902,7 +3907,7 @@ function WireNotesModal({entityId,selAcct,bankAccts,accounts,setAccounts,setBank
       </div>
       <div style={{fontSize:11,color:T.textMuted,marginTop:10}}>The row must match the transaction date exactly. Widen the amount tolerance if the statement figure may differ slightly (e.g. wire fees). Add a description keyword only if the amount alone might collide with another transaction.</div>
     </div>}
-    <div style={{fontSize:13,fontWeight:600,color:T.text,marginBottom:8}}>Saved notes ({notes.length})</div>
+    <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}><div style={{fontSize:13,fontWeight:600,color:T.text}}>Saved notes ({notes.length})</div><div style={{flex:1}}/>{notes.length>0&&<button style={{...S.btnS,color:T.teal,borderColor:T.teal+'40'}} onClick={exportNotes} title="Download the saved wire notes as an Excel file">Export Excel</button>}</div>
     {notes.length===0?<div style={{fontSize:12,color:T.textMuted,padding:'12px 0'}}>No notes yet.</div>:
     <table style={S.table}><thead><tr>
       <th style={S.th}>Bank Acct</th><th style={S.th}>Date</th><th style={S.thR}>Amount (±tol)</th><th style={S.th}>Keyword</th><th style={S.th}>Codes To</th><th style={S.th}>Dimension</th><th style={S.th}>Note</th><th style={S.th}>Support</th><th style={S.th}>Status</th><th style={S.th}></th>
