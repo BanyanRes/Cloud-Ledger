@@ -670,6 +670,40 @@ async function loadPrevCovenant(store, Q) {   // last quarter's "Midco Financial
   const ExcelJS = require('exceljs'); const w = new ExcelJS.Workbook(); await w.xlsx.load(await store.read('accounting', dir + '/' + c[0].name));
   return w.getWorksheet('Calc') ? { wb: w, name: c[0].name } : null;
 }
+// Read the balance from an uploaded statement's text (both BOT statements carry a text layer).
+// interest_reserve: "= Ending Balance 4,152,737.45" (account statement for the quarter-end month)
+// loan_statement:   the interest-accrual row covering the quarter end, else "ENDING PRINCIPAL BALANCE: $..."
+async function readStatementBalance(kind, buf, quarterEnd) {
+  let txt = '';
+  try { txt = (await pdfPagesText(buf)).join(' ').replace(/\s+/g, ' '); } catch (e) { return { balance: null, note: 'could not read the PDF text' }; }
+  if (!txt.trim()) return { balance: null, note: 'the PDF has no text layer (scanned image)' };
+  // scanned statements carry OCR text with stray spaces inside numbers/dates ("$120,280 ,227 . 01", "08-28 -26")
+  for (let k = 0; k < 3; k++) txt = txt.replace(/(\d)\s*([.,])\s*(\d)/g, '$1$2$3').replace(/(\d\d)\s*-\s*(\d\d)/g, '$1-$2').replace(/\$\s+(\d)/g, '$$$1');
+  const money = (x) => +String(x).replace(/[$,\s]/g, '');
+  if (kind === 'interest_reserve') {
+    const m = txt.match(/Ending Balance\s*\$?\s*([\d,]+\.\d{2})/i);
+    const per = txt.match(/Statement Period (?:from )?(\d\d-\d\d-\d\d) (?:through|to) (\d\d-\d\d-\d\d)/i);
+    if (!m) return { balance: null, note: 'no "Ending Balance" found on the statement' };
+    let note = 'read from the statement (Ending Balance' + (per ? ', period ' + per[1] + ' to ' + per[2] : '') + ')';
+    if (per && quarterEnd) { const end = '20' + per[2].slice(6) + '-' + per[2].slice(0, 5); if (end !== quarterEnd) note += ' - NOTE: statement period ends ' + per[2] + ', not ' + quarterEnd; }
+    return { balance: money(m[1]), note };
+  }
+  if (kind === 'loan_statement') {
+    const re = /(\d\d)-(\d\d)-(\d\d)\s*(\d\d)-(\d\d)-(\d\d)\s*(\d+)\s*\$([\d,]+\.\d\d)/g; let m;
+    while ((m = re.exec(txt))) {
+      const from = '20' + m[3] + '-' + m[1] + '-' + m[2], to = '20' + m[6] + '-' + m[4] + '-' + m[5];
+      if (quarterEnd && from <= quarterEnd && quarterEnd < to) return { balance: money(m[8]), note: 'read from the statement (principal balance for the period ' + from + ' to ' + to + ')' };
+    }
+    // the summary block lists ENDING PRINCIPAL BALANCE with principal/interest/fees due; the principal balance is the largest amount there
+    const blk = (txt.match(/ENDING PRINCIPAL BALANCE:?([\s\S]{0,600})/i) || [])[1] || '';
+    const amts = (blk.match(/\$\s*[\d,]+\.\d{2}/g) || []).map(money).filter((x) => isFinite(x));
+    const e = amts.length ? [null, String(Math.max(...amts))] : null;
+    const sd = txt.match(/STATEMENT DATE:?[\s\S]{0,200}?(\d\d\/\d\d\/\d\d)/i);
+    if (e) return { balance: money(e[1]), note: 'read from the statement (Ending Principal Balance' + (sd ? ' as of ' + sd[1] : '') + ')' };
+    return { balance: null, note: 'no principal balance found on the statement' };
+  }
+  return { balance: null, note: '' };
+}
 // lender-package file names, as in the Q2 2026 package
 const FS_NAME = {
   SRN: (Q) => '00 A1 County Line SRN LLC - Quarterly Financial Statements ' + pad2(Q.m) + '.' + pad2(Q.d) + '.' + Q.y + '.pdf',
@@ -998,6 +1032,8 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
       for (const n of ['Appraisals', 'Interest Reserve', 'NonRecurring Expenses']) {
         const sh = tplCov.wb.getWorksheet(n); if (sh) tplSheets[n] = copySheet(tplCov.wb, sh, wb, n, { images: n !== 'Interest Reserve' });
       }
+      const lnTpl = tplCov.wb.worksheets.find((w) => /loan balance$/i.test(w.name) && w.state !== 'hidden');
+      if (lnTpl) tplSheets.Loan = copySheet(tplCov.wb, lnTpl, wb, (Q.label + ' Loan Balance').slice(0, 31), { images: false });
     }
     // without a template the Calc tab is built from scratch; with one, the formulas are computed on a scratch sheet first
     const calc = tplCov ? scratchWb.addWorksheet('Calc') : wb.addWorksheet('Calc');
@@ -1115,8 +1151,24 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
         }
       }
     }
-    if (loan == null) pending.push('Loan balance at ' + Q.iso + ' not found in BOT loan statements - enter on "Loan Balance" tab');
-    const lb = wb.addWorksheet('Loan Balance'); lb.getCell('A1').value = 'BOT loan principal balance at ' + Q.iso; const lbc = lb.getCell('B3'); lbc.value = loan || 0; lbc.numFmt = NF; if (loan == null) lbc.fill = YEL;
+    // the BOT loan statement uploaded on the page is the source of record when present
+    const lnUp = (opts.uploads || []).find((u) => u.kind === 'loan_statement');
+    if (lnUp && lnUp.balance != null && isFinite(+lnUp.balance)) { loan = +lnUp.balance; loanSrc = 'BOT loan statement ' + (lnUp.filename || ''); }
+    else pending.push('Loan statement not uploaded for ' + Q.iso + ' - used ' + (loanSrc || 'CloudLedger') + ' for the loan balance');
+    if (tplSheets.Loan) {
+      const lw = tplSheets.Loan;
+      if (lnUp && lnUp.image) {
+        const sz = imageSize(lnUp.image); const w = Math.min(926, sz.w); const h = Math.round(sz.h * (w / sz.w));
+        lw.addImage(wb.addImage({ buffer: lnUp.image, extension: lnUp.ext || 'png' }), { tl: { col: 0, row: 3 }, ext: { width: w, height: h }, editAs: 'oneCell' });
+      } else {
+        lw.getCell('A4').value = 'Upload the BOT loan statement for ' + Q.label + ' on the Compliance Certificates page, then run Report again.';
+        lw.getCell('A4').font = { bold: true, color: { argb: 'FFC00000' } };
+      }
+      lw.getCell('L18').value = 'Loan Balance ending ' + MON[Q.m - 1] + ' ' + Q.y;
+      const lc = lw.getCell('L19'); lc.value = loan || 0; if (!lnUp) lc.fill = YEL;
+    }
+    if (loan == null) pending.push('Loan balance at '  + Q.iso + ' not found in BOT loan statements - enter on "Loan Balance" tab');
+    const lb = (tplSheets.Loan ? scratchWb : wb).addWorksheet('Loan Balance'); lb.getCell('A1').value = 'BOT loan principal balance at ' + Q.iso; const lbc = lb.getCell('B3'); lbc.value = loan || 0; lbc.numFmt = NF; if (loan == null) lbc.fill = YEL;
     lb.getCell('A3').value = 'Principal balance'; lb.getCell('A5').value = 'Source: ' + (loanSrc || 'NOT FOUND'); lb.getColumn(1).width = 22; lb.getColumn(2).width = 18;
     // interest reserve (acct 13100) per entity TB at quarter end
     const ir = (tplCov ? scratchWb : wb).addWorksheet('Interest Reserve'); ir.getCell('A1').value = 'Interest Reserve (acct 13100) at ' + Q.iso; ir.getRow(3).values = ['Entity', 'Balance', 'Source']; ir.getRow(3).font = { bold: true };
@@ -1162,7 +1214,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
     if (tplSheets.Appraisals) { const j = tplSheets.Appraisals.getCell('J16').value; const jv = j && typeof j === 'object' ? j.result : j; if (typeof jv === 'number') apTot = jv; }
     // interest reserve = ending balance of the bank's reserve statement uploaded on the Compliance Certificates page
     const irUp = (opts.uploads || []).find((u) => u.kind === 'interest_reserve');
-    if (irUp && irUp.balance != null && isFinite(+irUp.balance)) irTot = +irUp.balance;
+    if (irUp && irUp.balance != null && isFinite(+irUp.balance)) { irTot = +irUp.balance; for (let k = pending.length - 1; k >= 0; k--) if (/^Interest reserve /i.test(pending[k])) pending.splice(k, 1); }   // statement replaces the 13100 fallback
     else pending.push('Interest reserve statement not uploaded for ' + Q.iso + ' - used CloudLedger 13100 balances');
     let irBalRow = 33;
     {
@@ -1184,7 +1236,6 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
         }
         const d = irw.getCell(irBalRow, 4); d.value = irTot; if (!d.numFmt || d.numFmt === 'General') d.numFmt = NF;
         if (!irUp) d.fill = YEL;
-        if (irUp) { irw.getCell(irBalRow + 1, 2).value = 'Statement: ' + (irUp.filename || '') + (irUp.mime && /pdf/i.test(irUp.mime) ? ' (first page)' : ''); irw.getCell(irBalRow + 1, 2).font = { italic: true, size: 9, color: { argb: 'FF666666' } }; }
       }
     }
     // NonRecurring Expenses: add this quarter's block (same look as the earlier blocks); Calc picks up its Total
@@ -1253,7 +1304,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
       T.getCell('B2').value = Q.label; T.getCell('L2').value = 'Annualized T' + N;
       T.getCell('F7').value = { formula: "'Interest Reserve'!D" + irBalRow, result: irTot };
       T.getCell('I6').value = nrRef ? { formula: nrRef, result: 0 } : nr;
-      T.getCell('O3').value = { formula: "'Loan Balance'!B3", result: loan || 0 };
+      T.getCell('O3').value = tplSheets.Loan ? { formula: qs(tplSheets.Loan.name) + '!L19', result: loan || 0 } : { formula: "'Loan Balance'!B3", result: loan || 0 };
       T.getCell('N3').value = Q.label + ' Loan Balance'; T.getCell('Q4').value = Q.label + ' Loan Balance'; T.getCell('Q3').value = 'Annualized T' + N + ' NOI';
       T.getCell('L15').value = dscrMin;
     }
@@ -1294,8 +1345,10 @@ function ensureSchema(db) {
     CREATE TABLE IF NOT EXISTS compliance_cert_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, quarter_end TEXT NOT NULL, status TEXT NOT NULL, log TEXT, result TEXT, error TEXT,
       by_who TEXT, started_at TEXT DEFAULT (datetime('now')), finished_at TEXT);`);
   try { db.exec('ALTER TABLE compliance_cert_runs ADD COLUMN claimed_at TEXT'); } catch (e) { /* already there */ }
+  try { db.exec('ALTER TABLE compliance_cert_uploads ADD COLUMN note TEXT'); } catch (e) { /* new table below or already there */ }
   db.exec(`CREATE TABLE IF NOT EXISTS compliance_cert_uploads (id INTEGER PRIMARY KEY AUTOINCREMENT, quarter_end TEXT NOT NULL, kind TEXT NOT NULL,
-    filename TEXT, mime TEXT, data BLOB, balance REAL, by_who TEXT, created_at TEXT DEFAULT (datetime('now')), UNIQUE (quarter_end, kind))`);
+    filename TEXT, mime TEXT, data BLOB, balance REAL, by_who TEXT, created_at TEXT DEFAULT (datetime('now')), note TEXT, UNIQUE (quarter_end, kind))`);
+  try { db.exec('ALTER TABLE compliance_cert_uploads ADD COLUMN note TEXT'); } catch (e) { /* already there */ }
   if (!db.prepare('SELECT id FROM compliance_cert_config WHERE id = 1').get()) {
     const d = JSON.parse(JSON.stringify(Object.assign({}, DEFAULTS, { midco: Object.assign({}, DEFAULTS.midco, { entities: undefined }) })));
     db.prepare('INSERT INTO compliance_cert_config (id, data, updated_by) VALUES (1, ?, ?)').run(JSON.stringify(d), 'seed');
@@ -1409,19 +1462,24 @@ function registerComplianceCertRoutes(app, ctx) {
   const upMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
   app.get('/api/admin/compliance-certs/uploads', auth, requireRole('Admin', 'Accountant'), (req, res) => {
     const q = String(req.query.quarter_end || '');
-    res.json(db.prepare('SELECT id, quarter_end, kind, filename, mime, balance, by_who, created_at, length(data) AS size FROM compliance_cert_uploads WHERE quarter_end = ? ORDER BY kind').all(q));
+    res.json(db.prepare('SELECT id, quarter_end, kind, filename, mime, balance, note, by_who, created_at, length(data) AS size FROM compliance_cert_uploads WHERE quarter_end = ? ORDER BY kind').all(q));
   });
-  app.post('/api/admin/compliance-certs/uploads', auth, requireRole('Admin', 'Accountant'), upMem.single('file'), (req, res) => {
-    let Q; try { Q = parseQuarterEnd((req.body || {}).quarter_end); } catch (e) { return res.status(400).json({ error: e.message }); }
-    const kind = String((req.body || {}).kind || 'interest_reserve'); if (kind !== 'interest_reserve') return res.status(400).json({ error: 'unknown upload kind' });
-    const bal = +String((req.body || {}).balance || '').replace(/[$,\s]/g, '');
-    if (!req.file) return res.status(400).json({ error: 'Choose the statement file (PDF, PNG or JPG)' });
-    if (!/pdf|png|jpe?g/i.test(req.file.mimetype + ' ' + req.file.originalname)) return res.status(400).json({ error: 'The statement must be a PDF, PNG or JPG' });
-    if (!isFinite(bal) || !String((req.body || {}).balance || '').trim()) return res.status(400).json({ error: 'Enter the ending balance shown on the statement' });
-    db.prepare(`INSERT INTO compliance_cert_uploads (quarter_end, kind, filename, mime, data, balance, by_who) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (quarter_end, kind) DO UPDATE SET filename = excluded.filename, mime = excluded.mime, data = excluded.data, balance = excluded.balance, by_who = excluded.by_who, created_at = datetime('now')`)
-      .run(Q.iso, kind, req.file.originalname, req.file.mimetype, req.file.buffer, bal, who(req));
-    res.json({ ok: true });
+  app.post('/api/admin/compliance-certs/uploads', auth, requireRole('Admin', 'Accountant'), upMem.single('file'), async (req, res) => {
+    try {
+      let Q; try { Q = parseQuarterEnd((req.body || {}).quarter_end); } catch (e) { return res.status(400).json({ error: e.message }); }
+      const kind = String((req.body || {}).kind || ''); if (!['interest_reserve', 'loan_statement'].includes(kind)) return res.status(400).json({ error: 'unknown upload kind' });
+      if (!req.file) return res.status(400).json({ error: 'Choose the statement file (PDF, PNG or JPG)' });
+      if (!/pdf|png|jpe?g/i.test(req.file.mimetype + ' ' + req.file.originalname)) return res.status(400).json({ error: 'The statement must be a PDF, PNG or JPG' });
+      const typed = String((req.body || {}).balance || '').trim();
+      let balance = null, note = '';
+      if (typed) { balance = +typed.replace(/[$,\s]/g, ''); if (!isFinite(balance)) return res.status(400).json({ error: 'The balance entered is not a number' }); note = 'entered by hand'; }
+      else if (/pdf/i.test(req.file.mimetype + ' ' + req.file.originalname)) { const r = await readStatementBalance(kind, req.file.buffer, Q.iso); balance = r.balance; note = r.note; }
+      if (balance == null) return res.status(400).json({ error: 'Could not read the balance from this statement (' + (note || 'it is a picture, not a PDF') + '). Enter the balance and upload again.' });
+      db.prepare(`INSERT INTO compliance_cert_uploads (quarter_end, kind, filename, mime, data, balance, note, by_who) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (quarter_end, kind) DO UPDATE SET filename = excluded.filename, mime = excluded.mime, data = excluded.data, balance = excluded.balance, note = excluded.note, by_who = excluded.by_who, created_at = datetime('now')`)
+        .run(Q.iso, kind, req.file.originalname, req.file.mimetype, req.file.buffer, balance, note, who(req));
+      res.json({ ok: true, balance, note });
+    } catch (e) { res.status(500).json({ error: e.message }); }
   });
   app.delete('/api/admin/compliance-certs/uploads/:id', auth, requireRole('Admin', 'Accountant'), (req, res) => {
     db.prepare('DELETE FROM compliance_cert_uploads WHERE id = ?').run(+req.params.id); res.json({ ok: true });

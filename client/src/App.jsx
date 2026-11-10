@@ -6840,11 +6840,11 @@ function ComplianceCertificates({user}){
   const[run,setRun]=useState(null);
   const[err,setErr]=useState('');
   const[busy,setBusy]=useState(false);
-  const[ups,setUps]=useState([]);const[upFile,setUpFile]=useState(null);const[upBal,setUpBal]=useState('');const[upBusy,setUpBusy]=useState(false);const[upKey,setUpKey]=useState(0);
+  const[ups,setUps]=useState([]);const[upF,setUpF]=useState({});const[upB,setUpB]=useState({});const[upBusy,setUpBusy]=useState('');const[upKey,setUpKey]=useState(0);const[upMsg,setUpMsg]=useState({});
   const loadUps=async(q)=>{if(!q||!/^\d{4}-\d{2}-\d{2}$/.test(q))return setUps([]);try{setUps(await api.getComplianceUploads(q)||[]);}catch(e){setUps([]);}};
-  useEffect(()=>{loadUps(qe);},[qe]);
-  const doUpload=async()=>{setErr('');if(!upFile)return setErr('Choose the interest reserve statement first.');if(!String(upBal).trim())return setErr('Enter the ending balance shown on the statement.');
-    setUpBusy(true);try{await api.uploadComplianceStatement(qe,'interest_reserve',upBal,upFile);setUpFile(null);setUpBal('');setUpKey(k=>k+1);await loadUps(qe);}catch(e){setErr(e.message);}setUpBusy(false);};
+  useEffect(()=>{loadUps(qe);setUpMsg({});},[qe]);
+  const doUpload=async(kind)=>{setErr('');const f=upF[kind];if(!f)return setErr('Choose the statement file first.');
+    setUpBusy(kind);try{const r=await api.uploadComplianceStatement(qe,kind,upB[kind]||'',f);setUpMsg(m=>({...m,[kind]:r&&r.note}));setUpF(x=>({...x,[kind]:null}));setUpB(x=>({...x,[kind]:''}));setUpKey(k=>k+1);await loadUps(qe);}catch(e){setErr(e.message);}setUpBusy('');};
   const delUpload=async(id)=>{setErr('');try{await api.deleteComplianceUpload(id);await loadUps(qe);}catch(e){setErr(e.message);}};
   const load=async()=>{try{const d=await api.getComplianceCerts();setData(d);setQe(q=>q||d.default_quarter_end);}catch(e){setErr(e.message);}};
   useEffect(()=>{load();},[]);
@@ -6878,27 +6878,29 @@ function ComplianceCertificates({user}){
       <button style={{...S.btnP,padding:'7px 18px'}} disabled={busy||!qe} onClick={report}>{busy?'Running...':'Report'}</button>
       <div style={{fontSize:12,color:'#64748b'}}>Must be a quarter end (Mar 31, Jun 30, Sep 30, Dec 31). Re-running a quarter overwrites that quarter's generated files.</div>
     </div>
-    {(()=>{const ir=ups.find(u=>u.kind==='interest_reserve');return(<div style={{...S.card,marginBottom:12}}>
-      <div style={S.h2}>Midco I &mdash; interest reserve statement{qe?' ('+qe+')':''}</div>
-      <div style={{fontSize:12,color:'#64748b',marginBottom:8}}>Upload the Bank of Texas interest reserve statement for this quarter and enter its ending balance. It goes on the covenant workbook&rsquo;s Interest Reserve tab with the ending balance underneath, and that balance feeds the Calc tab. PDF (first page is used), PNG or JPG.</div>
-      {ir&&<div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,padding:'6px 10px',background:'#f8fafc',border:bd,borderRadius:6,fontSize:13,flexWrap:'wrap'}}>
-        <span>&#128206; <b>{ir.filename}</b></span>
-        <span>Ending balance <b>{money(ir.balance)}</b></span>
-        <span style={{color:'#64748b',fontSize:12}}>uploaded {ir.created_at}{ir.by_who?' by '+ir.by_who:''}</span>
-        <button style={{marginLeft:'auto',padding:'3px 8px',fontSize:12,border:bd,borderRadius:6,background:'#fff',cursor:'pointer'}} onClick={()=>delUpload(ir.id)}>Remove</button>
+    {[['interest_reserve','Midco I \u2014 interest reserve statement','Bank of Texas interest reserve account statement for the quarter-end month. It goes on the covenant workbook\u2019s Interest Reserve tab with the ending balance underneath, which feeds the Calc tab.','Ending balance'],
+      ['loan_statement','Midco I \u2014 loan statement','Bank of Texas loan statement covering the quarter end. It goes on the covenant workbook\u2019s Loan Balance tab with the loan balance next to it, which feeds the Calc tab\u2019s loan-to-value and debt yield.','Loan balance']].map(([kind,title,desc,balLabel])=>{const u=ups.find(x=>x.kind===kind);return(<div key={kind} style={{...S.card,marginBottom:12}}>
+      <div style={S.h2}>{title}{qe?' ('+qe+')':''}</div>
+      <div style={{fontSize:12,color:'#64748b',marginBottom:8}}>{desc} The {balLabel.toLowerCase()} is read from the PDF automatically; type it only for a scanned picture or to override. PDF (first page is shown), PNG or JPG.</div>
+      {u&&<div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,padding:'6px 10px',background:'#f8fafc',border:bd,borderRadius:6,fontSize:13,flexWrap:'wrap'}}>
+        <span>&#128206; <b>{u.filename}</b></span>
+        <span>{balLabel} <b>{money(u.balance)}</b></span>
+        {u.note&&<span style={{color:/NOTE:/.test(u.note)?'#92400e':'#64748b',fontSize:12}}>{u.note}</span>}
+        <span style={{color:'#94a3b8',fontSize:12}}>uploaded {u.created_at}{u.by_who?' by '+u.by_who:''}</span>
+        <button style={{marginLeft:'auto',padding:'3px 8px',fontSize:12,border:bd,borderRadius:6,background:'#fff',cursor:'pointer'}} onClick={()=>delUpload(u.id)}>Remove</button>
       </div>}
       <div style={{display:'flex',alignItems:'flex-end',gap:12,flexWrap:'wrap'}}>
         <div>
-          <div style={{fontSize:12,color:'#64748b',marginBottom:4}}>{ir?'Replace statement':'Statement'}</div>
-          <input key={upKey} type="file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" onChange={e=>setUpFile(e.target.files&&e.target.files[0]||null)} style={{fontSize:13}}/>
+          <div style={{fontSize:12,color:'#64748b',marginBottom:4}}>{u?'Replace statement':'Statement'}</div>
+          <input key={kind+upKey} type="file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" onChange={e=>{const f=e.target.files&&e.target.files[0]||null;setUpF(x=>({...x,[kind]:f}));}} style={{fontSize:13}}/>
         </div>
         <div>
-          <div style={{fontSize:12,color:'#64748b',marginBottom:4}}>Ending balance</div>
-          <input type="text" inputMode="decimal" placeholder="e.g. 4,968,892.02" value={upBal} onChange={e=>setUpBal(e.target.value)} style={{padding:'6px 8px',border:bd,borderRadius:6,fontSize:14,width:170}}/>
+          <div style={{fontSize:12,color:'#64748b',marginBottom:4}}>{balLabel} (optional)</div>
+          <input type="text" inputMode="decimal" placeholder="read from the statement" value={upB[kind]||''} onChange={e=>{const v=e.target.value;setUpB(x=>({...x,[kind]:v}));}} style={{padding:'6px 8px',border:bd,borderRadius:6,fontSize:14,width:190}}/>
         </div>
-        <button style={{...S.btnP,padding:'7px 18px'}} disabled={upBusy||!qe} onClick={doUpload}>{upBusy?'Uploading...':'Upload'}</button>
+        <button style={{...S.btnP,padding:'7px 18px'}} disabled={!!upBusy||!qe} onClick={()=>doUpload(kind)}>{upBusy===kind?'Uploading...':'Upload'}</button>
       </div>
-    </div>);})()}
+    </div>);})}
     {run&&run.status==='queued'&&<div style={{...S.card,marginBottom:12}}><div style={S.h2}>Waiting for your PC to pick up {run.quarter_end}...</div><div style={{fontSize:12,color:'#64748b'}}>This starts automatically once your computer is on and signed in.</div></div>}
     {run&&run.status==='running'&&<div style={{...S.card,marginBottom:12}}>
       <div style={S.h2}>Working on {run.quarter_end}...</div>
