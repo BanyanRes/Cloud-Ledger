@@ -6844,7 +6844,7 @@ function ComplianceCertificates({user}){
   const loadUps=async(q)=>{if(!q||!/^\d{4}-\d{2}-\d{2}$/.test(q))return setUps([]);try{setUps(await api.getComplianceUploads(q)||[]);}catch(e){setUps([]);}};
   useEffect(()=>{loadUps(qe);setUpMsg({});},[qe]);
   const doUpload=async(kind)=>{setErr('');const f=upF[kind];if(!f)return setErr('Choose the statement file first.');
-    setUpBusy(kind);try{const r=await api.uploadComplianceStatement(qe,kind,upB[kind]||'',f);setUpMsg(m=>({...m,[kind]:r&&r.note}));setUpF(x=>({...x,[kind]:null}));setUpB(x=>({...x,[kind]:''}));setUpKey(k=>k+1);await loadUps(qe);}catch(e){setErr(e.message);}setUpBusy('');};
+    setUpBusy(kind);try{const r=await api.uploadComplianceStatement(qe,kind,'',f);setUpMsg(m=>({...m,[kind]:r&&r.note}));setUpF(x=>({...x,[kind]:null}));setUpB(x=>({...x,[kind]:''}));setUpKey(k=>k+1);await loadUps(qe);}catch(e){setErr(e.message);}setUpBusy('');};
   const delUpload=async(id)=>{setErr('');try{await api.deleteComplianceUpload(id);await loadUps(qe);}catch(e){setErr(e.message);}};
   const load=async()=>{try{const d=await api.getComplianceCerts();setData(d);setQe(q=>q||d.default_quarter_end);}catch(e){setErr(e.message);}};
   useEffect(()=>{load();},[]);
@@ -6881,7 +6881,7 @@ function ComplianceCertificates({user}){
     {[['interest_reserve','Midco I \u2014 interest reserve statement','Bank of Texas interest reserve account statement for the quarter-end month. It goes on the covenant workbook\u2019s Interest Reserve tab with the ending balance underneath, which feeds the Calc tab.','Ending balance'],
       ['loan_statement','Midco I \u2014 loan statement','Bank of Texas loan statement covering the quarter end. It goes on the covenant workbook\u2019s Loan Balance tab with the loan balance next to it, which feeds the Calc tab\u2019s loan-to-value and debt yield.','Loan balance']].map(([kind,title,desc,balLabel])=>{const u=ups.find(x=>x.kind===kind);return(<div key={kind} style={{...S.card,marginBottom:12}}>
       <div style={S.h2}>{title}{qe?' ('+qe+')':''}</div>
-      <div style={{fontSize:12,color:'#64748b',marginBottom:8}}>{desc} The {balLabel.toLowerCase()} is read from the PDF automatically; type it only for a scanned picture or to override. PDF (first page is shown), PNG or JPG.</div>
+      <div style={{fontSize:12,color:'#64748b',marginBottom:8}}>{desc} The {balLabel.toLowerCase()} is read from the statement automatically. PDF only (the first page is shown).</div>
       {u&&<div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,padding:'6px 10px',background:'#f8fafc',border:bd,borderRadius:6,fontSize:13,flexWrap:'wrap'}}>
         <span>&#128206; <b>{u.filename}</b></span>
         <span>{balLabel} <b>{money(u.balance)}</b></span>
@@ -6892,11 +6892,7 @@ function ComplianceCertificates({user}){
       <div style={{display:'flex',alignItems:'flex-end',gap:12,flexWrap:'wrap'}}>
         <div>
           <div style={{fontSize:12,color:'#64748b',marginBottom:4}}>{u?'Replace statement':'Statement'}</div>
-          <input key={kind+upKey} type="file" accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" onChange={e=>{const f=e.target.files&&e.target.files[0]||null;setUpF(x=>({...x,[kind]:f}));}} style={{fontSize:13}}/>
-        </div>
-        <div>
-          <div style={{fontSize:12,color:'#64748b',marginBottom:4}}>{balLabel} (optional)</div>
-          <input type="text" inputMode="decimal" placeholder="read from the statement" value={upB[kind]||''} onChange={e=>{const v=e.target.value;setUpB(x=>({...x,[kind]:v}));}} style={{padding:'6px 8px',border:bd,borderRadius:6,fontSize:14,width:190}}/>
+          <input key={kind+upKey} type="file" accept=".pdf,application/pdf" onChange={e=>{const f=e.target.files&&e.target.files[0]||null;setUpF(x=>({...x,[kind]:f}));}} style={{fontSize:13}}/>
         </div>
         <button style={{...S.btnP,padding:'7px 18px'}} disabled={!!upBusy||!qe} onClick={()=>doUpload(kind)}>{upBusy===kind?'Uploading...':'Upload'}</button>
       </div>
