@@ -223,6 +223,9 @@ export const api = {
   saveComplianceCertsConfig: (cfg) => request('/admin/compliance-certs/config', { method: 'PUT', body: cfg }),
   runComplianceReport: (quarter_end) => request('/admin/compliance-certs/report', { method: 'POST', body: { quarter_end } }),
   getComplianceRun: (id) => request('/admin/compliance-certs/runs/' + encodeURIComponent(id)),
+  getComplianceUploads: (quarter_end) => request('/admin/compliance-certs/uploads?quarter_end=' + encodeURIComponent(quarter_end)),
+  uploadComplianceStatement: (quarter_end, kind, balance, file) => { const fd = new FormData(); fd.append('quarter_end', quarter_end); fd.append('kind', kind); fd.append('balance', balance); fd.append('file', file); return request('/admin/compliance-certs/uploads', { method: 'POST', body: fd }); },
+  deleteComplianceUpload: (id) => request('/admin/compliance-certs/uploads/' + encodeURIComponent(id), { method: 'DELETE' }),
   // Administration: Monthly Time Allocation (Jimmy & Irvin portfolio-company time)
   getTimeAllocation: () => request('/admin/time-allocation'),
   runTimeAllocation: (month_end) => request('/admin/time-allocation/report', { method: 'POST', body: { month_end } }),

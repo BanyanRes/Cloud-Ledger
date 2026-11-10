@@ -84,7 +84,22 @@ async function runJob(job) {
     const sv = job.config || {};
     const conf = Object.assign({}, cc.DEFAULTS, sv, { midco: Object.assign({}, cc.DEFAULTS.midco, sv.midco || {}, { entities: cc.DEFAULTS.midco.entities }) });
     const clOpt = job.cl ? { url: cfg.url, token: job.cl.token, entities: job.cl.entities } : null;
-    const result = await cc.runReport(job.quarter_end, conf, (line) => { buf.push(line); log('  ' + line); }, { cl: clOpt });
+    const uploads = (job.uploads || []).map((u) => {
+      const data = u.data ? Buffer.from(u.data, 'base64') : null; let image = null, ext = 'png';
+      if (data && /png/i.test(u.mime || u.filename)) image = data;
+      else if (data && /jpe?g/i.test(u.mime || u.filename)) { image = data; ext = 'jpeg'; }
+      else if (data && /pdf/i.test(u.mime || u.filename)) {
+        try {
+          const tmp = path.join(os.tmpdir(), 'cc_upload_' + Date.now()); fs.writeFileSync(tmp + '.pdf', data);
+          const py = ['python', path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python313', 'python.exe')];
+          let ok = false;
+          for (const exe of py) { try { require('child_process').execFileSync(exe, ['-c', 'import fitz,sys; d=fitz.open(sys.argv[1]); d[0].get_pixmap(dpi=150).save(sys.argv[2])', tmp + '.pdf', tmp + '.png'], { timeout: 60000, stdio: 'ignore' }); ok = true; break; } catch (e) { /* next */ } }
+          if (ok) image = fs.readFileSync(tmp + '.png'); else log('could not turn ' + u.filename + ' into a picture (Python/PyMuPDF not found)');
+        } catch (e) { log('statement conversion failed: ' + e.message); }
+      }
+      return { kind: u.kind, filename: u.filename, mime: u.mime, balance: u.balance, image, ext };
+    });
+    const result = await cc.runReport(job.quarter_end, conf, (line) => { buf.push(line); log('  ' + line); }, { cl: clOpt, uploads });
     clearInterval(timer); await flush();
     await api('/api/compliance-runner/runs/' + job.id + '/finish', { ok: true, result });
     log('Job ' + job.id + ' done: ' + JSON.stringify(result.counts || {}));
