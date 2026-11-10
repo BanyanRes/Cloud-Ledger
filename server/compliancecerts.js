@@ -269,6 +269,41 @@ async function pdfPagesText(buf) {
 const NF = '#,##0.00_);(#,##0.00)';
 function newWb() { const ExcelJS = require('exceljs'); const wb = new ExcelJS.Workbook(); wb.calcProperties.fullCalcOnLoad = true; return wb; }
 const YEL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFFF00' } };
+// Widen every column to fit its contents (numbers as displayed, labels, formula
+// results). Never narrows a column that was given a width on purpose. Long title
+// lines (> 60 chars) are ignored so they keep spilling across, as in Excel.
+function autofitWorkbook(wb) {
+  for (const ws of wb.worksheets) {
+    const need = {};
+    ws.eachRow({ includeEmpty: false }, (row) => row.eachCell({ includeEmpty: false }, (c) => {
+      let v = c.value;
+      if (v && typeof v === 'object' && !(v instanceof Date)) {
+        if ('result' in v) v = v.result; else if (v.richText) v = v.richText.map((t) => t.text).join(''); else if ('text' in v) v = v.text; else return;
+      }
+      if (v == null || v === '') return;
+      let len;
+      if (v instanceof Date) len = 10;
+      else if (typeof v === 'number') {
+        const fmt = String(c.numFmt || '');
+        const dec = /0\.0000/.test(fmt) ? 4 : /0\.00/.test(fmt) ? 2 : /%/.test(fmt) ? 2 : (Number.isInteger(v) || /#,##0[^.]|#,##0$/.test(fmt) ? 0 : 2);
+        let t = Math.abs(fmt.includes('%') ? v * 100 : v).toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
+        if (fmt.includes('%')) t += '%';
+        if (/"x"/.test(fmt)) t += 'x';
+        len = t.length + 2;   // room for parentheses / currency padding
+      } else {
+        len = String(v).split(/\r?\n/).reduce((m, l) => Math.max(m, l.length), 0);
+        if (len > 60) return;
+      }
+      if (c.font && c.font.bold) len *= 1.1;
+      need[c.col] = Math.max(need[c.col] || 0, len);
+    }));
+    for (const [col, len] of Object.entries(need)) {
+      const column = ws.getColumn(+col); const want = Math.min(65, Math.ceil(len + 2));
+      if (!column.width || column.width < want) column.width = want;
+    }
+  }
+}
+async function wbBuffer(wb) { autofitWorkbook(wb); return Buffer.from(await wb.xlsx.writeBuffer()); }
 function setF(ws, addr, formula, result, fmt) { const c = ws.getCell(addr); c.value = { formula: formula.replace(/^=/, ''), result }; if (fmt) c.numFmt = fmt; return c; }
 function colL(n) { let s = ''; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; }
 const qs = (name) => "'" + String(name).replace(/'/g, "''") + "'";
@@ -440,7 +475,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
         }
       }
       ws.getColumn(1).width = 11; ws.getColumn(2).width = 42;
-      await put('Skye Canyon', 'skye', '12_Month_Statement_res68831_Accrual.xlsx', await wb.xlsx.writeBuffer(), 'from ' + path.posix.basename(xl));
+      await put('Skye Canyon', 'skye', '12_Month_Statement_res68831_Accrual.xlsx', await wbBuffer(wb), 'from ' + path.posix.basename(xl));
     } else item('Skye Canyon', '12_Month_Statement_res68831_Accrual.xlsx', 'missing', 'no MergedExcel_*.xlsx in ' + dir);
     await copy('Skye Canyon', 'skye', 'shared', pdfF, 'Skye Canyon ' + MON[QE.m - 1] + ' ' + QE.y + ' Financial Reports.pdf');
     await put('Skye Canyon', 'skye', 'Certified Rent Roll_Skye Canyon_' + Q.tag + '.pdf', await stampCertificate('rentroll_skye', { asof: asOf, signdate: prepared }), 'unsigned');
@@ -475,7 +510,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
         xr++;
       }
       ws.getColumn(4).width = 36;
-      await put('South Mountain / Orchards', 'smo', fname, await wb.xlsx.writeBuffer(), 'from ' + path.posix.basename(pl));
+      await put('South Mountain / Orchards', 'smo', fname, await wbBuffer(wb), 'from ' + path.posix.basename(pl));
     });
   }
   await safe('South Mountain / Orchards', 'rent rolls', async () => {
@@ -568,7 +603,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
     calc.views = [{ zoomScale: 120 }];
     out.metrics.silo_jpm = { revenue: rev, opex, noi, interest: int, dscr };
     const xlsxName = 'Silo Ridge DSCR Calc_' + Q.tag + '.xlsx';
-    const xlsxBuf = Buffer.from(await wb.xlsx.writeBuffer());
+    const xlsxBuf = await wbBuffer(wb);
     await put('Silo Ridge - JPM', 'jpm', xlsxName, xlsxBuf, 'DSCR ' + (dscr ? dscr.toFixed(2) : 'n/a') + 'x');
     // draft email to JPM / Greystar with the calc attached (same recipients as the prior quarter's reply)
     const em = Object.assign({}, DEFAULTS.silo_jpm_email, cfg.silo_jpm_email || {});
@@ -864,7 +899,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
       interest_reserve: irTot, pending,
     };
     pending.forEach((p) => out.warnings.push('Midco: ' + p));
-    await put('Midco I', 'midco', 'Midco Financial Covenant_' + Q.tag + '.xlsx', await wb.xlsx.writeBuffer(),
+    await put('Midco I', 'midco', 'Midco Financial Covenant_' + Q.tag + '.xlsx', await wbBuffer(wb),
       'DSCR ' + (dscr ? dscr.toFixed(2) : 'n/a') + 'x' + (pending.length ? ' - DRAFT, ' + pending.length + ' pending input(s)' : ''));
   });
 
@@ -878,7 +913,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
     let r = 6 + out.items.length;
     if (out.warnings.length) { ws.getCell('A' + r).value = 'Warnings'; ws.getCell('A' + r).font = { bold: true }; out.warnings.forEach((w) => { r++; ws.getCell('A' + r).value = w; }); }
     [26, 70, 10, 80].forEach((w, i) => { ws.getColumn(i + 1).width = w; });
-    const url = await store.write('accounting', out.dest + '/Compliance Report_' + Q.tag + '.xlsx', Buffer.from(await wb.xlsx.writeBuffer()));
+    const url = await store.write('accounting', out.dest + '/Compliance Report_' + Q.tag + '.xlsx', await wbBuffer(wb));
     out.report_url = url;
   });
   out.counts = out.items.reduce((a, it) => { a[it.status] = (a[it.status] || 0) + 1; return a; }, {});
