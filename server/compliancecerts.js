@@ -1158,7 +1158,10 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
     if (tplSheets.Loan) {
       const lw = tplSheets.Loan;
       if (lnUp && lnUp.image) {
-        const sz = imageSize(lnUp.image); const w = Math.min(926, sz.w); const h = Math.round(sz.h * (w / sz.w));
+        const sz = imageSize(lnUp.image);
+        // fit within columns A-K so the balance in column L stays visible (Excel column width -> pixels: chars*7+5; default 8.43 -> 64px)
+        let availW = 0; for (let c = 1; c <= 11; c++) { const cw = lw.getColumn(c).width; availW += cw ? Math.trunc(cw * 7 + 5) : 64; }
+        const w = Math.min(availW - 6, sz.w); const h = Math.round(sz.h * (w / sz.w));
         lw.addImage(wb.addImage({ buffer: lnUp.image, extension: lnUp.ext || 'png' }), { tl: { col: 0, row: 3 }, ext: { width: w, height: h }, editAs: 'oneCell' });
       } else {
         lw.getCell('A4').value = 'Upload the BOT loan statement for ' + Q.label + ' on the Compliance Certificates page, then run Report again.';
