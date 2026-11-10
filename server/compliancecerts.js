@@ -303,7 +303,7 @@ function autofitWorkbook(wb) {
     }
   }
 }
-async function wbBuffer(wb) { autofitWorkbook(wb); return Buffer.from(await wb.xlsx.writeBuffer()); }
+async function wbBuffer(wb) { if (!wb.__noAutofit) autofitWorkbook(wb); return Buffer.from(await wb.xlsx.writeBuffer()); }
 function setF(ws, addr, formula, result, fmt) { const c = ws.getCell(addr); c.value = { formula: formula.replace(/^=/, ''), result }; if (fmt) c.numFmt = fmt; return c; }
 function colL(n) { let s = ''; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; }
 const qs = (name) => "'" + String(name).replace(/'/g, "''") + "'";
@@ -422,6 +422,207 @@ function buildDraftEml({ from, to, cc, subject, text, html, attachments }) {
 }
 const SIGNATURE_TEXT = ['Jimmy Yun', 'Chief Accounting Officer', 'M: 714.321.6021', '2381 Rosecrans Ave Suite 425, El Segundo, CA 90245', 'banyanres.com'];
 
+
+// ── Mark-Taylor / ResMan "Trailing Profit And Loss Detail" (T3) ────────────
+// Rebuilt in exactly the layout of the prior quarter's T3 (the ResMan export):
+// outline INCOME > RENTAL REVENUE > GROSS POT RENT > accounts, group totals,
+// TOTAL INCOME / TOTAL EXPENSE / NET OPERATING INCOME / NET INCOME, and a
+// Variance column vs budget (income: actual - budget; expense: budget - actual).
+const acctNo = (v) => { const m = String(v == null ? '' : v).trim().match(/^(\d{4}(?:\.\d+)?)(?=\s|$)/); return m ? m[1] : null; };   // keeps sub-accounts like 5002.01 distinct from 5002
+function t3Outline(rows) {   // parse the prior quarter's T3 into sections > categories > (subgroups | accounts)
+  const sections = []; let sec = null, cat = null, sub = null;
+  for (let r = 6; r < rows.length; r++) {
+    const R = rows[r] || []; let col = -1;
+    for (let c = 0; c < 5; c++) if (R[c] != null && String(R[c]).trim() !== '') { col = c; break; }
+    if (col < 0) continue;
+    const lab = String(R[col]).trim(); const hasNum = [5, 6, 7, 8, 9].some((c) => typeof R[c] === 'number');
+    const no = acctNo(lab);
+    if (no) { const a = { no, label: lab }; if (col === 4 && sub) sub.accts.push(a); else if (cat) { sub = null; cat.items.push({ acct: a }); } continue; }
+    if (hasNum || /^(total|net)\b/i.test(lab) || /^©/.test(lab)) { if (/^total\s/i.test(lab) && sub && lab.slice(6).trim().toUpperCase() === sub.name.toUpperCase()) sub = null; continue; }
+    if (col === 1) { sec = { name: lab, cats: [] }; sections.push(sec); cat = null; sub = null; }
+    else if (col === 2 && sec) { cat = { name: lab, items: [] }; sec.cats.push(cat); sub = null; }
+    else if (col === 3 && cat) { sub = { name: lab, accts: [] }; cat.items.push({ sub }); }
+  }
+  return sections;
+}
+function mtrAccounts(rows, cols) {   // account -> {label, vals[]} from a Mark-Taylor MTR report (P&L only: stops at NET INCOME, so capital items below it are left out)
+  const out = {};
+  for (const R of rows) {
+    if (R && R.slice(0, 5).some((x) => x != null && /^NET INCOME$/i.test(String(x).trim()))) break;
+    if (!R) continue; let lab = null;
+    for (let c = 0; c < 5; c++) if (acctNo(R[c])) { lab = String(R[c]).trim(); break; }
+    if (!lab) continue; const no = acctNo(lab);
+    if (/^[12]/.test(no)) continue;   // balance-sheet / capital items (e.g. 14xx capex) are not on the ResMan T3
+    out[no] = { label: lab, vals: cols.map((c) => (typeof R[c] === 'number' ? R[c] : 0)) };
+  }
+  return out;
+}
+function mtrRowByLabel(rows, re, cols) {
+  for (const R of rows) { if (!R) continue; for (let c = 0; c < 5; c++) if (R[c] != null && re.test(String(R[c]).trim())) return cols.map((k) => (typeof R[k] === 'number' ? R[k] : 0)); }
+  return null;
+}
+
+// Formatting profiles taken from the prior quarter's T3 (ResMan export): for each kind
+// of row, the exact cell styles, row height and merged spans of its first occurrence.
+async function xlsxCellFontSizes(buf) {   // 'E10' -> 7.5, read from styles.xml (ExcelJS parses font sizes with parseInt)
+  const JSZip = require('jszip'); const zip = await JSZip.loadAsync(buf);
+  const styles = await zip.file('xl/styles.xml').async('string');
+  const sheetName = Object.keys(zip.files).filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort()[0];
+  const sheet = await zip.file(sheetName).async('string');
+  const fontsXml = (styles.match(/<fonts[^>]*>([\s\S]*?)<\/fonts>/) || [])[1] || '';
+  const sizes = (fontsXml.match(/<font\b[\s\S]*?<\/font>|<font\b[^>]*\/>/g) || []).map((f) => { const m = f.match(/<sz val="([\d.]+)"/); return m ? parseFloat(m[1]) : null; });
+  const xfsXml = (styles.match(/<cellXfs[^>]*>([\s\S]*?)<\/cellXfs>/) || [])[1] || '';
+  const xfFont = (xfsXml.match(/<xf\b[^>]*>/g) || []).map((x) => { const m = x.match(/fontId="(\d+)"/); return m ? +m[1] : 0; });
+  const out = {}; const re = /<c\b([^>]*)>/g; let m;   // attribute order varies (t="s" r=".." s="..")
+  while ((m = re.exec(sheet))) { const rm = m[1].match(/\br="([A-Z]+\d+)"/), sm = m[1].match(/\bs="(\d+)"/); if (rm && sm) out[rm[1]] = sizes[xfFont[+sm[1]]]; }
+  return out;
+}
+async function t3StyleProfiles(tplBuf) {
+  const ExcelJS = require('exceljs'); const twb = new ExcelJS.Workbook(); await twb.xlsx.load(tplBuf);
+  const tws = twb.worksheets[0];
+  let fsz = {}; try { fsz = await xlsxCellFontSizes(tplBuf); } catch (e) { /* keep ExcelJS sizes */ }
+  const colL2 = (n) => { let t = ''; while (n > 0) { const q = (n - 1) % 26; t = String.fromCharCode(65 + q) + t; n = Math.floor((n - 1) / 26); } return t; };
+  const merges = {}; (tws.model.merges || []).forEach((m) => {
+    const mm = m.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/); if (!mm || mm[2] !== mm[4]) return;
+    const col = (L) => L.split('').reduce((a, ch) => a * 26 + ch.charCodeAt(0) - 64, 0);
+    (merges[+mm[2]] = merges[+mm[2]] || []).push([col(mm[1]), col(mm[3])]);
+  });
+  const snap = (r) => ({ height: tws.getRow(r).height, merges: merges[r] || [],
+    cells: Array.from({ length: 11 }, (_, i) => {
+      const st = JSON.parse(JSON.stringify(tws.getCell(r, i + 1).style || {}));
+      const exact = fsz[colL2(i + 1) + r]; if (exact && st.font) st.font.size = exact;   // keep 7.5pt etc.
+      return st;
+    }) });
+  const prof = {}; const put = (k, r) => { if (!prof[k]) prof[k] = snap(r); };
+  for (let r = 1; r <= 6; r++) prof['head' + r] = Object.assign(snap(r), { values: Array.from({ length: 11 }, (_, i) => tws.getCell(r, i + 1).value) });
+  const open = {}; let afterNoi = 0;
+  for (let r = 7; r <= tws.rowCount; r++) {
+    let col = 0, lab = null;
+    for (let c = 1; c <= 5; c++) { const v = tws.getCell(r, c).value; if (v != null && String(v).trim() !== '') { col = c; lab = String(v).trim(); break; } }
+    if (!lab) { if (prof.noi && !prof.gapAfterNoi) { afterNoi++; prof.gapHeights = (prof.gapHeights || []).concat([tws.getRow(r).height]); } continue; }
+    if (prof.noi && afterNoi) prof.gapAfterNoi = afterNoi;
+    const isNum = typeof tws.getCell(r, 6).value === 'number';
+    if (/^\u00a9/.test(lab)) { put('footer', r); continue; }
+    if (acctNo(lab)) { const shaded = !!(tws.getCell(r, col).fill && tws.getCell(r, col).fill.fgColor && tws.getCell(r, col).fill.fgColor.argb); put((col === 5 ? 'detE' : 'detD') + (shaded ? 'S' : ''), r); continue; }
+    if (/^NET OPERATING INCOME/i.test(lab)) { put('noi', r); continue; }
+    if (/^NET INCOME/i.test(lab)) { put('ni', r); continue; }
+    if (/^TOTAL\s/.test(lab) && lab === lab.toUpperCase()) { put('totSec', r); continue; }
+    if (/^Total\s/i.test(lab)) { const n = lab.slice(6).trim().toUpperCase(); put(open[4] === n ? 'totSub' : 'totCat', r); continue; }
+    if (!isNum) { open[col] = lab.toUpperCase(); put(col === 2 ? 'sec' : col === 3 ? 'cat' : 'sub', r); }
+  }
+  return { prof, widths: Array.from({ length: 11 }, (_, i) => tws.getColumn(i + 1).width), views: tws.views };
+}
+
+function buildResmanT3({ prop, Q, outline, actual, budgetQ, months, styles }) {
+  // place accounts that have quarter activity/budget but are not in the outline, next to their nearest lower account
+  const all = []; outline.forEach((s) => s.cats.forEach((c) => c.items.forEach((it) => { if (it.acct) all.push({ a: it.acct, list: c.items, isItem: true }); else it.sub.accts.forEach((a) => all.push({ a, list: it.sub.accts, isItem: false })); })));
+  const known = new Set(all.map((x) => x.a.no));
+  const extra = Object.keys(actual).concat(Object.keys(budgetQ)).filter((no, i, arr) => arr.indexOf(no) === i && !known.has(no))
+    .filter((no) => (actual[no] && actual[no].vals.some((v) => Math.abs(v) > 0.004)) || Math.abs(budgetQ[no] || 0) > 0.004).sort();
+  const added = [];
+  for (const no of extra) {
+    const lower = all.filter((x) => x.a.no < no).sort((x, y) => (x.a.no < y.a.no ? 1 : -1))[0] || all[0];
+    if (!lower) continue;
+    const a = { no, label: (actual[no] && actual[no].label) || no };
+    const idx = lower.list.findIndex((e) => (lower.isItem ? e.acct === lower.a : e === lower.a));
+    lower.list.splice(idx + 1, 0, lower.isItem ? { acct: a } : a);
+    all.push({ a, list: lower.list, isItem: lower.isItem }); added.push(a.label);
+  }
+  const ExcelJS = require('exceljs'); const wb = new ExcelJS.Workbook(); wb.__noAutofit = true;
+  const ws = wb.addWorksheet('Sheet', { views: (styles && styles.views) || [{ showGridLines: false }] });
+  const P = (styles && styles.prof) || {};
+  // stamp a template row's exact formatting (styles, height, merges) onto output row rr
+  const applyProf = (rr, k) => {
+    const pr = P[k]; if (!pr) return false;
+    pr.cells.forEach((st, i) => { if (st && Object.keys(st).length) ws.getCell(rr, i + 1).style = JSON.parse(JSON.stringify(st)); });
+    if (pr.height) ws.getRow(rr).height = pr.height;
+    pr.merges.forEach(([c1, c2]) => { try { ws.mergeCells(rr, c1, rr, c2); } catch (e) { /* overlapping */ } });
+    return true;
+  };
+  const NUMF = '[$-1010409]#,##0.00;(#,##0.00)', TF = 'Trebuchet MS', thin = { style: 'thin' }, SHADE = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF0F0F0' } };
+  ((styles && styles.widths) || [1.71, 1.57, 1.71, 1.57, 31.29, 10, 10, 10, 10, 10, 1.43]).forEach((w, i) => { if (w) ws.getColumn(i + 1).width = w; });
+  const title = (r, text, font, h) => { ws.mergeCells('A' + r + ':J' + r); const c = ws.getCell('A' + r); c.value = text; c.font = Object.assign({ name: TF }, font); c.alignment = { horizontal: 'center' }; ws.getRow(r).height = h; };
+  title(1, prop, { size: 12, bold: true }, 15.75);
+  title(2, 'Mark-Taylor Residential, Inc.', { size: 10 }, 12.75);
+  title(3, 'Trailing Profit And Loss Detail', { size: 10 }, 13.5);
+  title(4, MON[Q.m - 1] + ' ' + Q.y + ' - Accrual - Accounting Book: Default', { size: 10, italic: true }, 12.75);
+  const printed = new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'numeric', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' }).replace(',', '');
+  ws.getCell('A5').value = 'Printed ' + printed; ws.getCell('A5').font = { name: TF, size: 8 }; ws.getRow(5).height = 11.25;
+  for (let c = 1; c <= 11; c++) { ws.getCell(5, c).border = { bottom: thin }; ws.getCell(6, c).border = { bottom: thin }; }
+  ws.getCell('A6').value = 'Account'; ws.getCell('A6').font = { name: TF, size: 8, bold: true };
+  months.map((p) => mLabel(p) + ' Actual').concat(['Adjusted Total', 'Variance']).forEach((h, i) => { const c = ws.getCell(6, 6 + i); c.value = h; c.font = { name: TF, size: 8, bold: true }; c.alignment = { horizontal: 'right', vertical: 'bottom', wrapText: true }; });
+  ws.getRow(6).height = 24;
+  if (P.head1) {   // exact title block from the template
+    ws.unMergeCells('A1:J1'); ws.unMergeCells('A2:J2'); ws.unMergeCells('A3:J3'); ws.unMergeCells('A4:J4');
+    for (let rr = 1; rr <= 6; rr++) {
+      const pr = P['head' + rr]; if (!pr) continue;
+      for (let c = 1; c <= 11; c++) { const cell = ws.getCell(rr, c); const keep = cell.value; cell.style = JSON.parse(JSON.stringify(pr.cells[c - 1] || {})); cell.value = keep != null ? keep : pr.values[c - 1]; }
+      if (pr.height) ws.getRow(rr).height = pr.height;
+      pr.merges.forEach(([c1, c2]) => { try { ws.mergeCells(rr, c1, rr, c2); } catch (e) { /* */ } });
+    }
+  }
+  let r = 7, shadeN = 0;
+  const hdr = (col, text, h = 12) => {
+    const k = col === 2 ? 'sec' : col === 3 ? 'cat' : 'sub';
+    if (!applyProf(r, k)) { ws.getCell(r, col).numFmt = '@'; ws.getCell(r, col).font = { name: TF, size: 8, bold: true }; ws.getRow(r).height = h; }
+    ws.getCell(r, col).value = text; r++;
+  };
+  const nums = (vals, opts = {}) => vals.forEach((v, i) => { const c = ws.getCell(r, 6 + i); c.value = Math.round(v * 100) / 100; c.numFmt = NUMF; c.font = { name: TF, size: 7 }; c.alignment = { horizontal: 'right' }; if (opts.top) c.border = { top: thin }; if (opts.fill) c.fill = SHADE; });
+  const line = (a, col, income) => {   // account line: 3 months, total, variance
+    const v = (actual[a.no] && actual[a.no].vals) || [0, 0, 0]; const tot = v[0] + v[1] + v[2]; const bud = budgetQ[a.no] || 0;
+    const variance = income ? tot - bud : bud - tot;
+    const shaded = (shadeN++ % 2 === 1);
+    const k = (col === 5 ? 'detE' : 'detD') + (shaded ? 'S' : '');
+    const styled = applyProf(r, k) || applyProf(r, col === 5 ? 'detE' : 'detD');
+    const c = ws.getCell(r, col); c.value = (actual[a.no] && actual[a.no].label) || a.label;
+    if (!styled) { c.numFmt = '@'; c.font = { name: TF, size: 7.5 }; if (shaded) c.fill = SHADE; if (col === 4) ws.mergeCells(r, 4, r, 5); ws.getRow(r).height = 12; }
+    else if (shaded && !P[k]) { for (let cc = col; cc <= 10; cc++) ws.getCell(r, cc).fill = SHADE; }
+    if (styled) [v[0], v[1], v[2], tot, variance].forEach((x, i) => { ws.getCell(r, 6 + i).value = Math.round(x * 100) / 100; });
+    else nums([v[0], v[1], v[2], tot, variance], { fill: shaded });
+    r++;
+    return { v: [v[0], v[1], v[2], tot], variance };
+  };
+  const addT = (acc, x) => { for (let i = 0; i < 4; i++) acc.v[i] += x.v[i]; acc.variance += x.variance; };
+  const total = (label, acc, indent, h = 16.5, kind) => {
+    const vals = acc.v.concat([acc.variance]);
+    if (kind && applyProf(r, kind)) {
+      ws.getCell(r, 1).value = label; vals.forEach((x, i) => { ws.getCell(r, 6 + i).value = Math.round(x * 100) / 100; }); r++; return;
+    }
+    ws.mergeCells(r, 1, r, 5); const c = ws.getCell(r, 1); c.value = label; c.numFmt = '@'; c.font = { name: TF, size: 8, bold: true }; c.alignment = { horizontal: 'left', indent };
+    nums(vals, { top: true }); ws.getRow(r).height = h; r++;
+  };
+  const zero = () => ({ v: [0, 0, 0, 0], variance: 0 });
+  const secTot = {}; let noiRow = null;
+  for (const sec of outline) {
+    const income = /^INCOME$/i.test(sec.name.trim());
+    if (/^NON/i.test(sec.name) && noiRow) { const gaps = P.gapHeights || [null, null]; gaps.forEach((h) => { if (h) ws.getRow(r).height = h; r++; }); }
+    hdr(2, sec.name); const sAcc = zero();
+    for (const cat of sec.cats) {
+      hdr(3, cat.name, 11.25); const cAcc = zero();
+      for (const it of cat.items) {
+        if (it.acct) { addT(cAcc, line(it.acct, 4, income)); continue; }
+        hdr(4, it.sub.name, 12); const gAcc = zero();
+        for (const a of it.sub.accts) addT(gAcc, line(a, 5, income));
+        total('Total ' + it.sub.name, gAcc, 3, 16.5, 'totSub'); addT(cAcc, gAcc);
+      }
+      total('Total ' + cat.name, cAcc, 2, 16.5, 'totCat'); addT(sAcc, cAcc);
+    }
+    total('TOTAL ' + sec.name.toUpperCase(), sAcc, 1, 19.5, 'totSec'); secTot[sec.name.toUpperCase()] = sAcc;
+    if (/^EXPENSE$/i.test(sec.name.trim()) && secTot.INCOME) {
+      const ti = secTot.INCOME, noi = { v: ti.v.map((x, i) => x - sAcc.v[i]), variance: ti.variance + sAcc.variance };
+      total('NET OPERATING INCOME', noi, 0, 19.5, 'noi'); noiRow = noi;
+    }
+  }
+  const nonop = Object.keys(secTot).find((k) => /^NON/.test(k));
+  const base = noiRow || zero();
+  const ni = nonop ? { v: base.v.map((x, i) => x - secTot[nonop].v[i]), variance: base.variance + secTot[nonop].variance } : base;
+  total('NET INCOME', ni, 0, 11.25, 'ni');
+  r++;
+  if (applyProf(r, 'footer')) ws.getCell(r, 1).value = '\u00a9 ResMan, LLC';
+  else { ws.mergeCells(r, 1, r, 10); const f = ws.getCell(r, 1); f.value = '\u00a9 ResMan, LLC'; f.font = { name: 'Arial', size: 9, bold: true }; f.alignment = { horizontal: 'right' }; }
+  return { wb, totals: { income: secTot.INCOME ? secTot.INCOME.v : null, net: ni.v }, added };
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // The report job
 // ════════════════════════════════════════════════════════════════════════════
@@ -490,9 +691,45 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
       const fname = 'Banyan ' + short + ' - Q' + Q.q + ' T3.xlsx';
       if (!pl) { item('South Mountain / Orchards', fname, 'missing', 'no 12 Month Profit and Loss in ' + dir); return; }
       const rows = sheetRows(await store.read('shared', pl));
-      const hdr = rows[4] || [];
-      const cols = Q.months.map((p) => hdr.findIndex((h) => h instanceof Date ? (h.getUTCFullYear() === p.y && h.getUTCMonth() + 1 === p.m) : false));
+      const hdrRow = rows[4] || [];
+      const cols = Q.months.map((p) => hdrRow.findIndex((h) => h instanceof Date ? (h.getUTCFullYear() === p.y && h.getUTCMonth() + 1 === p.m) : false));
       if (cols.some((c) => c < 0)) throw new Error('quarter months not all in Mark-Taylor 12-month P&L');
+      // prior quarter's T3 = the layout template (ResMan export)
+      const pq = Q.back(3), pQ = { y: pq.y, q: Math.ceil(pq.m / 3) };
+      let tpl = null, tplBuf = null;
+      for (const folder of ['South Mountain and Orchards', 'South Mountian and Orchards']) {
+        const f2 = DEST_BASE + '/' + pQ.y + '/Q' + pQ.q + '/' + folder + '/Banyan ' + short + ' - Q' + pQ.q + ' T3.xlsx';
+        try { tplBuf = await store.read('accounting', f2); tpl = sheetRows(tplBuf); break; } catch (e) { /* try next */ }
+      }
+      // budget for the quarter = YTD budget at quarter end - YTD budget at prior quarter end (0 at year start)
+      const bvYtd = async (p) => {
+        const d2 = sfrMonth(prop, p); const bf = await findFile(store, 'shared', d2, new RegExp(prop.replace(/ /g, '\\s+') + '\\s+Budget Variance', 'i'), /\.xlsx$/i);
+        if (!bf) return null; const br = sheetRows(await store.read('shared', bf));
+        const out2 = {}; Object.entries(mtrAccounts(br, [12])).forEach(([k, v]) => { out2[k] = v.vals[0]; }); return out2;
+      };
+      const bNow = await bvYtd(QE); const bPrev = pq.y === QE.y ? await bvYtd(pq) : {};
+      const outline = tpl ? t3Outline(tpl) : null;
+      if (outline && outline.length && bNow && bPrev) {
+        const budgetQ = {}; new Set(Object.keys(bNow).concat(Object.keys(bPrev))).forEach((k) => { budgetQ[k] = (bNow[k] || 0) - (bPrev[k] || 0); });
+        const actual = mtrAccounts(rows, cols);
+        let styles = null; try { styles = await t3StyleProfiles(tplBuf); } catch (e) { out.warnings.push('South Mountain / Orchards: could not read formatting from last quarter\u2019s T3 (' + e.message + ')'); }
+        const built = buildResmanT3({ prop, Q, outline, actual, budgetQ, months: Q.months, styles });
+        // tie-out to Mark-Taylor's own totals
+        const mtrInc = mtrRowByLabel(rows, /^TOTAL INCOME$/i, cols), mtrNet0 = mtrRowByLabel(rows, /^NET INCOME$/i, cols), capex = mtrRowByLabel(rows, /^Total Capital Expenditure$/i, cols) || [0, 0, 0];
+        const mtrNet = mtrNet0 && mtrNet0.map((v, i) => v + capex[i]);   // Mark-Taylor deducts capex before NET INCOME; the ResMan T3 does not
+        const off = (a, b2) => a && b2 && [0, 1, 2].some((i) => Math.abs(a[i] - b2[i]) > 0.05);
+        let note = 'ResMan T3 layout from Q' + pQ.q + ' ' + pQ.y + '; ties to Mark-Taylor TOTAL INCOME and NET INCOME';
+        if (off(built.totals.income, mtrInc) || off(built.totals.net, mtrNet)) {
+          note = 'ResMan T3 layout - WARNING: totals do not tie to Mark-Taylor\u2019s 12-month P&L';
+          out.warnings.push('South Mountain / Orchards: ' + fname + ' totals do not tie to the Mark-Taylor 12-month P&L - check the account mapping');
+        }
+        if (built.added.length) out.warnings.push('South Mountain / Orchards: ' + fname + ' - new account(s) not in last quarter\u2019s T3, placed next to their neighbors: ' + built.added.join(', '));
+        await put('South Mountain / Orchards', 'smo', fname, await wbBuffer(built.wb), note);
+        return;
+      }
+      out.warnings.push('South Mountain / Orchards: ' + fname + ' - prior quarter T3 or budget report not found, used the simple layout');
+      const hdr = rows[4] || [];
+      const cols2 = Q.months.map((p) => hdr.findIndex((h) => h instanceof Date ? (h.getUTCFullYear() === p.y && h.getUTCMonth() + 1 === p.m) : false));
       const wb = newWb(); const ws = wb.addWorksheet('Sheet');
       ws.getCell('A1').value = prop; ws.getCell('A2').value = 'Mark-Taylor Residential, Inc.'; ws.getCell('A3').value = 'Trailing Profit And Loss Detail (T3)';
       ws.getCell('A4').value = MON[QE.m - 1] + ' ' + QE.y + ' - Accrual  |  ' + mLabel(Q.months[0]) + '-' + mLabel(QE) + ' columns from Mark-Taylor Twelve Month Profit and Loss (MTR)';
