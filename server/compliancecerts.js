@@ -287,6 +287,7 @@ async function stampCertificate(key, values) {
     const x = ov.x != null ? ov.x : f.x, w = ov.w != null ? ov.w : f.w;
     page.drawRectangle({ x: x - 0.5, y: f.y, width: w + 1, height: f.h, color: rgb(1, 1, 1) });
     if (values[f.name]) page.drawText(values[f.name], { x, y: f.baseline, size: f.size, font, color: rgb(0, 0, 0) });
+    if (f.underline) page.drawRectangle({ x: f.underline.x, y: f.underline.y, width: f.underline.w, height: f.underline.h, color: rgb(0, 0, 0) });   // restore the signature-date line
   }
   return Buffer.from(await doc.save());
 }
@@ -413,6 +414,8 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
   const QE = Q.months[2], sfr = cfg.sfr_base || DEFAULTS.sfr_base;
   const sfrMonth = (prop, p) => sfr + '/' + prop + '/' + pad2(p.m) + '.' + p.y;
   const asOf = pad2(Q.m) + '/' + pad2(Q.d) + '/' + Q.y;
+  // date the certificates are prepared (Pacific time), shown on the Date: line
+  const prepared = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: '2-digit', day: '2-digit', year: 'numeric' });
 
   // ── 1. Skye Canyon ────────────────────────────────────────────────────────
   await safe('Skye Canyon', 'package', async () => {
@@ -440,7 +443,7 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
       await put('Skye Canyon', 'skye', '12_Month_Statement_res68831_Accrual.xlsx', await wb.xlsx.writeBuffer(), 'from ' + path.posix.basename(xl));
     } else item('Skye Canyon', '12_Month_Statement_res68831_Accrual.xlsx', 'missing', 'no MergedExcel_*.xlsx in ' + dir);
     await copy('Skye Canyon', 'skye', 'shared', pdfF, 'Skye Canyon ' + MON[QE.m - 1] + ' ' + QE.y + ' Financial Reports.pdf');
-    await put('Skye Canyon', 'skye', 'Certified Rent Roll_Skye Canyon_' + Q.tag + '.pdf', await stampCertificate('rentroll_skye', { asof: asOf, signdate: '' }), 'unsigned');
+    await put('Skye Canyon', 'skye', 'Certified Rent Roll_Skye Canyon_' + Q.tag + '.pdf', await stampCertificate('rentroll_skye', { asof: asOf, signdate: prepared }), 'unsigned');
   });
 
   // ── 2. South Mountain / Orchards (Preserve) ───────────────────────────────
@@ -476,8 +479,8 @@ async function runReport(quarterEnd, cfg, log, opts = {}) {
     });
   }
   await safe('South Mountain / Orchards', 'rent rolls', async () => {
-    await put('South Mountain / Orchards', 'smo', 'Certified Rent Roll_Orchards ' + Q.tag + '.pdf', await stampCertificate('rentroll_orchards', { asof: asOf, signdate: '' }), 'unsigned');
-    await put('South Mountain / Orchards', 'smo', 'Certified Rent Roll_South Mountain ' + Q.tag + '.pdf', await stampCertificate('rentroll_sm', { asof: asOf, signdate: '' }), 'unsigned');
+    await put('South Mountain / Orchards', 'smo', 'Certified Rent Roll_Orchards ' + Q.tag + '.pdf', await stampCertificate('rentroll_orchards', { asof: asOf, signdate: prepared }), 'unsigned');
+    await put('South Mountain / Orchards', 'smo', 'Certified Rent Roll_South Mountain ' + Q.tag + '.pdf', await stampCertificate('rentroll_sm', { asof: asOf, signdate: prepared }), 'unsigned');
   });
 
   // ── 3. Silo Ridge - JPM DSCR ──────────────────────────────────────────────
