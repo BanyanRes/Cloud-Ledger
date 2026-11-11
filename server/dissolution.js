@@ -36,6 +36,7 @@ const path = require('path');
 const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 
 const TEMPLATE_FILE = 'de_certificate_of_cancellation.pdf';
+const SIGNATURE_FILE = 'dissolution_signature.png'; // authorized-person signature, stamped on the By line
 
 // ── SharePoint drives to search for formation documents ──────────────────────
 // Default to the two libraries where Banyan's filed org docs actually live
@@ -385,6 +386,19 @@ async function fillCancellation(templateBuf, f) {
   setField('Text3', f.execMonth);          // of ____
   setField('Text6', f.execYear);           // A.D. ____
   if (f.signerName) setField('Text8', f.signerName);
+  // Stamp the authorized-person signature image on the By line, if provided.
+  if (f.signatureBytes && f.signatureBytes.length) {
+    try {
+      const b = f.signatureBytes;
+      const img = (b[0] === 0x89 && b[1] === 0x50) ? await pdf.embedPng(b)
+        : (b[0] === 0xFF && b[1] === 0xD8) ? await pdf.embedJpg(b) : null;
+      if (img) {
+        const page = pdf.getPages()[0];
+        const w = 105, h = w * (img.height / img.width);
+        page.drawImage(img, { x: 356, y: 418 - h * 0.32, width: w, height: h });
+      }
+    } catch { /* ignore signature errors */ }
+  }
   try { form.updateFieldAppearances(font); } catch { /* ignore */ }
   if (f.flatten !== false) { try { form.flatten(); } catch { /* ignore */ } }
   return Buffer.from(await pdf.save());
@@ -403,12 +417,30 @@ function registerDissolutionRoutes(app, ctx) {
   ensureTable(db);
   try { fs.mkdirSync(templatesDir, { recursive: true }); } catch { /* ignore */ }
   const tplPath = () => path.join(templatesDir, TEMPLATE_FILE);
+  const sigPath = () => path.join(templatesDir, SIGNATURE_FILE);
   const BOTH = ['Admin', 'Accountant'];
 
   // Feature status — drives the page. Generation always works via the built-in
   // form; template_installed indicates an uploaded override is present.
   app.get('/api/admin/dissolution/status', auth, requireRole(...BOTH), (req, res) => {
-    res.json({ template_installed: fs.existsSync(tplPath()), built_in: true, graph_configured: graphConfigured() });
+    res.json({ template_installed: fs.existsSync(tplPath()), signature_installed: fs.existsSync(sigPath()), built_in: true, graph_configured: graphConfigured() });
+  });
+
+  // Install / replace the authorized-person signature image (Admin). PNG/JPG;
+  // a transparent PNG stamps cleanly on the By line.
+  app.post('/api/admin/dissolution/signature', auth, requireRole('Admin'), memUpload.single('file'), (req, res) => {
+    try {
+      const b = req.file && req.file.buffer;
+      if (!b || !b.length) return res.status(400).json({ error: 'No file uploaded.' });
+      const isPng = b[0] === 0x89 && b[1] === 0x50, isJpg = b[0] === 0xFF && b[1] === 0xD8;
+      if (!isPng && !isJpg) return res.status(400).json({ error: 'Signature must be a PNG or JPG image.' });
+      fs.writeFileSync(sigPath(), b);
+      res.json({ note: 'Signature installed.', signature_installed: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+  app.delete('/api/admin/dissolution/signature', auth, requireRole('Admin'), (req, res) => {
+    try { if (fs.existsSync(sigPath())) fs.unlinkSync(sigPath()); res.json({ signature_installed: false }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
   });
 
   // Install / replace the blank Certificate of Cancellation template (Admin).
@@ -476,7 +508,8 @@ function registerDissolutionRoutes(app, ctx) {
       }
       const signerName = (b.signer_name || '').toString().trim(); // blank → keep template's existing Name
       const template = fs.existsSync(tplPath()) ? fs.readFileSync(tplPath()) : await buildBlankCancellation();
-      const buf = await fillCancellation(template, { entity, formationDate, execDay, execMonth, execYear, signerName, flatten: b.flatten !== false });
+      const signatureBytes = (b.include_signature !== false && fs.existsSync(sigPath())) ? fs.readFileSync(sigPath()) : null;
+      const buf = await fillCancellation(template, { entity, formationDate, execDay, execMonth, execYear, signerName, signatureBytes, flatten: b.flatten !== false });
       const safe = entity.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'Entity';
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', 'attachment; filename="Certificate_of_Cancellation_' + safe + '.pdf"');

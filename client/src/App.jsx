@@ -10766,6 +10766,8 @@ function DissolutionPage({user}){
   const[err,setErr]=useState('');
   const[msg,setMsg]=useState('');
   const[tplFile,setTplFile]=useState(null);
+  const[sigFile,setSigFile]=useState(null);
+  const[includeSig,setIncludeSig]=useState(true);
   const load=async()=>{try{setStatus(await api.getDissolutionStatus());}catch(e){setErr(e.message);}};
   useEffect(()=>{load();},[]);
   const lookup=async(refresh)=>{
@@ -10787,7 +10789,7 @@ function DissolutionPage({user}){
     const e=entity.trim(); if(!e){setErr('Enter an entity name.');return;}
     setBusy('gen');setErr('');setMsg('');
     try{
-      const out=await api.generateCancellation({entity:e,formation_date:formDate,execution_date:execDate||undefined,signer_name:signer||undefined});
+      const out=await api.generateCancellation({entity:e,formation_date:formDate,execution_date:execDate||undefined,signer_name:signer||undefined,include_signature:includeSig});
       if(!out)return;
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
       setMsg('Generated '+out.filename+'.');
@@ -10797,6 +10799,12 @@ function DissolutionPage({user}){
     if(!tplFile)return;
     setBusy('tpl');setErr('');setMsg('');
     try{await api.uploadDissolutionTemplate(tplFile);setMsg('Template installed.');setTplFile(null);await load();}
+    catch(ex){setErr(ex.message);}finally{setBusy('');}
+  };
+  const uploadSig=async()=>{
+    if(!sigFile)return;
+    setBusy('sig');setErr('');setMsg('');
+    try{await api.uploadDissolutionSignature(sigFile);setMsg('Signature installed.');setSigFile(null);await load();}
     catch(ex){setErr(ex.message);}finally{setBusy('');}
   };
   const srcLabel=(s)=>s==='sharepoint'?'SharePoint':(s==='manual'?'a saved entry':'the store');
@@ -10841,9 +10849,10 @@ function DissolutionPage({user}){
           <input style={S.input} value={signer} placeholder="(keep template default)" onChange={e=>setSigner(e.target.value)}/>
         </div>
       </div>
-      <div style={{display:'flex',gap:10,flexWrap:'wrap',marginTop:4}}>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginTop:4,alignItems:'center'}}>
         <button style={S.btnP} disabled={busy==='gen'||!status} onClick={generate}>{busy==='gen'?'Generating...':'Generate Certificate of Cancellation'}</button>
         <button style={S.btnS} disabled={busy==='save'||!formDate.trim()} onClick={saveDate} title="Remember this formation date for next time">{busy==='save'?'Saving...':'Save formation date'}</button>
+        {status&&status.signature_installed&&<label style={{fontSize:12,color:'#475569',display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}><input type="checkbox" checked={includeSig} onChange={e=>setIncludeSig(e.target.checked)}/> Stamp my signature</label>}
       </div>
     </div>
 
@@ -10856,6 +10865,13 @@ function DissolutionPage({user}){
       <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
         <input type="file" accept="application/pdf,.pdf" key={tplFile?'f':'e'} onChange={e=>setTplFile(e.target.files&&e.target.files[0])}/>
         <button style={S.btnS} disabled={!tplFile||busy==='tpl'} onClick={uploadTpl}>{busy==='tpl'?'Uploading...':'Upload template'}</button>
+      </div>
+      <div style={{fontSize:13,color:'#475569',margin:'16px 0 8px',lineHeight:1.6,borderTop:'1px solid #e2e8f0',paddingTop:14}}>
+        Signature stamp: {status&&status.signature_installed?<b style={{color:'#166534'}}>installed</b>:<b style={{color:'#475569'}}>none</b>}. When installed it is stamped on the By line automatically; uncheck &ldquo;Stamp my signature&rdquo; above to omit it on a given document. Upload a PNG (transparent background works best) or JPG.
+      </div>
+      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+        <input type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" key={sigFile?'sf':'se'} onChange={e=>setSigFile(e.target.files&&e.target.files[0])}/>
+        <button style={S.btnS} disabled={!sigFile||busy==='sig'} onClick={uploadSig}>{busy==='sig'?'Uploading...':'Upload signature'}</button>
       </div>
     </div>}
   </div>);
