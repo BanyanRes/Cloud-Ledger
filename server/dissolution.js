@@ -418,12 +418,15 @@ function registerDissolutionRoutes(app, ctx) {
   try { fs.mkdirSync(templatesDir, { recursive: true }); } catch { /* ignore */ }
   const tplPath = () => path.join(templatesDir, TEMPLATE_FILE);
   const sigPath = () => path.join(templatesDir, SIGNATURE_FILE);
+  const bundledSigPath = path.join(__dirname, 'assets', SIGNATURE_FILE);
+  // Prefer an uploaded override on the data volume; else the repo-bundled default.
+  const activeSigPath = () => (fs.existsSync(sigPath()) ? sigPath() : (fs.existsSync(bundledSigPath) ? bundledSigPath : null));
   const BOTH = ['Admin', 'Accountant'];
 
   // Feature status — drives the page. Generation always works via the built-in
   // form; template_installed indicates an uploaded override is present.
   app.get('/api/admin/dissolution/status', auth, requireRole(...BOTH), (req, res) => {
-    res.json({ template_installed: fs.existsSync(tplPath()), signature_installed: fs.existsSync(sigPath()), built_in: true, graph_configured: graphConfigured() });
+    res.json({ template_installed: fs.existsSync(tplPath()), signature_installed: !!activeSigPath(), built_in: true, graph_configured: graphConfigured() });
   });
 
   // Install / replace the authorized-person signature image (Admin). PNG/JPG;
@@ -508,7 +511,8 @@ function registerDissolutionRoutes(app, ctx) {
       }
       const signerName = (b.signer_name || '').toString().trim(); // blank → keep template's existing Name
       const template = fs.existsSync(tplPath()) ? fs.readFileSync(tplPath()) : await buildBlankCancellation();
-      const signatureBytes = (b.include_signature !== false && fs.existsSync(sigPath())) ? fs.readFileSync(sigPath()) : null;
+      const sp = activeSigPath();
+      const signatureBytes = (b.include_signature !== false && sp) ? fs.readFileSync(sp) : null;
       const buf = await fillCancellation(template, { entity, formationDate, execDay, execMonth, execYear, signerName, signatureBytes, flatten: b.flatten !== false });
       const safe = entity.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'Entity';
       res.setHeader('Content-Type', 'application/pdf');
