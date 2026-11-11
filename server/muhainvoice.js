@@ -3,9 +3,11 @@
 // Muha K. Kim is an independent contractor (Independent Contractor Services
 // Agreement with Banyan Residential, LLC, effective 2026-11-11). Under the
 // agreement the contractor invoices a fixed USD 3,000/month retainer in two
-// semi-monthly installments (1st-15th and 16th-month end), plus a USD 50/month
-// laptop allowance (USD 25 per half-month, 30 months) and a USD 19.99 wire fee
-// per invoice. A partial billing period is prorated by working days (Mon-Fri)
+// semi-monthly installments (1st-15th and 16th-month end) and a USD 19.99 wire
+// fee per invoice. The laptop allowance was discontinued 2026-11: Banyan
+// bought the contractor a laptop outright instead of leasing his, so no
+// equipment-allowance line appears on invoices. A partial billing period is
+// prorated by working days (Mon-Fri)
 // in effect / working days in that billing period.
 //
 // This module:
@@ -29,8 +31,8 @@ const DEFAULTS = {
   effective_date: '2026-11-11',
   termination_date: '',
   monthly_fee: 3000,
-  monthly_allowance: 50,
-  allowance_months: 30,
+  monthly_allowance: 0,
+  allowance_months: 0,
   wire_fee: 19.99,
   invoice_prefix: 'MK',
   send_to: 'banyanresidential@bill.com',
@@ -88,6 +90,21 @@ function ensureTables(db) {
     if (!done.includes('lead_days_7')) {
       d.lead_days = 7; d._migrations = done.concat('lead_days_7');
       db.prepare("UPDATE muha_invoice_config SET data = ?, updated_by = 'migration lead_days_7', updated_at = datetime('now') WHERE id = 1").run(JSON.stringify(d));
+    }
+  }
+  // Laptop allowance discontinued (2026-11): Banyan bought the contractor a new
+  // laptop outright instead of leasing his personal computer, so the
+  // equipment-allowance line is dropped from all future invoices. Applied once
+  // (tracked in data._migrations) so a later edit on the settings page is never
+  // overwritten.
+  {
+    const cur = db.prepare('SELECT data FROM muha_invoice_config WHERE id = 1').get();
+    let d = {}; try { d = JSON.parse(cur.data); } catch (e) { d = {}; }
+    const done = Array.isArray(d._migrations) ? d._migrations : [];
+    if (!done.includes('laptop_purchased_no_allowance')) {
+      d.monthly_allowance = 0; d.allowance_months = 0;
+      d._migrations = done.concat('laptop_purchased_no_allowance');
+      db.prepare("UPDATE muha_invoice_config SET data = ?, updated_by = 'migration laptop_purchased_no_allowance', updated_at = datetime('now') WHERE id = 1").run(JSON.stringify(d));
     }
   }
   // MK-2026-11A was sent to Bill.com outside CloudLedger before this page went
