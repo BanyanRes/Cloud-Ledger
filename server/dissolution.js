@@ -466,7 +466,7 @@ function registerDissolutionRoutes(app, ctx) {
       const entity = (b.entity || '').toString().trim();
       const formationDate = (b.formation_date || '').toString().trim();
       if (!entity) return res.status(400).json({ error: 'entity is required' });
-      if (!formationDate) return res.status(400).json({ error: 'formation_date is required' });
+      // formation_date is optional — if omitted, line 2 is left blank to fill by hand.
       // Optional execution date (YYYY-MM-DD) → day / month / year blanks.
       let execDay = '', execMonth = '', execYear = '';
       const ed = (b.execution_date || '').toString().trim();

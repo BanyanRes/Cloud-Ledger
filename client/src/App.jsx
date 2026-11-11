@@ -10785,7 +10785,6 @@ function DissolutionPage({user}){
   };
   const generate=async()=>{
     const e=entity.trim(); if(!e){setErr('Enter an entity name.');return;}
-    if(!formDate.trim()){setErr('Enter or look up the formation date first.');return;}
     setBusy('gen');setErr('');setMsg('');
     try{
       const out=await api.generateCancellation({entity:e,formation_date:formDate,execution_date:execDate||undefined,signer_name:signer||undefined});
