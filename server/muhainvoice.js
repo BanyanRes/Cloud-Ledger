@@ -250,7 +250,6 @@ async function renderInvoicePdf(cfg, inv) {
   rt('TOTAL DUE', colPeriodR, y, bold, 12);
   rt(money(inv.total), R - 3, y, bold, 12);
   line(colPeriodR + 2, R, y + 15, 1.2, rgb(0, 0, 0));
-  line(colPeriodR + 2, R, y - 4, 0.6, rgb(0, 0, 0)); line(colPeriodR + 2, R, y - 6, 0.6, rgb(0, 0, 0));
 
   y -= 40;
   txt('NOTES', L, y, bold, 10, navy); y -= 15;
