@@ -3,10 +3,11 @@
 // Muha K. Kim is an independent contractor (Independent Contractor Services
 // Agreement with Banyan Residential, LLC, effective 2026-11-11). Under the
 // agreement the contractor invoices a fixed USD 3,000/month retainer in two
-// semi-monthly installments (1st-15th and 16th-month end) and a USD 19.99 wire
-// fee per invoice. The laptop allowance was discontinued 2026-11: Banyan
-// bought the contractor a laptop outright instead of leasing his, so no
-// equipment-allowance line appears on invoices. A partial billing period is
+// semi-monthly installments (1st-15th and 16th-month end). The laptop allowance
+// (USD 50/month) and the USD 19.99-per-invoice wire fee were both discontinued
+// 2026-11: Banyan bought the contractor a laptop outright instead of leasing
+// his, so no equipment-allowance line appears on invoices, and the wire fee is
+// no longer billed. A partial billing period is
 // prorated by working days (Mon-Fri)
 // in effect / working days in that billing period.
 //
@@ -33,7 +34,7 @@ const DEFAULTS = {
   monthly_fee: 3000,
   monthly_allowance: 0,
   allowance_months: 0,
-  wire_fee: 19.99,
+  wire_fee: 0,
   invoice_prefix: 'MK',
   send_to: 'banyanresidential@bill.com',
   cc: 'jyun@banyanres.com',
@@ -105,6 +106,19 @@ function ensureTables(db) {
       d.monthly_allowance = 0; d.allowance_months = 0;
       d._migrations = done.concat('laptop_purchased_no_allowance');
       db.prepare("UPDATE muha_invoice_config SET data = ?, updated_by = 'migration laptop_purchased_no_allowance', updated_at = datetime('now') WHERE id = 1").run(JSON.stringify(d));
+    }
+  }
+  // Wire transfer fee discontinued (2026-11): per Jimmy, no wire fee is billed
+  // on Muha invoices going forward. Applied once (tracked in data._migrations)
+  // so a later edit on the settings page is never overwritten.
+  {
+    const cur = db.prepare('SELECT data FROM muha_invoice_config WHERE id = 1').get();
+    let d = {}; try { d = JSON.parse(cur.data); } catch (e) { d = {}; }
+    const done = Array.isArray(d._migrations) ? d._migrations : [];
+    if (!done.includes('wire_fee_removed')) {
+      d.wire_fee = 0;
+      d._migrations = done.concat('wire_fee_removed');
+      db.prepare("UPDATE muha_invoice_config SET data = ?, updated_by = 'migration wire_fee_removed', updated_at = datetime('now') WHERE id = 1").run(JSON.stringify(d));
     }
   }
   // MK-2026-11A was sent to Bill.com outside CloudLedger before this page went
