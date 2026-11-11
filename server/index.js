@@ -11816,6 +11816,19 @@ require('./letterhead').registerLetterheadRoutes(app, {
   templatesDir: path.join(dataDir, 'templates'),
 });
 
+// ═══ Dissolution — Delaware Certificate of Cancellation generator ═══
+// Entity name → formation date (CloudLedger store, then a live SharePoint
+// search via Microsoft Graph when configured) → a filled DE085 Certificate of
+// Cancellation PDF. The blank template lives on the data volume, uploaded once
+// via the Dissolution page (Admin). See server/dissolution.js.
+require('./dissolution').registerDissolutionRoutes(app, {
+  db,
+  auth,
+  requireRole,
+  memUpload,
+  templatesDir: path.join(dataDir, 'templates'),
+});
+
 
 // ═══ Financial Statements package generator ═══
 // Generates GL-derived financial statements (Balance Sheet, Operations, Cash

@@ -1055,6 +1055,7 @@ export default function App(){
       {id:'am_fee',label:'AM Fee Invoices',icon:'🧾',section:'administration'},{id:'compliance_certs',label:'Compliance Certificates',icon:'📑',section:'administration'},
       {id:'time_allocation',label:'Time Allocation',icon:'⏱️',section:'administration'},
       {id:'letterhead',label:'Letterhead',icon:'📄',section:'administration'},
+      {id:'dissolution',label:'Dissolution',icon:'🏛️',section:'administration'},
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
       {id:'users',label:'Users',icon:NI.users,section:'all'},
       {id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom_setup'},
@@ -1137,6 +1138,7 @@ export default function App(){
         {page==='compliance_certs'&&canAccess('administration')&&<ComplianceCertificates user={user} key={'cc-'+rk}/>}
         {page==='time_allocation'&&canAccess('administration')&&<TimeAllocation user={user} key={'ta-'+rk}/>}
         {page==='letterhead'&&canAccess('administration')&&<LetterheadPage user={user} key={'lh-'+rk}/>}
+        {page==='dissolution'&&canAccess('administration')&&<DissolutionPage user={user} key={'dis-'+rk}/>}
         {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} isAdmin={user.role==='Admin'} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
@@ -10749,6 +10751,118 @@ function AssignmentPage({entities,user}){
     </div>
   </div>);
 }
+
+// === Administration: Dissolution - Delaware Certificate of Cancellation (DE085) ===
+function DissolutionPage({user}){
+  const isAdmin=user&&user.role==='Admin';
+  const[status,setStatus]=useState(null);
+  const[entity,setEntity]=useState('');
+  const[look,setLook]=useState(null);
+  const[formDate,setFormDate]=useState('');
+  const[formIso,setFormIso]=useState('');
+  const[execDate,setExecDate]=useState('');
+  const[signer,setSigner]=useState('');
+  const[busy,setBusy]=useState('');
+  const[err,setErr]=useState('');
+  const[msg,setMsg]=useState('');
+  const[tplFile,setTplFile]=useState(null);
+  const load=async()=>{try{setStatus(await api.getDissolutionStatus());}catch(e){setErr(e.message);}};
+  useEffect(()=>{load();},[]);
+  const lookup=async(refresh)=>{
+    const e=entity.trim(); if(!e){setErr('Enter an entity name first.');return;}
+    setBusy('lookup');setErr('');setMsg('');setLook(null);
+    try{
+      const r=await api.dissolutionLookup(e,refresh);
+      setLook(r);
+      if(r&&r.found){ setFormDate(r.formation_date||''); setFormIso(r.formation_date_iso||''); }
+    }catch(ex){setErr(ex.message);}finally{setBusy('');}
+  };
+  const saveDate=async()=>{
+    const e=entity.trim(); if(!e)return;
+    setBusy('save');setErr('');setMsg('');
+    try{await api.saveFormationDate({entity:e,formation_date:formDate,formation_date_iso:formIso});setMsg('Formation date saved for '+e+'.');}
+    catch(ex){setErr(ex.message);}finally{setBusy('');}
+  };
+  const generate=async()=>{
+    const e=entity.trim(); if(!e){setErr('Enter an entity name.');return;}
+    if(!formDate.trim()){setErr('Enter or look up the formation date first.');return;}
+    setBusy('gen');setErr('');setMsg('');
+    try{
+      const out=await api.generateCancellation({entity:e,formation_date:formDate,execution_date:execDate||undefined,signer_name:signer||undefined});
+      if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
+      setMsg('Generated '+out.filename+'.');
+    }catch(ex){setErr(ex.message);}finally{setBusy('');}
+  };
+  const uploadTpl=async()=>{
+    if(!tplFile)return;
+    setBusy('tpl');setErr('');setMsg('');
+    try{await api.uploadDissolutionTemplate(tplFile);setMsg('Template installed.');setTplFile(null);await load();}
+    catch(ex){setErr(ex.message);}finally{setBusy('');}
+  };
+  const srcLabel=(s)=>s==='sharepoint'?'SharePoint':(s==='manual'?'a saved entry':'the store');
+  return(<div>
+    <div style={{marginBottom:8}}>
+      <div style={S.h1}>Dissolution</div>
+      <div style={S.sub}>Generate a Delaware Certificate of Cancellation (DE085). Enter the entity name and its Certificate of Formation filing date is looked up{status&&status.graph_configured?' from SharePoint':''} and filled into the form.</div>
+    </div>
+    {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
+    {msg&&<div style={{marginBottom:12,padding:'8px 12px',background:'#dcfce7',color:'#166534',borderRadius:6,fontSize:13}}>{msg}</div>}
+    {status&&!status.template_installed&&<div style={{...S.err,marginBottom:12}}>The Certificate of Cancellation template is not installed yet{isAdmin?' - upload it below.':' - ask an Admin to upload it.'}</div>}
+
+    <div style={S.card}>
+      <div style={S.h2}>Certificate of Cancellation</div>
+      <div style={S.row}>
+        <div style={{flex:2,minWidth:260}}>
+          <label style={S.label}>Entity name (LLC)</label>
+          <input style={S.input} value={entity} placeholder="e.g. CLRFI Midco I, LLC"
+            onChange={e=>setEntity(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')lookup(false);}}/>
+        </div>
+        <div style={{alignSelf:'flex-end'}}>
+          <button style={S.btnS} disabled={busy==='lookup'} onClick={()=>lookup(false)}>{busy==='lookup'?'Looking up...':'Look up formation date'}</button>
+        </div>
+      </div>
+      {look&&<div style={{fontSize:12,color:'#475569',marginBottom:12,marginTop:-4}}>
+        {look.found
+          ? <>Found via <b>{srcLabel(look.source)}</b>{look.source_file?<> - <a href={look.source_url||'#'} target="_blank" rel="noreferrer" style={S.link}>{look.source_file}</a></>:null}{look.phrase?<div style={{color:'#64748b',marginTop:2}}>{'"'+look.phrase+'"'}</div>:null}{look.graph_configured?null:<> &middot; <button style={S.link} onClick={()=>lookup(true)}>re-search SharePoint</button></>}</>
+          : <>No formation date found{look.graph_configured?' - enter it manually below.':' - live SharePoint search is off on the server, so enter the date manually below.'}
+              {look.candidates&&look.candidates.length?<div style={{marginTop:4}}>Candidate files: {look.candidates.slice(0,5).map((c,i)=>(<span key={i}><a href={c.webUrl} target="_blank" rel="noreferrer" style={S.link}>{c.name}</a>{i<Math.min(5,look.candidates.length)-1?', ':''}</span>))}</div>:null}</>}
+      </div>}
+      <div style={S.row}>
+        <div style={{flex:1,minWidth:200}}>
+          <label style={S.label}>Certificate of Formation filed on</label>
+          <input style={S.input} value={formDate} placeholder="e.g. May 26, 2026"
+            onChange={e=>{setFormDate(e.target.value);setFormIso('');}}/>
+        </div>
+        <div style={{minWidth:160}}>
+          <label style={S.label}>Execution date (optional)</label>
+          <input type="date" style={S.input} value={execDate} onChange={e=>setExecDate(e.target.value)}/>
+        </div>
+        <div style={{minWidth:170}}>
+          <label style={S.label}>Signer name (optional)</label>
+          <input style={S.input} value={signer} placeholder="(keep template default)" onChange={e=>setSigner(e.target.value)}/>
+        </div>
+      </div>
+      <div style={{display:'flex',gap:10,flexWrap:'wrap',marginTop:4}}>
+        <button style={S.btnP} disabled={busy==='gen'||!status||!status.template_installed} onClick={generate}>{busy==='gen'?'Generating...':'Generate Certificate of Cancellation'}</button>
+        <button style={S.btnS} disabled={busy==='save'||!formDate.trim()} onClick={saveDate} title="Remember this formation date for next time">{busy==='save'?'Saving...':'Save formation date'}</button>
+      </div>
+    </div>
+
+    {isAdmin&&<div style={S.card}>
+      <div style={S.h2}>Template &amp; data source</div>
+      <div style={{fontSize:13,color:'#475569',marginBottom:10,lineHeight:1.6}}>
+        Blank Delaware Certificate of Cancellation (DE085) fillable PDF: {status&&status.template_installed?<b style={{color:'#166534'}}>installed</b>:<b style={{color:'#991b1b'}}>not installed</b>}.<br/>
+        Live SharePoint formation-date lookup: <b style={{color:status&&status.graph_configured?'#166534':'#991b1b'}}>{status&&status.graph_configured?'on':'off'}</b>{status&&!status.graph_configured?<span style={{color:'#64748b'}}> (set MS_TENANT_ID / MS_CLIENT_ID / MS_CLIENT_SECRET on the server to enable). Until then, dates come from saved entries or manual input.</span>:null}
+      </div>
+      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+        <input type="file" accept="application/pdf,.pdf" key={tplFile?'f':'e'} onChange={e=>setTplFile(e.target.files&&e.target.files[0])}/>
+        <button style={S.btnS} disabled={!tplFile||busy==='tpl'} onClick={uploadTpl}>{busy==='tpl'?'Uploading...':'Upload template'}</button>
+      </div>
+    </div>}
+  </div>);
+}
+
 
 function OrgStructurePage({entities,canEdit=true}){
   const[tab,setTab]=useState('structure');

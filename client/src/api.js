@@ -1287,6 +1287,34 @@ export const api = {
     return { blob, filename, subscriptionMissing };
   },
 
+  // ── Dissolution (Certificate of Cancellation generator) ──
+  getDissolutionStatus: () => request('/admin/dissolution/status'),
+  dissolutionLookup: (entity, refresh) => request('/admin/dissolution/lookup?entity=' + encodeURIComponent(entity) + (refresh ? '&refresh=1' : '')),
+  getFormations: () => request('/admin/dissolution/formations'),
+  saveFormationDate: (body) => request('/admin/dissolution/formation', { method: 'POST', body }),
+  uploadDissolutionTemplate: async (file) => {
+    const token = getToken();
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(API_BASE + '/admin/dissolution/template', { method: 'POST', headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: fd });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    let data = {}; try { data = await res.json(); } catch {}
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    return data;
+  },
+  generateCancellation: async (payload) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/admin/dissolution/generate', { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: JSON.stringify(payload) });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) { let data = {}; try { data = await res.json(); } catch {} throw new Error(data.error || 'Generation failed'); }
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const filename = m ? m[1] : 'Certificate_of_Cancellation.pdf';
+    const blob = await res.blob();
+    return { blob, filename };
+  },
+
   // ── Banyan Letterhead (fillable PDF generator) ──
   getLetterheadLogoStatus: () => request('/letterhead/logo/status'),
   getLetterheadLogoPreview: async () => {
