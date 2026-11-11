@@ -10808,7 +10808,6 @@ function DissolutionPage({user}){
     </div>
     {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
     {msg&&<div style={{marginBottom:12,padding:'8px 12px',background:'#dcfce7',color:'#166534',borderRadius:6,fontSize:13}}>{msg}</div>}
-    {status&&!status.template_installed&&<div style={{...S.err,marginBottom:12}}>The Certificate of Cancellation template is not installed yet{isAdmin?' - upload it below.':' - ask an Admin to upload it.'}</div>}
 
     <div style={S.card}>
       <div style={S.h2}>Certificate of Cancellation</div>
@@ -10844,7 +10843,7 @@ function DissolutionPage({user}){
         </div>
       </div>
       <div style={{display:'flex',gap:10,flexWrap:'wrap',marginTop:4}}>
-        <button style={S.btnP} disabled={busy==='gen'||!status||!status.template_installed} onClick={generate}>{busy==='gen'?'Generating...':'Generate Certificate of Cancellation'}</button>
+        <button style={S.btnP} disabled={busy==='gen'||!status} onClick={generate}>{busy==='gen'?'Generating...':'Generate Certificate of Cancellation'}</button>
         <button style={S.btnS} disabled={busy==='save'||!formDate.trim()} onClick={saveDate} title="Remember this formation date for next time">{busy==='save'?'Saving...':'Save formation date'}</button>
       </div>
     </div>
@@ -10852,7 +10851,7 @@ function DissolutionPage({user}){
     {isAdmin&&<div style={S.card}>
       <div style={S.h2}>Template &amp; data source</div>
       <div style={{fontSize:13,color:'#475569',marginBottom:10,lineHeight:1.6}}>
-        Blank Delaware Certificate of Cancellation (DE085) fillable PDF: {status&&status.template_installed?<b style={{color:'#166534'}}>installed</b>:<b style={{color:'#991b1b'}}>not installed</b>}.<br/>
+        Delaware Certificate of Cancellation (DE085) form: {status&&status.template_installed?<b style={{color:'#166534'}}>uploaded override installed</b>:<b style={{color:'#475569'}}>using the built-in form</b>}. Upload the official Wolters Kluwer PDF to override (e.g. to carry a pre-drawn signature).<br/>
         Live SharePoint formation-date lookup: <b style={{color:status&&status.graph_configured?'#166534':'#991b1b'}}>{status&&status.graph_configured?'on':'off'}</b>{status&&!status.graph_configured?<span style={{color:'#64748b'}}> (set MS_TENANT_ID / MS_CLIENT_ID / MS_CLIENT_SECRET on the server to enable). Until then, dates come from saved entries or manual input.</span>:null}
       </div>
       <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>

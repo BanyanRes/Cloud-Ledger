@@ -33,7 +33,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 const fs = require('fs');
 const path = require('path');
-const { PDFDocument, StandardFonts } = require('pdf-lib');
+const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 
 const TEMPLATE_FILE = 'de_certificate_of_cancellation.pdf';
 
@@ -310,6 +310,59 @@ async function findFormationDate(db, entity, { refresh = false } = {}) {
   return Object.assign(res, { found: false, candidates: [] });
 }
 
+// ── built-in blank form ──────────────────────────────────────────────────────
+// Recreates the Delaware Certificate of Cancellation (DE085) as a fillable
+// AcroForm with the same field names fillCancellation() expects, so generation
+// works with zero setup. If an Admin uploads the official Wolters Kluwer PDF it
+// is used instead (e.g. to carry a pre-drawn signature). US-Letter, 612×792.
+async function buildBlankCancellation() {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([612, 792]);
+  const reg = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const form = pdf.getForm();
+  const black = rgb(0, 0, 0);
+  const draw = (t, x, y, size, f) => page.drawText(t, { x, y, size, font: f || reg, color: black });
+  const center = (t, y, size, f) => { const ff = f || reg; draw(t, (612 - ff.widthOfTextAtSize(t, size)) / 2, y, size, ff); };
+  const line = (x1, y, x2) => page.drawLine({ start: { x: x1, y }, end: { x: x2, y }, thickness: 0.8, color: black });
+  const field = (name, x, y, w, h, size, def) => {
+    const fld = form.createTextField(name);
+    fld.addToPage(page, { x, y, width: w, height: h, borderWidth: 0 });
+    if (size) try { fld.setFontSize(size); } catch { /* ignore */ }
+    if (def) fld.setText(def);
+    return fld;
+  };
+  const L = 72, R = 540;
+  center('STATE OF DELAWARE', 712, 15, bold);
+  center('CERTIFICATE OF CANCELLATION', 692, 15, bold);
+  // 1. name of the LLC
+  draw('1.', L, 646, 11, bold);
+  draw('The name of the limited liability company is', L + 22, 646, 11);
+  line(L, 622, R); field('Text9', L + 2, 625, R - (L + 2), 16, 11);
+  line(L, 600, R); field('Text2', L + 2, 603, R - (L + 2), 16, 11);
+  // 2. formation filing date
+  draw('2.', L, 560, 11, bold);
+  draw('The Certificate of Formation of the limited liability company was filed on', L + 22, 560, 11);
+  line(L, 536, R); field('Text4', L + 2, 539, R - (L + 2), 16, 11);
+  // execution clause
+  draw('IN WITNESS WHEREOF, the undersigned has executed this Certificate of', L, 486, 11, bold);
+  let x = L; const y = 466;
+  const seg = (t, f) => { draw(t, x, y, 11, f); x += (f || reg).widthOfTextAtSize(t, 11); };
+  seg('Cancellation this '); line(x, y - 2, x + 42); field('Text5', x, y - 1, 42, 14, 11); x += 46;
+  seg(' day of '); line(x, y - 2, x + 92); field('Text3', x, y - 1, 92, 14, 11); x += 96;
+  seg(', A.D. '); line(x, y - 2, x + 46); field('Text6', x, y - 1, 46, 14, 11); x += 48;
+  seg('.');
+  // signature block
+  draw('By:', 322, 420, 11);
+  line(346, 418, 560); field('Text7', 348, 421, 212, 16, 11);
+  draw('Authorized Person(s)', 388, 405, 9);
+  draw('Name:', 322, 378, 11);
+  line(360, 376, 560); field('Text8', 362, 379, 198, 16, 11, 'Jimmy Yun');
+  draw('Print or Type', 396, 363, 9);
+  draw('DE085 — Delaware Certificate of Cancellation', L, 40, 7);
+  return Buffer.from(await pdf.save());
+}
+
 // ── template fill ────────────────────────────────────────────────────────────
 async function fillCancellation(templateBuf, f) {
   const pdf = await PDFDocument.load(templateBuf);
@@ -352,9 +405,10 @@ function registerDissolutionRoutes(app, ctx) {
   const tplPath = () => path.join(templatesDir, TEMPLATE_FILE);
   const BOTH = ['Admin', 'Accountant'];
 
-  // Feature status — drives the page (template installed? live search available?).
+  // Feature status — drives the page. Generation always works via the built-in
+  // form; template_installed indicates an uploaded override is present.
   app.get('/api/admin/dissolution/status', auth, requireRole(...BOTH), (req, res) => {
-    res.json({ template_installed: fs.existsSync(tplPath()), graph_configured: graphConfigured() });
+    res.json({ template_installed: fs.existsSync(tplPath()), built_in: true, graph_configured: graphConfigured() });
   });
 
   // Install / replace the blank Certificate of Cancellation template (Admin).
@@ -404,10 +458,10 @@ function registerDissolutionRoutes(app, ctx) {
     catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // Generate the filled Certificate of Cancellation PDF.
+  // Generate the filled Certificate of Cancellation PDF (uploaded template if
+  // present, otherwise the built-in DE085 form).
   app.post('/api/admin/dissolution/generate', auth, requireRole(...BOTH), async (req, res) => {
     try {
-      if (!fs.existsSync(tplPath())) return res.status(400).json({ error: 'Upload the Certificate of Cancellation template on the Dissolution page first (Admin → Templates card).' });
       const b = req.body || {};
       const entity = (b.entity || '').toString().trim();
       const formationDate = (b.formation_date || '').toString().trim();
@@ -421,7 +475,8 @@ function registerDissolutionRoutes(app, ctx) {
         execDay = ordinalDay(d); execMonth = (MONTHS[m - 1] || '').replace(/^./, (c) => c.toUpperCase()); execYear = String(y);
       }
       const signerName = (b.signer_name || '').toString().trim(); // blank → keep template's existing Name
-      const buf = await fillCancellation(fs.readFileSync(tplPath()), { entity, formationDate, execDay, execMonth, execYear, signerName, flatten: b.flatten !== false });
+      const template = fs.existsSync(tplPath()) ? fs.readFileSync(tplPath()) : await buildBlankCancellation();
+      const buf = await fillCancellation(template, { entity, formationDate, execDay, execMonth, execYear, signerName, flatten: b.flatten !== false });
       const safe = entity.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'Entity';
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', 'attachment; filename="Certificate_of_Cancellation_' + safe + '.pdf"');
@@ -433,6 +488,6 @@ function registerDissolutionRoutes(app, ctx) {
 module.exports = {
   registerDissolutionRoutes,
   // exported for local testing:
-  fillCancellation, findFormationDate, searchFormationFromSharePoint,
+  buildBlankCancellation, fillCancellation, findFormationDate, searchFormationFromSharePoint,
   extractFormationDateFromText, extractDateFromFilename, ordinalWordToNum, coreName, scoreCandidate,
 };
