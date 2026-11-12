@@ -356,7 +356,7 @@ async function buildBlankCancellation() {
   // signature block
   draw('By:', 322, 420, 11);
   line(346, 418, 560); field('Text7', 348, 421, 212, 16, 11);
-  draw('Authorized Person(s)', 388, 405, 9);
+  draw('Authorized Person(s)', 388, 400, 9);
   draw('Name:', 322, 378, 11);
   line(360, 376, 560); field('Text8', 362, 379, 198, 16, 11, 'Jimmy Yun');
   draw('Print or Type', 396, 363, 9);
@@ -394,8 +394,12 @@ async function fillCancellation(templateBuf, f) {
         : (b[0] === 0xFF && b[1] === 0xD8) ? await pdf.embedJpg(b) : null;
       if (img) {
         const page = pdf.getPages()[0];
-        const w = 105, h = w * (img.height / img.width);
-        page.drawImage(img, { x: 356, y: 418 - h * 0.32, width: w, height: h });
+        // Rest the signature on the By line (underline at y=418), bulk above the
+        // line and clear of the "Authorized Person(s)" label below it.
+        const lineY = 418, sigX = 356, maxW = 196;
+        let sigH = 24, sigW = sigH * (img.width / img.height);
+        if (sigW > maxW) { sigW = maxW; sigH = maxW * (img.height / img.width); }
+        page.drawImage(img, { x: sigX, y: lineY - sigH * 0.16, width: sigW, height: sigH });
       }
     } catch { /* ignore signature errors */ }
   }
