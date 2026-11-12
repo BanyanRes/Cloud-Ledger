@@ -515,8 +515,8 @@ function registerDissolutionRoutes(app, ctx) {
       }
       const signerName = (b.signer_name || '').toString().trim(); // blank → keep template's existing Name
       const template = fs.existsSync(tplPath()) ? fs.readFileSync(tplPath()) : await buildBlankCancellation();
-      const sp = activeSigPath();
-      const signatureBytes = (b.include_signature !== false && sp) ? fs.readFileSync(sp) : null;
+      // Signature stamping disabled — the By line is left blank for a manual signature.
+      const signatureBytes = null;
       const buf = await fillCancellation(template, { entity, formationDate, execDay, execMonth, execYear, signerName, signatureBytes, flatten: b.flatten !== false });
       const safe = entity.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'Entity';
       res.setHeader('Content-Type', 'application/pdf');
