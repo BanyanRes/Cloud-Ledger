@@ -49,6 +49,10 @@ const { PDFDocument, StandardFonts } = require('pdf-lib');
 const TEMPLATE_FILE = 'maplemark_new_account_application.pdf';
 const REFERENCE_FILE = 'maplemark_reference_filled.pdf'; // a completed Banyan packet whose boilerplate is cloned
 
+// Banyan's office — the physical / mailing address used on every bank account
+// application (overridable per-generation via the details panel).
+const BANYAN_OFFICE = { address: '2381 Rosecrans Ave, Suite 425', city: 'El Segundo', state: 'CA', zip: '90245' };
+
 // Fields that must exist in a valid MapleMark packet (sanity-check on upload).
 const REQUIRED_FIELDS = ['Entity Name', 'TIN', 'Entity Type'];
 
@@ -278,13 +282,13 @@ function upsertStored(db, rec) {
 // Resolve an entity's bank profile: store first, then live SharePoint.
 async function resolveProfile(db, entity, { refresh = false } = {}) {
   const res = { entity, graph_configured: graphConfigured(), entity_type: entityTypeFromName(entity) };
+  res.phys = BANYAN_OFFICE; res.mail = BANYAN_OFFICE;   // bank address is the El Segundo office, not the entity's filing address
   if (!refresh) {
     const s = getStored(db, entity);
     if (s && (s.ein || s.phys_address || s.source === 'manual')) {
       return Object.assign(res, { found: true, source: s.source || 'store', stored: s,
         entity_type: s.entity_type || res.entity_type, ein: s.ein,
-        phys: { address: s.phys_address, city: s.phys_city, state: s.phys_state, zip: s.phys_zip },
-        mail: { address: s.mail_address, city: s.mail_city, state: s.mail_state, zip: s.mail_zip },
+        phys: BANYAN_OFFICE, mail: BANYAN_OFFICE,
         dba: s.dba, email: s.email, phone: s.phone, nature: s.nature,
         source_file: s.source_file, source_url: s.source_url });
     }
@@ -298,7 +302,7 @@ async function resolveProfile(db, entity, { refresh = false } = {}) {
           phys_address: phys.address || null, phys_city: phys.city || null, phys_state: phys.state || null, phys_zip: phys.zip || null,
           source: 'sharepoint', source_file: sp.source_file || null, source_url: sp.source_url || null });
         return Object.assign(res, { found: true, source: 'sharepoint', candidates: sp.candidates,
-          ein: sp.ein, phys, mail: {}, source_file: sp.source_file, source_url: sp.source_url });
+          ein: sp.ein, phys: BANYAN_OFFICE, mail: BANYAN_OFFICE, source_file: sp.source_file, source_url: sp.source_url });
       }
       return Object.assign(res, { found: false, candidates: sp.candidates || [] });
     } catch (e) {
@@ -339,6 +343,8 @@ async function fillBankApplication(templateBuf, f) {
   setT('ZIP.Mailing', f.mailZip || f.physZip);
   // Entity attributes: a real-estate fund entity is none of the regulated categories.
   if (f.attributesNone !== false) check('NONE OF THE FOLLOWING');
+  // Entity documentation: for an LLC, the Operating Agreement is provided.
+  if (/\bllc\b/i.test(f.entity || '') || /limited liability company/i.test(f.entityType || '')) check('undefined_11');
   // Optional: person opening the account (Beneficial Ownership p.2 top line). Left
   // blank unless explicitly provided — it is a human, not entity-identity data.
   setT('Individual Name 1', f.personOpening);
@@ -387,6 +393,8 @@ async function fillFromReference(refBuf, f) {
   // signer rows are Banyan-constant and kept.
   for (let i = 1; i <= 4; i++) { setT('Name ' + i, ''); setT('Address ' + i, ''); setT('DOB ' + i, ''); setT('SSN ' + i, ''); setT('% ' + i, ''); }
   setT('Legal Entity Identifier', '');
+  // Entity documentation: for an LLC, check the Operating Agreement box.
+  if (/\bllc\b/i.test(f.entity || '') || /limited liability company/i.test(f.entityType || '')) { try { form.getCheckBox('undefined_11').check(); } catch { /* ignore */ } }
   try { form.updateFieldAppearances(font); } catch { /* ignore */ }
   if (f.flatten === true) { try { form.flatten(); } catch { /* ignore */ } }
   return Buffer.from(await pdf.save());
@@ -395,6 +403,31 @@ async function fillFromReference(refBuf, f) {
 // ── routes ───────────────────────────────────────────────────────────────────
 // Map a free-text entity name to its CloudLedger entity_type (the dashboard
 // group: shell / development / accounting / rail_assets / rail_car_services).
+// Resolve a free-text entity name to its full CloudLedger legal name (e.g.
+// "Sherman Rail" -> "Sherman Rail Solutions, LLC"), so the bank form shows the
+// legal name and the LLC entity-doc box can be detected. Returns null if no
+// confident match.
+function entityLegalName(db, name) {
+  try {
+    const norm = (s) => coreName(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const k = norm(name); if (!k) return null;
+    const rows = db.prepare('SELECT name FROM entities').all();
+    let hit = rows.find((r) => norm(r.name) === k);
+    if (!hit) {
+      const kt = k.split(' ').filter(Boolean);
+      let best = null, bestSc = 0;
+      for (const r of rows) {
+        const rn = norm(r.name); const rt = rn.split(' ').filter(Boolean);
+        const inRow = kt.filter((t) => rn.includes(t)).length / Math.max(kt.length, 1);
+        const inKey = rt.filter((t) => k.includes(t)).length / Math.max(rt.length, 1);
+        const sc = Math.max(inRow, inKey);
+        if (sc >= 0.8 && sc > bestSc) { bestSc = sc; best = r; }
+      }
+      hit = best;
+    }
+    return hit ? hit.name : null;
+  } catch { return null; }
+}
 function entityTypeOf(db, name) {
   try {
     const norm = (s) => coreName(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -621,10 +654,11 @@ function registerBankAccountRoutes(app, ctx) {
       if (!refBuf && fs.existsSync(refPath())) { refBuf = fs.readFileSync(refPath()); refSource = 'default'; }
       if (!refBuf && !active) return res.status(400).json({ error: 'No MapleMark packet is installed. Upload the blank New Account Application packet (and optionally a filled reference packet) once (Admin) to enable generation.' });
       let prof = {}; try { prof = await resolveProfile(db, entity, { refresh: b.refresh === true }); } catch { prof = {}; }
-      const pphys = prof.phys || {}, pmail = prof.mail || {};
+      const legalName = entityLegalName(db, entity) || entity;   // full legal name for the bank form
+      const pphys = prof.phys || BANYAN_OFFICE, pmail = prof.mail || BANYAN_OFFICE;
       const pick = (bv, pv) => (bv != null && String(bv).trim() !== '') ? bv : (pv || '');
       const data = {
-        entity,
+        entity: legalName,
         entityType: pick(b.entity_type, prof.entity_type || entityTypeFromName(entity)),
         ein: pick(b.ein, prof.ein), dba: pick(b.dba, prof.dba), nature: pick(b.nature, prof.nature),
         email: pick(b.email, prof.email), phone: pick(b.phone, prof.phone),
@@ -636,7 +670,7 @@ function registerBankAccountRoutes(app, ctx) {
       };
       if (refSource) { try { res.setHeader('X-Reference-Source', refSource); } catch { /* ignore */ } }
       const buf = refBuf ? await fillFromReference(refBuf, data) : await fillBankApplication(fs.readFileSync(active), data);
-      const safe = entity.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'Entity';
+      const safe = legalName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'Entity';
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', 'attachment; filename="MapleMark_New_Account_Application_' + safe + '.pdf"');
       res.send(buf);
