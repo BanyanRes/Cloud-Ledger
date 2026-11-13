@@ -10891,7 +10891,6 @@ function BankAccountPage({user}){
   const[busy,setBusy]=useState('');
   const[err,setErr]=useState('');
   const[msg,setMsg]=useState('');
-  const[tplFile,setTplFile]=useState(null);
   const[refFile,setRefFile]=useState(null);
   const set=(k,v)=>setF(p=>({...p,[k]:v}));
   const load=async()=>{try{setStatus(await api.getBankAppStatus());}catch(e){setErr(e.message);}};
@@ -10924,12 +10923,6 @@ function BankAccountPage({user}){
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
       setMsg('Generated '+out.filename+'.');
     }catch(ex){setErr(ex.message);}finally{setBusy('');}
-  };
-  const uploadTpl=async()=>{
-    if(!tplFile)return;
-    setBusy('tpl');setErr('');setMsg('');
-    try{await api.uploadBankAppTemplate(tplFile);setMsg('Template installed.');setTplFile(null);await load();}
-    catch(ex){setErr(ex.message);}finally{setBusy('');}
   };
   const uploadRef=async()=>{
     if(!refFile)return;
@@ -11013,12 +11006,7 @@ function BankAccountPage({user}){
     {isAdmin&&<div style={S.card}>
       <div style={S.h2}>Template &amp; data source</div>
       <div style={{fontSize:13,color:'#475569',marginBottom:10,lineHeight:1.6}}>
-        MapleMark New Account Application packet: {status&&status.template_installed?<b style={{color:'#166534'}}>uploaded override installed</b>:(status&&status.bundled_template?<b style={{color:'#166534'}}>using the built-in bundled form</b>:<b style={{color:'#991b1b'}}>not installed</b>)}. Upload the blank fillable packet (the 4-page application plus the 2-page Beneficial Ownership form) once to enable generation.<br/>
         Live SharePoint lookup (type / EIN / address): <b style={{color:status&&status.graph_configured?'#166534':'#991b1b'}}>{status&&status.graph_configured?'on':'off'}</b>{status&&!status.graph_configured?<span style={{color:'#64748b'}}> (set MS_TENANT_ID / MS_CLIENT_ID / MS_CLIENT_SECRET on the server to enable). Until then, details come from saved entries or manual input.</span>:null}
-      </div>
-      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
-        <input type="file" accept="application/pdf,.pdf" key={tplFile?'f':'e'} onChange={e=>setTplFile(e.target.files&&e.target.files[0])}/>
-        <button style={S.btnS} disabled={!tplFile||busy==='tpl'} onClick={uploadTpl}>{busy==='tpl'?'Uploading...':'Upload packet'}</button>
       </div>
       <div style={{fontSize:13,color:'#475569',margin:'16px 0 8px',lineHeight:1.6,borderTop:'1px solid #e2e8f0',paddingTop:14}}>
         Reference template: CloudLedger automatically clones a completed application from <b>another entity of the same dashboard type</b> (a shell entity is templated from another shell, a development entity from another development, and so on) — swapping in only the entity name, type, EIN and address, and always leaving the per-entity 25% beneficial-owner rows blank. The chosen template is cached per type; signer/owner SSNs are never stored in CloudLedger.
