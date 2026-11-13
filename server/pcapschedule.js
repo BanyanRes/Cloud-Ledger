@@ -40,31 +40,49 @@ const spellQuarterEnd = (end) => { const [y, m, d] = String(end).split('-').map(
 const COLS = [
   { key: 'num', label: 'Partner #', w: 9 },
   { key: 'name', label: 'Investor', w: 40 },
-  { key: 'commitment', label: 'Capital Commitments', w: 15, money: true, v: (i) => i.commitment },
-  { key: 'pct', label: '% of Commitments', w: 13, pct: true, v: (i, tot) => (tot ? i.commitment / tot : 0) },
-  { key: 'beginning', label: 'Partners’ Capital at January 1', w: 15, money: true, v: (i) => i.ytd.beginning },
-  { key: 'contributions', label: 'Contributions', w: 14, money: true, v: (i) => i.ytd.contributions },
-  { key: 'refunds', label: 'Capital Call Refunds', w: 15, money: true, v: (i) => i.ytd.returnOfCapital },
-  { key: 'syndication', label: 'Syndication Costs', w: 13, money: true, v: (i) => i.ytd.syndication },
-  { key: 'waived', label: 'Waived Development Fees', w: 13, money: true, v: (i) => i.ytd.waivedDevFees },
-  { key: 'totalExp', label: 'Total Expenses', w: 13, money: true, v: (i) => r2(i.ytd.netInvestment + i.ytd.managementFee) },
-  { key: 'netDecrease', label: 'Net Decrease Resulting from Operations', w: 15, money: true, v: (i) => r2(i.ytd.netInvestment + i.ytd.managementFee) },
-  { key: 'transfers', label: 'Transfers of Interest', w: 13, money: true, v: (i) => i.ytd.transfers },
-  { key: 'ending', label: 'Partners’ Capital at End', w: 15, money: true, v: (i) => i.ytd.ending },
+  { key: 'commitment', label: 'Capital Commitments', w: 15, money: true, v: (i) => i._sched.commitment },
+  { key: 'pct', label: '% of Commitments', w: 13, pct: true, v: (i, tot) => (tot ? i._sched.commitment / tot : 0) },
+  { key: 'beginning', label: 'Partners’ Capital at January 1', w: 15, money: true, v: (i) => i._sched.beginning },
+  { key: 'contributions', label: 'Contributions', w: 14, money: true, v: (i) => i._sched.contributions },
+  { key: 'refunds', label: 'Capital Call Refunds', w: 15, money: true, v: (i) => i._sched.refunds },
+  { key: 'syndication', label: 'Syndication Costs', w: 13, money: true, v: (i) => i._sched.syndication },
+  { key: 'waived', label: 'Waived Development Fees', w: 13, money: true, v: (i) => i._sched.waived },
+  { key: 'totalExp', label: 'Total Expenses', w: 13, money: true, v: (i) => i._sched.totalExp },
+  { key: 'netDecrease', label: 'Net Decrease Resulting from Operations', w: 15, money: true, v: (i) => i._sched.netDecrease },
+  { key: 'transfers', label: 'Transfers of Interest', w: 13, money: true, v: (i) => i._sched.transfers },
+  { key: 'ending', label: 'Partners’ Capital at End', w: 15, money: true, v: (i) => i._sched.ending },
 ];
 const MONEY_KEYS = COLS.filter((c) => c.money).map((c) => c.key);
 
+// Attach whole-dollar, footed schedule values to each investor so rows foot
+// across (beginning + activity = ending) and the column totals, being sums of
+// the printed rows, foot down. Reuses the shared largest-remainder allocator.
+function attachSched(data) {
+  for (const inv of data.investors) {
+    const y = inv.ytd;
+    const beginning = Math.round(Number(y.beginning) || 0);
+    const ending = Math.round(Number(y.ending) || 0);
+    const netDecreaseCents = (Number(y.netInvestment) || 0) + (Number(y.managementFee) || 0);
+    const [contributions, refunds, syndication, waived, netDecrease, transfers] =
+      pcap.allocateWhole([y.contributions, y.returnOfCapital, y.syndication, y.waivedDevFees, netDecreaseCents, y.transfers], ending - beginning);
+    inv._sched = {
+      commitment: Math.round(Number(inv.commitment) || 0),
+      beginning, contributions, refunds, syndication, waived,
+      totalExp: netDecrease, netDecrease, transfers, ending,
+    };
+  }
+}
 function sectionTotals(rows) {
   const t = {};
-  for (const c of COLS) if (c.money || c.key === 'commitment') t[c.key] = 0;
-  for (const inv of rows) for (const c of COLS) if (c.money) t[c.key] = r2((t[c.key] || 0) + c.v(inv));
-  t.commitment = r2(rows.reduce((s, i) => s + i.commitment, 0));
+  for (const c of COLS) if (c.money) t[c.key] = rows.reduce((s, i) => s + ((i._sched && i._sched[c.key]) || 0), 0);
+  t.commitment = rows.reduce((s, i) => s + ((i._sched && i._sched.commitment) || 0), 0);
   return t;
 }
 
 function buildWorkbook(data) {
   const q = data.quarter;
-  const grandCommit = data.totals.commitment;
+  attachSched(data);
+  const grandCommit = data.investors.reduce((s, i) => s + i._sched.commitment, 0);
   const wb = new ExcelJS.Workbook();
   wb.creator = 'CloudLedger'; wb.created = new Date();
   const ws = wb.addWorksheet('Partners’ Capital Accounts', {

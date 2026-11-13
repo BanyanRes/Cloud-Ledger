@@ -5993,6 +5993,51 @@ function renderCarrySchedule(pdf, fonts, meta, data) {
 }
 
 // Partners' Capital Accounts (landscape) — mirrors Weaver's schedule.
+// Whole-dollar footing shared by the Statement of Changes in Partners' Capital
+// and the Partners' Capital Accounts schedule (same round-once-then-foot policy
+// as server/pcap.js; kept local to avoid a cross-module require).
+function footAlloc(values, target) {
+  const w = (v) => Math.round(Number(v) || 0);
+  const rounded = values.map(w);
+  let residual = w(target) - rounded.reduce((a, b) => a + b, 0);
+  if (!residual) return rounded;
+  const dir = residual > 0 ? 1 : -1;
+  const order = values.map((v, i) => ({ i, frac: (Number(v) || 0) - rounded[i] }))
+    .filter((x) => rounded[x.i] !== 0)
+    .sort((a, b) => (dir > 0 ? b.frac - a.frac : a.frac - b.frac));
+  const pool = order.length ? order
+    : values.map((v, i) => ({ i })).sort((a, b) => Math.abs(Number(values[b.i]) || 0) - Math.abs(Number(values[a.i]) || 0));
+  for (let k = 0; residual !== 0; k++) { rounded[pool[k % pool.length].i] += dir; residual -= dir; }
+  return rounded;
+}
+// Whole-dollar copy of the changes-in-capital model that foots both ways: each
+// column (GP / Total) rolls forward (beginning + activity = ending) and every
+// row cross-foots (LP = Total - GP). Total ending is the balance-sheet control;
+// GP is rounded; LP is the plug.
+function footChangesModel(cc) {
+  const KEYS = ['contributions', 'refunds', 'syndication', 'waived', 'transfers', 'netLoss'];
+  const stops = cc.twoPeriod ? ['jan1', 'mar31', 'jun30'] : ['jan1', 'jun30'];
+  const segs = cc.twoPeriod ? ['q1', 'q2'] : ['ytd'];
+  const w = (v) => Math.round(Number(v) || 0);
+  const colFoot = (col) => {
+    const bals = {}; for (const st of stops) bals[st] = w(cc[st][col]);
+    const acts = {};
+    segs.forEach((sg, i) => {
+      const vals = KEYS.map((k) => Number(cc[sg][col][k]) || 0);
+      const f = footAlloc(vals, bals[stops[i + 1]] - bals[stops[i]]);
+      const o = {}; KEYS.forEach((k, j) => { o[k] = f[j]; }); acts[sg] = o;
+    });
+    return { bals, acts };
+  };
+  const T = colFoot('total'), G = colFoot('GP');
+  const out = { twoPeriod: cc.twoPeriod, hasClassData: cc.hasClassData };
+  for (const st of stops) out[st] = { GP: G.bals[st], LP: T.bals[st] - G.bals[st], total: T.bals[st] };
+  for (const sg of segs) {
+    out[sg] = { GP: G.acts[sg], LP: {}, total: T.acts[sg] };
+    for (const k of KEYS) out[sg].LP[k] = T.acts[sg][k] - G.acts[sg][k];
+  }
+  return out;
+}
 function renderPcapSchedule(pdf, fonts, meta, data) {
   const { reg, bold } = fonts;
   const money = v => acctW(v);       // Weaver shows the capital-accounts schedule in whole dollars
@@ -6029,19 +6074,27 @@ function renderPcapSchedule(pdf, fonts, meta, data) {
   const fundInvIncome = (data.investmentIncome && data.investmentIncome.q) || 0;
   const totalNetLoss = tq ? r2((tq.netInvestment || 0) + (tq.managementFee || 0) + (tq.unrealized || 0)) : 0;
   const dollarCols = []; for (let i = 0; i < N; i++) if (i !== 1) dollarCols.push(i);
+  const acc = { commitment: 0, beginning: 0, contributions: 0, refunds: 0, syndication: 0, waived: 0, income: 0, expenses: 0, netLoss: 0, transfers: 0, ending: 0 };
   const rowFor = (inv, n, first) => {
     const y = inv.q;
-    const netLoss = r2((y.netInvestment || 0) + (y.managementFee || 0) + (y.unrealized || 0));
-    const income = totalNetLoss ? r2(fundInvIncome * (netLoss / totalNetLoss)) : 0;
-    const expenses = r2(netLoss - income);
+    const beginning = Math.round(y.beginning || 0), ending = Math.round(y.ending || 0);
+    const commitment = Math.round(inv.commitment || 0);
+    const netLossCents = (y.netInvestment || 0) + (y.managementFee || 0) + (y.unrealized || 0);
+    const [contributions, refunds, syndication, waived, netLoss, transfers] =
+      footAlloc([y.contributions, y.returnOfCapital, y.syndication, y.waivedDevFees, netLossCents, y.transfers], ending - beginning);
+    const income = Math.round(totalNetLoss ? fundInvIncome * (netLossCents / totalNetLoss) : 0);
+    const expenses = netLoss - income;   // income + expenses = net decrease (whole dollars)
+    acc.commitment += commitment; acc.beginning += beginning; acc.contributions += contributions;
+    acc.refunds += refunds; acc.syndication += syndication; acc.waived += waived; acc.income += income;
+    acc.expenses += expenses; acc.netLoss += netLoss; acc.transfers += transfers; acc.ending += ending;
     const pct = totalCommit ? (inv.commitment / totalCommit * 100) : 0;
     const cells = [
-      money(inv.commitment), pct.toFixed(4) + '%', money(y.beginning),
-      money(y.contributions), money(y.returnOfCapital), money(y.syndication), money(y.waivedDevFees),
+      money(commitment), pct.toFixed(4) + '%', money(beginning),
+      money(contributions), money(refunds), money(syndication), money(waived),
       money(income), money(expenses), money(netLoss),
     ];
-    if (showTransfers) cells.push(money(y.transfers));
-    cells.push(money(y.ending));
+    if (showTransfers) cells.push(money(transfers));
+    cells.push(money(ending));
     L.ensure(13);
     L.page.drawText(String(n), { x: LLEFT, y: L.y, size: 7.5, font: reg });
     L.row('', cells, { indent: 0, dollarPrefix: first, dollarCols, valueInset: 2 });
@@ -6054,16 +6107,13 @@ function renderPcapSchedule(pdf, fonts, meta, data) {
   if (gps.length) { L.space(4); L.row('General Partners', [], { indent: 0, boldRow: true }); }
   gps.forEach((inv, i) => rowFor(inv, ++n, i === 0));
   if (tq) {
-    const netLoss = totalNetLoss;
-    const income = fundInvIncome;
-    const expenses = r2(netLoss - income);
     const cells = [
-      money(data.totals.commitment), '100.0000%', money(tq.beginning),
-      money(tq.contributions), money(tq.returnOfCapital), money(tq.syndication), money(tq.waivedDevFees),
-      money(income), money(expenses), money(netLoss),
+      money(acc.commitment), '100.0000%', money(acc.beginning),
+      money(acc.contributions), money(acc.refunds), money(acc.syndication), money(acc.waived),
+      money(acc.income), money(acc.expenses), money(acc.netLoss),
     ];
-    if (showTransfers) cells.push(money(tq.transfers));
-    cells.push(money(tq.ending));
+    if (showTransfers) cells.push(money(acc.transfers));
+    cells.push(money(acc.ending));
     L.row('Total', cells, { indent: 0, boldRow: true, ruleAbove: true, doubleBelow: true, dollarPrefix: true, dollarCols, valueInset: 2 });
   }
 }
@@ -6180,7 +6230,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
     L.row('Total liabilities', [money(a.totalLiab)], { indent: 10, ruleAbove: true, gapAfter: 8 });
     L.row('Partners' + APOS + ' capital:', [], { indent: 6 });
     if (!isZero(a.capGP) || a.capGP !== a.totalCapital) L.row('General partners', [money(a.capGP)], { indent: 20 });
-    L.row('Limited partners', [money(a.capLP)], { indent: 20 });
+    L.row('Limited partners', [money(Math.round(a.totalCapital) - Math.round(a.capGP))], { indent: 20 });
     L.row('Total partners' + APOS + ' capital', [money(a.totalCapital)], { indent: 10, ruleAbove: true, gapAfter: 8 });
     L.row('Total liabilities and partners' + APOS + ' capital', [money(a.totalLiabCapital)], { indent: 6, ruleAbove: true, doubleBelow: true, dollarPrefix: true });
   }
@@ -6270,7 +6320,7 @@ async function renderFundStatementsPdf(s, outOffsets, supp) {
       L.page.drawText(partnersCap, { x: (spanL + spanR) / 2 - sw / 2, y: stop, size: 9, font: bold });
       L.page.drawLine({ start: { x: spanL, y: stop - 3 }, end: { x: spanR, y: stop - 3 }, thickness: 0.6, color: rgb(0.2, 0.2, 0.2) }); L.y = stop - 15; }
     L.colHeaders(['General Partners', 'Limited Partners', 'Total'], { bottomAlign: true, underline: true, colBox: true });
-    const cc = s.changesInCapital;
+    const cc = footChangesModel(s.changesInCapital);
     const yr = String(m.asOf).slice(0, 4);
     const bal3 = (b) => [money(b.GP), money(b.LP), money(b.total)];
     const act3 = (a, k) => [money(a.GP[k]), money(a.LP[k]), money(a.total[k])];
