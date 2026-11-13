@@ -227,6 +227,7 @@ function buildData(ctx, quarter, opts = {}) {
   const classes = db.prepare('SELECT id, name, partner_type FROM dim_classes WHERE entity_id = ?').all(eid);
   const commitRows = db.prepare('SELECT class_id, commitment_amount FROM investor_commitments WHERE entity_id = ?').all(eid);
   const commitBy = {}; commitRows.forEach((c) => { commitBy[c.class_id] = r2(c.commitment_amount); });
+  const waivedSrcBy = {};   // class_id -> source-account balance (inception-to-date waived fees)
   if (eid === FUND_EID) {
     for (const rule of WAIVED_FEE_COMMITMENTS) {
       const cls = classes.find((c) => c.name === rule.investor);
@@ -237,7 +238,7 @@ function buildData(ctx, quarter, opts = {}) {
         bal = row ? Number(row.balance) || 0 : 0;
       } catch (e) { bal = 0; }
       // No balance found: keep the stored commitment rather than show the bare base.
-      if (bal > 0) commitBy[cls.id] = r2(rule.base + bal);
+      if (bal > 0) { commitBy[cls.id] = r2(rule.base + bal); waivedSrcBy[cls.id] = r2(bal); }
     }
   }
   const carryBy = opts.carryByClass || {};
@@ -272,6 +273,19 @@ function buildData(ctx, quarter, opts = {}) {
       ytd, itd, q,
     });
   }
+  // Inception-to-date waived development fees for these investors are the source
+  // account's balance. Fees waived before the fund ledger tagged them separately
+  // sit in Contributions there, so move that portion from Contributions to
+  // Waived development fees in the inception-to-date column (ending unchanged).
+  for (const inv of investors) {
+    const src = waivedSrcBy[inv.class_id];
+    if (!src) continue;
+    const delta = r2(src - inv.itd.waivedDevFees);
+    if (Math.abs(delta) < 0.005) continue;
+    inv.itd.waivedDevFees = src;
+    inv.itd.contributions = r2(inv.itd.contributions - delta);
+  }
+
   // ── Roster corrections & transfer-of-interest presentation ──────────────────
   // Merge renamed/stray classes into their surviving investor (source folded into
   // target, source dropped), and present transfers of interest within
