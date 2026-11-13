@@ -1329,6 +1329,7 @@ export const api = {
   getBankAppStatus: () => request('/admin/bankapp/status'),
   bankAppLookup: (entity, refresh) => request('/admin/bankapp/lookup?entity=' + encodeURIComponent(entity) + (refresh ? '&refresh=1' : '')),
   getBankProfiles: () => request('/admin/bankapp/profiles'),
+  resetBankAppReferenceCache: () => request('/admin/bankapp/reference-cache', { method: 'DELETE' }),
   saveBankProfile: (body) => request('/admin/bankapp/profile', { method: 'POST', body }),
   uploadBankAppTemplate: async (file) => {
     const token = getToken();

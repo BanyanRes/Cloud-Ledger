@@ -393,6 +393,100 @@ async function fillFromReference(refBuf, f) {
 }
 
 // ── routes ───────────────────────────────────────────────────────────────────
+// Map a free-text entity name to its CloudLedger entity_type (the dashboard
+// group: shell / development / accounting / rail_assets / rail_car_services).
+function entityTypeOf(db, name) {
+  try {
+    const norm = (s) => coreName(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const k = norm(name); if (!k) return null;
+    const rows = db.prepare('SELECT name, entity_type FROM entities').all();
+    let hit = rows.find((r) => norm(r.name) === k);
+    if (!hit) {
+      const kt = k.split(' ').filter(Boolean);
+      let best = null, bestSc = 0;
+      for (const r of rows) {
+        const rn = norm(r.name); const rt = rn.split(' ').filter(Boolean);
+        const inRow = kt.filter((t) => rn.includes(t)).length / Math.max(kt.length, 1);
+        const inKey = rt.filter((t) => k.includes(t)).length / Math.max(rt.length, 1);
+        const sc = Math.max(inRow, inKey);
+        if (sc >= 0.8 && sc > bestSc) { bestSc = sc; best = r; }
+      }
+      hit = best;
+    }
+    return hit ? String(hit.entity_type || 'accounting').trim().toLowerCase() : null;
+  } catch { return null; }
+}
+function sameTypePeerNames(db, target, type) {
+  try {
+    const norm = (s) => coreName(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const tk = norm(target);
+    return db.prepare('SELECT name FROM entities WHERE lower(trim(entity_type)) = lower(?) ORDER BY code').all(type)
+      .map((r) => r.name).filter((n) => norm(n) !== tk);
+  } catch { return []; }
+}
+// Does this buffer look like a FILLED MapleMark packet (fillable + has a signer)?
+async function isFilledPacket(buf) {
+  try {
+    const d = await PDFDocument.load(buf); const form = d.getForm();
+    const names = form.getFields().map((x) => x.getName());
+    if (!REQUIRED_FIELDS.every((n) => names.includes(n))) return false;
+    try { return !!(form.getTextField('Name.FullLegal.1.0').getText() || '').trim(); } catch { return false; }
+  } catch { return false; }
+}
+// List completed MapleMark application packets in SharePoint (folder-scoped).
+async function listAppPackets() {
+  const drives = await resolveDriveIds();
+  const out = []; const seen = new Set();
+  for (const drive of drives) {
+    let items;
+    try { items = ((await (await gfetch('/drives/' + drive + "/root/search(q='New Business Account Application Packet')?$top=50&$select=id,name,webUrl,file,lastModifiedDateTime")).json()).value || []); } catch { continue; }
+    for (const it of items) {
+      if (!it || it.folder || !/\.pdf$/i.test(it.name || '')) continue;
+      if (!/application/i.test(it.name)) continue;
+      if (!/Maple ?Mark Account Info/i.test(it.webUrl || '')) continue;
+      const key = drive + '|' + it.id; if (seen.has(key)) continue; seen.add(key);
+      out.push({ driveId: drive, id: it.id, name: it.name, webUrl: it.webUrl, modified: it.lastModifiedDateTime || '' });
+    }
+  }
+  return out;
+}
+// Pick the same-type peer whose completed application best fits the target as a
+// template, download it, and verify it is actually filled.
+async function findSameTypeReference(db, target, type) {
+  const peers = sameTypePeerNames(db, target, type);
+  if (!peers.length) return null;
+  const files = await listAppPackets();
+  if (!files.length) return null;
+  const toks = (s) => coreName(s).toLowerCase().split(/[^a-z0-9]+/).filter((t) => t && t.length >= 2 && !['the', 'llc', 'lp', 'inc'].includes(t));
+  const targetToks = toks(target);
+  const peerTok = peers.map((p) => ({ name: p, toks: toks(p) }));
+  const cand = [];
+  for (const f of files) {
+    const fn = f.name.toLowerCase();
+    let peer = null, cover = 0;
+    for (const p of peerTok) {
+      if (!p.toks.length) continue;
+      const c = p.toks.filter((t) => fn.includes(t)).length / p.toks.length;
+      if (c >= 0.8 && c > cover) { cover = c; peer = p.name; }
+    }
+    if (!peer) continue;
+    let sc = cover * 5;
+    sc += targetToks.filter((t) => fn.includes(t)).length * 2;   // prefer a peer that shares words with the target (e.g. "rail")
+    if (/revised/.test(fn)) sc += 2;
+    if (/signed/.test(fn)) sc -= 2;                              // signed copies are often flattened
+    if (f.modified) { const y = new Date(f.modified).getFullYear(); if (y >= 2022) sc += Math.min(2, (y - 2022) * 0.5); }
+    cand.push({ f, peer, sc });
+  }
+  cand.sort((a, b) => b.sc - a.sc);
+  for (const c of cand.slice(0, 6)) {
+    try {
+      const buf = Buffer.from(await (await gfetch('/drives/' + c.f.driveId + '/items/' + c.f.id + '/content')).arrayBuffer());
+      if (await isFilledPacket(buf)) return { buf, peer: c.peer, name: c.f.name, url: c.f.webUrl, type };
+    } catch { /* try next candidate */ }
+  }
+  return null;
+}
+
 function registerBankAccountRoutes(app, ctx) {
   const { db, auth, requireRole, memUpload, templatesDir } = ctx;
   ensureTable(db);
@@ -479,9 +573,23 @@ function registerBankAccountRoutes(app, ctx) {
       const b = req.body || {};
       const entity = (b.entity || '').toString().trim();
       if (!entity) return res.status(400).json({ error: 'entity is required' });
-      const haveRef = fs.existsSync(refPath());
       const active = activeTplPath();
-      if (!haveRef && !active) return res.status(400).json({ error: 'No MapleMark packet is installed. Upload the blank New Account Application packet (and optionally a filled reference packet) once (Admin) to enable generation.' });
+      // Pick a reference packet whose boilerplate matches the entity's type
+      // (dashboard group): a same-type peer's completed application, cached per
+      // type. Falls back to the admin default reference, then the blank template.
+      let refBuf = null, refSource = '';
+      const etype = entityTypeOf(db, entity);
+      const typeRefPath = etype ? path.join(templatesDir, 'maplemark_reference_' + etype.replace(/[^a-z0-9_]+/g, '') + '.pdf') : null;
+      if (b.refresh_reference === true && typeRefPath) { try { if (fs.existsSync(typeRefPath)) fs.unlinkSync(typeRefPath); } catch { /* ignore */ } }
+      if (typeRefPath && fs.existsSync(typeRefPath)) { refBuf = fs.readFileSync(typeRefPath); refSource = 'type-cache:' + etype; }
+      if (!refBuf && graphConfigured() && etype) {
+        try {
+          const found = await findSameTypeReference(db, entity, etype);
+          if (found) { refBuf = found.buf; refSource = 'same-type(' + etype + '):' + found.peer; if (typeRefPath) { try { fs.writeFileSync(typeRefPath, found.buf); } catch { /* ignore */ } } }
+        } catch { /* fall through to default */ }
+      }
+      if (!refBuf && fs.existsSync(refPath())) { refBuf = fs.readFileSync(refPath()); refSource = 'default'; }
+      if (!refBuf && !active) return res.status(400).json({ error: 'No MapleMark packet is installed. Upload the blank New Account Application packet (and optionally a filled reference packet) once (Admin) to enable generation.' });
       let prof = {}; try { prof = await resolveProfile(db, entity, { refresh: b.refresh === true }); } catch { prof = {}; }
       const pphys = prof.phys || {}, pmail = prof.mail || {};
       const pick = (bv, pv) => (bv != null && String(bv).trim() !== '') ? bv : (pv || '');
@@ -496,9 +604,8 @@ function registerBankAccountRoutes(app, ctx) {
         personOpening: b.person_opening || '',
         flatten: b.flatten === true,
       };
-      const buf = haveRef
-        ? await fillFromReference(fs.readFileSync(refPath()), data)
-        : await fillBankApplication(fs.readFileSync(active), data);
+      if (refSource) { try { res.setHeader('X-Reference-Source', refSource); } catch { /* ignore */ } }
+      const buf = refBuf ? await fillFromReference(refBuf, data) : await fillBankApplication(fs.readFileSync(active), data);
       const safe = entity.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'Entity';
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', 'attachment; filename="MapleMark_New_Account_Application_' + safe + '.pdf"');
@@ -559,11 +666,24 @@ function registerBankAccountRoutes(app, ctx) {
       res.json({ note: 'Reference packet installed from SharePoint.', reference_installed: true, source_item: itemId });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
+
+  // Clear the per-type auto-picked reference cache (Admin), so the next
+  // generation re-selects a same-type template from SharePoint.
+  app.delete('/api/admin/bankapp/reference-cache', auth, requireRole('Admin'), (req, res) => {
+    try {
+      let cleared = 0;
+      for (const fn of fs.readdirSync(templatesDir)) {
+        if (/^maplemark_reference_.+\.pdf$/i.test(fn) && fn !== REFERENCE_FILE) { try { fs.unlinkSync(path.join(templatesDir, fn)); cleared++; } catch { /* ignore */ } }
+      }
+      res.json({ cleared });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
 }
 
 module.exports = {
   registerBankAccountRoutes,
   // exported for local testing:
   fillBankApplication, fillFromReference, resolveProfile, searchProfileFromSharePoint,
+  entityTypeOf, findSameTypeReference,
   extractEin, extractAddress, entityTypeFromName, coreName, scoreCandidate,
 };
