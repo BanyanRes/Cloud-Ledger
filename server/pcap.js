@@ -49,6 +49,16 @@ const UNREAL_ACCTS = ['390130'];           // accum unrealized gain/loss (frozen
 const EQUITY_ACCTS = [...CONTRIB_ACCTS, ...SYND_ACCTS, ...NETINV_ACCTS, ...MGMT_ACCTS, ...UNREAL_ACCTS, '390500'];
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+// Investors whose capital commitment grows with waived development fees. The
+// commitment is a fixed base plus the balance of a contributed-capital account in
+// another entity as of the statement date, so it moves with each new waived fee
+// and each quarter's statement shows the figure as of that quarter end.
+// Odyssey Holdings, LLC: base + SRN (entity 37) account 34014. The base is the
+// 6/30/26 commitment (785,296.64) less the 34014 balance at that date (340,908.87).
+const WAIVED_FEE_COMMITMENTS = [
+  { investor: 'Odyssey Holdings, LLC', base: 444387.77, source_entity: 37, account: '34014' },
+];
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 
 // ── Whole-dollar footing (round once, then foot) ─────────────────────────────
@@ -217,6 +227,19 @@ function buildData(ctx, quarter, opts = {}) {
   const classes = db.prepare('SELECT id, name, partner_type FROM dim_classes WHERE entity_id = ?').all(eid);
   const commitRows = db.prepare('SELECT class_id, commitment_amount FROM investor_commitments WHERE entity_id = ?').all(eid);
   const commitBy = {}; commitRows.forEach((c) => { commitBy[c.class_id] = r2(c.commitment_amount); });
+  if (eid === FUND_EID) {
+    for (const rule of WAIVED_FEE_COMMITMENTS) {
+      const cls = classes.find((c) => c.name === rule.investor);
+      if (!cls) continue;
+      let bal = 0;
+      try {
+        const row = (computeBalances(rule.source_entity, { as_of: quarter.end }) || []).find((r) => String(r.code) === rule.account);
+        bal = row ? Number(row.balance) || 0 : 0;
+      } catch (e) { bal = 0; }
+      // No balance found: keep the stored commitment rather than show the bare base.
+      if (bal > 0) commitBy[cls.id] = r2(rule.base + bal);
+    }
+  }
   const carryBy = opts.carryByClass || {};
   const gpSet = new Set(classes.filter((c) => String(c.partner_type || '').toUpperCase() === 'GP').map((c) => Number(c.id)));
 
