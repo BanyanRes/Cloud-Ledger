@@ -767,7 +767,7 @@ function NavFlyout({catKey,catLabel,items,pos,page,canReorder,onPick,onClose,onR
   const top=Math.max(12,Math.min(pos.top,Math.max(12,window.innerHeight-est-12)));
   return(<>
     <div style={{position:'fixed',inset:0,zIndex:70}} onClick={onClose}/>
-    <div style={{position:'fixed',top,left:pos.left,zIndex:71,width:256,background:T.bgCard,borderRadius:T.radiusSm,border:'1px solid '+T.border,boxShadow:T.shadowLg,padding:'8px 0',maxHeight:'calc(100vh - 24px)',overflowY:'auto'}}>
+    <div style={{position:'fixed',top,left:pos.left,zIndex:71,width:330,background:T.bgCard,borderRadius:T.radiusSm,border:'1px solid '+T.border,boxShadow:T.shadowLg,padding:'8px 0',maxHeight:'calc(100vh - 24px)',overflowY:'auto'}}>
       <div style={{padding:'2px 14px 8px',fontSize:9,fontWeight:700,color:T.textDim,textTransform:'uppercase',letterSpacing:'0.12em'}}>{catLabel}</div>
       {list.map((id,i)=>{
         const n=byId[id];if(!n)return null;
