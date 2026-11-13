@@ -434,18 +434,48 @@ async function isFilledPacket(buf) {
   } catch { return false; }
 }
 // List completed MapleMark application packets in SharePoint (folder-scoped).
+const APP_FOLDER_PATH = (process.env.BANKAPP_FOLDER_PATH || 'Banyan Residential - Corporate/Finance/Accounting/Maple Mark Account Info');
+const SELECT_ITEM = '$top=200&$select=id,name,webUrl,file,folder,lastModifiedDateTime';
+// List completed MapleMark application packets by walking the known folder (and
+// its immediate subfolders) directly — deterministic, unlike content search,
+// which the app-only Graph token does not reliably index.
 async function listAppPackets() {
-  const drives = await resolveDriveIds();
   const out = []; const seen = new Set();
+  const drives = await resolveDriveIds();
+  const push = (drive, it) => {
+    if (!it || it.folder || !/\.pdf$/i.test(it.name || '')) return;
+    if (!/application/i.test(it.name)) return;
+    const key = drive + '|' + it.id; if (seen.has(key)) return; seen.add(key);
+    out.push({ driveId: drive, id: it.id, name: it.name, webUrl: it.webUrl, modified: it.lastModifiedDateTime || '' });
+  };
   for (const drive of drives) {
-    let items;
-    try { items = ((await (await gfetch('/drives/' + drive + "/root/search(q='New Business Account Application Packet')?$top=50&$select=id,name,webUrl,file,lastModifiedDateTime")).json()).value || []); } catch { continue; }
-    for (const it of items) {
-      if (!it || it.folder || !/\.pdf$/i.test(it.name || '')) continue;
-      if (!/application/i.test(it.name)) continue;
-      if (!/Maple ?Mark Account Info/i.test(it.webUrl || '')) continue;
-      const key = drive + '|' + it.id; if (seen.has(key)) continue; seen.add(key);
-      out.push({ driveId: drive, id: it.id, name: it.name, webUrl: it.webUrl, modified: it.lastModifiedDateTime || '' });
+    const encPath = APP_FOLDER_PATH.split('/').map(encodeURIComponent).join('/');
+    let roots;
+    try {
+      const r = await gfetch('/drives/' + drive + '/root:/' + encPath + ':/children?' + SELECT_ITEM, { ok: [404] });
+      if (r.status === 404) continue;
+      roots = ((await r.json()).value || []);
+    } catch { continue; }
+    for (const it of roots) push(drive, it);
+    // one level into subfolders (Signed …, Executed Set up forms, Account Mapping …)
+    for (const sf of roots.filter((x) => x.folder).slice(0, 12)) {
+      try {
+        const rr = await gfetch('/drives/' + drive + '/items/' + sf.id + '/children?' + SELECT_ITEM, { ok: [404] });
+        if (rr.status === 404) continue;
+        for (const it of ((await rr.json()).value || [])) push(drive, it);
+      } catch { /* ignore */ }
+    }
+    if (out.length) break; // found the folder on this drive
+  }
+  // Fallback to content search if the path walk found nothing.
+  if (!out.length) {
+    for (const drive of drives) {
+      let items;
+      try { items = ((await (await gfetch('/drives/' + drive + "/root/search(q='New Business Account Application Packet')?$top=50&$select=id,name,webUrl,file,lastModifiedDateTime")).json()).value || []); } catch { continue; }
+      for (const it of items) {
+        if (!/Maple ?Mark Account Info/i.test(it.webUrl || '')) continue;
+        push(drive, it);
+      }
     }
   }
   return out;
