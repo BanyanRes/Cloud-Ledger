@@ -1325,6 +1325,21 @@ export const api = {
     return { blob, filename };
   },
 
+  // ── Administration document folders ──
+  listAdminDocs: (tool) => request('/admin/docs/' + encodeURIComponent(tool)),
+  deleteAdminDoc: (tool, id) => request('/admin/docs/' + encodeURIComponent(tool) + '/' + id, { method: 'DELETE' }),
+  downloadAdminDoc: async (tool, id) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/admin/docs/' + encodeURIComponent(tool) + '/' + id + '/download', { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    if (!res.ok) { let data = {}; try { data = await res.json(); } catch {} throw new Error(data.error || 'Download failed'); }
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const filename = m ? m[1] : 'document';
+    const blob = await res.blob();
+    return { blob, filename };
+  },
+
   // ── Bank Account Application (MapleMark New Account Application) ──
   getBankAppStatus: () => request('/admin/bankapp/status'),
   bankAppLookup: (entity, refresh) => request('/admin/bankapp/lookup?entity=' + encodeURIComponent(entity) + (refresh ? '&refresh=1' : '')),

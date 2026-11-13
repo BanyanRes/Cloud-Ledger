@@ -748,7 +748,12 @@ function ResetPasswordScreen({token}){
 // be dragged into a different order; the new order is handed back to the caller,
 // which persists it per-user on the server. Positioned `fixed` rather than absolute
 // so the sidebar's own overflow can't clip it.
-function NavFlyout({catKey,catLabel,items,pos,page,canReorder,onPick,onClose,onReorder}){
+// Administration items that generate documents. Each gets a folder icon in the
+// flyout (left of the drag handle) opening the folder of documents it has saved.
+// The id here is also the server-side tool key (see server/admindocs.js).
+const DOC_FOLDER_TOOLS = new Set(['assignment', 'usc_capital', 'muha_invoice', 'am_fee',
+  'compliance_certs', 'time_allocation', 'letterhead', 'dissolution', 'bank_account_app']);
+function NavFlyout({catKey,catLabel,items,pos,page,canReorder,onPick,onClose,onReorder,onOpenFolder}){
   const ids=items.map(i=>i.id);
   const[list,setList]=useState(ids);
   const[drag,setDrag]=useState(null);
@@ -778,6 +783,7 @@ function NavFlyout({catKey,catLabel,items,pos,page,canReorder,onPick,onClose,onR
             fontWeight:active?600:400,color:active?T.accent:T.text,
             background:drag===i?T.bgHover:(active?T.accentDim:'transparent'),
             borderLeft:'3px solid '+(active?T.accent:'transparent')}}>
+          {DOC_FOLDER_TOOLS.has(id)&&<span onClick={e=>{e.stopPropagation();onOpenFolder&&onOpenFolder(id,n.label);}} title="Saved documents" style={{fontSize:13,cursor:'pointer',lineHeight:1}}>📁</span>}
           {canReorder&&<span onClick={e=>e.stopPropagation()} title="Drag to reorder" style={{color:T.textDim,fontSize:12,cursor:'grab',lineHeight:1}}>⠿</span>}
           <span style={{width:20,textAlign:'center'}}>{n.icon}</span>
           <span style={{flex:1,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{n.label}</span>
@@ -786,6 +792,65 @@ function NavFlyout({catKey,catLabel,items,pos,page,canReorder,onPick,onClose,onR
       {canReorder&&list.length>1&&<div style={{borderTop:'1px solid '+T.borderLight,marginTop:6,paddingTop:7,display:'flex',justifyContent:'space-between',alignItems:'center',padding:'7px 14px 0'}}>
         <span style={{fontSize:10,color:T.textDim}}>Drag to reorder</span>
         <button style={{background:'none',border:'none',color:T.textMuted,fontSize:10,cursor:'pointer',padding:0}} onClick={e=>{e.stopPropagation();onReorder(null);}}>Reset</button></div>}
+    </div></>);
+}
+
+// ═══ Administration document folder ═══
+// Opened from the folder icon beside a document-generating Administration item.
+// Lists the documents that tool has filed on the data volume, with download /
+// delete. `tool` is the server-side tool key (= the nav item id).
+function DocsFolderModal({ tool, label, onClose }) {
+  const [rows, setRows] = useState(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState('');
+  const load = () => { setErr(''); api.listAdminDocs(tool).then(r => setRows(r.rows || [])).catch(e => { setErr(e.message); setRows([]); }); };
+  useEffect(() => { load(); }, [tool]);
+  useEffect(() => { const h = e => { if (e.key === 'Escape') onClose(); }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h); }, [onClose]);
+  const fmtSize = (n) => { if (n == null) return ''; if (n < 1024) return n + ' B'; if (n < 1048576) return (n / 1024).toFixed(0) + ' KB'; return (n / 1048576).toFixed(1) + ' MB'; };
+  const fmtDate = (s) => { if (!s) return ''; const d = new Date(String(s).replace(' ', 'T') + 'Z'); return isNaN(d.getTime()) ? s : d.toLocaleString(); };
+  const download = async (row) => {
+    setBusy('d' + row.id);
+    try {
+      const out = await api.downloadAdminDoc(tool, row.id);
+      if (out) { const u = URL.createObjectURL(out.blob); const a = document.createElement('a'); a.href = u; a.download = out.filename || row.original_name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 1500); }
+    } catch (e) { setErr(e.message); } finally { setBusy(''); }
+  };
+  const del = async (row) => {
+    if (!window.confirm('Delete "' + row.original_name + '" from this folder?')) return;
+    setBusy('x' + row.id);
+    try { await api.deleteAdminDoc(tool, row.id); setRows(rs => rs.filter(r => r.id !== row.id)); }
+    catch (e) { setErr(e.message); } finally { setBusy(''); }
+  };
+  return (<>
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 200 }} onClick={onClose} />
+    <div style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', zIndex: 201, width: 'min(640px,94vw)', maxHeight: '86vh', display: 'flex', flexDirection: 'column', background: T.bgCard, borderRadius: T.radius, border: '1px solid ' + T.border, boxShadow: T.shadowLg }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 18px', borderBottom: '1px solid ' + T.borderLight }}>
+        <span style={{ fontSize: 18 }}>📁</span>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>{label}</div>
+          <div style={{ fontSize: 11, color: T.textDim }}>Saved documents</div>
+        </div>
+        <button onClick={onClose} style={{ background: 'none', border: 'none', color: T.textMuted, fontSize: 20, cursor: 'pointer', lineHeight: 1 }}>×</button>
+      </div>
+      <div style={{ padding: '10px 18px 18px', overflowY: 'auto' }}>
+        {err && <div style={{ color: T.red, fontSize: 12, marginBottom: 10 }}>{err}</div>}
+        {rows == null && <div style={{ color: T.textDim, fontSize: 13, padding: '18px 0' }}>Loading…</div>}
+        {rows && rows.length === 0 && <div style={{ color: T.textDim, fontSize: 13, padding: '24px 0', textAlign: 'center' }}>No documents saved yet. Documents this tool generates are filed here automatically.</div>}
+        {rows && rows.length > 0 && <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead><tr style={{ textAlign: 'left', color: T.textDim, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            <th style={{ padding: '6px 8px' }}>Document</th><th style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>Saved</th><th style={{ padding: '6px 8px', textAlign: 'right' }}>Size</th><th style={{ padding: '6px 8px' }}></th>
+          </tr></thead>
+          <tbody>{rows.map(row => (<tr key={row.id} style={{ borderTop: '1px solid ' + T.borderLight }}>
+            <td style={{ padding: '8px', color: T.text, wordBreak: 'break-word' }}>{row.original_name}</td>
+            <td style={{ padding: '8px', color: T.textDim, whiteSpace: 'nowrap' }}>{fmtDate(row.created_at)}</td>
+            <td style={{ padding: '8px', color: T.textDim, textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtSize(row.size)}</td>
+            <td style={{ padding: '8px', whiteSpace: 'nowrap', textAlign: 'right' }}>
+              <button onClick={() => download(row)} disabled={busy === 'd' + row.id} style={{ background: T.accent, color: '#fff', border: 'none', borderRadius: T.radiusSm, padding: '4px 10px', fontSize: 12, cursor: 'pointer', marginRight: 6 }}>{busy === 'd' + row.id ? '…' : 'Download'}</button>
+              <button onClick={() => del(row)} disabled={busy === 'x' + row.id} title="Delete" style={{ background: 'none', color: T.red, border: '1px solid ' + T.border, borderRadius: T.radiusSm, padding: '4px 8px', fontSize: 12, cursor: 'pointer' }}>{busy === 'x' + row.id ? '…' : 'Delete'}</button>
+            </td>
+          </tr>))}</tbody>
+        </table>}
+      </div>
     </div></>);
 }
 
@@ -799,6 +864,7 @@ export default function App(){
   // item order inside each category ({CATEGORY:[pageId,...]}), loaded from and
   // saved to the server so it follows the user across browsers and machines.
   const[openCat,setOpenCat]=useState(null);
+  const[docsFolder,setDocsFolder]=useState(null); // {tool,label} — Administration document folder modal
   const[navOrder,setNavOrder]=useState({});
   useEffect(()=>{
     if(!user)return;let live=true;
@@ -1111,7 +1177,9 @@ export default function App(){
       {openCat&&openCatDef&&<NavFlyout catKey={openCatDef.key} catLabel={openCatDef.label} items={orderedItems(openCatDef)}
         pos={openCat} page={page} canReorder={true}
         onPick={id=>{setPage(id);setOpenCat(null);}} onClose={()=>setOpenCat(null)}
+        onOpenFolder={(id,label)=>{setDocsFolder({tool:id,label});setOpenCat(null);}}
         onReorder={ids=>saveNavOrder(openCatDef.key,ids)}/>}
+      {docsFolder&&<DocsFolderModal tool={docsFolder.tool} label={docsFolder.label} onClose={()=>setDocsFolder(null)}/>}
       <div style={S.main}>{(()=>{const en=entities.find(e=>e.id===activeEntity);const entityName=en?en.name:'';return<>
         {page==='dashboard'&&<Dashboard entityId={activeEntity} setActiveEntity={setActiveEntity} setPage={setPage} user={user} key={rk}/>}
         {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)} onDuplicate={(entry)=>{setJeForm(jeFromEntry(entry));setShowJE(true);}} openJEId={pendingJEId} clearOpenJE={()=>setPendingJEId(null)}/>}

@@ -1541,6 +1541,11 @@ app.use(cors());
 app.use(morgan('short'));
 app.use(express.json({ limit: '10mb' }));
 
+// Administration document folders: capture every file the nine document tools
+// generate and file it into that tool's folder on the data volume. Registered
+// here (before the tool routes) so it precedes them in the middleware chain.
+require('./admindocs').registerCaptureMiddleware(app, { db, dataDir });
+
 // Rate limiter for authentication endpoints. Login and password-reset are the
 // prime targets for credential-stuffing and brute-force attempts, so cap each
 // client IP to a small number of attempts per window. Successful requests do not
@@ -11443,6 +11448,7 @@ require('./pcap').registerPcapRoutes(app, {
 // Quarterly one-page statement for USC's interest in CLIP Property Owner (54) and
 // CLR Silsbee Property Owner (39), plus the cover email / Outlook draft. Carry-
 // forward annual inputs validated against the live GL. See server/usccapital.js.
+require('./admindocs').registerAdminDocsRoutes(app, { db, auth, requireRole, dataDir });
 require('./usccapital').registerUscCapitalRoutes(app, {
   db,
   auth,
