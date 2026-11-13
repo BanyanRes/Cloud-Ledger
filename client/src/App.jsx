@@ -1056,6 +1056,7 @@ export default function App(){
       {id:'time_allocation',label:'Time Allocation',icon:'⏱️',section:'administration'},
       {id:'letterhead',label:'Letterhead',icon:'📄',section:'administration'},
       {id:'dissolution',label:'Dissolution',icon:'🏛️',section:'administration'},
+      {id:'bank_account_app',label:'Bank Account Application',icon:'🏦',section:'administration'},
       {id:'entities',label:'Entities ('+entities.length+')',icon:NI.entities,section:'all'},
       {id:'users',label:'Users',icon:NI.users,section:'all'},
       {id:'billcom',label:'Bill.com Setup',icon:'💳',section:'billcom_setup'},
@@ -1139,6 +1140,7 @@ export default function App(){
         {page==='time_allocation'&&canAccess('administration')&&<TimeAllocation user={user} key={'ta-'+rk}/>}
         {page==='letterhead'&&canAccess('administration')&&<LetterheadPage user={user} key={'lh-'+rk}/>}
         {page==='dissolution'&&canAccess('administration')&&<DissolutionPage user={user} key={'dis-'+rk}/>}
+        {page==='bank_account_app'&&canAccess('administration')&&<BankAccountPage user={user} key={'baa-'+rk}/>}
         {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} isAdmin={user.role==='Admin'} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
@@ -10872,6 +10874,144 @@ function DissolutionPage({user}){
       <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
         <input type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg" key={sigFile?'sf':'se'} onChange={e=>setSigFile(e.target.files&&e.target.files[0])}/>
         <button style={S.btnS} disabled={!sigFile||busy==='sig'} onClick={uploadSig}>{busy==='sig'?'Uploading...':'Upload signature'}</button>
+      </div>
+    </div>}
+  </div>);
+}
+
+
+// === Administration: Bank Account Application - MapleMark New Account Application ===
+function BankAccountPage({user}){
+  const isAdmin=user&&user.role==='Admin';
+  const[status,setStatus]=useState(null);
+  const[entity,setEntity]=useState('');
+  const[look,setLook]=useState(null);
+  const[f,setF]=useState({entity_type:'',ein:'',dba:'',phys_address:'',phys_city:'',phys_state:'',phys_zip:'',mail_address:'',mail_city:'',mail_state:'',mail_zip:'',email:'',phone:'',nature:'',person_opening:''});
+  const[busy,setBusy]=useState('');
+  const[err,setErr]=useState('');
+  const[msg,setMsg]=useState('');
+  const[tplFile,setTplFile]=useState(null);
+  const set=(k,v)=>setF(p=>({...p,[k]:v}));
+  const load=async()=>{try{setStatus(await api.getBankAppStatus());}catch(e){setErr(e.message);}};
+  useEffect(()=>{load();},[]);
+  const lookup=async(refresh)=>{
+    const e=entity.trim(); if(!e){setErr('Enter an entity name first.');return;}
+    setBusy('lookup');setErr('');setMsg('');setLook(null);
+    try{
+      const r=await api.bankAppLookup(e,refresh);
+      setLook(r);
+      setF(p=>({...p,
+        entity_type:r.entity_type||p.entity_type,
+        ein:r.ein||p.ein,
+        dba:(r.dba!=null?r.dba:p.dba),
+        phys_address:(r.phys&&r.phys.address)||p.phys_address,
+        phys_city:(r.phys&&r.phys.city)||p.phys_city,
+        phys_state:(r.phys&&r.phys.state)||p.phys_state,
+        phys_zip:(r.phys&&r.phys.zip)||p.phys_zip,
+        mail_address:(r.mail&&r.mail.address)||p.mail_address,
+        mail_city:(r.mail&&r.mail.city)||p.mail_city,
+        mail_state:(r.mail&&r.mail.state)||p.mail_state,
+        mail_zip:(r.mail&&r.mail.zip)||p.mail_zip,
+        email:(r.email!=null?r.email:p.email),
+        phone:(r.phone!=null?r.phone:p.phone),
+        nature:(r.nature!=null?r.nature:p.nature),
+      }));
+    }catch(ex){setErr(ex.message);}finally{setBusy('');}
+  };
+  const saveProfile=async()=>{
+    const e=entity.trim(); if(!e)return;
+    setBusy('save');setErr('');setMsg('');
+    try{await api.saveBankProfile({entity:e,...f});setMsg('Entity details saved for '+e+'.');}
+    catch(ex){setErr(ex.message);}finally{setBusy('');}
+  };
+  const generate=async()=>{
+    const e=entity.trim(); if(!e){setErr('Enter an entity name.');return;}
+    setBusy('gen');setErr('');setMsg('');
+    try{
+      const out=await api.generateBankApplication({entity:e,...f});
+      if(!out)return;
+      const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
+      setMsg('Generated '+out.filename+'.');
+    }catch(ex){setErr(ex.message);}finally{setBusy('');}
+  };
+  const uploadTpl=async()=>{
+    if(!tplFile)return;
+    setBusy('tpl');setErr('');setMsg('');
+    try{await api.uploadBankAppTemplate(tplFile);setMsg('Template installed.');setTplFile(null);await load();}
+    catch(ex){setErr(ex.message);}finally{setBusy('');}
+  };
+  const srcLabel=(s)=>s==='sharepoint'?'SharePoint':(s==='manual'?'a saved entry':'the store');
+  const fld=(label,key,ph,w)=>(<div style={{minWidth:w||150,flex:1}}>
+    <label style={S.label}>{label}</label>
+    <input style={S.input} value={f[key]} placeholder={ph||''} onChange={e=>set(key,e.target.value)}/>
+  </div>);
+  return(<div>
+    <div style={{marginBottom:8}}>
+      <div style={S.h1}>Bank Account Application</div>
+      <div style={S.sub}>Generate a MapleMark Bank New Account Application (Business &amp; Trust) packet. Enter the entity name; its type, EIN and address are looked up{status&&status.graph_configured?' from SharePoint':''} and filled into the form. Signer, beneficial-owner and account-choice fields are left blank for manual completion.</div>
+    </div>
+    {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
+    {msg&&<div style={{marginBottom:12,padding:'8px 12px',background:'#dcfce7',color:'#166534',borderRadius:6,fontSize:13}}>{msg}</div>}
+
+    <div style={S.card}>
+      <div style={S.h2}>New Account Application</div>
+      <div style={S.row}>
+        <div style={{flex:2,minWidth:260}}>
+          <label style={S.label}>Entity name</label>
+          <input style={S.input} value={entity} placeholder="e.g. CLRFI Midco I, LLC"
+            onChange={e=>setEntity(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')lookup(false);}}/>
+        </div>
+        <div style={{alignSelf:'flex-end'}}>
+          <button style={S.btnS} disabled={busy==='lookup'} onClick={()=>lookup(false)}>{busy==='lookup'?'Looking up...':'Look up entity info'}</button>
+        </div>
+      </div>
+      {look&&<div style={{fontSize:12,color:'#475569',marginBottom:12,marginTop:-4}}>
+        {look.found
+          ? <>Found via <b>{srcLabel(look.source)}</b>{look.source_file?<> - <a href={look.source_url||'#'} target="_blank" rel="noreferrer" style={S.link}>{look.source_file}</a></>:null}. Review the fields below before generating.</>
+          : <>No stored or SharePoint record found{look.graph_configured?'':' (live SharePoint lookup is off on the server)'} - the entity type is derived from the name; enter the EIN and address below.
+              {look.candidates&&look.candidates.length?<div style={{marginTop:4}}>Candidate files: {look.candidates.slice(0,5).map((c,i)=>(<span key={i}><a href={c.webUrl} target="_blank" rel="noreferrer" style={S.link}>{c.name}</a>{i<Math.min(5,look.candidates.length)-1?', ':''}</span>))}</div>:null}</>}
+      </div>}
+      <div style={S.row}>
+        {fld('Entity type','entity_type','e.g. Limited Liability Company',200)}
+        {fld('Tax ID (EIN)','ein','XX-XXXXXXX',140)}
+        {fld('DBA (optional)','dba','',140)}
+      </div>
+      <div style={S.row}>
+        {fld('Physical address','phys_address','Street',240)}
+        {fld('City','phys_city','',120)}
+        {fld('State','phys_state','',70)}
+        {fld('ZIP','phys_zip','',90)}
+      </div>
+      <div style={S.row}>
+        {fld('Mailing address (if different)','mail_address','defaults to physical',240)}
+        {fld('City','mail_city','',120)}
+        {fld('State','mail_state','',70)}
+        {fld('ZIP','mail_zip','',90)}
+      </div>
+      <div style={S.row}>
+        {fld('Entity email','email','',200)}
+        {fld('Entity phone','phone','',160)}
+        {fld('Nature of business','nature','e.g. Real estate development and investment',260)}
+      </div>
+      <div style={S.row}>
+        {fld('Person opening account (optional)','person_opening','name on the beneficial-ownership page',260)}
+      </div>
+      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginTop:4,alignItems:'center'}}>
+        <button style={S.btnP} disabled={busy==='gen'||!status||(status&&!status.template_available)} onClick={generate}>{busy==='gen'?'Generating...':'Generate application packet'}</button>
+        <button style={S.btnS} disabled={busy==='save'} onClick={saveProfile} title="Remember this entity's details for next time">{busy==='save'?'Saving...':'Save entity details'}</button>
+      </div>
+      {status&&!status.template_available&&<div style={{fontSize:12,color:'#991b1b',marginTop:8}}>No blank packet is installed yet{isAdmin?' - upload it below to enable generation.':' - ask an Admin to upload the blank MapleMark packet.'}</div>}
+    </div>
+
+    {isAdmin&&<div style={S.card}>
+      <div style={S.h2}>Template &amp; data source</div>
+      <div style={{fontSize:13,color:'#475569',marginBottom:10,lineHeight:1.6}}>
+        MapleMark New Account Application packet: {status&&status.template_installed?<b style={{color:'#166534'}}>uploaded override installed</b>:(status&&status.bundled_template?<b style={{color:'#166534'}}>using the built-in bundled form</b>:<b style={{color:'#991b1b'}}>not installed</b>)}. Upload the blank fillable packet (the 4-page application plus the 2-page Beneficial Ownership form) once to enable generation.<br/>
+        Live SharePoint lookup (type / EIN / address): <b style={{color:status&&status.graph_configured?'#166534':'#991b1b'}}>{status&&status.graph_configured?'on':'off'}</b>{status&&!status.graph_configured?<span style={{color:'#64748b'}}> (set MS_TENANT_ID / MS_CLIENT_ID / MS_CLIENT_SECRET on the server to enable). Until then, details come from saved entries or manual input.</span>:null}
+      </div>
+      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+        <input type="file" accept="application/pdf,.pdf" key={tplFile?'f':'e'} onChange={e=>setTplFile(e.target.files&&e.target.files[0])}/>
+        <button style={S.btnS} disabled={!tplFile||busy==='tpl'} onClick={uploadTpl}>{busy==='tpl'?'Uploading...':'Upload packet'}</button>
       </div>
     </div>}
   </div>);

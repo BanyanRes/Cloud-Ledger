@@ -11829,6 +11829,20 @@ require('./dissolution').registerDissolutionRoutes(app, {
   templatesDir: path.join(dataDir, 'templates'),
 });
 
+// ═══ Bank Account Application — MapleMark New Account Application filler ═══
+// Entity name → entity type (from the legal-name suffix) + EIN/address (a live
+// SharePoint search via Microsoft Graph when configured, else saved/manual
+// entry) → a partially-filled MapleMark New Account Application packet. PII,
+// signer and account-choice fields are left blank. The blank packet lives on
+// the data volume, uploaded once via the page (Admin). See server/bankaccount.js.
+require('./bankaccount').registerBankAccountRoutes(app, {
+  db,
+  auth,
+  requireRole,
+  memUpload,
+  templatesDir: path.join(dataDir, 'templates'),
+});
+
 
 // ═══ Financial Statements package generator ═══
 // Generates GL-derived financial statements (Balance Sheet, Operations, Cash

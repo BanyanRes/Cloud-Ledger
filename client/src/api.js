@@ -1325,6 +1325,34 @@ export const api = {
     return { blob, filename };
   },
 
+  // ── Bank Account Application (MapleMark New Account Application) ──
+  getBankAppStatus: () => request('/admin/bankapp/status'),
+  bankAppLookup: (entity, refresh) => request('/admin/bankapp/lookup?entity=' + encodeURIComponent(entity) + (refresh ? '&refresh=1' : '')),
+  getBankProfiles: () => request('/admin/bankapp/profiles'),
+  saveBankProfile: (body) => request('/admin/bankapp/profile', { method: 'POST', body }),
+  uploadBankAppTemplate: async (file) => {
+    const token = getToken();
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(API_BASE + '/admin/bankapp/template', { method: 'POST', headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: fd });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    let data = {}; try { data = await res.json(); } catch {}
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    return data;
+  },
+  generateBankApplication: async (payload) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/admin/bankapp/generate', { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: JSON.stringify(payload) });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    const ctype = res.headers.get('content-type') || '';
+    if (!res.ok || ctype.includes('application/json')) { let data = {}; try { data = await res.json(); } catch {} throw new Error(data.error || 'Generation failed'); }
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const filename = m ? m[1] : 'MapleMark_New_Account_Application.pdf';
+    const blob = await res.blob();
+    return { blob, filename };
+  },
+
   // ── Banyan Letterhead (fillable PDF generator) ──
   getLetterheadLogoStatus: () => request('/letterhead/logo/status'),
   getLetterheadLogoPreview: async () => {
