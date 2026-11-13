@@ -1339,6 +1339,25 @@ export const api = {
     const blob = await res.blob();
     return { blob, filename };
   },
+  uploadAdminDocs: (tool, files, folder) => {
+    const fd = new FormData();
+    for (const f of files) fd.append('files', f);
+    fd.append('folder', folder || '');
+    return request('/admin/docs/' + encodeURIComponent(tool) + '/upload', { method: 'POST', body: fd });
+  },
+  createAdminDocFolder: (tool, folder) => request('/admin/docs/' + encodeURIComponent(tool) + '/folders', { method: 'POST', body: { folder } }),
+  deleteAdminDocFolder: (tool, folder) => request('/admin/docs/' + encodeURIComponent(tool) + '/folders?folder=' + encodeURIComponent(folder), { method: 'DELETE' }),
+  downloadAdminDocsAll: async (tool, folder) => {
+    const token = getToken();
+    const res = await fetch(API_BASE + '/admin/docs/' + encodeURIComponent(tool) + '/download-all?folder=' + encodeURIComponent(folder || ''), { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    if (!res.ok) { let data = {}; try { data = await res.json(); } catch {} throw new Error(data.error || 'Download failed'); }
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^"]+)"?/);
+    const filename = m ? m[1] : (tool + '.zip');
+    const blob = await res.blob();
+    return { blob, filename };
+  },
 
   // ── Bank Account Application (MapleMark New Account Application) ──
   getBankAppStatus: () => request('/admin/bankapp/status'),

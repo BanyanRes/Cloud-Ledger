@@ -797,61 +797,182 @@ function NavFlyout({catKey,catLabel,items,pos,page,canReorder,onPick,onClose,onR
 
 // ═══ Administration document folder ═══
 // Opened from the folder icon beside a document-generating Administration item.
-// Lists the documents that tool has filed on the data volume, with download /
-// delete. `tool` is the server-side tool key (= the nav item id).
-function DocsFolderModal({ tool, label, onClose }) {
-  const [rows, setRows] = useState(null);
+// A folder browser (like the entity Workpapers browser) over the documents that
+// tool has filed on the data volume: subfolders, upload, download, delete,
+// download-all. `tool` is the server-side tool key (= the nav item id). Bank
+// Account Application groups each entity's package under its own subfolder.
+function DocsFolderModal({ tool, label, user, onClose }) {
+  const [files, setFiles] = useState([]);
+  const [folders, setFolders] = useState([]);
+  const [curPath, setCurPath] = useState('');
+  const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
+  const [msg, setMsg] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [uploadTarget, setUploadTarget] = useState('');
+  const [newFolderMode, setNewFolderMode] = useState(false);
+  const [newFolderName, setNewFolderName] = useState('');
+  const [zipBusy, setZipBusy] = useState(false);
   const [busy, setBusy] = useState('');
-  const load = () => { setErr(''); api.listAdminDocs(tool).then(r => setRows(r.rows || [])).catch(e => { setErr(e.message); setRows([]); }); };
-  useEffect(() => { load(); }, [tool]);
+  const fileInputRef = useRef(null);
+  const canEdit = user && (user.role === 'Admin' || user.role === 'Accountant');
+  const isAdmin = user && user.role === 'Admin';
+
+  useEffect(() => { setUploadTarget(curPath); }, [curPath]);
+  const load = useCallback(async () => {
+    setLoading(true); setErr('');
+    try { const r = await api.listAdminDocs(tool); setFiles(r.files || []); setFolders(r.folders || []); }
+    catch (e) { setErr(e.message); } finally { setLoading(false); }
+  }, [tool]);
+  useEffect(() => { load(); }, [load]);
   useEffect(() => { const h = e => { if (e.key === 'Escape') onClose(); }; window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h); }, [onClose]);
-  const fmtSize = (n) => { if (n == null) return ''; if (n < 1024) return n + ' B'; if (n < 1048576) return (n / 1024).toFixed(0) + ' KB'; return (n / 1048576).toFixed(1) + ' MB'; };
-  const fmtDate = (s) => { if (!s) return ''; const d = new Date(String(s).replace(' ', 'T') + 'Z'); return isNaN(d.getTime()) ? s : d.toLocaleString(); };
-  const download = async (row) => {
-    setBusy('d' + row.id);
+
+  const currentFiles = files.filter(f => String(f.folder || '') === curPath);
+  const childFolders = useMemo(() => {
+    const set = new Set();
+    folders.forEach(fp => {
+      if (curPath === '') { if (!fp.includes('/')) set.add(fp); }
+      else if (fp.startsWith(curPath + '/')) { const rest = fp.slice(curPath.length + 1); if (!rest.includes('/')) set.add(fp); }
+    });
+    return Array.from(set).sort();
+  }, [folders, curPath]);
+
+  const breadcrumbs = useMemo(() => {
+    if (!curPath) return [{ label, path: '' }];
+    const parts = curPath.split('/');
+    return [{ label, path: '' }, ...parts.map((_, i) => ({ label: parts[i], path: parts.slice(0, i + 1).join('/') }))];
+  }, [curPath, label]);
+  const allFolderPaths = useMemo(() => ['', ...folders], [folders]);
+  const downloadAllFiles = useMemo(() => files.filter(f => {
+    const fp = String(f.folder || '');
+    return curPath === '' ? true : (fp === curPath || fp.startsWith(curPath + '/'));
+  }), [files, curPath]);
+
+  const fmtPstDate = ts => {
+    if (!ts) return '';
+    return new Date(ts + (ts.includes('Z') || ts.includes('+') ? '' : 'Z')).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+  };
+
+  const doUpload = async e => {
+    const fileList = e.target.files;
+    if (!fileList || !fileList.length) return;
+    setErr(''); setMsg(''); setUploading(true);
+    try { const r = await api.uploadAdminDocs(tool, fileList, uploadTarget); setMsg(r.uploaded + ' file(s) uploaded to ' + (uploadTarget || 'root')); load(); }
+    catch (ex) { setErr(ex.message || 'Upload failed'); }
+    finally { setUploading(false); if (fileInputRef.current) fileInputRef.current.value = ''; }
+  };
+  const createFolder = async () => {
+    if (!newFolderName.trim()) { setErr('Folder name required'); return; }
+    const fullPath = curPath ? curPath + '/' + newFolderName.trim() : newFolderName.trim();
+    setErr(''); setMsg('');
+    try { await api.createAdminDocFolder(tool, fullPath); setNewFolderMode(false); setNewFolderName(''); setMsg('Folder created'); load(); }
+    catch (ex) { setErr(ex.message); }
+  };
+  const deleteFile = async f => {
+    if (!confirm('Delete "' + f.original_name + '"?')) return;
+    setErr(''); setMsg(''); setBusy('x' + f.id);
+    try { await api.deleteAdminDoc(tool, f.id); setFiles(fs => fs.filter(x => x.id !== f.id)); }
+    catch (ex) { setErr(ex.message); } finally { setBusy(''); }
+  };
+  const deleteFolder = async fp => {
+    if (!confirm('Delete folder "' + fp.split('/').pop() + '"? The folder must be empty.')) return;
+    setErr(''); setMsg('');
+    try { await api.deleteAdminDocFolder(tool, fp); load(); }
+    catch (ex) { setErr(ex.message); }
+  };
+  const download = async f => {
+    setBusy('d' + f.id);
+    try { const out = await api.downloadAdminDoc(tool, f.id); if (out) { const u = URL.createObjectURL(out.blob); const a = document.createElement('a'); a.href = u; a.download = out.filename || f.original_name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 1500); } }
+    catch (ex) { setErr(ex.message); } finally { setBusy(''); }
+  };
+  const downloadAll = async () => {
+    if (!downloadAllFiles.length || zipBusy) return;
+    setErr(''); setMsg(''); setZipBusy(true);
     try {
-      const out = await api.downloadAdminDoc(tool, row.id);
-      if (out) { const u = URL.createObjectURL(out.blob); const a = document.createElement('a'); a.href = u; a.download = out.filename || row.original_name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 1500); }
-    } catch (e) { setErr(e.message); } finally { setBusy(''); }
+      const out = await api.downloadAdminDocsAll(tool, curPath);
+      if (out) { const u = URL.createObjectURL(out.blob); const a = document.createElement('a'); a.href = u; a.download = out.filename; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(u), 1000); setMsg('Downloaded ' + downloadAllFiles.length + ' file(s) as a ZIP.'); }
+    } catch (ex) { setErr(ex.message || 'Download failed'); } finally { setZipBusy(false); }
   };
-  const del = async (row) => {
-    if (!window.confirm('Delete "' + row.original_name + '" from this folder?')) return;
-    setBusy('x' + row.id);
-    try { await api.deleteAdminDoc(tool, row.id); setRows(rs => rs.filter(r => r.id !== row.id)); }
-    catch (e) { setErr(e.message); } finally { setBusy(''); }
-  };
-  return (<>
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 200 }} onClick={onClose} />
-    <div style={{ position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', zIndex: 201, width: 'min(640px,94vw)', maxHeight: '86vh', display: 'flex', flexDirection: 'column', background: T.bgCard, borderRadius: T.radius, border: '1px solid ' + T.border, boxShadow: T.shadowLg }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 18px', borderBottom: '1px solid ' + T.borderLight }}>
-        <span style={{ fontSize: 18 }}>📁</span>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: T.text }}>{label}</div>
-          <div style={{ fontSize: 11, color: T.textDim }}>Saved documents</div>
-        </div>
-        <button onClick={onClose} style={{ background: 'none', border: 'none', color: T.textMuted, fontSize: 20, cursor: 'pointer', lineHeight: 1 }}>×</button>
+
+  return (<div style={S.modal} onClick={onClose}><div className="cl-modal-box" style={{ ...S.modalBox, maxWidth: 944, maxHeight: '92vh', display: 'flex', flexDirection: 'column' }} onClick={e => e.stopPropagation()}>
+    <button style={S.modalClose} onClick={onClose}>&times;</button>
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ fontSize: 18, fontWeight: 700, color: T.textBright, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 22 }}>📁</span> {label} &mdash; Saved documents
       </div>
-      <div style={{ padding: '10px 18px 18px', overflowY: 'auto' }}>
-        {err && <div style={{ color: T.red, fontSize: 12, marginBottom: 10 }}>{err}</div>}
-        {rows == null && <div style={{ color: T.textDim, fontSize: 13, padding: '18px 0' }}>Loading…</div>}
-        {rows && rows.length === 0 && <div style={{ color: T.textDim, fontSize: 13, padding: '24px 0', textAlign: 'center' }}>No documents saved yet. Documents this tool generates are filed here automatically.</div>}
-        {rows && rows.length > 0 && <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
-          <thead><tr style={{ textAlign: 'left', color: T.textDim, fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.04em' }}>
-            <th style={{ padding: '6px 8px' }}>Document</th><th style={{ padding: '6px 8px', whiteSpace: 'nowrap' }}>Saved</th><th style={{ padding: '6px 8px', textAlign: 'right' }}>Size</th><th style={{ padding: '6px 8px' }}></th>
-          </tr></thead>
-          <tbody>{rows.map(row => (<tr key={row.id} style={{ borderTop: '1px solid ' + T.borderLight }}>
-            <td style={{ padding: '8px', color: T.text, wordBreak: 'break-word' }}>{row.original_name}</td>
-            <td style={{ padding: '8px', color: T.textDim, whiteSpace: 'nowrap' }}>{fmtDate(row.created_at)}</td>
-            <td style={{ padding: '8px', color: T.textDim, textAlign: 'right', whiteSpace: 'nowrap' }}>{fmtSize(row.size)}</td>
-            <td style={{ padding: '8px', whiteSpace: 'nowrap', textAlign: 'right' }}>
-              <button onClick={() => download(row)} disabled={busy === 'd' + row.id} style={{ background: T.accent, color: '#fff', border: 'none', borderRadius: T.radiusSm, padding: '4px 10px', fontSize: 12, cursor: 'pointer', marginRight: 6 }}>{busy === 'd' + row.id ? '…' : 'Download'}</button>
-              <button onClick={() => del(row)} disabled={busy === 'x' + row.id} title="Delete" style={{ background: 'none', color: T.red, border: '1px solid ' + T.border, borderRadius: T.radiusSm, padding: '4px 8px', fontSize: 12, cursor: 'pointer' }}>{busy === 'x' + row.id ? '…' : 'Delete'}</button>
-            </td>
-          </tr>))}</tbody>
-        </table>}
+    </div>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 14, padding: '10px 14px', background: T.bgElevated, borderRadius: T.radiusSm, fontSize: 13 }}>
+      {breadcrumbs.map((b, i) => <span key={i} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {i > 0 && <span style={{ color: T.textDim }}>&rsaquo;</span>}
+        {i === breadcrumbs.length - 1
+          ? <span style={{ fontWeight: 600, color: T.textBright }}>{b.label}</span>
+          : <button style={{ background: 'none', border: 0, padding: 0, color: T.accent, cursor: 'pointer', fontSize: 13, fontFamily: 'inherit' }} onClick={() => setCurPath(b.path)}>{b.label}</button>}
+      </span>)}
+    </div>
+    {canEdit && <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+      <input ref={fileInputRef} type="file" multiple style={{ display: 'none' }} onChange={doUpload} />
+      <button style={{ ...S.btnP, opacity: uploading ? 0.6 : 1, cursor: uploading ? 'not-allowed' : 'pointer' }} disabled={uploading} onClick={() => fileInputRef.current && fileInputRef.current.click()}>{uploading ? 'Uploading...' : '+ Upload Files'}</button>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: T.textMuted }}>
+        <span>to:</span>
+        <select style={{ ...S.inputSm, minWidth: 200, maxWidth: 360 }} value={uploadTarget} onChange={e => setUploadTarget(e.target.value)} disabled={uploading}>
+          {allFolderPaths.map(fp => <option key={fp || '__root__'} value={fp}>{fp ? label + ' / ' + fp : label + ' (root)'}</option>)}
+        </select>
       </div>
-    </div></>);
+      {!newFolderMode
+        ? <button style={S.btnS} onClick={() => { setNewFolderMode(true); setNewFolderName(''); }}>+ New Folder</button>
+        : <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input style={{ ...S.inputSm, minWidth: 180 }} placeholder="Folder name" value={newFolderName} onChange={e => setNewFolderName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') createFolder(); if (e.key === 'Escape') setNewFolderMode(false); }} autoFocus />
+            <button style={{ ...S.btnS, padding: '6px 12px', fontSize: 11 }} onClick={createFolder}>Create</button>
+            <button style={{ ...S.btnGhost, fontSize: 11 }} onClick={() => setNewFolderMode(false)}>Cancel</button>
+          </div>}
+    </div>}
+    {err && <div style={{ ...S.err, marginBottom: 10 }}>{err}</div>}
+    {msg && <div style={{ ...S.success, marginBottom: 10 }}>{msg}</div>}
+    <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+      <button style={{ ...S.btnS, opacity: (downloadAllFiles.length === 0 || zipBusy) ? 0.5 : 1, cursor: (downloadAllFiles.length === 0 || zipBusy) ? 'not-allowed' : 'pointer' }}
+        disabled={downloadAllFiles.length === 0 || zipBusy}
+        title={downloadAllFiles.length === 0 ? 'Nothing to download in this folder' : 'Download every file in this folder and its subfolders as one ZIP'}
+        onClick={downloadAll}>{zipBusy ? 'Zipping...' : 'Download All' + (downloadAllFiles.length ? ' (' + downloadAllFiles.length + ')' : '')}</button>
+    </div>
+    <div style={{ flex: '0 1 auto', minHeight: 160, overflowY: 'auto', border: '1px solid ' + T.border, borderRadius: T.radiusSm }}>
+      {loading ? <div style={{ padding: 60, textAlign: 'center', color: T.textMuted }}>Loading...</div>
+       : (childFolders.length === 0 && currentFiles.length === 0)
+         ? <div style={{ padding: 60, textAlign: 'center', color: T.textDim }}>This folder is empty{canEdit ? '. Documents this tool generates are filed here automatically; upload files or create a subfolder too.' : '.'}</div>
+         : <table style={S.table}>
+            <thead style={{ position: 'sticky', top: 0, background: T.bgCard, zIndex: 1 }}>
+              <tr><th style={S.th}>Name</th><th style={S.thR} width={110}>Size</th><th style={S.th} width={190}>Saved By</th><th style={S.th} width={180}>Date (PST)</th><th style={S.th} width={150}></th></tr>
+            </thead>
+            <tbody>
+              {childFolders.map(fp => <tr key={'d-' + fp} style={{ background: T.bgElevated }}>
+                <td style={S.td}>
+                  <button style={{ background: 'none', border: 0, padding: 0, color: T.accent, fontWeight: 600, cursor: 'pointer', fontSize: 13, fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 8 }} onClick={() => setCurPath(fp)}>
+                    <span style={{ fontSize: 16 }}>📁</span> {fp.split('/').pop()}
+                  </button>
+                </td>
+                <td style={S.tdR}></td><td style={S.td}></td><td style={S.td}></td>
+                <td style={S.td}>{canEdit && <div style={{ display: 'flex', gap: 6 }}>
+                  <button style={{ ...S.btnGhost, color: T.red, fontSize: 11 }} onClick={() => deleteFolder(fp)}>Delete</button>
+                </div>}</td>
+              </tr>)}
+              {currentFiles.map(f => <tr key={'f-' + f.id}>
+                <td style={S.td}>
+                  <button onClick={() => download(f)} disabled={busy === 'd' + f.id} style={{ background: 'none', border: 0, padding: 0, color: T.textBright, cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 8 }}
+                    onMouseEnter={e => e.currentTarget.style.color = T.accent} onMouseLeave={e => e.currentTarget.style.color = T.textBright}>
+                    <span style={{ fontSize: 14 }}>📄</span> {f.original_name}
+                  </button>
+                </td>
+                <td style={{ ...S.tdR, color: T.textMuted, fontSize: 12 }}>{fmtSize(f.size)}</td>
+                <td style={{ ...S.td, color: T.textMuted, fontSize: 12 }}>{f.created_by}</td>
+                <td style={{ ...S.td, color: T.textMuted, fontSize: 12 }}>{fmtPstDate(f.created_at)}</td>
+                <td style={S.td}><div style={{ display: 'flex', gap: 6 }}>
+                  <button style={{ ...S.btnGhost, color: T.accent, fontSize: 11 }} disabled={busy === 'd' + f.id} onClick={() => download(f)}>{busy === 'd' + f.id ? '…' : 'Download'}</button>
+                  {isAdmin && <button style={{ ...S.btnGhost, color: T.red, fontSize: 11 }} disabled={busy === 'x' + f.id} onClick={() => deleteFile(f)}>{busy === 'x' + f.id ? '…' : 'Delete'}</button>}
+                </div></td>
+              </tr>)}
+            </tbody>
+          </table>}
+    </div>
+  </div></div>);
 }
 
 export default function App(){
@@ -1179,7 +1300,7 @@ export default function App(){
         onPick={id=>{setPage(id);setOpenCat(null);}} onClose={()=>setOpenCat(null)}
         onOpenFolder={(id,label)=>{setDocsFolder({tool:id,label});setOpenCat(null);}}
         onReorder={ids=>saveNavOrder(openCatDef.key,ids)}/>}
-      {docsFolder&&<DocsFolderModal tool={docsFolder.tool} label={docsFolder.label} onClose={()=>setDocsFolder(null)}/>}
+      {docsFolder&&<DocsFolderModal tool={docsFolder.tool} label={docsFolder.label} user={user} onClose={()=>setDocsFolder(null)}/>}
       <div style={S.main}>{(()=>{const en=entities.find(e=>e.id===activeEntity);const entityName=en?en.name:'';return<>
         {page==='dashboard'&&<Dashboard entityId={activeEntity} setActiveEntity={setActiveEntity} setPage={setPage} user={user} key={rk}/>}
         {page==='journal'&&activeEntity&&<JournalList entityId={activeEntity} entityName={entityName} dimsEnabled={dimsEnabled} canEdit={canEdit} key={activeEntity+'-'+rk} onNewEntry={()=>setShowJE(true)} onDuplicate={(entry)=>{setJeForm(jeFromEntry(entry));setShowJE(true);}} openJEId={pendingJEId} clearOpenJE={()=>setPendingJEId(null)}/>}
