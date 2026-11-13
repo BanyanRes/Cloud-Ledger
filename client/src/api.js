@@ -1340,6 +1340,16 @@ export const api = {
     if (!res.ok) throw new Error(data.error || 'Upload failed');
     return data;
   },
+  uploadBankAppReference: async (file) => {
+    const token = getToken();
+    const fd = new FormData();
+    fd.append('file', file);
+    const res = await fetch(API_BASE + '/admin/bankapp/reference', { method: 'POST', headers: { ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: fd });
+    if (res.status === 401) { clearToken(); window.location.reload(); return null; }
+    let data = {}; try { data = await res.json(); } catch {}
+    if (!res.ok) throw new Error(data.error || 'Upload failed');
+    return data;
+  },
   generateBankApplication: async (payload) => {
     const token = getToken();
     const res = await fetch(API_BASE + '/admin/bankapp/generate', { method: 'POST', headers: { 'content-type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) }, body: JSON.stringify(payload) });

@@ -10892,6 +10892,7 @@ function BankAccountPage({user}){
   const[err,setErr]=useState('');
   const[msg,setMsg]=useState('');
   const[tplFile,setTplFile]=useState(null);
+  const[refFile,setRefFile]=useState(null);
   const set=(k,v)=>setF(p=>({...p,[k]:v}));
   const load=async()=>{try{setStatus(await api.getBankAppStatus());}catch(e){setErr(e.message);}};
   useEffect(()=>{load();},[]);
@@ -10930,16 +10931,22 @@ function BankAccountPage({user}){
     try{await api.uploadBankAppTemplate(tplFile);setMsg('Template installed.');setTplFile(null);await load();}
     catch(ex){setErr(ex.message);}finally{setBusy('');}
   };
+  const uploadRef=async()=>{
+    if(!refFile)return;
+    setBusy('ref');setErr('');setMsg('');
+    try{await api.uploadBankAppReference(refFile);setMsg('Reference packet installed.');setRefFile(null);await load();}
+    catch(ex){setErr(ex.message);}finally{setBusy('');}
+  };
   const srcLabel=(s)=>s==='sharepoint'?'SharePoint':(s==='manual'?'a saved entry':'the store');
   const fld=(label,key,ph,w)=>(<div style={{minWidth:w||150,flex:1}}>
     <label style={S.label}>{label}</label>
     <input style={S.input} value={f[key]} placeholder={ph||''} onChange={e=>set(key,e.target.value)}/>
   </div>);
-  const canGen=status&&status.template_available;
+  const canGen=status&&status.can_generate;
   return(<div>
     <div style={{marginBottom:8}}>
       <div style={S.h1}>Bank Account Application</div>
-      <div style={S.sub}>Enter an entity name and generate a MapleMark Bank New Account Application (Business &amp; Trust) packet. CloudLedger fills the entity's type, EIN and address{status&&status.graph_configured?' from SharePoint':''}; signer, beneficial-owner and account-choice fields are left blank for manual completion.</div>
+      <div style={S.sub}>Enter an entity name and generate a MapleMark Bank New Account Application (Business &amp; Trust) packet. CloudLedger fills the entity's type, EIN and address{status&&status.graph_configured?' from SharePoint':''}{status&&status.reference_installed?', plus the standard signer, manager and account-profile answers from the reference packet':''}. The per-entity 25% beneficial-owner rows are left blank for you to complete.</div>
     </div>
     {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
     {msg&&<div style={{marginBottom:12,padding:'8px 12px',background:'#dcfce7',color:'#166534',borderRadius:6,fontSize:13}}>{msg}</div>}
@@ -11007,6 +11014,13 @@ function BankAccountPage({user}){
       <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
         <input type="file" accept="application/pdf,.pdf" key={tplFile?'f':'e'} onChange={e=>setTplFile(e.target.files&&e.target.files[0])}/>
         <button style={S.btnS} disabled={!tplFile||busy==='tpl'} onClick={uploadTpl}>{busy==='tpl'?'Uploading...':'Upload packet'}</button>
+      </div>
+      <div style={{fontSize:13,color:'#475569',margin:'16px 0 8px',lineHeight:1.6,borderTop:'1px solid #e2e8f0',paddingTop:14}}>
+        Reference completed packet: {status&&status.reference_installed?<b style={{color:'#166534'}}>installed</b>:<b style={{color:'#475569'}}>none</b>}. Upload one completed Banyan packet (e.g. a signed Business Account Application). Its standard signer, managing-owner and account-profile answers are cloned into every packet you generate, with only the entity name, type, EIN and address swapped in. It lives on the server data volume; its signer/owner SSNs are never stored in CloudLedger, and the per-entity 25% beneficial-owner rows are always left blank.
+      </div>
+      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+        <input type="file" accept="application/pdf,.pdf" key={refFile?'rf':'re'} onChange={e=>setRefFile(e.target.files&&e.target.files[0])}/>
+        <button style={S.btnS} disabled={!refFile||busy==='ref'} onClick={uploadRef}>{busy==='ref'?'Uploading...':'Upload reference'}</button>
       </div>
     </div>}
   </div>);

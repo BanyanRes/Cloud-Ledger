@@ -47,6 +47,7 @@ const path = require('path');
 const { PDFDocument, StandardFonts } = require('pdf-lib');
 
 const TEMPLATE_FILE = 'maplemark_new_account_application.pdf';
+const REFERENCE_FILE = 'maplemark_reference_filled.pdf'; // a completed Banyan packet whose boilerplate is cloned
 
 // Fields that must exist in a valid MapleMark packet (sanity-check on upload).
 const REQUIRED_FIELDS = ['Entity Name', 'TIN', 'Entity Type'];
@@ -347,12 +348,57 @@ async function fillBankApplication(templateBuf, f) {
   return Buffer.from(await pdf.save());
 }
 
+// Clone a FILLED reference packet: overwrite the entity-specific fields with the
+// target entity's data, clear the per-entity 25%-owner rows, and keep all of the
+// reference's standard boilerplate (authorized signer, managing beneficial
+// owner, person opening the account, account-profile selections, primary
+// activity, entity attributes). Any PII in the reference (signer / owner SSN,
+// DOB) stays on the data volume — it is never read into or stored by CloudLedger.
+async function fillFromReference(refBuf, f) {
+  const pdf = await PDFDocument.load(refBuf);
+  const form = pdf.getForm();
+  const font = await pdf.embedFont(StandardFonts.Helvetica);
+  const setT = (name, val) => { try { form.getTextField(name).setText(val == null ? '' : String(val)); } catch { /* field absent — ignore */ } };
+  // Entity-specific fields: ALWAYS overwrite (blank when unknown) so the
+  // reference entity's own values never leak through.
+  setT('Entity Name', f.entity);   // also drives the Beneficial Ownership legal-entity field
+  setT('Account Title', f.entity);
+  setT('Entity Type', f.entityType);
+  setT('TIN', f.ein);
+  setT('DBA', f.dba);
+  setT('Address.Physical', f.physAddress);
+  setT('City.Phyiscal', f.physCity);   // field name misspelled in the form — keep verbatim
+  setT('State.Physical', f.physState);
+  setT('ZIP.Physical', f.physZip);
+  setT('Address.Mailing', f.mailAddress || f.physAddress);
+  setT('City.Mailing', f.mailCity || f.physCity);
+  setT('State.Mailing', f.mailState || f.physState);
+  setT('ZIP.Mailing', f.mailZip || f.physZip);
+  // Banyan-constant contact / activity: overwrite only when the target supplied
+  // one, otherwise keep the reference's standard value.
+  const over = (name, val) => { if (val != null && String(val).trim() !== '') setT(name, val); };
+  over('Entity Email Address', f.email);
+  over('Entity Phone Number', f.phone);
+  over('Nature of Business/Industry', f.nature);
+  over('Individual Name 1', f.personOpening);
+  // Per-entity 25%-owner rows (Beneficial Ownership Section i) differ for every
+  // entity — clear them so one entity's owners never carry onto another. The
+  // managing-individual row (Name & Title / Address 5 / DOB 5 / SSN 5) and the
+  // signer rows are Banyan-constant and kept.
+  for (let i = 1; i <= 4; i++) { setT('Name ' + i, ''); setT('Address ' + i, ''); setT('DOB ' + i, ''); setT('SSN ' + i, ''); setT('% ' + i, ''); }
+  setT('Legal Entity Identifier', '');
+  try { form.updateFieldAppearances(font); } catch { /* ignore */ }
+  if (f.flatten === true) { try { form.flatten(); } catch { /* ignore */ } }
+  return Buffer.from(await pdf.save());
+}
+
 // ── routes ───────────────────────────────────────────────────────────────────
 function registerBankAccountRoutes(app, ctx) {
   const { db, auth, requireRole, memUpload, templatesDir } = ctx;
   ensureTable(db);
   try { fs.mkdirSync(templatesDir, { recursive: true }); } catch { /* ignore */ }
   const tplPath = () => path.join(templatesDir, TEMPLATE_FILE);
+  const refPath = () => path.join(templatesDir, REFERENCE_FILE);
   const bundledTplPath = path.join(__dirname, 'assets', TEMPLATE_FILE);
   // Prefer an uploaded override on the data volume; else the repo-bundled blank.
   const activeTplPath = () => (fs.existsSync(tplPath()) ? tplPath() : (fs.existsSync(bundledTplPath) ? bundledTplPath : null));
@@ -364,6 +410,8 @@ function registerBankAccountRoutes(app, ctx) {
       template_installed: fs.existsSync(tplPath()),
       bundled_template: fs.existsSync(bundledTplPath),
       template_available: !!activeTplPath(),
+      reference_installed: fs.existsSync(refPath()),
+      can_generate: fs.existsSync(refPath()) || !!activeTplPath(),
       graph_configured: graphConfigured(),
     });
   });
@@ -419,22 +467,25 @@ function registerBankAccountRoutes(app, ctx) {
     catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // Generate the filled MapleMark packet. If identity fields aren't supplied,
-  // CloudLedger resolves them itself (store → SharePoint) so entering just the
-  // entity name is enough; any field supplied in the body overrides the
-  // resolved value.
+  // Generate the filled MapleMark packet. When a reference completed packet is
+  // installed, CloudLedger clones it — carrying Banyan's standard signer,
+  // managing-owner and account-profile boilerplate — and overwrites only the
+  // entity-specific fields, clearing the per-entity 25%-owner rows. Otherwise it
+  // fills the blank template with entity identity only. Entering just the entity
+  // name is enough; CloudLedger resolves type/EIN/address itself (store →
+  // SharePoint) and any field supplied in the body overrides the resolved value.
   app.post('/api/admin/bankapp/generate', auth, requireRole(...BOTH), async (req, res) => {
     try {
       const b = req.body || {};
       const entity = (b.entity || '').toString().trim();
       if (!entity) return res.status(400).json({ error: 'entity is required' });
+      const haveRef = fs.existsSync(refPath());
       const active = activeTplPath();
-      if (!active) return res.status(400).json({ error: 'No MapleMark packet is installed. Upload the blank New Account Application packet once (Admin) to enable generation.' });
+      if (!haveRef && !active) return res.status(400).json({ error: 'No MapleMark packet is installed. Upload the blank New Account Application packet (and optionally a filled reference packet) once (Admin) to enable generation.' });
       let prof = {}; try { prof = await resolveProfile(db, entity, { refresh: b.refresh === true }); } catch { prof = {}; }
       const pphys = prof.phys || {}, pmail = prof.mail || {};
       const pick = (bv, pv) => (bv != null && String(bv).trim() !== '') ? bv : (pv || '');
-      const template = fs.readFileSync(active);
-      const buf = await fillBankApplication(template, {
+      const data = {
         entity,
         entityType: pick(b.entity_type, prof.entity_type || entityTypeFromName(entity)),
         ein: pick(b.ein, prof.ein), dba: pick(b.dba, prof.dba), nature: pick(b.nature, prof.nature),
@@ -444,11 +495,68 @@ function registerBankAccountRoutes(app, ctx) {
         attributesNone: b.attributes_none !== false,
         personOpening: b.person_opening || '',
         flatten: b.flatten === true,
-      });
+      };
+      const buf = haveRef
+        ? await fillFromReference(fs.readFileSync(refPath()), data)
+        : await fillBankApplication(fs.readFileSync(active), data);
       const safe = entity.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'Entity';
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', 'attachment; filename="MapleMark_New_Account_Application_' + safe + '.pdf"');
       res.send(buf);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Install / replace the FILLED reference packet (Admin). A completed Banyan
+  // packet whose standard signer / managing-owner / account-profile answers are
+  // cloned into every generated packet. Must be a MapleMark packet that is
+  // actually filled (has a signer name).
+  app.post('/api/admin/bankapp/reference', auth, requireRole('Admin'), memUpload.single('file'), async (req, res) => {
+    try {
+      if (!req.file || !req.file.buffer) return res.status(400).json({ error: 'No file uploaded.' });
+      let ok = false, filled = false;
+      try {
+        const d = await PDFDocument.load(req.file.buffer);
+        const form = d.getForm();
+        const names = form.getFields().map((x) => x.getName());
+        ok = REQUIRED_FIELDS.every((n) => names.includes(n));
+        try { filled = !!(form.getTextField('Name.FullLegal.1.0').getText() || '').trim(); } catch { filled = false; }
+      } catch { ok = false; }
+      if (!ok) return res.status(400).json({ error: 'That does not look like the MapleMark New Account Application packet (expected fields Entity Name / TIN / Entity Type).' });
+      if (!filled) return res.status(400).json({ error: 'That packet has no authorized signer filled in — upload a completed Banyan packet to use as the reference.' });
+      fs.writeFileSync(refPath(), req.file.buffer);
+      res.json({ note: 'Reference packet installed.', reference_installed: true });
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Remove the reference packet (generation falls back to entity-only fill).
+  app.delete('/api/admin/bankapp/reference', auth, requireRole('Admin'), (req, res) => {
+    try { if (fs.existsSync(refPath())) fs.unlinkSync(refPath()); res.json({ reference_installed: false }); }
+    catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
+  // Install the reference packet straight from SharePoint (Admin) — downloads the
+  // chosen completed packet via Graph and stores it on the data volume, so the
+  // canonical reference can be designated without a manual download/upload.
+  app.post('/api/admin/bankapp/reference-from-sharepoint', auth, requireRole('Admin'), async (req, res) => {
+    try {
+      if (!graphConfigured()) return res.status(400).json({ error: 'Microsoft Graph is not configured on the server.' });
+      const b = req.body || {};
+      const driveId = (b.driveId || '').toString().trim();
+      const itemId = (b.itemId || '').toString().trim();
+      if (!driveId || !itemId) return res.status(400).json({ error: 'driveId and itemId are required' });
+      const buf = Buffer.from(await (await gfetch('/drives/' + driveId + '/items/' + itemId + '/content')).arrayBuffer());
+      let ok = false, filled = false;
+      try {
+        const d = await PDFDocument.load(buf);
+        const form = d.getForm();
+        const names = form.getFields().map((x) => x.getName());
+        ok = REQUIRED_FIELDS.every((n) => names.includes(n));
+        try { filled = !!(form.getTextField('Name.FullLegal.1.0').getText() || '').trim(); } catch { filled = false; }
+      } catch { ok = false; }
+      if (!ok) return res.status(400).json({ error: 'That file is not the MapleMark packet (expected fields Entity Name / TIN / Entity Type).' });
+      if (!filled) return res.status(400).json({ error: 'That packet has no authorized signer filled in.' });
+      fs.writeFileSync(refPath(), buf);
+      res.json({ note: 'Reference packet installed from SharePoint.', reference_installed: true, source_item: itemId });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 }
@@ -456,6 +564,6 @@ function registerBankAccountRoutes(app, ctx) {
 module.exports = {
   registerBankAccountRoutes,
   // exported for local testing:
-  fillBankApplication, resolveProfile, searchProfileFromSharePoint,
+  fillBankApplication, fillFromReference, resolveProfile, searchProfileFromSharePoint,
   extractEin, extractAddress, entityTypeFromName, coreName, scoreCandidate,
 };
