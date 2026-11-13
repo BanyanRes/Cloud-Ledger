@@ -11108,7 +11108,7 @@ function BankAccountPage({user}){
       const out=await api.generateBankApplication({entity:e,...f});
       if(!out)return;
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
-      setMsg('Generated '+out.filename+'.');
+      const sd=out.supporting;setMsg('Generated '+out.filename+'.'+(sd?(sd.pending?' Supporting documents are still being pulled from SharePoint and will appear in the folder shortly.':(' Supporting documents saved to the folder: '+(sd.saved.length?sd.saved.map(d=>d.category).join(', '):'none found')+'.'+(sd.missing.length?' Not found in SharePoint (upload manually): '+sd.missing.join(', ')+'.':''))):''));
     }catch(ex){setErr(ex.message);}finally{setBusy('');}
   };
   const srcLabel=(s)=>s==='sharepoint'?'SharePoint':(s==='manual'?'a saved entry':'the store');

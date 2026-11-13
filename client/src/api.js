@@ -1394,8 +1394,9 @@ export const api = {
     const cd = res.headers.get('content-disposition') || '';
     const m = cd.match(/filename="?([^"]+)"?/);
     const filename = m ? m[1] : 'MapleMark_New_Account_Application.pdf';
+    let supporting = null; try { supporting = JSON.parse(decodeURIComponent(res.headers.get('x-supporting-docs') || '')); } catch {}
     const blob = await res.blob();
-    return { blob, filename };
+    return { blob, filename, supporting };
   },
 
   // ── Banyan Letterhead (fillable PDF generator) ──

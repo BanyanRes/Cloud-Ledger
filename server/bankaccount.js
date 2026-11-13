@@ -571,6 +571,7 @@ async function findSupportingDocs(entity) {
   const drives = await resolveDriveIds();
   const core = coreName(entity);
   const etoks = tokens(entity);
+  const phrase = core.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   if (!etoks.length || !drives.length) return [];
   const out = [];
   for (const cat of SUPPORTING_CATS) {
@@ -591,6 +592,10 @@ async function findSupportingDocs(entity) {
           if (/\bdraft\b|template/i.test(n)) continue;
           const cov = etoks.filter((t) => n.includes(t)).length / etoks.length;
           if (cov < 0.8) continue;                 // must clearly be THIS entity
+          // The entity's name must appear as one contiguous phrase, so a sibling
+          // with an extra word (e.g. "Banyan SFR Cyrene" vs "Banyan Cyrene") is
+          // never mistaken for it.
+          if (phrase && !n.replace(/[^a-z0-9]+/g, ' ').includes(phrase)) continue;
           let sc = cov * 5;
           if (cat.key === 'Operating Agreement') { if (/executed/i.test(n)) sc += 3; if (/a&r|amended|restat/i.test(n)) sc += 2; }
           if (/signed|executed|filed/i.test(n)) sc += 1;
@@ -697,6 +702,10 @@ function registerBankAccountRoutes(app, ctx) {
       const entity = (b.entity || '').toString().trim();
       if (!entity) return res.status(400).json({ error: 'entity is required' });
       const active = activeTplPath();
+      // Start pulling the entity's supporting documents now, in parallel with
+      // building the packet, so they are in the folder by the time we respond.
+      const supportName = entityLegalName(db, entity) || entity;
+      const supportP = graphConfigured() ? findSupportingDocs(supportName).catch(() => []) : Promise.resolve([]);
       // Pick a reference packet whose boilerplate matches the entity's type
       // (dashboard group): a same-type peer's completed application, cached per
       // type. Falls back to the admin default reference, then the blank template.
@@ -737,20 +746,24 @@ function registerBankAccountRoutes(app, ctx) {
       // legal entity, so an entity's documents always group together regardless of
       // how its name was typed (comma/no-comma, short name, etc.).
       try { saveAdminDoc(db, dataDir, 'bank_account_app', buf, fileName, who, 'application/pdf', legalName); } catch { /* best-effort */ }
+      // Wait for the supporting documents (Certificate of Formation, EIN letter,
+      // Operating Agreement) so they are in the folder before the user looks. The
+      // search started in parallel above; cap the wait so a slow SharePoint never
+      // hangs the download, and finish in the background if the cap is hit.
+      const saveDocs = (docs) => { for (const d of (docs || [])) { try { saveAdminDoc(db, dataDir, 'bank_account_app', d.buf, d.name, who, 'application/pdf', legalName); } catch { /* ignore one */ } } };
+      let supportDocs = null;
+      try { supportDocs = await Promise.race([supportP, new Promise((r) => setTimeout(() => r(null), 45000))]); } catch { supportDocs = []; }
+      if (supportDocs === null) { supportP.then(saveDocs).catch(() => {}); } else { saveDocs(supportDocs); }
+      try {
+        res.setHeader('X-Supporting-Docs', encodeURIComponent(JSON.stringify({
+          pending: supportDocs === null,
+          saved: (supportDocs || []).map((d) => ({ category: d.category, name: d.name })),
+          missing: supportDocs === null ? [] : SUPPORTING_CATS.map((c) => c.key).filter((k) => !(supportDocs || []).some((d) => d.category === k)),
+        })));
+      } catch { /* ignore */ }
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', 'attachment; filename="' + fileName + '"');
       res.send(buf);
-      // After responding, pull this entity's supporting documents (Certificate of
-      // Formation, EIN letter, Operating Agreement) from SharePoint into the same
-      // folder — best-effort, so the download isn't delayed and a miss is harmless.
-      if (graphConfigured()) {
-        setImmediate(async () => {
-          try {
-            const docs = await findSupportingDocs(legalName);
-            for (const d of docs) { try { saveAdminDoc(db, dataDir, 'bank_account_app', d.buf, d.name, who, 'application/pdf', legalName); } catch { /* ignore one */ } }
-          } catch { /* best-effort */ }
-        });
-      }
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
