@@ -419,7 +419,10 @@ function registerBankAccountRoutes(app, ctx) {
     catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // Generate the filled MapleMark packet.
+  // Generate the filled MapleMark packet. If identity fields aren't supplied,
+  // CloudLedger resolves them itself (store → SharePoint) so entering just the
+  // entity name is enough; any field supplied in the body overrides the
+  // resolved value.
   app.post('/api/admin/bankapp/generate', auth, requireRole(...BOTH), async (req, res) => {
     try {
       const b = req.body || {};
@@ -427,14 +430,17 @@ function registerBankAccountRoutes(app, ctx) {
       if (!entity) return res.status(400).json({ error: 'entity is required' });
       const active = activeTplPath();
       if (!active) return res.status(400).json({ error: 'No MapleMark packet is installed. Upload the blank New Account Application packet once (Admin) to enable generation.' });
+      let prof = {}; try { prof = await resolveProfile(db, entity, { refresh: b.refresh === true }); } catch { prof = {}; }
+      const pphys = prof.phys || {}, pmail = prof.mail || {};
+      const pick = (bv, pv) => (bv != null && String(bv).trim() !== '') ? bv : (pv || '');
       const template = fs.readFileSync(active);
       const buf = await fillBankApplication(template, {
         entity,
-        entityType: (b.entity_type != null ? b.entity_type : entityTypeFromName(entity)) || '',
-        ein: b.ein || '', dba: b.dba || '', nature: b.nature || '',
-        email: b.email || '', phone: b.phone || '',
-        physAddress: b.phys_address || '', physCity: b.phys_city || '', physState: b.phys_state || '', physZip: b.phys_zip || '',
-        mailAddress: b.mail_address || '', mailCity: b.mail_city || '', mailState: b.mail_state || '', mailZip: b.mail_zip || '',
+        entityType: pick(b.entity_type, prof.entity_type || entityTypeFromName(entity)),
+        ein: pick(b.ein, prof.ein), dba: pick(b.dba, prof.dba), nature: pick(b.nature, prof.nature),
+        email: pick(b.email, prof.email), phone: pick(b.phone, prof.phone),
+        physAddress: pick(b.phys_address, pphys.address), physCity: pick(b.phys_city, pphys.city), physState: pick(b.phys_state, pphys.state), physZip: pick(b.phys_zip, pphys.zip),
+        mailAddress: pick(b.mail_address, pmail.address), mailCity: pick(b.mail_city, pmail.city), mailState: pick(b.mail_state, pmail.state), mailZip: pick(b.mail_zip, pmail.zip),
         attributesNone: b.attributes_none !== false,
         personOpening: b.person_opening || '',
         flatten: b.flatten === true,

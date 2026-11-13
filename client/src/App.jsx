@@ -10886,6 +10886,7 @@ function BankAccountPage({user}){
   const[status,setStatus]=useState(null);
   const[entity,setEntity]=useState('');
   const[look,setLook]=useState(null);
+  const[showDetails,setShowDetails]=useState(false);
   const[f,setF]=useState({entity_type:'',ein:'',dba:'',phys_address:'',phys_city:'',phys_state:'',phys_zip:'',mail_address:'',mail_city:'',mail_state:'',mail_zip:'',email:'',phone:'',nature:'',person_opening:''});
   const[busy,setBusy]=useState('');
   const[err,setErr]=useState('');
@@ -10894,30 +10895,19 @@ function BankAccountPage({user}){
   const set=(k,v)=>setF(p=>({...p,[k]:v}));
   const load=async()=>{try{setStatus(await api.getBankAppStatus());}catch(e){setErr(e.message);}};
   useEffect(()=>{load();},[]);
+  const applyLook=(r)=>{ setLook(r); setF(p=>({...p,
+    entity_type:r.entity_type||p.entity_type, ein:r.ein||p.ein, dba:(r.dba!=null?r.dba:p.dba),
+    phys_address:(r.phys&&r.phys.address)||p.phys_address, phys_city:(r.phys&&r.phys.city)||p.phys_city, phys_state:(r.phys&&r.phys.state)||p.phys_state, phys_zip:(r.phys&&r.phys.zip)||p.phys_zip,
+    mail_address:(r.mail&&r.mail.address)||p.mail_address, mail_city:(r.mail&&r.mail.city)||p.mail_city, mail_state:(r.mail&&r.mail.state)||p.mail_state, mail_zip:(r.mail&&r.mail.zip)||p.mail_zip,
+    email:(r.email!=null?r.email:p.email), phone:(r.phone!=null?r.phone:p.phone), nature:(r.nature!=null?r.nature:p.nature),
+  })); };
   const lookup=async(refresh)=>{
-    const e=entity.trim(); if(!e){setErr('Enter an entity name first.');return;}
-    setBusy('lookup');setErr('');setMsg('');setLook(null);
-    try{
-      const r=await api.bankAppLookup(e,refresh);
-      setLook(r);
-      setF(p=>({...p,
-        entity_type:r.entity_type||p.entity_type,
-        ein:r.ein||p.ein,
-        dba:(r.dba!=null?r.dba:p.dba),
-        phys_address:(r.phys&&r.phys.address)||p.phys_address,
-        phys_city:(r.phys&&r.phys.city)||p.phys_city,
-        phys_state:(r.phys&&r.phys.state)||p.phys_state,
-        phys_zip:(r.phys&&r.phys.zip)||p.phys_zip,
-        mail_address:(r.mail&&r.mail.address)||p.mail_address,
-        mail_city:(r.mail&&r.mail.city)||p.mail_city,
-        mail_state:(r.mail&&r.mail.state)||p.mail_state,
-        mail_zip:(r.mail&&r.mail.zip)||p.mail_zip,
-        email:(r.email!=null?r.email:p.email),
-        phone:(r.phone!=null?r.phone:p.phone),
-        nature:(r.nature!=null?r.nature:p.nature),
-      }));
-    }catch(ex){setErr(ex.message);}finally{setBusy('');}
+    const e=entity.trim(); if(!e){setErr('Enter an entity name first.');return null;}
+    setBusy('lookup');setErr('');setMsg('');
+    try{ const r=await api.bankAppLookup(e,refresh); applyLook(r); return r; }
+    catch(ex){setErr(ex.message);return null;}finally{setBusy('');}
   };
+  const reviewDetails=async()=>{ if(!showDetails&&!look)await lookup(false); setShowDetails(s=>!s); };
   const saveProfile=async()=>{
     const e=entity.trim(); if(!e)return;
     setBusy('save');setErr('');setMsg('');
@@ -10945,10 +10935,11 @@ function BankAccountPage({user}){
     <label style={S.label}>{label}</label>
     <input style={S.input} value={f[key]} placeholder={ph||''} onChange={e=>set(key,e.target.value)}/>
   </div>);
+  const canGen=status&&status.template_available;
   return(<div>
     <div style={{marginBottom:8}}>
       <div style={S.h1}>Bank Account Application</div>
-      <div style={S.sub}>Generate a MapleMark Bank New Account Application (Business &amp; Trust) packet. Enter the entity name; its type, EIN and address are looked up{status&&status.graph_configured?' from SharePoint':''} and filled into the form. Signer, beneficial-owner and account-choice fields are left blank for manual completion.</div>
+      <div style={S.sub}>Enter an entity name and generate a MapleMark Bank New Account Application (Business &amp; Trust) packet. CloudLedger fills the entity's type, EIN and address{status&&status.graph_configured?' from SharePoint':''}; signer, beneficial-owner and account-choice fields are left blank for manual completion.</div>
     </div>
     {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
     {msg&&<div style={{marginBottom:12,padding:'8px 12px',background:'#dcfce7',color:'#166534',borderRadius:6,fontSize:13}}>{msg}</div>}
@@ -10959,48 +10950,52 @@ function BankAccountPage({user}){
         <div style={{flex:2,minWidth:260}}>
           <label style={S.label}>Entity name</label>
           <input style={S.input} value={entity} placeholder="e.g. CLRFI Midco I, LLC"
-            onChange={e=>setEntity(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')lookup(false);}}/>
+            onChange={e=>{setEntity(e.target.value);setLook(null);}} onKeyDown={e=>{if(e.key==='Enter'&&canGen)generate();}}/>
         </div>
         <div style={{alignSelf:'flex-end'}}>
-          <button style={S.btnS} disabled={busy==='lookup'} onClick={()=>lookup(false)}>{busy==='lookup'?'Looking up...':'Look up entity info'}</button>
+          <button style={S.btnP} disabled={busy==='gen'||!canGen} onClick={generate}>{busy==='gen'?'Generating...':'Generate packet'}</button>
         </div>
       </div>
-      {look&&<div style={{fontSize:12,color:'#475569',marginBottom:12,marginTop:-4}}>
-        {look.found
-          ? <>Found via <b>{srcLabel(look.source)}</b>{look.source_file?<> - <a href={look.source_url||'#'} target="_blank" rel="noreferrer" style={S.link}>{look.source_file}</a></>:null}. Review the fields below before generating.</>
-          : <>No stored or SharePoint record found{look.graph_configured?'':' (live SharePoint lookup is off on the server)'} - the entity type is derived from the name; enter the EIN and address below.
-              {look.candidates&&look.candidates.length?<div style={{marginTop:4}}>Candidate files: {look.candidates.slice(0,5).map((c,i)=>(<span key={i}><a href={c.webUrl} target="_blank" rel="noreferrer" style={S.link}>{c.name}</a>{i<Math.min(5,look.candidates.length)-1?', ':''}</span>))}</div>:null}</>}
+      <div style={{display:'flex',gap:14,alignItems:'center',marginTop:2,flexWrap:'wrap'}}>
+        <button style={S.link} disabled={busy==='lookup'} onClick={reviewDetails}>{busy==='lookup'?'Looking up...':(showDetails?'Hide details':'Review / edit details')}</button>
+        {look&&<span style={{fontSize:12,color:'#475569'}}>
+          {look.found
+            ? <>Found via <b>{srcLabel(look.source)}</b>{look.source_file?<> - <a href={look.source_url||'#'} target="_blank" rel="noreferrer" style={S.link}>{look.source_file}</a></>:null}</>
+            : <>Nothing on file{look.graph_configured?'':' (SharePoint lookup is off on the server)'} - type is derived from the name; add the EIN/address under details.</>}
+        </span>}
+      </div>
+
+      {showDetails&&<div style={{marginTop:14,borderTop:'1px solid #e2e8f0',paddingTop:14}}>
+        <div style={S.row}>
+          {fld('Entity type','entity_type','e.g. Limited Liability Company',200)}
+          {fld('Tax ID (EIN)','ein','XX-XXXXXXX',140)}
+          {fld('DBA (optional)','dba','',140)}
+        </div>
+        <div style={S.row}>
+          {fld('Physical address','phys_address','Street',240)}
+          {fld('City','phys_city','',120)}
+          {fld('State','phys_state','',70)}
+          {fld('ZIP','phys_zip','',90)}
+        </div>
+        <div style={S.row}>
+          {fld('Mailing address (if different)','mail_address','defaults to physical',240)}
+          {fld('City','mail_city','',120)}
+          {fld('State','mail_state','',70)}
+          {fld('ZIP','mail_zip','',90)}
+        </div>
+        <div style={S.row}>
+          {fld('Entity email','email','',200)}
+          {fld('Entity phone','phone','',160)}
+          {fld('Nature of business','nature','e.g. Real estate development and investment',260)}
+        </div>
+        <div style={S.row}>
+          {fld('Person opening account (optional)','person_opening','name on the beneficial-ownership page',260)}
+        </div>
+        <div style={{marginTop:4}}>
+          <button style={S.btnS} disabled={busy==='save'} onClick={saveProfile} title="Remember this entity's details for next time">{busy==='save'?'Saving...':'Save entity details'}</button>
+        </div>
       </div>}
-      <div style={S.row}>
-        {fld('Entity type','entity_type','e.g. Limited Liability Company',200)}
-        {fld('Tax ID (EIN)','ein','XX-XXXXXXX',140)}
-        {fld('DBA (optional)','dba','',140)}
-      </div>
-      <div style={S.row}>
-        {fld('Physical address','phys_address','Street',240)}
-        {fld('City','phys_city','',120)}
-        {fld('State','phys_state','',70)}
-        {fld('ZIP','phys_zip','',90)}
-      </div>
-      <div style={S.row}>
-        {fld('Mailing address (if different)','mail_address','defaults to physical',240)}
-        {fld('City','mail_city','',120)}
-        {fld('State','mail_state','',70)}
-        {fld('ZIP','mail_zip','',90)}
-      </div>
-      <div style={S.row}>
-        {fld('Entity email','email','',200)}
-        {fld('Entity phone','phone','',160)}
-        {fld('Nature of business','nature','e.g. Real estate development and investment',260)}
-      </div>
-      <div style={S.row}>
-        {fld('Person opening account (optional)','person_opening','name on the beneficial-ownership page',260)}
-      </div>
-      <div style={{display:'flex',gap:12,flexWrap:'wrap',marginTop:4,alignItems:'center'}}>
-        <button style={S.btnP} disabled={busy==='gen'||!status||(status&&!status.template_available)} onClick={generate}>{busy==='gen'?'Generating...':'Generate application packet'}</button>
-        <button style={S.btnS} disabled={busy==='save'} onClick={saveProfile} title="Remember this entity's details for next time">{busy==='save'?'Saving...':'Save entity details'}</button>
-      </div>
-      {status&&!status.template_available&&<div style={{fontSize:12,color:'#991b1b',marginTop:8}}>No blank packet is installed yet{isAdmin?' - upload it below to enable generation.':' - ask an Admin to upload the blank MapleMark packet.'}</div>}
+      {status&&!status.template_available&&<div style={{fontSize:12,color:'#991b1b',marginTop:10}}>No blank packet is installed yet{isAdmin?' - upload it below to enable generation.':' - ask an Admin to upload the blank MapleMark packet.'}</div>}
     </div>
 
     {isAdmin&&<div style={S.card}>
