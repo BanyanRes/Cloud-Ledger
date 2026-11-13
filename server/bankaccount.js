@@ -779,6 +779,32 @@ function registerBankAccountRoutes(app, ctx) {
       res.json({ cleared });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
+
+  // Diagnostic (Admin): can the server WRITE to the MapleMark SharePoint folder?
+  // Creates and deletes a temp subfolder; reveals whether Graph has write scope.
+  app.get('/api/admin/bankapp/sp-write-test', auth, requireRole('Admin'), async (req, res) => {
+    try {
+      if (!graphConfigured()) return res.json({ graph: false, canWrite: false });
+      const drive = (await resolveDriveIds())[0];
+      const encPath = (process.env.BANKAPP_FOLDER_PATH || 'Banyan Residential - Corporate/Finance/Accounting/Maple Mark Account Info').split('/').map(encodeURIComponent).join('/');
+      const fr = await gfetch('/drives/' + drive + '/root:/' + encPath, { ok: [404] });
+      if (fr.status === 404) return res.json({ canWrite: false, error: 'MapleMark folder not found' });
+      const folder = await fr.json();
+      let created = null, err = null;
+      try {
+        const r = await gfetch('/drives/' + drive + '/items/' + folder.id + '/children', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: '_cl_write_test_' + Date.now(), folder: {}, '@microsoft.graph.conflictBehavior': 'rename' }),
+        });
+        created = await r.json();
+      } catch (e) { err = e.message; }
+      if (created && created.id) {
+        try { await gfetch('/drives/' + drive + '/items/' + created.id, { method: 'DELETE', ok: [204] }); } catch { /* ignore */ }
+        return res.json({ canWrite: true });
+      }
+      return res.json({ canWrite: false, error: err });
+    } catch (e) { res.json({ canWrite: false, error: e.message }); }
+  });
 }
 
 module.exports = {
