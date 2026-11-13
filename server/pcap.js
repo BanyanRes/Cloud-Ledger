@@ -51,6 +51,52 @@ const EQUITY_ACCTS = [...CONTRIB_ACCTS, ...SYND_ACCTS, ...NETINV_ACCTS, ...MGMT_
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const isDate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
 
+// ── Whole-dollar footing (round once, then foot) ─────────────────────────────
+// Amounts are carried in cents (and tie to the GL to the penny), but statements
+// print in whole dollars. Rounding each line independently can break footing by
+// $1 — e.g. commitment 78,300 less contributed 57,567 printing unfunded 20,734,
+// which doesn't foot. These helpers round once and force the printed numbers to
+// foot: derived lines are plugged from the rounded components, and the
+// roll-forward's activity lines absorb the ±$1 residual (largest-remainder) so
+// beginning + activity = ending while the GL-tied ending is unchanged.
+const ACTIVITY_KEYS = ['contributions', 'returnOfCapital', 'transfers', 'waivedDevFees',
+  'syndication', 'netInvestment', 'managementFee', 'unrealized'];
+const whole = (v) => Math.round(Number(v) || 0);
+// Round `values` to whole dollars summing exactly to `target`, placing the ±$1
+// residual on the line(s) whose rounding was closest to flipping (in the needed
+// direction). Never nudges a line that rounds to zero, so hidden zero lines stay
+// hidden; falls back to the largest-magnitude line only if every line is zero.
+function allocateWhole(values, target) {
+  const rounded = values.map(whole);
+  let residual = whole(target) - rounded.reduce((a, b) => a + b, 0);
+  if (!residual) return rounded;
+  const dir = residual > 0 ? 1 : -1;
+  const order = values.map((v, i) => ({ i, frac: (Number(v) || 0) - rounded[i] }))
+    .filter((x) => rounded[x.i] !== 0)
+    .sort((a, b) => (dir > 0 ? b.frac - a.frac : a.frac - b.frac));
+  const pool = order.length ? order
+    : values.map((v, i) => ({ i })).sort((a, b) => Math.abs(Number(values[b.i]) || 0) - Math.abs(Number(values[a.i]) || 0));
+  for (let k = 0; residual !== 0; k++) { rounded[pool[k % pool.length].i] += dir; residual -= dir; }
+  return rounded;
+}
+// Whole-dollar roll-forward for one period column that foots:
+//   beginning + Sum(activity) = endingBeforeCarry; + carryRealloc = ending.
+// beginning / endingBeforeCarry / ending are controls (ending ties to the GL).
+function footColumn(col) {
+  const beginning = whole(col.beginning);
+  const endingBeforeCarry = whole(col.endingBeforeCarry);
+  const ending = whole(col.ending);
+  const acts = allocateWhole(ACTIVITY_KEYS.map((k) => col[k]), endingBeforeCarry - beginning);
+  const out = { beginning, endingBeforeCarry, ending, carryRealloc: ending - endingBeforeCarry };
+  ACTIVITY_KEYS.forEach((k, i) => { out[k] = acts[i]; });
+  return out;
+}
+// Whole-dollar commitment summary that foots: unfunded = commitment - contributed.
+function footCommitment(inv) {
+  const commitment = whole(inv.commitment), contributed = whole(inv.contributed);
+  return { commitment, contributed, unfunded: commitment - contributed };
+}
+
 function resolveQuarter(quarterEnd) {
   if (!isDate(quarterEnd)) throw new Error('quarter_end must be a date in YYYY-MM-DD form');
   const [y, m, d] = quarterEnd.split('-').map(Number);
@@ -491,7 +537,8 @@ async function renderStatementsPdf(data, opts = {}) {
     page.drawText('Investor Name: ' + inv.name, { x: mL, y, size: 10, font: bold }); y -= 28;
     page.drawText('Capital Commitment Summary', { x: mL, y, size: 10, font: bold });
     rt(page, 'Amount', cITD, y, bold, 10); y -= 16;
-    const crows = [['Capital Commitment', 1, inv.commitment], ['Contributed capital', -(inv.pct_contributed || 0), -(inv.contributed || 0)], ['Unfunded commitment', inv.pct_unfunded || 0, inv.unfunded || 0]];
+    const fc = footCommitment(inv);
+    const crows = [['Capital Commitment', 1, fc.commitment], ['Contributed capital', -(inv.pct_contributed || 0), -fc.contributed], ['Unfunded commitment', inv.pct_unfunded || 0, fc.unfunded]];
     crows.forEach((rw, i) => {
       if (i === 2) { rule(page, cYTD - 48, cYTD, y + 11); rule(page, cITD - 64, cITD, y + 11); }   // single rule above the total (% and Amount)
       page.drawText(rw[0], { x: mL + 10, y, size: 10, font: reg });
@@ -504,9 +551,10 @@ async function renderStatementsPdf(data, opts = {}) {
     page.drawText('Capital Summary', { x: mL, y, size: 10, font: bold });
     rt(page, 'Year-to-Date', cYTD, y, bold, 9);
     rt(page, 'Inception-to-Date', cITD, y, bold, 9); y -= 16;
+    const fy = footColumn(inv.ytd), fi = footColumn(inv.itd);
     for (const line of STMT_LINES) {
-      const vy = inv.ytd[line.key], vi = inv.itd[line.key];
-      if (!line.always && !line.rule && Math.abs(vy || 0) < 0.005 && Math.abs(vi || 0) < 0.005) continue;
+      const vy = fy[line.key], vi = fi[line.key];
+      if (!line.always && !line.rule && Math.abs(vy || 0) < 0.5 && Math.abs(vi || 0) < 0.5) continue;
       const f = line.bold ? bold : reg;
       if (line.rule) { rule(page, cYTD - 64, cYTD, y + 11); rule(page, cITD - 64, cITD, y + 11); }   // single rule above (two segments, per column)
       let ls = 9;
@@ -591,4 +639,5 @@ function registerPcapRoutes(app, ctx) {
 }
 
 module.exports = { resolveQuarter, buildData, buildWorkbook, periodColumn, classifyContributions,
-  saveToWorkpapers, findWorkpaper, registerPcapRoutes, renderStatementsPdf, FUND_EID, EQUITY_ACCTS };
+  saveToWorkpapers, findWorkpaper, registerPcapRoutes, renderStatementsPdf, FUND_EID, EQUITY_ACCTS,
+  allocateWhole, footColumn, footCommitment, ACTIVITY_KEYS };
