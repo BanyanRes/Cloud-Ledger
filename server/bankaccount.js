@@ -667,6 +667,43 @@ function registerBankAccountRoutes(app, ctx) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
+  // Diagnostic (Admin): show how the same-type reference is being selected for an
+  // entity — its type, same-type peer count, matched candidate files and whether
+  // each parses as a fillable current-form packet.
+  app.get('/api/admin/bankapp/reference-debug', auth, requireRole('Admin'), async (req, res) => {
+    try {
+      const entity = (req.query.entity || '').toString().trim();
+      if (!entity) return res.status(400).json({ error: 'entity is required' });
+      const etype = entityTypeOf(db, entity);
+      const peers = etype ? sameTypePeerNames(db, entity, etype) : [];
+      const out = { entity, etype, peer_count: peers.length, graph_configured: graphConfigured(), files: 0, candidates: [] };
+      if (!graphConfigured() || !etype) return res.json(out);
+      const files = await listAppPackets();
+      out.files = files.length;
+      const toks = (s) => coreName(s).toLowerCase().split(/[^a-z0-9]+/).filter((t) => t && t.length >= 2 && !['the', 'llc', 'lp', 'inc'].includes(t));
+      const targetToks = toks(entity);
+      const peerTok = peers.map((pp) => ({ name: pp, toks: toks(pp) }));
+      const cand = [];
+      for (const f of files) {
+        const fn = f.name.toLowerCase();
+        let peer = null, cover = 0;
+        for (const pt of peerTok) { if (!pt.toks.length) continue; const cc = pt.toks.filter((t) => fn.includes(t)).length / pt.toks.length; if (cc >= 0.8 && cc > cover) { cover = cc; peer = pt.name; } }
+        if (!peer) continue;
+        let sc = cover * 5; sc += targetToks.filter((t) => fn.includes(t)).length * 2;
+        if (/revised/.test(fn)) sc += 2; if (/signed/.test(fn)) sc -= 2;
+        if (f.modified) { const y = new Date(f.modified).getFullYear(); if (y >= 2022) sc += Math.min(2, (y - 2022) * 0.5); }
+        cand.push({ f, peer, sc });
+      }
+      cand.sort((a, b) => b.sc - a.sc);
+      for (const cc of cand.slice(0, 8)) {
+        let fillable = null;
+        try { const buf = Buffer.from(await (await gfetch('/drives/' + cc.f.driveId + '/items/' + cc.f.id + '/content')).arrayBuffer()); fillable = await isFilledPacket(buf); } catch (e) { fillable = 'err:' + e.message.slice(0, 60); }
+        out.candidates.push({ name: cc.f.name, peer: cc.peer, score: Math.round(cc.sc * 10) / 10, fillable });
+      }
+      res.json(out);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
+
   // Clear the per-type auto-picked reference cache (Admin), so the next
   // generation re-selects a same-type template from SharePoint.
   app.delete('/api/admin/bankapp/reference-cache', auth, requireRole('Admin'), (req, res) => {
