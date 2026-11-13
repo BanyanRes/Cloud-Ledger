@@ -54,6 +54,28 @@ function ancestors(folder) {
   for (let i = 0; i < parts.length; i++) out.push(parts.slice(0, i + 1).join('/'));
   return out;
 }
+// A match key for a folder path: each segment lowercased with punctuation and
+// runs of whitespace collapsed, so "Sherman Rail Solutions, LLC" and "Sherman
+// Rail Solutions LLC" share a key — but "ABC Holdings LLC" and "ABC Holdings LP"
+// do not (the suffix word is kept).
+function folderKey(folder) {
+  return normFolder(folder).split('/').map((seg) => seg.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()).join('/');
+}
+// Resolve a proposed folder to an EXISTING folder for the same tool whose key
+// matches, so a punctuation/spacing/case variant never spawns a second folder
+// for the same entity. Returns the existing folder's exact name, else the
+// normalized proposed name.
+function canonicalFolder(db, tool, proposed) {
+  const want = normFolder(proposed);
+  if (!want) return '';
+  const key = folderKey(want);
+  if (!key) return want;
+  const existing = new Set();
+  for (const r of db.prepare("SELECT DISTINCT IFNULL(folder, '') AS folder FROM admin_documents WHERE tool = ?").all(tool)) { if (r.folder) existing.add(r.folder); }
+  for (const r of db.prepare('SELECT folder FROM admin_doc_folders WHERE tool = ?').all(tool)) { if (r.folder) existing.add(r.folder); }
+  for (const f of existing) { if (folderKey(f) === key) return f; }   // reuse the folder that already exists
+  return want;
+}
 
 function ensureTable(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS admin_documents (
@@ -86,7 +108,7 @@ function ensureTable(db) {
 // document of the same name in the same folder (newest wins).
 function saveAdminDoc(db, dataDir, tool, buf, originalName, who, mime, folder) {
   if (!TOOL_KEYS.includes(tool) || !buf || !buf.length) return;
-  const fold = normFolder(folder);
+  const fold = canonicalFolder(db, tool, folder);   // reuse an existing folder for the same entity, never a punctuation variant
   const dir = dirFor(dataDir, tool);
   try { fs.mkdirSync(dir, { recursive: true }); } catch { /* ignore */ }
   const name = String(originalName || (tool + '.pdf')).replace(/[/\\]/g, '_').trim().slice(0, 200) || (tool + '.pdf');
@@ -179,11 +201,12 @@ function registerAdminDocsRoutes(app, ctx) {
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 
-  // Create an (empty) folder.
+  // Create an (empty) folder. Canonicalized so a punctuation/case variant of an
+  // existing folder doesn't create a second one for the same entity.
   app.post('/api/admin/docs/:tool/folders', auth, requireRole(...BOTH), (req, res) => {
     try {
       const tool = safeTool(req.params.tool);
-      const folder = normFolder((req.body && req.body.folder) || '');
+      const folder = canonicalFolder(db, tool, (req.body && req.body.folder) || '');
       if (!folder) return res.status(400).json({ error: 'Folder name required' });
       db.prepare('INSERT OR IGNORE INTO admin_doc_folders (tool, folder, created_by) VALUES (?, ?, ?)')
         .run(tool, folder, (req.user && (req.user.email || req.user.name)) || 'system');
