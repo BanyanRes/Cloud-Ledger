@@ -659,7 +659,7 @@ function registerBankAccountRoutes(app, ctx) {
       const pick = (bv, pv) => (bv != null && String(bv).trim() !== '') ? bv : (pv || '');
       const data = {
         entity: legalName,
-        entityType: pick(b.entity_type, prof.entity_type || entityTypeFromName(entity)),
+        entityType: pick(b.entity_type, prof.entity_type || entityTypeFromName(legalName)),
         ein: pick(b.ein, prof.ein), dba: pick(b.dba, prof.dba), nature: pick(b.nature, prof.nature),
         email: pick(b.email, prof.email), phone: pick(b.phone, prof.phone),
         physAddress: pick(b.phys_address, pphys.address), physCity: pick(b.phys_city, pphys.city), physState: pick(b.phys_state, pphys.state), physZip: pick(b.phys_zip, pphys.zip),
