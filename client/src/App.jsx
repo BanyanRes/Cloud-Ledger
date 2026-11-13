@@ -10882,7 +10882,6 @@ function DissolutionPage({user}){
 
 // === Administration: Bank Account Application - MapleMark New Account Application ===
 function BankAccountPage({user}){
-  const isAdmin=user&&user.role==='Admin';
   const[status,setStatus]=useState(null);
   const[entity,setEntity]=useState('');
   const[look,setLook]=useState(null);
@@ -10891,7 +10890,6 @@ function BankAccountPage({user}){
   const[busy,setBusy]=useState('');
   const[err,setErr]=useState('');
   const[msg,setMsg]=useState('');
-  const[refFile,setRefFile]=useState(null);
   const set=(k,v)=>setF(p=>({...p,[k]:v}));
   const load=async()=>{try{setStatus(await api.getBankAppStatus());}catch(e){setErr(e.message);}};
   useEffect(()=>{load();},[]);
@@ -10923,17 +10921,6 @@ function BankAccountPage({user}){
       const url=URL.createObjectURL(out.blob);const a=document.createElement('a');a.href=url;a.download=out.filename;a.click();URL.revokeObjectURL(url);
       setMsg('Generated '+out.filename+'.');
     }catch(ex){setErr(ex.message);}finally{setBusy('');}
-  };
-  const uploadRef=async()=>{
-    if(!refFile)return;
-    setBusy('ref');setErr('');setMsg('');
-    try{await api.uploadBankAppReference(refFile);setMsg('Reference packet installed.');setRefFile(null);await load();}
-    catch(ex){setErr(ex.message);}finally{setBusy('');}
-  };
-  const resetCache=async()=>{
-    setBusy('cache');setErr('');setMsg('');
-    try{const r=await api.resetBankAppReferenceCache();setMsg('Cleared '+(r&&r.cleared||0)+' auto-picked template(s); the next packet re-selects by type.');}
-    catch(ex){setErr(ex.message);}finally{setBusy('');}
   };
   const srcLabel=(s)=>s==='sharepoint'?'SharePoint':(s==='manual'?'a saved entry':'the store');
   const fld=(label,key,ph,w)=>(<div style={{minWidth:w||150,flex:1}}>
@@ -11000,28 +10987,8 @@ function BankAccountPage({user}){
           <button style={S.btnS} disabled={busy==='save'} onClick={saveProfile} title="Remember this entity's details for next time">{busy==='save'?'Saving...':'Save entity details'}</button>
         </div>
       </div>}
-      {status&&!status.template_available&&<div style={{fontSize:12,color:'#991b1b',marginTop:10}}>No blank packet is installed yet{isAdmin?' - upload it below to enable generation.':' - ask an Admin to upload the blank MapleMark packet.'}</div>}
+      {status&&!status.template_available&&<div style={{fontSize:12,color:'#991b1b',marginTop:10}}>No MapleMark packet is installed on the server yet.</div>}
     </div>
-
-    {isAdmin&&<div style={S.card}>
-      <div style={S.h2}>Template &amp; data source</div>
-      <div style={{fontSize:13,color:'#475569',marginBottom:10,lineHeight:1.6}}>
-        Live SharePoint lookup (type / EIN / address): <b style={{color:status&&status.graph_configured?'#166534':'#991b1b'}}>{status&&status.graph_configured?'on':'off'}</b>{status&&!status.graph_configured?<span style={{color:'#64748b'}}> (set MS_TENANT_ID / MS_CLIENT_ID / MS_CLIENT_SECRET on the server to enable). Until then, details come from saved entries or manual input.</span>:null}
-      </div>
-      <div style={{fontSize:13,color:'#475569',margin:'16px 0 8px',lineHeight:1.6,borderTop:'1px solid #e2e8f0',paddingTop:14}}>
-        Reference template: CloudLedger automatically clones a completed application from <b>another entity of the same dashboard type</b> (a shell entity is templated from another shell, a development entity from another development, and so on) — swapping in only the entity name, type, EIN and address, and always leaving the per-entity 25% beneficial-owner rows blank. The chosen template is cached per type; signer/owner SSNs are never stored in CloudLedger.
-      </div>
-      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
-        <button style={S.btnS} disabled={busy==='cache'} onClick={resetCache}>{busy==='cache'?'Clearing...':'Reset auto-picked templates'}</button>
-      </div>
-      <div style={{fontSize:13,color:'#475569',margin:'16px 0 8px',lineHeight:1.6}}>
-        Fallback reference (optional): {status&&status.reference_installed?<b style={{color:'#166534'}}>installed</b>:<b style={{color:'#475569'}}>none</b>}. Used only when no same-type application is found. Upload one completed Banyan packet to set it.
-      </div>
-      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
-        <input type="file" accept="application/pdf,.pdf" key={refFile?'rf':'re'} onChange={e=>setRefFile(e.target.files&&e.target.files[0])}/>
-        <button style={S.btnS} disabled={!refFile||busy==='ref'} onClick={uploadRef}>{busy==='ref'?'Uploading...':'Upload fallback'}</button>
-      </div>
-    </div>}
   </div>);
 }
 
