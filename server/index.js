@@ -11846,6 +11846,7 @@ require('./bankaccount').registerBankAccountRoutes(app, {
   auth,
   requireRole,
   memUpload,
+  dataDir,
   templatesDir: path.join(dataDir, 'templates'),
 });
 

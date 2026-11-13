@@ -45,6 +45,7 @@
 const fs = require('fs');
 const path = require('path');
 const { PDFDocument, StandardFonts } = require('pdf-lib');
+const { saveAdminDoc } = require('./admindocs');
 
 const TEMPLATE_FILE = 'maplemark_new_account_application.pdf';
 const REFERENCE_FILE = 'maplemark_reference_filled.pdf'; // a completed Banyan packet whose boilerplate is cloned
@@ -550,8 +551,67 @@ async function findSameTypeReference(db, target, type) {
   return null;
 }
 
+// Pull an entity's bank-required supporting documents from SharePoint — the
+// Certificate of Formation / Articles of Organization, the EIN confirmation
+// (CP-575 / SS-4 / W-9), and the executed Operating Agreement — so an entity's
+// complete bank-opening package is filed together. Each category keeps only a
+// high-confidence match (>= 80% of the entity's name tokens appear in the file
+// name) and never a draft/template; whatever isn't confidently found is simply
+// left for manual upload. Best-effort and conservative: better to miss a
+// document than to file the wrong entity's.
+const SUPPORTING_CATS = [
+  { key: 'Certificate of Formation', re: /certificate\s+of\s+formation|articles\s+of\s+organization|\bformation\b/i,
+    qs: ['certificate of formation', 'articles of organization', 'formation'] },
+  { key: 'EIN Letter', re: /cp.?575|ss.?4|employer\s+identification|\bein\b|w-?9/i,
+    qs: ['EIN', 'CP-575', 'W-9', 'employer identification'] },
+  { key: 'Operating Agreement', re: /operating\s+agreement|llc\s+agreement|\bllca\b/i,
+    qs: ['operating agreement', 'LLCA', 'LLC agreement'] },
+];
+async function findSupportingDocs(entity) {
+  const drives = await resolveDriveIds();
+  const core = coreName(entity);
+  const etoks = tokens(entity);
+  if (!etoks.length || !drives.length) return [];
+  const out = [];
+  for (const cat of SUPPORTING_CATS) {
+    let best = null; const seen = new Set();
+    for (const drive of drives) {
+      for (const q of cat.qs) {
+        let items;
+        try {
+          const r = await gfetch('/drives/' + drive + "/root/search(q='" + encodeURIComponent(core + ' ' + q).replace(/'/g, "''") + "')?$top=25&$select=id,name,webUrl,file,lastModifiedDateTime", { ok: [404] });
+          if (r.status === 404) continue;
+          items = ((await r.json()).value || []);
+        } catch { continue; }
+        for (const it of items) {
+          if (!it || it.folder || !/\.pdf$/i.test(it.name || '')) continue;
+          const key = drive + '|' + it.id; if (seen.has(key)) continue; seen.add(key);
+          const n = it.name.toLowerCase();
+          if (!cat.re.test(n)) continue;
+          if (/\bdraft\b|template/i.test(n)) continue;
+          const cov = etoks.filter((t) => n.includes(t)).length / etoks.length;
+          if (cov < 0.8) continue;                 // must clearly be THIS entity
+          let sc = cov * 5;
+          if (cat.key === 'Operating Agreement') { if (/executed/i.test(n)) sc += 3; if (/a&r|amended|restat/i.test(n)) sc += 2; }
+          if (/signed|executed|filed/i.test(n)) sc += 1;
+          if (it.lastModifiedDateTime) { const y = new Date(it.lastModifiedDateTime).getFullYear(); if (y >= 2018) sc += Math.min(2, (y - 2018) * 0.25); }
+          if (!best || sc > best.sc) best = { driveId: drive, itemId: it.id, name: it.name, sc };
+        }
+      }
+    }
+    if (best) {
+      try {
+        const buf = Buffer.from(await (await gfetch('/drives/' + best.driveId + '/items/' + best.itemId + '/content')).arrayBuffer());
+        if (buf && buf.length > 500) out.push({ category: cat.key, name: best.name, buf });
+      } catch { /* skip this category */ }
+    }
+  }
+  return out;
+}
+
 function registerBankAccountRoutes(app, ctx) {
   const { db, auth, requireRole, memUpload, templatesDir } = ctx;
+  const dataDir = ctx.dataDir || path.dirname(templatesDir);   // admin-docs folders live under <dataDir>/admin-docs
   ensureTable(db);
   try { fs.mkdirSync(templatesDir, { recursive: true }); } catch { /* ignore */ }
   const tplPath = () => path.join(templatesDir, TEMPLATE_FILE);
@@ -671,9 +731,26 @@ function registerBankAccountRoutes(app, ctx) {
       if (refSource) { try { res.setHeader('X-Reference-Source', refSource); } catch { /* ignore */ } }
       const buf = refBuf ? await fillFromReference(refBuf, data) : await fillBankApplication(fs.readFileSync(active), data);
       const safe = legalName.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'Entity';
+      const fileName = 'MapleMark_New_Account_Application_' + safe + '.pdf';
+      const who = (req.user && (req.user.email || req.user.name)) || 'system';
+      // File the generated application under a subfolder named for the RESOLVED
+      // legal entity, so an entity's documents always group together regardless of
+      // how its name was typed (comma/no-comma, short name, etc.).
+      try { saveAdminDoc(db, dataDir, 'bank_account_app', buf, fileName, who, 'application/pdf', legalName); } catch { /* best-effort */ }
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', 'attachment; filename="MapleMark_New_Account_Application_' + safe + '.pdf"');
+      res.setHeader('Content-Disposition', 'attachment; filename="' + fileName + '"');
       res.send(buf);
+      // After responding, pull this entity's supporting documents (Certificate of
+      // Formation, EIN letter, Operating Agreement) from SharePoint into the same
+      // folder — best-effort, so the download isn't delayed and a miss is harmless.
+      if (graphConfigured()) {
+        setImmediate(async () => {
+          try {
+            const docs = await findSupportingDocs(legalName);
+            for (const d of docs) { try { saveAdminDoc(db, dataDir, 'bank_account_app', d.buf, d.name, who, 'application/pdf', legalName); } catch { /* ignore one */ } }
+          } catch { /* best-effort */ }
+        });
+      }
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
 

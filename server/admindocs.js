@@ -35,7 +35,8 @@ const DOC_ROUTES = [
   { re: /^\/api\/admin\/time-allocation\/report(?:[/?]|$)/, tool: 'time_allocation' },
   { re: /^\/api\/letterhead\/generate(?:[/?]|$)/, tool: 'letterhead' },
   { re: /^\/api\/admin\/dissolution\/generate(?:[/?]|$)/, tool: 'dissolution' },
-  { re: /^\/api\/admin\/bankapp\/generate(?:[/?]|$)/, tool: 'bank_account_app' },
+  // bank_account_app is filed by its own route handler (server/bankaccount.js) so
+  // it can group by the resolved legal-entity name and also pull supporting docs.
 ];
 
 const safeTool = (t) => String(t || '').replace(/[^a-z0-9_]/gi, '').slice(0, 40);
