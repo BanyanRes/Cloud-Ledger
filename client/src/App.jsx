@@ -1156,6 +1156,12 @@ export default function App(){
   const isSFRCla = !!(_activeEnt && (_activeEnt.code==='BANYANSF' || /^banyan\s*sfr\s*gp\s*investors$/i.test((_activeEnt.name||'').trim())));
   const quarterlyCla = isMidcoCla || isSFRCla;
   const canClaClose = isBanyanRes || isClip || isSilsbee || isSRN || isBuna || isTurnkeyEntity || isCLRO || isHP || isBraker || isMidcoCla || isSFRCla;
+  // Operating TB Account Mapping (Accounting): shown for any entity in the HP or
+  // Braker group — the two projects whose operating column is an uploaded
+  // property-manager trial balance that needs mapping to statement lines.
+  const isOperMapEntity = !!(_activeEnt && (
+    /^(HPPROPER|BRIDGEBA|BANYANHP|HPMANAGE|BRAKERPR|BRAKERQO1|BRAKERQO|BANYANSF1)$/i.test((_activeEnt.code||'').trim())
+    || /bridge\s*banyan\s*hp|highpoint|^hp\s*property\s*owner$|braker/i.test((_activeEnt.name||'').trim())));
   // Odyssey Holdings — the holding company that gets a monthly closing workpaper
   // supporting every balance-sheet account. The generator itself is generic.
   const isOdyssey = !!(_activeEnt && /odyssey/i.test(_activeEnt.name||''));
@@ -1181,6 +1187,7 @@ export default function App(){
       {id:'journal',label:'Journal Entries',icon:NI.journal,section:'entries'},
       {id:'coa',label:'Chart of Accounts',icon:NI.coa,section:'coa'},
       ...(dimsEnabled?[{id:'dimensions',label:'Dimensions',icon:'🏷️',section:'coa'}]:[]),
+      ...(isOperMapEntity?[{id:'operating_tb_map',label:'Operating TB Account Mapping',icon:'🗺️',section:'consolidation'}]:[]),
     ]},
     {key:'BANKING',label:'Banking',icon:'🏛️',items:[
       {id:'banktxn',label:'Bank Transactions',icon:NI.banktxn,section:'bankrec'},
@@ -1331,6 +1338,7 @@ export default function App(){
         {page==='dissolution'&&canAccess('administration')&&<DissolutionPage user={user} key={'dis-'+rk}/>}
         {page==='bank_account_app'&&canAccess('administration')&&<BankAccountPage user={user} key={'baa-'+rk}/>}
         {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
+        {page==='operating_tb_map'&&canAccess('consolidation')&&<OperatingMapPage activeEntity={activeEntity} canEdit={canEdit} key={'opmap-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} isAdmin={user.role==='Admin'} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='memorized'&&activeEntity&&<MemorizedReportsPage entityId={activeEntity} entityName={entityName} canEdit={canEdit} onOpen={(r)=>{const c=r.config||{};if(r.report_type==='trial'&&c.asOf)setTbAsOf(c.asOf);else if(r.report_type==='bs'&&c.asOf)setBsAsOf(c.asOf);else if(r.report_type==='is'){if(c.from)setIsFrom(c.from);if(c.to)setIsTo(c.to);}else setPendingReportConfig({type:r.report_type,config:c});setPage(r.report_type==='drilldown'?'coa':r.report_type);}} key={activeEntity+'-'+rk}/>}
@@ -10448,6 +10456,176 @@ function OrgTreeRows({node,onEdit,canEdit,depth=0}){
     </tr>
     {(node.children||[]).map(c=><OrgTreeRows key={c.id+'-'+c.edge_id} node={c} onEdit={onEdit} canEdit={canEdit} depth={depth+1}/>)}
   </>);
+}
+
+// ── Operating TB Account Mapping (Accounting › Braker / HP) ──
+// Standalone page to map a property manager's operating trial balance to
+// CloudLedger statement lines: upload a month, review the accounts the system
+// auto-mapped and confirm or correct them, map whatever is left, and edit any
+// existing mapping. Backed by /api/operating-map; it reads and writes the same
+// data any consolidating schedule still in use relies on.
+function OperatingMapPage({activeEntity,canEdit=true}){
+  const TYPES=['Asset','Liability','Equity','Revenue','Expense'];
+  const [books,setBooks]=useState([]);
+  const [operEid,setOperEid]=useState(null);
+  const [monthSel,setMonthSel]=useState('');            // '' = latest on file
+  const [view,setView]=useState(null);
+  const [mapRows,setMapRows]=useState([]);
+  const [err,setErr]=useState('');const [msg,setMsg]=useState('');const [busy,setBusy]=useState(false);
+  const fileRef=useRef(null);const [file,setFile]=useState(null);const [upMonth,setUpMonth]=useState('');
+
+  const book=books.find(b=>b.oper_eid===operEid)||null;
+
+  const loadBooks=useCallback(async()=>{
+    try{const r=await api.getOperMapBooks();const bs=(r&&r.books)||[];setBooks(bs);
+      if(bs.length)setOperEid(prev=>prev!=null?prev:((bs.find(b=>b.parent_entity_id===activeEntity)||bs[0]).oper_eid));
+      else setErr('No operating trial balance is set up. This page is for Braker and HP.');
+    }catch(e){setErr(e.message);}
+  },[activeEntity]);
+  useEffect(()=>{loadBooks();},[loadBooks]);
+
+  const loadView=useCallback(async()=>{
+    if(operEid==null)return;setErr('');
+    try{const v=await api.getOperMap(operEid,monthSel||undefined);setView(v);
+      setMapRows((v.lines||[]).filter(l=>l.target_code).map(l=>({...l})));
+      if(!upMonth&&v.as_of)setUpMonth(v.as_of);
+    }catch(e){setErr(e.message);}
+  },[operEid,monthSel]);
+  useEffect(()=>{loadView();},[loadView]);
+
+  const refresh=async(m)=>{if(m)setMsg(m);await loadView();try{const r=await api.getOperMapBooks();setBooks((r&&r.books)||[]);}catch(e){}};
+
+  const upload=async()=>{
+    if(!file){setErr('Choose the operating trial balance file (.xlsx or .csv).');return;}
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(upMonth)){setErr('Enter the month-end date for this trial balance.');return;}
+    setBusy(true);setErr('');setMsg('');
+    try{const r=await api.uploadOperMapTb(operEid,upMonth,file);
+      const bits=[r.count+' accounts saved as of '+r.as_of+'.'];
+      bits.push(r.balanced===false?('\u26a0 It does not foot \u2014 debits and credits are off by '+fmt(r.residual)+'. Check for a subtotal row or a misread column.'):'It foots.');
+      if(r.auto_mapped_count)bits.push(r.auto_mapped_count+' new account'+(r.auto_mapped_count===1?'':'s')+' auto-mapped \u2014 confirm '+(r.auto_mapped_count===1?'it':'them')+' below.');
+      if(r.unmapped_count)bits.push(r.unmapped_count+' still unmapped \u2014 map '+(r.unmapped_count===1?'it':'them')+' below.');
+      setFile(null);if(fileRef.current)fileRef.current.value='';
+      setMonthSel(r.as_of);
+      await refresh(bits.join(' '));
+    }catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+
+  const rerun=async()=>{setBusy(true);setErr('');setMsg('');
+    try{const r=await api.autoOperMap(operEid,monthSel||undefined);
+      await refresh(r.auto_mapped_count?(r.auto_mapped_count+' more account'+(r.auto_mapped_count===1?'':'s')+' auto-mapped \u2014 confirm below.'):'No further accounts could be auto-mapped \u2014 map the rest below.');
+    }catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+
+  // Save a set of row operations (map / confirm / change / remove).
+  const save=async(rows,okMsg)=>{setBusy(true);setErr('');setMsg('');
+    try{await api.saveOperMap(operEid,rows,monthSel||undefined);await refresh(okMsg);}
+    catch(e){setErr(e.message);}finally{setBusy(false);}
+  };
+
+  const setMapField=(i,k,v)=>setMapRows(rows=>rows.map((r,ix)=>ix===i?{...r,[k]:v,_dirty:true}:r));
+  const saveMapEdits=async()=>{const dirty=mapRows.filter(r=>r._dirty);if(!dirty.length){setMsg('No mapping changes to save.');return;}
+    await save(dirty.map(r=>({source_code:r.source_code,target_code:r.target_code,target_name:r.target_name,target_type:r.target_type})),dirty.length+' mapping row(s) saved.');};
+
+  const monthVal=monthSel||(view?view.as_of:'')||'';
+  const srcBadge=(s)=>{if(s==='auto')return {t:'auto',c:T.orange};if(s==='auto-confirmed')return {t:'auto \u2713',c:T.green};return null;};
+
+  return(<div>
+    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:10}}>
+      <div><div style={S.h1}>Operating TB Account Mapping</div>
+        <div style={S.sub}>{book?(book.label+(book.parent_name?(' \u2014 '+book.parent_name):'')):''} The property manager keeps its own ledger; map its accounts to CloudLedger statement lines. New accounts each month are auto-mapped where the match is clear and surfaced here to confirm.</div></div>
+      <div style={{display:'flex',alignItems:'flex-end',gap:10}}>
+        {books.length>1&&<div><label style={S.label}>Property</label>
+          <select style={S.selectSm} value={operEid||''} onChange={e=>{setOperEid(Number(e.target.value));setMonthSel('');setView(null);setUpMonth('');}}>
+            {books.map(b=><option key={b.oper_eid} value={b.oper_eid}>{b.label}</option>)}</select></div>}
+        <div><label style={S.label}>Month</label>
+          <select style={S.selectSm} value={monthVal} onChange={e=>setMonthSel(e.target.value)}>
+            {(view&&view.months||[]).map(m=><option key={m.as_of} value={m.as_of}>{m.as_of}{m.lines?(' ('+m.lines+')'):''}</option>)}
+            {!(view&&view.months||[]).length&&<option value="">none</option>}
+          </select></div>
+      </div>
+    </div>
+
+    {err&&<div style={{...S.card,borderColor:T.red+'40'}}><div style={S.err}>{err}</div></div>}
+    {msg&&<div style={{...S.card,borderColor:T.green+'40',padding:14}}><div style={S.success}>{msg}</div></div>}
+
+    {canEdit&&<div style={{...S.card,padding:16,marginBottom:16}}>
+      <div style={{fontWeight:700,color:T.textBright,marginBottom:10}}>Upload a trial balance</div>
+      <div style={{display:'flex',gap:14,alignItems:'flex-end',flexWrap:'wrap'}}>
+        <div><label style={S.label}>Month end</label><input style={S.inputSm} type="date" value={upMonth} onChange={e=>setUpMonth(e.target.value)}/></div>
+        <div><label style={S.label}>File (.xlsx / .csv)</label><input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={e=>setFile(e.target.files&&e.target.files[0])} style={{display:'block',fontSize:12,color:T.textMuted}}/></div>
+        <button style={{...S.btnP,opacity:(busy||!file)?0.5:1}} disabled={busy||!file} onClick={upload}>{busy?'Working\u2026':'Upload & auto-map'}</button>
+      </div>
+    </div>}
+
+    {book&&<div style={{...S.card,padding:'10px 14px',marginBottom:16,display:'flex',gap:20,flexWrap:'wrap',fontSize:12.5,color:T.textMuted}}>
+      <span>{book.map_rows} mapped</span>
+      <span style={{color:(view&&view.unmapped&&view.unmapped.length)?T.orange:T.textMuted}}>{(view&&view.unmapped||[]).length} unmapped</span>
+      <span style={{color:(view&&view.pending&&view.pending.length)?T.orange:T.textMuted}}>{(view&&view.pending||[]).length} awaiting confirmation</span>
+      {canEdit&&(view&&((view.unmapped||[]).length||0))>0&&<button style={{...S.btnGhost,color:T.accent,fontSize:11.5,padding:'2px 8px'}} onClick={rerun} disabled={busy}>Re-run auto-map</button>}
+    </div>}
+
+    {view&&view.pending&&view.pending.length>0&&<div style={{...S.card,padding:0,marginBottom:16,borderColor:T.orange+'55'}}>
+      <div style={{padding:'10px 14px',fontWeight:700,color:T.orange,fontSize:13,borderBottom:'1px solid '+T.border}}>Auto-mapped \u2014 confirm ({view.pending.length})<span style={{fontWeight:400,color:T.textMuted}}>{'  '}these flow into the schedules now; confirm or change each one</span></div>
+      <table style={S.table}><thead><tr><th style={S.th}>Source</th><th style={S.th}>Name</th><th style={S.thR}>Ending</th><th style={S.th}>Target code</th><th style={S.th}>Target name</th><th style={S.th}>Type</th><th style={S.th}></th></tr></thead>
+        <tbody>{view.pending.map(p=><OperPendingRow key={p.source_code} p={p} canEdit={canEdit} busy={busy}
+          onConfirm={(tc,tn,tt)=>save([{source_code:p.source_code,target_code:tc,target_name:tn,target_type:tt}],'Confirmed '+p.source_code+' \u2192 '+tc+' '+tn+'.')}
+          onRemove={()=>save([{source_code:p.source_code,_delete:true}],'Removed the mapping for '+p.source_code+' \u2014 it is unmapped again.')}/>)}</tbody></table></div>}
+
+    {view&&view.unmapped&&view.unmapped.length>0&&<div style={{...S.card,padding:0,marginBottom:16,borderColor:T.orange+'40'}}>
+      <div style={{padding:'10px 14px',fontWeight:700,color:T.orange,fontSize:13,borderBottom:'1px solid '+T.border}}>Unmapped ({view.unmapped.length})<span style={{fontWeight:400,color:T.textMuted}}>{'  '}these do not flow into the schedules until mapped</span></div>
+      <table style={S.table}><thead><tr><th style={S.th}>Source</th><th style={S.th}>Name</th><th style={S.thR}>Ending</th><th style={S.th}>Target code</th><th style={S.th}>Target name</th><th style={S.th}>Type</th><th style={S.th}></th></tr></thead>
+        <tbody>{view.unmapped.map(u=><OperUnmappedRow key={u.source_code} u={u} canEdit={canEdit} busy={busy}
+          onMap={(tc,tn,tt)=>save([{source_code:u.source_code,target_code:tc,target_name:tn,target_type:tt}],'Mapped '+u.source_code+' \u2192 '+tc+' '+tn+'.')}/>)}</tbody></table></div>}
+
+    <div style={{fontWeight:700,color:T.textBright,fontSize:13,margin:'0 0 8px'}}>All mappings ({mapRows.length})</div>
+    <div style={{...scrollBox()}} className="cl-scroll">
+      <table style={S.table}><thead><tr><th style={S.th}>Source</th><th style={S.th}>Name</th><th style={S.th}>Target code</th><th style={S.th}>Target name</th><th style={S.th}>Type</th><th style={S.th}></th><th style={S.th}></th></tr></thead>
+        <tbody>{mapRows.map((r,i)=>{const b=srcBadge(r.source);return(<tr key={r.source_code} title={r.notes||''}>
+          <td style={{...S.td,fontWeight:600}}>{r.source_code}</td>
+          <td style={{...S.td,color:T.textMuted,whiteSpace:'normal',maxWidth:200}}>{r.source_name}</td>
+          <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:90}} value={r.target_code||''} onChange={e=>setMapField(i,'target_code',e.target.value)}/>:r.target_code}</td>
+          <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:230}} value={r.target_name||''} onChange={e=>setMapField(i,'target_name',e.target.value)}/>:r.target_name}</td>
+          <td style={S.td}>{canEdit?<select style={S.selectSm} value={r.target_type||''} onChange={e=>setMapField(i,'target_type',e.target.value)}>{TYPES.map(t=><option key={t}>{t}</option>)}</select>:r.target_type}</td>
+          <td style={S.td}>{b&&<span style={{fontSize:10.5,fontWeight:700,color:b.c,border:'1px solid '+b.c+'66',borderRadius:4,padding:'1px 5px'}} title={r.notes||''}>{b.t}</span>}</td>
+          <td style={S.td}>{canEdit&&<button style={{...S.btnGhost,color:T.red,fontSize:11}} title="Remove this mapping" onClick={()=>save([{source_code:r.source_code,_delete:true}],'Removed the mapping for '+r.source_code+'.')} disabled={busy}>remove</button>}</td>
+        </tr>);})}
+        {!mapRows.length&&<tr><td colSpan={7} style={{...S.td,color:T.textDim,textAlign:'center'}}>No mappings yet. Upload a trial balance, then map its accounts above.</td></tr>}
+        </tbody></table></div>
+    {canEdit&&mapRows.some(r=>r._dirty)&&<button style={{...S.btnP,marginTop:12}} onClick={saveMapEdits} disabled={busy}>{busy?'Saving\u2026':'Save mapping changes'}</button>}
+  </div>);
+}
+
+// One auto-mapped account awaiting confirmation: the proposed target is editable
+// and pre-filled; Confirm saves it (any edit is kept), the note explains why.
+function OperPendingRow({p,canEdit,busy,onConfirm,onRemove}){
+  const TYPES=['Asset','Liability','Equity','Revenue','Expense'];
+  const [tc,setTc]=useState(p.target_code||'');const [tn,setTn]=useState(p.target_name||'');const [tt,setTt]=useState(p.target_type||'Asset');
+  return(<tr title={p.notes||''}>
+    <td style={{...S.td,fontWeight:600}}>{p.source_code}</td>
+    <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{p.source_name}{p.notes&&<div style={{fontSize:10.5,color:T.textDim}}>{String(p.notes).replace(/^Auto-mapped \u2014 /,'').replace(/ Confirm or change\.$/,'')}</div>}</td>
+    <td style={S.tdR}>{fmt(p.ending)}</td>
+    <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:80}} value={tc} onChange={e=>setTc(e.target.value)}/>:tc}</td>
+    <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:200}} value={tn} onChange={e=>setTn(e.target.value)}/>:tn}</td>
+    <td style={S.td}>{canEdit?<select style={S.selectSm} value={tt} onChange={e=>setTt(e.target.value)}>{TYPES.map(t=><option key={t}>{t}</option>)}</select>:tt}</td>
+    <td style={{...S.td,whiteSpace:'nowrap'}}>{canEdit&&<>
+      <button style={{...S.btnGhost,color:T.green,fontSize:11}} disabled={busy} onClick={()=>onConfirm(tc.trim(),tn.trim(),tt)}>confirm</button>
+      <button style={{...S.btnGhost,color:T.red,fontSize:11}} disabled={busy} onClick={onRemove}>unmap</button></>}</td>
+  </tr>);
+}
+
+// One unmapped operating account, with inline inputs to give it a target.
+function OperUnmappedRow({u,canEdit,busy,onMap}){
+  const TYPES=['Asset','Liability','Equity','Revenue','Expense'];
+  const [tc,setTc]=useState('');const [tn,setTn]=useState(u.source_name||'');const [tt,setTt]=useState('Asset');
+  return(<tr>
+    <td style={{...S.td,fontWeight:600}}>{u.source_code}</td>
+    <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{u.source_name}</td>
+    <td style={S.tdR}>{fmt(u.ending)}</td>
+    <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:80}} value={tc} onChange={e=>setTc(e.target.value)} placeholder="code"/>:''}</td>
+    <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:200}} value={tn} onChange={e=>setTn(e.target.value)} placeholder="name"/>:''}</td>
+    <td style={S.td}>{canEdit?<select style={S.selectSm} value={tt} onChange={e=>setTt(e.target.value)}>{TYPES.map(t=><option key={t}>{t}</option>)}</select>:''}</td>
+    <td style={S.td}>{canEdit?<button style={{...S.btnGhost,color:T.accent,fontSize:11}} disabled={busy||!tc.trim()||!tn.trim()} onClick={()=>onMap(tc.trim(),tn.trim(),tt)}>map</button>:''}</td>
+  </tr>);
 }
 
 // ── Consolidation (Braker / HP) ──

@@ -11781,6 +11781,20 @@ require('./consolidation_routes').registerConsolidationRoutes(app, {
   workpapersDir: WORKPAPERS_DIR,
 });
 
+// === Operating TB Account Mapping (Accounting › Braker / HP) ===
+// Standalone home for mapping a property manager's operating trial balance to
+// CloudLedger statement lines: upload, view mapped/unmapped, auto-map new
+// accounts (surfaced for confirmation) and edit. Reads/writes the same
+// operating_tb / operating_tb_map tables the consolidation engine uses, so
+// existing maps carry over. See server/operatingmap.js.
+require('./operatingmap').registerOperatingMapRoutes(app, {
+  db,
+  auth,
+  requireRole,
+  userHasEntityAccess,
+  workpapersDir: WORKPAPERS_DIR,
+});
+
 // === Org structure (ownership tree) ===
 // Who owns whom, from the legal org charts, including holding companies that
 // hold investment balances but keep no ledger here. Drives two things the

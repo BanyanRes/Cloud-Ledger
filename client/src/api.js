@@ -1253,6 +1253,22 @@ export const api = {
   getConsolSchedules: (parentEid, asOf) =>
     request('/consolidation/' + parentEid + '/schedules?as_of=' + asOf),
 
+  // ── Operating TB Account Mapping (Accounting › Braker / HP) ──
+  // Standalone home for the property-manager TB → statement-line map. Keyed on
+  // the operating entity id (the "book"); reuses the same data the schedules
+  // read, with auto-mapping of new accounts surfaced for confirmation.
+  getOperMapBooks: () => request('/operating-map/books'),
+  getOperMap: (operEid, asOf) => request('/operating-map/' + operEid + (asOf ? '?as_of=' + asOf : '')),
+  uploadOperMapTb: (operEid, asOf, file) => {
+    const fd = new FormData();
+    fd.append('file', file); fd.append('as_of', asOf);
+    return request('/operating-map/' + operEid + '/upload', { method: 'POST', body: fd });
+  },
+  autoOperMap: (operEid, asOf) => request('/operating-map/' + operEid + '/auto', { method: 'POST', body: { as_of: asOf } }),
+  saveOperMap: (operEid, rows, asOf) => request('/operating-map/' + operEid + '/map', { method: 'PUT', body: { rows, as_of: asOf } }),
+  deleteOperMapTb: (operEid, asOf) => request('/operating-map/' + operEid + '?as_of=' + asOf, { method: 'DELETE' }),
+  getOperMapLog: (operEid) => request('/operating-map/' + operEid + '/log'),
+
   // ── Assignment of Interest (document generator) ──
   getAssignmentTemplateStatus: () => request('/assignments/templates/status'),
   uploadAssignmentTemplate: async (kind, file) => {
