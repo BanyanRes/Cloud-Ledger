@@ -7284,36 +7284,14 @@ app.post('/api/billcom/backfill-payment-vendors/:entity_id', auth, requireEntity
 });
 
 // Phase 5: Push CloudLedger COA to Bill.com and auto-create mappings.
-app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), async (req, res) => {
-  const entityId = parseInt(req.params.entity_id);
-  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
-  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
-  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
-
-  const body = req.body || {};
-  let rows;
-  if (Array.isArray(body.codes) && body.codes.length > 0) {
-    const placeholders = body.codes.map(function(){ return '?'; }).join(',');
-    rows = db.prepare('SELECT code, name, type, subtype FROM accounts WHERE entity_id = ? AND code IN (' + placeholders + ')').all(entityId, ...body.codes);
-  } else if (body.all) {
-    // Every account regardless of type (asset/liability/income/equity/expense).
-    // mapType() below maps each CL type to the right Bill.com account type.
-    rows = db.prepare("SELECT code, name, type, subtype FROM accounts WHERE entity_id = ? ORDER BY code").all(entityId);
-  } else if (body.all_expenses) {
-    rows = db.prepare("SELECT code, name, type, subtype FROM accounts WHERE entity_id = ? AND type = 'Expense' ORDER BY code").all(entityId);
-  } else {
-    return res.status(400).json({ error: 'Provide codes:[...], all:true, or all_expenses:true' });
-  }
-  if (rows.length === 0) return res.status(404).json({ error: 'No matching CL accounts found' });
-
-  let session, devKey, existing;
-  try {
-    const pw = billcomDecrypt(cfg.password_enc);
-    devKey = billcomDecrypt(cfg.dev_key_enc);
-    session = await billcomLogin({ username: cfg.username, password: pw, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
-    existing = await billcomListAccounts({ sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url });
-  } catch (ex) { return res.status(502).json({ error: 'login or list failed: ' + ex.message }); }
-
+// Push CL chart-of-accounts rows into Bill.com: create any that don't already
+// exist there (matched by account number, exact name, or a Bill.com name that
+// embeds the CL code like "18420 Due from ..."), map the rest, and record the
+// billcom_account_map link. Shared by the push-coa endpoint and the bill sync's
+// auto-push, so the caller passes an already-authenticated session + devKey.
+// Best-effort per row; returns a summary of what was created / mapped / skipped.
+async function pushCoaToBillcom({ entityId, rows, session, devKey, baseUrl }) {
+  const existing = await billcomListAccounts({ sessionId: session.sessionId, devKey, baseUrl });
   const byName = new Map();
   const byNum = new Map();
   for (const a of existing) {
@@ -7321,7 +7299,6 @@ app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_i
     const num = a && (a.accountNumber || a.number);
     if (num) byNum.set(String(num), a);
   }
-
   function mapType(clType, subtype) {
     const t = String(clType || '').toLowerCase();
     const s = String(subtype || '').toLowerCase();
@@ -7342,47 +7319,88 @@ app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_i
     if (t === 'equity') return 'EQUITY';
     return 'OTHER_EXPENSE';
   }
-
   const headers = { 'Content-Type': 'application/json', 'sessionId': session.sessionId, 'devKey': devKey, 'Accept': 'application/json' };
-  const base = cfg.api_base_url;
-
   const existingMap = db.prepare('SELECT cl_account_code, billcom_account_id FROM billcom_account_map WHERE entity_id = ?').all(entityId);
-  const mappedClCodes = new Set(existingMap.map(function(m){ return m.cl_account_code; }));
-
+  const mappedClCodes = new Set(existingMap.map(function (m) { return m.cl_account_code; }));
+  const insMap = db.prepare('INSERT OR IGNORE INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)');
   const out = { pushed: [], skipped_existing: [], mapped_only: [], errors: [] };
-
   for (const row of rows) {
     try {
-      let bcAccount = byNum.get(row.code) || byName.get(String(row.name).trim().toLowerCase());
+      let bcAccount = byNum.get(String(row.code)) || byName.get(String(row.name).trim().toLowerCase());
+      if (!bcAccount) {
+        // A Bill.com account added by hand often embeds the CL code in its name
+        // ("18420 Due from Banyan Van Buren LLC"). Match that so we MAP it rather
+        // than create a duplicate account in Bill.com.
+        const codePrefix = (String(row.code).trim() + ' ').toLowerCase();
+        const withCode = (String(row.code).trim() + ' ' + String(row.name).trim()).toLowerCase();
+        bcAccount = existing.find(function (a) {
+          const nm = String((a && a.name) || '').trim().toLowerCase();
+          return nm === withCode || nm.indexOf(codePrefix) === 0;
+        }) || null;
+      }
       if (bcAccount) {
         if (!mappedClCodes.has(row.code)) {
-          db.prepare('INSERT OR IGNORE INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)')
-            .run(entityId, bcAccount.id, bcAccount.name, row.code, new Date().toISOString());
+          insMap.run(entityId, bcAccount.id, bcAccount.name, row.code, new Date().toISOString());
+          mappedClCodes.add(row.code);
           out.mapped_only.push({ code: row.code, name: row.name, billcom_id: bcAccount.id });
         } else {
           out.skipped_existing.push({ code: row.code, name: row.name, billcom_id: bcAccount.id });
         }
         continue;
       }
-      const payload = {
-        name: row.name,
-        account: { accountNumber: row.code, type: mapType(row.type, row.subtype) }
-      };
-      const r = await fetch(base + '/classifications/chart-of-accounts', { method: 'POST', headers, body: JSON.stringify(payload) });
+      const payload = { name: row.name, account: { accountNumber: row.code, type: mapType(row.type, row.subtype) } };
+      const r = await fetch(baseUrl + '/classifications/chart-of-accounts', { method: 'POST', headers, body: JSON.stringify(payload) });
       const txt = await r.text();
       let j; try { j = JSON.parse(txt); } catch { j = null; }
       if (!r.ok || !j || !j.id) {
         out.errors.push({ code: row.code, name: row.name, status: r.status, error: txt.slice(0, 400) });
         continue;
       }
-      db.prepare('INSERT OR IGNORE INTO billcom_account_map (entity_id, billcom_account_id, billcom_account_name, cl_account_code, created_at) VALUES (?,?,?,?,?)')
-        .run(entityId, j.id, j.name || row.name, row.code, new Date().toISOString());
+      insMap.run(entityId, j.id, j.name || row.name, row.code, new Date().toISOString());
+      mappedClCodes.add(row.code);
       out.pushed.push({ code: row.code, name: row.name, billcom_id: j.id });
     } catch (ex) {
       out.errors.push({ code: row.code, name: row.name, error: ex.message });
     }
   }
-  res.json(out);
+  return out;
+}
+
+app.post('/api/billcom/push-coa/:entity_id', auth, requireEntityAccess('entity_id'), requireRole('Admin','Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com not configured' });
+
+  const body = req.body || {};
+  let rows;
+  if (Array.isArray(body.codes) && body.codes.length > 0) {
+    const placeholders = body.codes.map(function () { return '?'; }).join(',');
+    rows = db.prepare('SELECT code, name, type, subtype FROM accounts WHERE entity_id = ? AND code IN (' + placeholders + ')').all(entityId, ...body.codes);
+  } else if (body.all) {
+    rows = db.prepare("SELECT code, name, type, subtype FROM accounts WHERE entity_id = ? ORDER BY code").all(entityId);
+  } else if (body.all_expenses) {
+    rows = db.prepare("SELECT code, name, type, subtype FROM accounts WHERE entity_id = ? AND type = 'Expense' ORDER BY code").all(entityId);
+  } else if (body.ap_scope) {
+    // AP coding scope: the account categories bills actually get coded to -
+    // expense accounts plus the intercompany "Due from" receivables.
+    rows = db.prepare("SELECT code, name, type, subtype FROM accounts WHERE entity_id = ? AND (type = 'Expense' OR name LIKE 'Due from%') ORDER BY code").all(entityId);
+  } else {
+    return res.status(400).json({ error: 'Provide codes:[...], all:true, all_expenses:true, or ap_scope:true' });
+  }
+  if (rows.length === 0) return res.status(404).json({ error: 'No matching CL accounts found' });
+
+  let session, devKey;
+  try {
+    const pw = billcomDecrypt(cfg.password_enc);
+    devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password: pw, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+  } catch (ex) { return res.status(502).json({ error: 'login failed: ' + ex.message }); }
+
+  try {
+    const out = await pushCoaToBillcom({ entityId, rows, session, devKey, baseUrl: cfg.api_base_url });
+    res.json(out);
+  } catch (ex) { return res.status(502).json({ error: 'push failed: ' + ex.message }); }
 });
 
 
@@ -8181,6 +8199,34 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
   const alreadySynced = db.prepare(
     "SELECT 1 FROM billcom_sync_log WHERE entity_id = ? AND sync_type = ? AND billcom_id = ? AND status = 'success' LIMIT 1"
   );
+
+  // -- Keep Bill.com's chart of accounts in step with CL (auto-push) ----------
+  // The GL account must already exist in Bill.com for an AP coder to code a bill
+  // to it, and CL does not mirror its chart there automatically. So before
+  // pulling bills, create in Bill.com any in-scope CL account not yet mapped -
+  // the categories bills get coded to: expense accounts and the intercompany
+  // "Due from" receivables (e.g. a new "Due from <entity>" for an intercompany
+  // reimbursement bill). Runs only when something is actually missing (zero cost
+  // on a fully-synced entity), never in preview, and is best-effort: a failure is
+  // logged and never blocks the bill sync.
+  if (!preview) {
+    try {
+      const _mappedCodes = new Set(mapRows.map(r => String(r.cl_account_code)));
+      const _scopeRows = db.prepare("SELECT code, name, type, subtype FROM accounts WHERE entity_id = ? AND (type = 'Expense' OR name LIKE 'Due from%')").all(entityId);
+      const _missing = _scopeRows.filter(r => !_mappedCodes.has(String(r.code)));
+      if (_missing.length) {
+        const _pushOut = await pushCoaToBillcom({ entityId, rows: _missing, session, devKey: listArgs.devKey, baseUrl: cfg.api_base_url });
+        const _created = _pushOut.pushed.length, _mapped = _pushOut.mapped_only.length;
+        if (_created || _mapped) {
+          try { logSync.run(entityId, 'coa', null, null, 'success', 'auto-pushed to Bill.com: ' + _created + ' created, ' + _mapped + ' mapped', now, null); } catch (e) {}
+          const _fresh = db.prepare('SELECT billcom_account_id, billcom_account_name, cl_account_code FROM billcom_account_map WHERE entity_id = ?').all(entityId);
+          mapById.clear(); for (const _r of _fresh) mapById.set(String(_r.billcom_account_id), _r);
+        }
+        if (_pushOut.errors.length) console.error('[billcom sync] entity ' + entityId + ': COA auto-push had ' + _pushOut.errors.length + ' error(s): ' + JSON.stringify(_pushOut.errors.slice(0, 3)));
+        result.coa_push = { created: _created, mapped: _mapped, errors: _pushOut.errors.length };
+      }
+    } catch (e) { console.error('[billcom sync] entity ' + entityId + ': COA auto-push failed: ' + e.message); }
+  }
 
   // Vendor name comes straight off the bill object — the v3 bill (both the list
   // and the detail form) carries vendorName — so we no longer download the entire
