@@ -218,6 +218,16 @@ function buildData(ctx, m, eid) {
   for (const [c, v] of begBS) if (isBS(v.type) && Math.abs(v.balance) >= 0.005) codes.add(c);
   for (const [c, v] of endBS) if (isBS(v.type) && Math.abs(v.balance) >= 0.005) codes.add(c);
   for (const [c, arr] of lines) { const info = acctInfo.get(c); if (info && isBS(info.type) && arr.some((x) => Math.abs(x.signed) >= 0.005)) codes.add(c); }
+  // Prepaid accounts are kept even at a zero balance. A prepaid lead schedule
+  // documents that each prepaid account was reviewed, so the firm lists a
+  // zero-balance prepaid account on the leadsheet rather than dropping the whole
+  // schedule (e.g. HP Property Owner, whose only prepaid account sits at $0).
+  // Only the prepaid category is force-surfaced; every other category still
+  // drops when it is zero for the period, and a zero prepaid account with no
+  // register policies renders a clean empty schedule with no discrepancy.
+  for (const [c, info] of acctInfo) {
+    if (isBS(info.type) && categoryOf(c, info.name, info.type, info.bank_acct) === 'prepaid') codes.add(c);
+  }
 
   const acctRows = [];
   for (const c of codes) {
