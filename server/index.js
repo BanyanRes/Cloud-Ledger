@@ -8162,6 +8162,14 @@ app.post('/api/billcom/sync/:entity_id', auth, requireEntityAccess('entity_id'),
     console.error('[billcom sync] entity ' + entityId + ' bills fetch failed: ' + e.message);
     return res.status(502).json({ error: 'Failed to fetch bills: ' + e.message });
   }
+  // Drop bills Bill.com has flipped to inactive/deleted (isActive === '2'). Its list
+  // endpoint still returns those, so without this a bill deleted upstream stays in
+  // `liveIds` (the deletion mirror's "absent from fetch" trigger never fires, so its
+  // JE is never removed) AND stays in the upsert set (a manually deleted JE gets
+  // re-created on the next sync). Filtering here lets the mirror's positive-confirmation
+  // guard remove the stale JE and stops the resurrection loop. Same exclusion is
+  // already applied on the open-AP path.
+  bills = bills.filter(b => String((b && (b.isActive != null ? b.isActive : b.is_active)) || '') !== '2');
   console.log('[billcom sync] entity ' + entityId + ': ' + bills.length + ' bills fetched, fetching payments');
   try {
     payments = await billcomListPaymentsWindowed({ ...listArgs, fromDate: windowFrom, toDate: windowTo });
