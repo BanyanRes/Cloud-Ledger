@@ -10501,7 +10501,6 @@ function OperatingMapPage({activeEntity,canEdit=true}){
     setBusy(true);setErr('');setMsg('');
     try{const r=await api.uploadOperMapTb(operEid,upMonth,file);
       const bits=[r.count+' accounts saved as of '+r.as_of+'.'];
-      if(r.new_count)bits.push(r.new_count+' new account'+(r.new_count===1?'':'s')+(r.prior_as_of?(' since '+r.prior_as_of):'')+': '+(r.new_accounts||[]).map(a=>a.source_code).join(', ')+'.');
       bits.push(r.balanced===false?('\u26a0 It does not foot \u2014 debits and credits are off by '+fmt(r.residual)+'. Check for a subtotal row or a misread column.'):'It foots.');
       if(r.auto_mapped_count)bits.push(r.auto_mapped_count+' new account'+(r.auto_mapped_count===1?'':'s')+' auto-mapped \u2014 confirm '+(r.auto_mapped_count===1?'it':'them')+' below.');
       if(r.unmapped_count)bits.push(r.unmapped_count+' still unmapped \u2014 map '+(r.unmapped_count===1?'it':'them')+' below.');
