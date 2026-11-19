@@ -4519,12 +4519,10 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     // closing cluster (Net Income + the two grand totals) still stays together
     // via the ensure(rowH*4) below (Jimmy 2026-11).
     ensure(rowH * 2 + Math.min(contrib.length, 3) * rowH);
-    subHeader('Members’ Equity');
-    contrib.forEach(a => acctRowAt(a, 18));
+    emitGroup('Members’ Equity', contrib, 18, true);
     subSubtotal('Total Members’ Equity', i => sumCol(contrib, i));
     if (retained.length) {
-      subHeader('Retained Earnings');
-      retained.forEach(a => acctRowAt(a, 18));
+      emitGroup('Retained Earnings', retained, 18, true);
       subSubtotal('Total Retained Earnings', i => sumCol(retained, i));
     }
     // Reserve the whole equity CLOSING cluster (Net Income + the two grand
