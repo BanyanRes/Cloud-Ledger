@@ -3129,6 +3129,14 @@ function makeLayout(pdf, fonts, meta, statementTitle, opts = {}) {
     get page() { return page; },
     space(n) { y -= n; },
     ensure,
+    // willBreak(space): true when `space` pts of content won't fit on the current
+    // page (the next row would spill onto a new page). breakPage(): force a new
+    // page now. Used to break a long balance-sheet sub-group (e.g. Soft Costs)
+    // across pages and reprint its heading with "(continued)" atop the
+    // continuation page, instead of pushing the whole section down and leaving a
+    // big blank (Jimmy, 2026-11).
+    willBreak(space) { return (y - space) < (PAGE.mB + 8); },
+    breakPage() { newPage(); },
     // Keep-together: if the next `space` points of content won't fit on the
     // current page, break to a new page BEFORE rendering it — so a grouped block
     // (e.g. an operating-expense category with its header, lines and subtotal)
@@ -3538,26 +3546,39 @@ async function renderStatementsPdf(s, outOffsets) {
       // section fits on a fresh usable page; a section taller than a page still
       // flows across pages normally, so this never emits blank pages.
       {
-        let _nL = 1; // section header
-        for (const _su of sec.subs) {
-          if (showSubHeaders) _nL += 1;
-          _nL += _su.rows.length;
-          const _fs = m.profile === 'banyandev' && BANYANDEV_FORCE_SUBTOTAL_SECTIONS.has(sec.title);
-          if (showSubHeaders && (_su.rows.length > 1 || _fs)) _nL += 1;
-        }
-        _nL += 1; // section total
-        L.keepTogether(_nL * 13 + 14);
+        // Reserve only a LEAD block (section header + first sub-header + the
+        // first few rows). The old code reserved the section's FULL height, so a
+        // tall section (Other Assets / Soft Costs) that happened to fit on a
+        // fresh page jumped there wholesale and left ~70% of the prior page
+        // blank. Reserving just the lead keeps the header from being stranded
+        // alone at a page bottom, then lets the body flow and fill the page; a
+        // short section whose lead IS the whole section still stays together
+        // (Jimmy 2026-11).
+        const _first = sec.subs[0];
+        let _lead = 1;                                          // section header
+        if (showSubHeaders) _lead += 1;                         // first sub-header
+        _lead += Math.min(_first ? _first.rows.length : 0, 3);  // first few rows
+        L.keepTogether(_lead * 13 + 14);
       }
       L.row(secLabel, [], { indent: 6, boldRow: true, gapBefore: spaceBefore });
       for (const su of sec.subs) {
-        if (showSubHeaders) L.row(subLabelOf(su), [], { indent: 16 });
+        // Keep a sub-header with its first row so a page never ends on a bare
+        // "Soft Costs" heading (its rows would start the next page).
+        if (showSubHeaders) L.row(subLabelOf(su), [], { indent: 16, keepWithNext: 13 });
         const rowIndent = showSubHeaders ? 26 : 16;
-        for (const r of su.rows) {
-          L.row(r.name, bsCells(r.cur, r.pri), { indent: rowIndent, dollarPrefix: bsFirstRow });
-          bsFirstRow = false;
-        }
         const forceSub = m.profile === 'banyandev' && BANYANDEV_FORCE_SUBTOTAL_SECTIONS.has(sec.title);
-        if (showSubHeaders && (su.rows.length > 1 || forceSub)) {
+        const hasSubtotal = showSubHeaders && (su.rows.length > 1 || forceSub);
+        su.rows.forEach((r, ri) => {
+          // Reserve the sub-group subtotal's height on the LAST row so it never
+          // separates from its detail; when a long group (Soft Costs) crosses a
+          // page, break and reprint "<sub> (continued)" above the rest (Jimmy
+          // 2026-11).
+          const kw = (hasSubtotal && ri === su.rows.length - 1) ? 13 : 0;
+          if (showSubHeaders && L.willBreak(13 + kw)) { L.breakPage(); L.row(subLabelOf(su) + ' (continued)', [], { indent: 16 }); }
+          L.row(r.name, bsCells(r.cur, r.pri), { indent: rowIndent, dollarPrefix: bsFirstRow, keepWithNext: kw });
+          bsFirstRow = false;
+        });
+        if (hasSubtotal) {
           // GL balances are already signed; a contra subtotal (accumulated
           // amortization) is naturally negative and prints in parentheses.
           L.row('Total ' + subLabelOf(su), bsCells(su.subtotal.cur, su.subtotal.pri), { indent: 20, ruleAbove: true });
@@ -4410,6 +4431,19 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
   };
   const subHeader = (t) => { ensure(rowH); dtext(t, nameLeft + 10, y, F.row, reg); y -= rowH; };
   const subSubtotal = (label, getVal) => { ensure(rowH); rule(); dtext(label, nameLeft + 18, y, F.row, reg); figs(getVal, reg); y -= rowH * 1.2; };
+  const willBreak = (space) => (y - space) < (PAGE.mB + 8);
+  // Render a sub-group heading + its rows, reprinting "<label> (continued)" atop
+  // any page the group spills onto, and never ending a page on a bare heading
+  // (the heading is kept with its first row). Mirrors the face balance sheet's
+  // Soft-Costs continuation rule so a long group never leaves the reader without
+  // a heading on the next page (Jimmy 2026-11).
+  const emitGroup = (label, rows, ind, showLabel) => {
+    if (showLabel) { ensure(rowH * 2); subHeader(label); }
+    for (const a of rows) {
+      if (showLabel && willBreak(rowH)) { newPage(); subHeader(label + ' (continued)'); }
+      acctRowAt(a, ind);
+    }
+  };
   // Group a set of rows into ordered { section, subs:[{sub, rows}] } using the
   // face classification and the profile's section/subsection order.
   const groupRows = (rows, sectionOrder) => {
@@ -4437,9 +4471,8 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     const force = forceSubSet.has(secGroup.section);
     const showSubs = secGroup.subs.length > 1 || force;
     for (const su of secGroup.subs) {
-      if (showSubs) subHeader(su.sub);
       const ind = showSubs ? 18 : 10;
-      su.rows.forEach(a => acctRowAt(a, ind));
+      emitGroup(su.sub, su.rows, ind, showSubs);
       if (showSubs && (su.rows.length > 1 || force)) subSubtotal('Total ' + su.sub, i => sumCol(su.rows, i));
     }
     const allRows = secGroup.subs.reduce((s2, su) => s2.concat(su.rows), []);
@@ -4480,17 +4513,12 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
     dollarFirst = true;
     for (const sec of groupRows(liabs, ['Current Liabilities', 'Long Term Liabilities'])) renderGroupedSection(sec, 'Total ' + sec.section);
     subtotal('Total Liabilities', i => sumCol(liabs, i));
-    // Keep the whole Members' Equity section on one page — never split it so
-    // that only its totals spill to a near-empty continuation page (matches the
-    // face balance sheet; CLA/Jimmy 8/30, "no orphaned totals"). Falls back to
-    // the Net Income reserve below when the section is taller than a page.
-    {
-      const usable = (PH - PAGE.mT) - (PAGE.mB + 8);
-      let eqH = rowH * 2 + contrib.length * rowH + rowH * 1.2;   // ME header + Net Income + contributed + its subtotal
-      if (retained.length) eqH += rowH + retained.length * rowH + rowH * 1.2;  // Retained Earnings header + rows + subtotal
-      eqH += rowH * 3;                                            // the two grand totals
-      if (eqH <= usable) ensure(eqH);
-    }
+    // Reserve only the lead (Members' Equity header + first few rows) so the
+    // equity block is never pushed whole to a fresh page leaving a big blank
+    // behind; it flows across pages normally via each row's own ensure(). The
+    // closing cluster (Net Income + the two grand totals) still stays together
+    // via the ensure(rowH*4) below (Jimmy 2026-11).
+    ensure(rowH * 2 + Math.min(contrib.length, 3) * rowH);
     subHeader('Members’ Equity');
     contrib.forEach(a => acctRowAt(a, 18));
     subSubtotal('Total Members’ Equity', i => sumCol(contrib, i));
