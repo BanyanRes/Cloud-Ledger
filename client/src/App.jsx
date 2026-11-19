@@ -1338,7 +1338,7 @@ export default function App(){
         {page==='dissolution'&&canAccess('administration')&&<DissolutionPage user={user} key={'dis-'+rk}/>}
         {page==='bank_account_app'&&canAccess('administration')&&<BankAccountPage user={user} key={'baa-'+rk}/>}
         {page==='consolidation'&&canAccess('consolidation')&&<ConsolidationPage entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'consol-'+rk}/>}
-        {page==='operating_tb_map'&&canAccess('consolidation')&&<OperatingMapPage activeEntity={activeEntity} canEdit={canEdit} key={'opmap-'+rk}/>}
+        {page==='operating_tb_map'&&canAccess('consolidation')&&<OperatingMapPage activeEntity={activeEntity} activeEnt={_activeEnt} canEdit={canEdit} key={'opmap-'+rk}/>}
         {page==='ic_mapping'&&canAccess('intercompany')&&<IntercompanyMapping entities={entities} activeEntity={activeEntity} canEdit={canEdit} key={'icm-'+rk}/>}
         {page==='apaging'&&activeEntity&&<ApAgingReport entityId={activeEntity} entityName={entityName} canEdit={canEdit} isAdmin={user.role==='Admin'} pendingConfig={pendingReportConfig&&pendingReportConfig.type==='apaging'?pendingReportConfig.config:null} clearPending={()=>setPendingReportConfig(null)} key={activeEntity+'-'+rk}/>}
         {page==='memorized'&&activeEntity&&<MemorizedReportsPage entityId={activeEntity} entityName={entityName} canEdit={canEdit} onOpen={(r)=>{const c=r.config||{};if(r.report_type==='trial'&&c.asOf)setTbAsOf(c.asOf);else if(r.report_type==='bs'&&c.asOf)setBsAsOf(c.asOf);else if(r.report_type==='is'){if(c.from)setIsFrom(c.from);if(c.to)setIsTo(c.to);}else setPendingReportConfig({type:r.report_type,config:c});setPage(r.report_type==='drilldown'?'coa':r.report_type);}} key={activeEntity+'-'+rk}/>}
@@ -10464,7 +10464,7 @@ function OrgTreeRows({node,onEdit,canEdit,depth=0}){
 // auto-mapped and confirm or correct them, map whatever is left, and edit any
 // existing mapping. Backed by /api/operating-map; it reads and writes the same
 // data any consolidating schedule still in use relies on.
-function OperatingMapPage({activeEntity,canEdit=true}){
+function OperatingMapPage({activeEntity,activeEnt,canEdit=true}){
   const TYPES=['Asset','Liability','Equity','Revenue','Expense'];
   const [books,setBooks]=useState([]);
   const [operEid,setOperEid]=useState(null);
@@ -10478,11 +10478,21 @@ function OperatingMapPage({activeEntity,canEdit=true}){
 
   const loadBooks=useCallback(async()=>{
     try{const r=await api.getOperMapBooks();const bs=(r&&r.books)||[];setBooks(bs);
-      if(bs.length)setOperEid(prev=>prev!=null?prev:((bs.find(b=>b.parent_entity_id===activeEntity)||bs[0]).oper_eid));
-      else setErr('No operating trial balance is set up. This page is for Braker and HP.');
+      if(!bs.length)setErr('No operating trial balance is set up. This page is for Braker and HP.');
     }catch(e){setErr(e.message);}
   },[activeEntity]);
   useEffect(()=>{loadBooks();},[loadBooks]);
+  const scopeForEnt=(ent)=>{ if(!ent) return null; const code=(ent.code||'').trim(), name=(ent.name||'').trim();
+    if(/^(BRAKERPR|BRAKERQO1|BRAKERQO)$/i.test(code)||/braker/i.test(name)) return 'braker';
+    if(/^(HPPROPER|BRIDGEBA|BANYANHP|HPMANAGE)$/i.test(code)||/bridge\s*banyan\s*hp|highpoint|^hp\s*property\s*owner$/i.test(name)) return 'hp';
+    return null; };
+  const wantScope=scopeForEnt(activeEnt);
+  // Follow the entity selected above: pick the operating book (HP / Braker)
+  // that matches the active entity's group, so an upload can't land on the wrong book.
+  useEffect(()=>{ if(!books.length) return;
+    const want=books.find(b=>b.scope_key===wantScope)||books.find(b=>b.parent_entity_id===activeEntity);
+    if(want&&want.oper_eid!==operEid){ setOperEid(want.oper_eid); setMonthSel(''); setView(null); setUpMonth(''); }
+  },[wantScope,activeEntity,books,operEid]);
 
   const loadView=useCallback(async()=>{
     if(operEid==null)return;setErr('');
@@ -10545,6 +10555,7 @@ function OperatingMapPage({activeEntity,canEdit=true}){
             {(view&&view.months||[]).map(m=><option key={m.as_of} value={m.as_of}>{m.as_of}{m.lines?(' ('+m.lines+')'):''}</option>)}
             {!(view&&view.months||[]).length&&<option value="">none</option>}
           </select></div>
+        <div><label style={S.label}>Find account</label><input style={{...S.inputSm,width:200}} placeholder='code or name...' value={q} onChange={e=>setQ(e.target.value)}/></div>
       </div>
     </div>
 
@@ -10571,20 +10582,17 @@ function OperatingMapPage({activeEntity,canEdit=true}){
     {view&&view.pending&&view.pending.length>0&&<div style={{...S.card,padding:0,marginBottom:16,borderColor:T.orange+'55'}}>
       <div style={{padding:'10px 14px',fontWeight:700,color:T.orange,fontSize:13,borderBottom:'1px solid '+T.border}}>Auto-mapped \u2014 confirm ({view.pending.length})<span style={{fontWeight:400,color:T.textMuted}}>{'  '}these flow into the schedules now; confirm or change each one</span></div>
       <table style={S.table}><thead><tr><th style={S.th}>Source</th><th style={S.th}>Name</th><th style={S.thR}>Ending</th><th style={S.th}>Target code</th><th style={S.th}>Target name</th><th style={S.th}>Type</th><th style={S.th}></th></tr></thead>
-        <tbody>{view.pending.map(p=><OperPendingRow key={p.source_code} p={p} canEdit={canEdit} busy={busy}
+        <tbody>{view.pending.filter(matchRow).map(p=><OperPendingRow key={p.source_code} p={p} canEdit={canEdit} busy={busy}
           onConfirm={(tc,tn,tt)=>save([{source_code:p.source_code,target_code:tc,target_name:tn,target_type:tt}],'Confirmed '+p.source_code+' \u2192 '+tc+' '+tn+'.')}
           onRemove={()=>save([{source_code:p.source_code,_delete:true}],'Removed the mapping for '+p.source_code+' \u2014 it is unmapped again.')}/>)}</tbody></table></div>}
 
     {view&&view.unmapped&&view.unmapped.length>0&&<div style={{...S.card,padding:0,marginBottom:16,borderColor:T.orange+'40'}}>
       <div style={{padding:'10px 14px',fontWeight:700,color:T.orange,fontSize:13,borderBottom:'1px solid '+T.border}}>Unmapped ({view.unmapped.length})<span style={{fontWeight:400,color:T.textMuted}}>{'  '}these do not flow into the schedules until mapped</span></div>
       <table style={S.table}><thead><tr><th style={S.th}>Source</th><th style={S.th}>Name</th><th style={S.thR}>Ending</th><th style={S.th}>Target code</th><th style={S.th}>Target name</th><th style={S.th}>Type</th><th style={S.th}></th></tr></thead>
-        <tbody>{view.unmapped.map(u=><OperUnmappedRow key={u.source_code} u={u} canEdit={canEdit} busy={busy}
+        <tbody>{view.unmapped.filter(matchRow).map(u=><OperUnmappedRow key={u.source_code} u={u} canEdit={canEdit} busy={busy}
           onMap={(tc,tn,tt)=>save([{source_code:u.source_code,target_code:tc,target_name:tn,target_type:tt}],'Mapped '+u.source_code+' \u2192 '+tc+' '+tn+'.')}/>)}</tbody></table></div>}
 
-    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,margin:'0 0 8px',flexWrap:'wrap'}}>
-      <div style={{fontWeight:700,color:T.textBright,fontSize:13}}>All mappings ({q?(shownMap.length+' of '+mapRows.length):mapRows.length})</div>
-      <input style={{...S.inputSm,width:260}} placeholder='Search account code or name...' value={q} onChange={e=>setQ(e.target.value)}/>
-    </div>
+    <div style={{fontWeight:700,color:T.textBright,fontSize:13,margin:'0 0 8px'}}>All mappings ({q?(shownMap.length+' of '+mapRows.length):mapRows.length})</div>
     <div style={{...scrollBox()}} className="cl-scroll">
       <table style={S.table}><thead><tr><th style={S.th}>Source</th><th style={S.th}>Name</th><th style={S.th}>Target code</th><th style={S.th}>Target name</th><th style={S.th}>Type</th><th style={S.th}></th><th style={S.th}></th></tr></thead>
         <tbody>{shownMap.map((r)=>{const b=srcBadge(r.source);return(<tr key={r.source_code} title={r.notes||''}>
