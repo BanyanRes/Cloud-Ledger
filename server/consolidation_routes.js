@@ -297,17 +297,23 @@ const BRAKER_MAP = [
 // plus a Q3 2026 Greystar transfer of 120,000.00 — 447,226.06 in total, the
 // operating ledger's contributed capital to the penny.
 //
-// All of it has since been reclassed INTO 11020 Buildings, so the elimination
-// now targets Buildings for the full 447,226.06 (Dr 32000 / Cr 11020). The three
-// original accounts are reclassed to zero and kept here only for provenance. A
-// reclass into a fixed asset is not a cash transfer, so the forward-funding
-// derivation cannot trace it — the amount is stated. (CLA / Max Meyer, 2026-10-15.)
+// In Aug–Sep 2026 all of it was reclassed INTO 11020 Buildings, so the
+// elimination briefly targeted Buildings for the full 447,226.06 (Dr 32000 /
+// Cr 11020), per CLA (Max Meyer) 2026-10-15. That reclass was REVERSED in Oct
+// 2026: the full 447,226.06 is back in 13425 Operating Shortfall, which again
+// carries the operating funding. So eliminate 13425 in `full` — self-maintaining,
+// it captures whatever the shortfall holds each period (Dr 32000 / Cr 13425);
+// Buildings no longer carries the funding. NOTE: this map is period-agnostic.
+// For the Aug–Sep snapshots (13425 = 0, the cash physically in Buildings) the
+// elimination does not apply and the funding shows as unassigned — re-add the
+// 11020 override for those months only if those historical schedules must tie.
+// (Jimmy Yun, 2026-11-18.)
 // [ account code, name, mode, amount ]
 const BRAKER_FUNDING = [
-  ['11020', 'Buildings', 'amount', 447226.06],
+  ['11020', 'Buildings', 'amount', 0],
   ['11690', 'Other FF&E', 'amount', 0],
   ['12597', 'Other Marketing', 'amount', 0],
-  ['13425', 'Operating Shortfall', 'amount', 0],
+  ['13425', 'Operating Shortfall', 'full', 0],
 ];
 
 // ────────────────────────────── HP ──────────────────────────────
