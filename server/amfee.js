@@ -203,6 +203,10 @@ function ensureTables(db) {
   ];
   const insExt = db.prepare("INSERT OR IGNORE INTO amfee_issues (billing_key, period_key, status, period_label, invoice_no, amount, trigger, by_who, sent_at) VALUES (?,?,'sent',?,?,?,'external','sent outside CloudLedger', datetime('now'))");
   for (const row of EXT_SENT) insExt.run(row[0], row[1], row[2], row[3], row[4]);
+  // One-time: the August 2026 Carlyle invoices were sent outside CloudLedger and
+  // are not to be booked here; mark them skipped so they drop off the due list.
+  const insSkip = db.prepare("INSERT OR IGNORE INTO amfee_issues (billing_key, period_key, status, period_label, trigger, by_who) VALUES (?,?,'skipped','August 2026','external','removed \u2014 sent outside CloudLedger, not booked')");
+  for (const k of ['orchards', 'south_mountain', 'skye_canyon']) insSkip.run(k, '2026-08');
 }
 
 function getConfig(db) {
@@ -269,6 +273,27 @@ function resolvePeriod(b, key) {
   const iss = new Date(Date.UTC(y, (mo - 1) + (b.period === 'prior' ? 1 : 0), 1));
   const iy = iss.getUTCFullYear(), im = iss.getUTCMonth() + 1;
   return { key, label: MON[mo - 1] + ' ' + y, y, m: mo, issueDate: iy + '-' + String(im).padStart(2, '0') + '-' + String(b.issue_dom || 1).padStart(2, '0') };
+}
+// The next period that is NOT yet at its issue date (so it can be prepared early
+// from the admin page, e.g. October before the 20th). Returns null if none soon.
+function nextUpcoming(b, today) {
+  if (b.cadence === 'quarterly') {
+    const fut = (b.schedule || []).filter((s) => s.issue > today).sort((a, c) => (a.issue < c.issue ? -1 : 1))[0];
+    if (!fut) return null;
+    const [y, q] = fut.period.split('-Q');
+    return { key: fut.period, label: 'Q' + q + ' ' + y, y: +y, quarter: +q, issueDate: fut.issue, upcoming: true };
+  }
+  const [ty, tm] = today.split('-').map(Number);
+  for (let fwd = 0; fwd <= 3; fwd++) {
+    const trig = new Date(Date.UTC(ty, tm - 1 + fwd, 1));
+    const trY = trig.getUTCFullYear(), trM = trig.getUTCMonth() + 1;
+    const issueDate = trY + '-' + String(trM).padStart(2, '0') + '-' + String(b.issue_dom).padStart(2, '0');
+    if (issueDate <= today) continue;
+    const pd = new Date(Date.UTC(trY, trM - 1 - (b.period === 'prior' ? 1 : 0), 1));
+    const py = pd.getUTCFullYear(), pm = pd.getUTCMonth() + 1;
+    return { key: py + '-' + String(pm).padStart(2, '0'), label: MON[pm - 1] + ' ' + py, y: py, m: pm, issueDate, upcoming: true };
+  }
+  return null;
 }
 
 // ── MS Graph (app-only) ───────────────────────────────────────────────────────
@@ -742,7 +767,11 @@ function registerAmFeeRoutes(app, ctx) {
       const today = pacificToday().date;
       const issues = {}; for (const r of db.prepare('SELECT * FROM amfee_issues').all()) issues[r.billing_key + '|' + r.period_key] = r;
       const billings = getBillings(db).map((b) => {
-        const due = periodsDue(b, today).map((p) => { const i = issues[b.key + '|' + p.key]; return Object.assign({}, p, { status: i ? i.status : 'due', invoice_no: i && i.invoice_no, amount: i && i.amount, error: i && i.error, sent_at: i && i.sent_at }); });
+        const mk = (p) => { const i = issues[b.key + '|' + p.key]; return Object.assign({}, p, { status: i ? i.status : (p.upcoming ? 'upcoming' : 'due'), invoice_no: i && i.invoice_no, amount: i && i.amount, error: i && i.error, sent_at: i && i.sent_at }); };
+        const due = periodsDue(b, today).map(mk).filter((p) => p.status !== 'skipped');   // dismissed stragglers drop off
+        const up = nextUpcoming(b, today);                                                 // next period, pre-issue-date
+        if (up && !due.some((p) => p.key === up.key)) due.push(mk(up));
+        due.sort((a, c) => (a.key < c.key ? 1 : -1));                                       // newest period first
         const history = db.prepare('SELECT period_key, period_label, status, invoice_no, amount, sent_at, error FROM amfee_issues WHERE billing_key = ? ORDER BY period_key DESC LIMIT 12').all(b.key);
         return { key: b.key, property: b.property, client_name: b.client_name, cadence: b.cadence, fee_type: b.fee_type, fixed_amount: b.fixed_amount, enabled: b.enabled, recipients: b.recipients, due, history };
       });

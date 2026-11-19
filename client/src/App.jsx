@@ -7211,7 +7211,7 @@ function AmFeeInvoices({user}){
   const td={padding:'6px 8px',borderBottom:bd,whiteSpace:'nowrap'};
   const tdr={...td,textAlign:'right'};
   const nb={padding:'3px 8px',fontSize:12,border:bd,borderRadius:6,background:'#fff',cursor:'pointer',marginRight:6};
-  const STAT={sent:['Sent','#166534','#dcfce7'],failed:['Failed','#991b1b','#fee2e2'],skipped:['Skipped','#475569','#e2e8f0'],issuing:['Issuing','#1e40af','#dbeafe'],due:['Due','#92400e','#fef3c7']};
+  const STAT={sent:['Sent','#166534','#dcfce7'],failed:['Failed','#991b1b','#fee2e2'],skipped:['Skipped','#475569','#e2e8f0'],issuing:['Issuing','#1e40af','#dbeafe'],due:['Due','#92400e','#fef3c7'],upcoming:['Upcoming','#334155','#f1f5f9']};
   const pill=(st)=>{const m=STAT[st]||[st,'#334155','#f1f5f9'];return(<span style={{background:m[2],color:m[1],padding:'1px 8px',borderRadius:10,fontSize:12}}>{m[0]}</span>);};
   const preview=async(key,period)=>{setErr('');setMsg('');try{const out=await api.getAmFeePreviewPdf(key,period);if(!out)return;const url=URL.createObjectURL(out.blob);window.open(url,'_blank');setTimeout(()=>URL.revokeObjectURL(url),30000);}catch(e){setErr(e.message);}};
   const testCalc=async(key,period)=>{setBusy(key+period);setErr('');setMsg('');try{const c=await api.getAmFeeCalc(key,period);setMsg(key+' '+period+': net collections '+money(c.netColl,true)+' x '+((c.rate||0.01)*100)+'% = '+money(c.feeRaw,true)+' -> invoiced '+money(c.fee)+(c.source_folder?(' (from '+c.source_folder+')'):''));}catch(e){setErr(e.message);}finally{setBusy('');}};
@@ -7245,7 +7245,7 @@ function AmFeeInvoices({user}){
         <thead><tr><th style={{...td,textAlign:'left'}}>Period</th><th style={{...td,textAlign:'left'}}>Status</th><th style={tdr}>Invoice #</th><th style={tdr}>Amount</th><th style={{...td}}></th></tr></thead>
         <tbody>
           {(b.due||[]).map(p=>(<tr key={p.key}>
-            <td style={td}>{p.label}</td>
+            <td style={td}>{p.label}{p.upcoming&&p.issueDate?<span style={{color:'#64748b',fontSize:11,marginLeft:6}}>· issues {p.issueDate}</span>:null}</td>
             <td style={td}>{pill(p.status)}{p.error?<span title={p.error} style={{color:'#991b1b',marginLeft:6,cursor:'help'}}>!</span>:null}</td>
             <td style={tdr}>{p.invoice_no||''}</td>
             <td style={tdr}>{p.amount!=null?money(p.amount,true):''}</td>
