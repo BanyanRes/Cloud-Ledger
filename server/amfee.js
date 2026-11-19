@@ -354,9 +354,12 @@ async function computeCalc(cfg, b, period) {
 
   const inputs = {};
   if (b.calc.source === 'banyan_mtr') {
-    // income: the property's own 12-month P&L, excluding the "Combined" workbook
+    // income: the property's own 12-month P&L, excluding the "Combined" workbook.
+    // Prefer the name hint ("preserve" / "south mountain"); otherwise take the only
+    // non-combined P&L in the folder (handles name drift like "South Mountain"→"SM").
     const hint = (b.calc.t12_name || '').toLowerCase();
-    const t12f = fnames.find((n) => /12 month|profit and loss/i.test(n) && !/combined/i.test(n) && (!hint || n.toLowerCase().includes(hint)));
+    const cands = fnames.filter((n) => /\.xlsx$/i.test(n) && /12 month|profit and loss/i.test(n) && !/combined/i.test(n));
+    const t12f = (hint && cands.find((n) => n.toLowerCase().includes(hint))) || cands[0];
     if (!t12f) throw new Error('No property 12-Month P&L (MTR) file in ' + monPath);
     const t12 = await read(t12f);
     const col = monthColIndex(t12, period.y, period.m);
@@ -371,7 +374,7 @@ async function computeCalc(cfg, b, period) {
     inputs.ar = tbMovement(tb, b.calc.ar_code);                   // resident A/R increase → reduces collections
     inputs.prepaid = -(tbMovement(tb, b.calc.prepaid_code) || 0); // prepaid-rent credit (collection) → adds
   } else if (b.calc.source === 'rp_codes') {
-    const merged = pick(/mergedexcel|res\d+/);
+    const merged = fnames.find((n) => /\.xlsx$/i.test(n) && /mergedexcel|res\d+/i.test(n));
     if (!merged) throw new Error('No merged financial export in ' + monPath);
     const wb = await read(merged);
     inputs.gross = rpIncome(wb, b.calc.gross_code);    // single-period Income Statement, Period to Date
