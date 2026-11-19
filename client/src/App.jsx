@@ -10547,14 +10547,6 @@ function OperatingMapPage({activeEntity,activeEnt,canEdit=true}){
       <div><div style={S.h1}>Operating TB Account Mapping</div>
         <div style={S.sub}>{book?(book.label+(book.parent_name?(' \u2014 '+book.parent_name):'')):''} The property manager keeps its own ledger; map its accounts to CloudLedger statement lines. New accounts each month are auto-mapped where the match is clear and surfaced here to confirm.</div></div>
       <div style={{display:'flex',alignItems:'flex-end',gap:10}}>
-        {books.length>1&&<div><label style={S.label}>Property</label>
-          <select style={S.selectSm} value={operEid||''} onChange={e=>{setOperEid(Number(e.target.value));setMonthSel('');setView(null);setUpMonth('');}}>
-            {books.map(b=><option key={b.oper_eid} value={b.oper_eid}>{b.label}</option>)}</select></div>}
-        <div><label style={S.label}>Month</label>
-          <select style={S.selectSm} value={monthVal} onChange={e=>setMonthSel(e.target.value)}>
-            {(view&&view.months||[]).map(m=><option key={m.as_of} value={m.as_of}>{m.as_of}{m.lines?(' ('+m.lines+')'):''}</option>)}
-            {!(view&&view.months||[]).length&&<option value="">none</option>}
-          </select></div>
         <div><label style={S.label}>Find account</label><input style={{...S.inputSm,width:200}} placeholder='code or name...' value={q} onChange={e=>setQ(e.target.value)}/></div>
       </div>
     </div>
