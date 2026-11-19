@@ -11532,6 +11532,7 @@ require('./amfee').registerAmFeeRoutes(app, {
   db,
   auth,
   requireRole,
+  dataDir,
   getResendKey: () => RESEND_API_KEY,
   getFromEmail: () => (process.env.AR_FROM_EMAIL || RESET_FROM_EMAIL),
 });

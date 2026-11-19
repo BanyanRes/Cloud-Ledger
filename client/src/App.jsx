@@ -7218,7 +7218,7 @@ function AmFeeInvoices({user}){
   const issue=async(b,period,status)=>{const re=status==='sent'||status==='failed';
     if(!window.confirm((re?'RE-ISSUE':'Issue')+' the '+period+' '+b.property+' invoice now?\n\nThis posts a journal entry in Banyan Residential (Dr A/R, Cr Asset Management Fee) and EMAILS it to '+b.recipients.to+' and '+((b.recipients.cc||[]).length)+' cc recipients.'))return;
     setBusy(b.key+period);setErr('');setMsg('');
-    try{const o=await api.issueAmFee(b.key,period,re);setMsg('Issued '+b.property+' '+period+' as invoice #'+o.invoice_no+' ('+money(o.amount,true)+')'+(o.file_warning?(' - note: not filed to SharePoint ('+o.file_warning+')'):''));await load();}
+    try{const o=await api.issueAmFee(b.key,period,re);setMsg('Issued '+b.property+' '+period+' as invoice #'+o.invoice_no+' ('+money(o.amount,true)+')'+(o.file_warning?(' - note: not saved to the AM Fee Invoices folder ('+o.file_warning+')'):''));await load();}
     catch(e){setErr(e.message);}finally{setBusy('');}};
   const toggle=async(b)=>{setBusy('en'+b.key);setErr('');setMsg('');try{await api.saveAmFeeBilling(b.key,{enabled:b.enabled?0:1});await load();}catch(e){setErr(e.message);}finally{setBusy('');}};
   const toggleSched=async()=>{setBusy('sched');setErr('');setMsg('');try{await api.saveAmFeeConfig({scheduler_on:data.config.scheduler_on?0:1});await load();}catch(e){setErr(e.message);}finally{setBusy('');}};
@@ -7226,10 +7226,10 @@ function AmFeeInvoices({user}){
   return(<div>
     <div style={{marginBottom:8}}>
       <div style={S.h1}>AM Fee Invoices</div>
-      <div style={S.sub}>Monthly &amp; quarterly asset-management fee invoices issued by Banyan Residential, LLC. Each is created as an A/R invoice (Dr A/R, Cr Asset Management Fee Revenue), emailed to the recipients, and filed to the AM Fees SharePoint folder. Scheduler is <b>{data.config.scheduler_on?'ON':'OFF'}</b>.</div>
+      <div style={S.sub}>Monthly &amp; quarterly asset-management fee invoices issued by Banyan Residential, LLC. Each is created as an A/R invoice (Dr A/R, Cr Asset Management Fee Revenue), emailed to the recipients, and saved to the AM Fee Invoices folder. Scheduler is <b>{data.config.scheduler_on?'ON':'OFF'}</b>.</div>
     </div>
     {!data.email_configured&&<div style={{...S.err,marginBottom:12}}>Email is not configured on the server (RESEND_API_KEY) &mdash; invoices cannot be sent.</div>}
-    {!data.graph_configured&&<div style={{marginBottom:12,padding:'8px 12px',background:'#fef3c7',color:'#92400e',borderRadius:6,fontSize:13}}>Microsoft Graph / SharePoint is not configured. Invoices still email &amp; post, but PDFs will not be filed to the AM Fees folder, and the calculated (Carlyle) invoices cannot read their financials until it is set.</div>}
+    {!data.graph_configured&&<div style={{marginBottom:12,padding:'8px 12px',background:'#fef3c7',color:'#92400e',borderRadius:6,fontSize:13}}>Microsoft Graph / SharePoint is not configured. Invoices still email, post, and save to the AM Fee Invoices folder, but the calculated (Carlyle) invoices cannot read their financials until it is set.</div>}
     {err&&<div style={{...S.err,marginBottom:12}}>{err}</div>}
     {msg&&<div style={{marginBottom:12,padding:'8px 12px',background:'#dcfce7',color:'#166534',borderRadius:6,fontSize:13}}>{msg}</div>}
     {isAdmin&&<div style={{marginBottom:12}}><button style={{...S.btnP,padding:'5px 12px',fontSize:13}} disabled={busy==='sched'} onClick={toggleSched}>{data.config.scheduler_on?'Turn scheduler OFF':'Turn scheduler ON'}</button></div>}

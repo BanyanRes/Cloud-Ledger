@@ -32,6 +32,7 @@
 // previewed and sent manually from the Admin page.
 
 const ar = require('./ar');
+const { saveAdminDoc } = require('./admindocs');
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const MON = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -662,7 +663,7 @@ function nextInvoiceNo(db, b) {
 }
 
 async function issueOne(ctx, b, period, trigger, who) {
-  const { db } = ctx;
+  const { db, dataDir } = ctx;
   const cfg = getConfig(db);
   if (!claim(db, b.key, period.key, trigger, who)) return { ok: false, reason: b.property + ' ' + period.label + ' already issued or skipped' };
   const upd = (patch) => {
@@ -705,16 +706,20 @@ async function issueOne(ctx, b, period, trigger, who) {
     // mark the A/R invoice as sent
     try { db.prepare("UPDATE ar_invoices SET status='sent', sent_at=datetime('now') WHERE id=?").run(invId); } catch (e) { /* non-fatal */ }
 
-    // 5) file to SharePoint (non-fatal — invoice already sent + booked)
-    let pdfUrl = null, calcUrl = null, fileWarn = null;
+    // 5) file into CloudLedger's own "AM Fee Invoices" folder (its data volume,
+    //    not SharePoint): the client invoice PDF and, for CALC billings, the calc
+    //    workbook. Grouped in a subfolder per property. Non-fatal.
+    let fileWarn = null;
     try {
-      pdfUrl = await spUpload(cfg, fill(b.sp_pdf_dir, b, period), pdfName, pdf, 'application/pdf');
-      if (calcBuf) calcUrl = await spUpload(cfg, fill(b.sp_calc_dir, b, period), fill(b.calc_name, b, period), calcBuf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    } catch (e) { fileWarn = e.message; }
+      if (!dataDir) throw new Error('data volume unavailable');
+      const fold = b.property;   // e.g. "Orchards"
+      saveAdminDoc(db, dataDir, 'am_fee', pdf, pdfName, who, 'application/pdf', fold);
+      if (calcBuf) saveAdminDoc(db, dataDir, 'am_fee', calcBuf, fill(b.calc_name, b, period), who, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fold);
+    } catch (e) { fileWarn = 'not filed to the AM Fee Invoices folder: ' + e.message; }
 
-    upd({ status: 'sent', sent_to: [b.recipients.to].concat(b.recipients.cc || []).join('; '), pdf_url: pdfUrl, calc_url: calcUrl, error: fileWarn, sent_at: new Date().toISOString() });
+    upd({ status: 'sent', sent_to: [b.recipients.to].concat(b.recipients.cc || []).join('; '), error: fileWarn, sent_at: new Date().toISOString() });
     console.log('[amfee] ' + trigger + ' issued ' + b.key + ' ' + period.key + ' #' + invoiceNo + ' $' + amount + (fileWarn ? ' (file warning: ' + fileWarn + ')' : ''));
-    return { ok: true, invoice_no: invoiceNo, amount, ar_invoice_id: invId, pdf_url: pdfUrl, calc_url: calcUrl, file_warning: fileWarn };
+    return { ok: true, invoice_no: invoiceNo, amount, ar_invoice_id: invId, file_warning: fileWarn };
   } catch (e) {
     upd({ status: 'failed', error: e.message });
     console.error('[amfee] FAILED ' + b.key + ' ' + period.key + ': ' + e.message);
