@@ -75,6 +75,22 @@ function books(db) {
 }
 function bookFor(db, operEid) { return books(db).find((b) => Number(b.oper_eid) === Number(operEid)) || null; }
 
+// ── New accounts: present in `eom` but not in the immediately prior uploaded
+// month. This is the signal the property manager added an account this period —
+// distinct from "unmapped" (a new account can be auto-mapped, and an old account
+// can sit unmapped). First month on file has no baseline, so nothing is new.
+function priorMonthEnd(db, operEid, eom) {
+  const r = db.prepare('SELECT MAX(as_of) p FROM operating_tb WHERE entity_id = ? AND as_of < ?').get(operEid, eom);
+  return (r && r.p) || null;
+}
+function newCodes(db, operEid, eom) {
+  const prior = priorMonthEnd(db, operEid, eom);
+  if (!prior) return { prior: null, set: new Set() };
+  const prev = new Set(db.prepare('SELECT source_code FROM operating_tb WHERE entity_id = ? AND as_of = ?').all(operEid, prior).map((r) => String(r.source_code)));
+  const cur = db.prepare('SELECT source_code FROM operating_tb WHERE entity_id = ? AND as_of = ?').all(operEid, eom).map((r) => String(r.source_code));
+  return { prior, set: new Set(cur.filter((c) => !prev.has(c))) };
+}
+
 // ── Name helpers ──
 const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 // A collection-loss / contra account nets against the fee it offsets; strip the
@@ -170,6 +186,7 @@ function autoMap(db, operEid, asOf, by) {
 function viewFor(db, operEid, asOf) {
   const months = C.tbMonths(db, operEid);
   const eom = asOf ? monthEnd(asOf) : (months[0] || {}).as_of;
+  const nw = eom ? newCodes(db, operEid, eom) : { prior: null, set: new Set() };
   const map = C.mapFor(db, operEid);
   const mapMeta = new Map();
   for (const r of db.prepare('SELECT source_code, confirmed, source, notes FROM operating_tb_map WHERE entity_id = ?').all(operEid)) mapMeta.set(String(r.source_code), r);
@@ -180,12 +197,12 @@ function viewFor(db, operEid, asOf) {
       return { source_code: l.source_code, source_name: l.source_name, ending: r2(l.ending), activity: r2(l.debit - l.credit),
         target_code: m ? m.target_code : null, target_name: m ? m.target_name : null, target_type: m ? m.target_type : null,
         confirmed: m ? (meta.confirmed == null ? 1 : meta.confirmed) : null, source: m ? (meta.source || 'manual') : null,
-        notes: m ? (meta.notes || null) : null };
+        notes: m ? (meta.notes || null) : null, is_new: nw.set.has(String(l.source_code)) };
     }).sort((a, b) => String(a.source_code).localeCompare(String(b.source_code)));
   }
-  const unmapped = eom ? C.unmappedFor(db, operEid, eom) : [];
+  const unmapped = (eom ? C.unmappedFor(db, operEid, eom) : []).map((u) => ({ ...u, is_new: nw.set.has(String(u.source_code)) }));
   const pending = lines.filter((l) => l.target_code && !Number(l.confirmed));
-  return { oper_eid: operEid, as_of: eom || null, months, lines, unmapped, pending };
+  return { oper_eid: operEid, as_of: eom || null, prior_as_of: nw.prior, new_count: nw.set.size, months, lines, unmapped, pending, new_accounts: lines.filter((l) => l.is_new) };
 }
 
 // ── Routes ──
@@ -269,10 +286,13 @@ function registerOperatingMapRoutes(app, deps) {
 
       const proposals = autoMap(db, bk.oper_eid, eom, who(req));
       const unmapped = C.unmappedFor(db, bk.oper_eid, eom);
+      const nw = newCodes(db, bk.oper_eid, eom);
+      const newAccounts = parsed.lines.filter((l) => nw.set.has(String(l.source_code))).map((l) => ({ source_code: l.source_code, source_name: l.source_name, ending: r2(l.ending) }));
       res.json({ success: true, as_of: eom, count: parsed.lines.length, balanced: parsed.balanced,
         residual: parsed.residual, sign_mode: parsed.signMode,
         auto_mapped_count: proposals.length, auto_mapped: proposals,
         unmapped_count: unmapped.length, unmapped_nonzero: unmapped.filter((u) => Math.abs(u.ending) > 0.004),
+        new_count: nw.set.size, prior_as_of: nw.prior, new_accounts: newAccounts,
         workpaper });
     } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
   });

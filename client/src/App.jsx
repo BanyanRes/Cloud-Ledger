@@ -10470,7 +10470,7 @@ function OperatingMapPage({activeEntity,canEdit=true}){
   const [operEid,setOperEid]=useState(null);
   const [monthSel,setMonthSel]=useState('');            // '' = latest on file
   const [view,setView]=useState(null);
-  const [mapRows,setMapRows]=useState([]);
+  const [mapRows,setMapRows]=useState([]);const [q,setQ]=useState('');
   const [err,setErr]=useState('');const [msg,setMsg]=useState('');const [busy,setBusy]=useState(false);
   const fileRef=useRef(null);const [file,setFile]=useState(null);const [upMonth,setUpMonth]=useState('');
 
@@ -10501,6 +10501,7 @@ function OperatingMapPage({activeEntity,canEdit=true}){
     setBusy(true);setErr('');setMsg('');
     try{const r=await api.uploadOperMapTb(operEid,upMonth,file);
       const bits=[r.count+' accounts saved as of '+r.as_of+'.'];
+      if(r.new_count)bits.push(r.new_count+' new account'+(r.new_count===1?'':'s')+(r.prior_as_of?(' since '+r.prior_as_of):'')+': '+(r.new_accounts||[]).map(a=>a.source_code).join(', ')+'.');
       bits.push(r.balanced===false?('\u26a0 It does not foot \u2014 debits and credits are off by '+fmt(r.residual)+'. Check for a subtotal row or a misread column.'):'It foots.');
       if(r.auto_mapped_count)bits.push(r.auto_mapped_count+' new account'+(r.auto_mapped_count===1?'':'s')+' auto-mapped \u2014 confirm '+(r.auto_mapped_count===1?'it':'them')+' below.');
       if(r.unmapped_count)bits.push(r.unmapped_count+' still unmapped \u2014 map '+(r.unmapped_count===1?'it':'them')+' below.');
@@ -10522,7 +10523,10 @@ function OperatingMapPage({activeEntity,canEdit=true}){
     catch(e){setErr(e.message);}finally{setBusy(false);}
   };
 
-  const setMapField=(i,k,v)=>setMapRows(rows=>rows.map((r,ix)=>ix===i?{...r,[k]:v,_dirty:true}:r));
+  const setMapField=(code,k,v)=>setMapRows(rows=>rows.map(r=>r.source_code===code?{...r,[k]:v,_dirty:true}:r));
+  const ql=q.trim().toLowerCase();
+  const matchRow=(r)=>!ql||[r.source_code,r.source_name,r.target_code,r.target_name].some(x=>String(x||'').toLowerCase().includes(ql));
+  const shownMap=mapRows.filter(matchRow);
   const saveMapEdits=async()=>{const dirty=mapRows.filter(r=>r._dirty);if(!dirty.length){setMsg('No mapping changes to save.');return;}
     await save(dirty.map(r=>({source_code:r.source_code,target_code:r.target_code,target_name:r.target_name,target_type:r.target_type})),dirty.length+' mapping row(s) saved.');};
 
@@ -10561,6 +10565,7 @@ function OperatingMapPage({activeEntity,canEdit=true}){
       <span>{book.map_rows} mapped</span>
       <span style={{color:(view&&view.unmapped&&view.unmapped.length)?T.orange:T.textMuted}}>{(view&&view.unmapped||[]).length} unmapped</span>
       <span style={{color:(view&&view.pending&&view.pending.length)?T.orange:T.textMuted}}>{(view&&view.pending||[]).length} awaiting confirmation</span>
+      <span style={{color:(view&&view.new_count)?T.accent:T.textMuted}} title='Accounts added since the prior month'>{(view&&view.new_count)||0} new this month</span>
       {canEdit&&(view&&((view.unmapped||[]).length||0))>0&&<button style={{...S.btnGhost,color:T.accent,fontSize:11.5,padding:'2px 8px'}} onClick={rerun} disabled={busy}>Re-run auto-map</button>}
     </div>}
 
@@ -10577,19 +10582,22 @@ function OperatingMapPage({activeEntity,canEdit=true}){
         <tbody>{view.unmapped.map(u=><OperUnmappedRow key={u.source_code} u={u} canEdit={canEdit} busy={busy}
           onMap={(tc,tn,tt)=>save([{source_code:u.source_code,target_code:tc,target_name:tn,target_type:tt}],'Mapped '+u.source_code+' \u2192 '+tc+' '+tn+'.')}/>)}</tbody></table></div>}
 
-    <div style={{fontWeight:700,color:T.textBright,fontSize:13,margin:'0 0 8px'}}>All mappings ({mapRows.length})</div>
+    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,margin:'0 0 8px',flexWrap:'wrap'}}>
+      <div style={{fontWeight:700,color:T.textBright,fontSize:13}}>All mappings ({q?(shownMap.length+' of '+mapRows.length):mapRows.length})</div>
+      <input style={{...S.inputSm,width:260}} placeholder='Search account code or name...' value={q} onChange={e=>setQ(e.target.value)}/>
+    </div>
     <div style={{...scrollBox()}} className="cl-scroll">
       <table style={S.table}><thead><tr><th style={S.th}>Source</th><th style={S.th}>Name</th><th style={S.th}>Target code</th><th style={S.th}>Target name</th><th style={S.th}>Type</th><th style={S.th}></th><th style={S.th}></th></tr></thead>
-        <tbody>{mapRows.map((r,i)=>{const b=srcBadge(r.source);return(<tr key={r.source_code} title={r.notes||''}>
-          <td style={{...S.td,fontWeight:600}}>{r.source_code}</td>
+        <tbody>{shownMap.map((r)=>{const b=srcBadge(r.source);return(<tr key={r.source_code} title={r.notes||''}>
+          <td style={{...S.td,fontWeight:600,overflow:'visible',textOverflow:'clip',minWidth:112}}>{r.source_code}{r.is_new&&<OperNewBadge/>}</td>
           <td style={{...S.td,color:T.textMuted,whiteSpace:'normal',maxWidth:200}}>{r.source_name}</td>
-          <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:90}} value={r.target_code||''} onChange={e=>setMapField(i,'target_code',e.target.value)}/>:r.target_code}</td>
-          <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:230}} value={r.target_name||''} onChange={e=>setMapField(i,'target_name',e.target.value)}/>:r.target_name}</td>
-          <td style={S.td}>{canEdit?<select style={S.selectSm} value={r.target_type||''} onChange={e=>setMapField(i,'target_type',e.target.value)}>{TYPES.map(t=><option key={t}>{t}</option>)}</select>:r.target_type}</td>
+          <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:90}} value={r.target_code||''} onChange={e=>setMapField(r.source_code,'target_code',e.target.value)}/>:r.target_code}</td>
+          <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:230}} value={r.target_name||''} onChange={e=>setMapField(r.source_code,'target_name',e.target.value)}/>:r.target_name}</td>
+          <td style={S.td}>{canEdit?<select style={S.selectSm} value={r.target_type||''} onChange={e=>setMapField(r.source_code,'target_type',e.target.value)}>{TYPES.map(t=><option key={t}>{t}</option>)}</select>:r.target_type}</td>
           <td style={S.td}>{b&&<span style={{fontSize:10.5,fontWeight:700,color:b.c,border:'1px solid '+b.c+'66',borderRadius:4,padding:'1px 5px'}} title={r.notes||''}>{b.t}</span>}</td>
           <td style={S.td}>{canEdit&&<button style={{...S.btnGhost,color:T.red,fontSize:11}} title="Remove this mapping" onClick={()=>save([{source_code:r.source_code,_delete:true}],'Removed the mapping for '+r.source_code+'.')} disabled={busy}>remove</button>}</td>
         </tr>);})}
-        {!mapRows.length&&<tr><td colSpan={7} style={{...S.td,color:T.textDim,textAlign:'center'}}>No mappings yet. Upload a trial balance, then map its accounts above.</td></tr>}
+        {!shownMap.length&&<tr><td colSpan={7} style={{...S.td,color:T.textDim,textAlign:'center'}}>{mapRows.length?('No account matches "'+q+'".'):'No mappings yet. Upload a trial balance, then map its accounts above.'}</td></tr>}
         </tbody></table></div>
     {canEdit&&mapRows.some(r=>r._dirty)&&<button style={{...S.btnP,marginTop:12}} onClick={saveMapEdits} disabled={busy}>{busy?'Saving\u2026':'Save mapping changes'}</button>}
   </div>);
@@ -10597,11 +10605,13 @@ function OperatingMapPage({activeEntity,canEdit=true}){
 
 // One auto-mapped account awaiting confirmation: the proposed target is editable
 // and pre-filled; Confirm saves it (any edit is kept), the note explains why.
+function OperNewBadge(){return <span style={{marginLeft:6,fontSize:9.5,fontWeight:700,color:T.accent,border:'1px solid '+T.accent+'66',borderRadius:4,padding:'1px 4px',verticalAlign:'middle'}} title='New since the prior month'>NEW</span>;}
+
 function OperPendingRow({p,canEdit,busy,onConfirm,onRemove}){
   const TYPES=['Asset','Liability','Equity','Revenue','Expense'];
   const [tc,setTc]=useState(p.target_code||'');const [tn,setTn]=useState(p.target_name||'');const [tt,setTt]=useState(p.target_type||'Asset');
   return(<tr title={p.notes||''}>
-    <td style={{...S.td,fontWeight:600}}>{p.source_code}</td>
+    <td style={{...S.td,fontWeight:600,overflow:'visible',textOverflow:'clip',minWidth:112}}>{p.source_code}{p.is_new&&<OperNewBadge/>}</td>
     <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{p.source_name}{p.notes&&<div style={{fontSize:10.5,color:T.textDim}}>{String(p.notes).replace(/^Auto-mapped \u2014 /,'').replace(/ Confirm or change\.$/,'')}</div>}</td>
     <td style={S.tdR}>{fmt(p.ending)}</td>
     <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:80}} value={tc} onChange={e=>setTc(e.target.value)}/>:tc}</td>
@@ -10618,7 +10628,7 @@ function OperUnmappedRow({u,canEdit,busy,onMap}){
   const TYPES=['Asset','Liability','Equity','Revenue','Expense'];
   const [tc,setTc]=useState('');const [tn,setTn]=useState(u.source_name||'');const [tt,setTt]=useState('Asset');
   return(<tr>
-    <td style={{...S.td,fontWeight:600}}>{u.source_code}</td>
+    <td style={{...S.td,fontWeight:600,overflow:'visible',textOverflow:'clip',minWidth:112}}>{u.source_code}{u.is_new&&<OperNewBadge/>}</td>
     <td style={{...S.td,whiteSpace:'normal',color:T.textMuted}}>{u.source_name}</td>
     <td style={S.tdR}>{fmt(u.ending)}</td>
     <td style={S.td}>{canEdit?<input style={{...S.inputSm,width:80}} value={tc} onChange={e=>setTc(e.target.value)} placeholder="code"/>:''}</td>
