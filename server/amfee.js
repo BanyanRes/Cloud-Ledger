@@ -97,7 +97,7 @@ const SEED_BILLINGS = [
     cadence: 'monthly', issue_dom: 20, period: 'prior', fee_type: 'calc', rate: 0.01, rounding: 'dollar',
     next_no: null, recipients: MARKTAYLOR, enabled: 0,
     fin_dir: SP_FIN_BASE + '/Preserve_Orchards/{YYYY}/{MONFOLDER}',
-    calc: { source: 'banyan_mtr', gross_label: 'Total Gross Potential Rent', loss_label: 'Total Rent Losses', other_label: 'Total Other Income', ar_label: 'Accounts Receivable', prepaid_label: 'Prepaid Rent' },
+    calc: { source: 'banyan_mtr', t12_name: 'preserve', gross_label: 'Total Gross Potential Rent', loss_label: 'Total Rent Losses', other_label: 'Total Other Income', ar_code: '1200', prepaid_code: '1720' },
     sp_calc_dir: SP_AMFEE_BASE + '/Orchards/{YYYY}', calc_name: 'Orchards AM Monthly Fee_{MONTH} {YYYY}.xlsx',
     sp_pdf_dir: SP_AMFEE_BASE + '/Orchards/Invoiced/{YYYY}', pdf_name: 'Orchards AM Fee_{MONABBR} {YYYY}.pdf',
   },
@@ -107,7 +107,7 @@ const SEED_BILLINGS = [
     cadence: 'monthly', issue_dom: 20, period: 'prior', fee_type: 'calc', rate: 0.01, rounding: 'dollar',
     next_no: null, recipients: MARKTAYLOR, enabled: 0,
     fin_dir: SP_FIN_BASE + '/South Mountain/{YYYY}/{MONFOLDER}',
-    calc: { source: 'banyan_mtr', gross_label: 'Total Gross Potential Rent', loss_label: 'Total Rent Losses', other_label: 'Total Other Income', ar_label: 'Accounts Receivable', prepaid_label: 'Prepaid Rent' },
+    calc: { source: 'banyan_mtr', t12_name: 'south mountain', gross_label: 'Total Gross Potential Rent', loss_label: 'Total Rent Losses', other_label: 'Total Other Income', ar_code: '1200', prepaid_code: '1720' },
     sp_calc_dir: SP_AMFEE_BASE + '/South Mountain/{YYYY}', calc_name: 'South Mountain AM Fee_{MONTH} {YYYY}.xlsx',
     sp_pdf_dir: SP_AMFEE_BASE + '/South Mountain/Invoiced/{YYYY}', pdf_name: 'South Mountain AM Fee_{MONABBR} {YYYY}.pdf',
   },
@@ -177,6 +177,19 @@ function ensureTables(db) {
   for (const b of SEED_BILLINGS) {
     const ex = db.prepare('SELECT key FROM amfee_billings WHERE key = ?').get(b.key);
     if (!ex) db.prepare('INSERT INTO amfee_billings (key, data, updated_by) VALUES (?, ?, ?)').run(b.key, JSON.stringify(b), 'seed');
+  }
+  // Migration: refresh the calc config of existing CALC billings to the current
+  // SEED definition when it differs (the extraction logic + A/R / prepaid account
+  // codes changed), preserving runtime fields (enabled, next_no, recipients).
+  for (const b of SEED_BILLINGS) {
+    if (!b.calc) continue;
+    const row = db.prepare('SELECT data FROM amfee_billings WHERE key = ?').get(b.key);
+    if (!row) continue;
+    let cur; try { cur = JSON.parse(row.data); } catch (e) { continue; }
+    if (JSON.stringify(cur.calc) !== JSON.stringify(b.calc)) {
+      cur.calc = b.calc;
+      db.prepare("UPDATE amfee_billings SET data = ?, updated_by = 'calc-migration', updated_at = datetime('now') WHERE key = ?").run(JSON.stringify(cur), b.key);
+    }
   }
   // Invoices already issued outside CloudLedger (the old manual Excel process),
   // recorded so the scheduler never re-sends them and the page shows them as done.
@@ -314,9 +327,18 @@ function matchMonthFolder(names, y, m) {
 }
 
 // ── CALC: compute the fee for a Carlyle property from its SharePoint financials ─
-// NOTE: wired but gated (enabled=0) until each property is tied out to the last
-// manual month. computeCalc downloads the month's T12 + Balance Sheet, extracts
-// the five inputs per the billing's calc map, and returns the breakdown.
+// Carlyle AM fee = round( Net Collections of Rent x 1% ), where, for the single
+// billing month, Net Collections = Total Revenue (gross rent + rent losses +
+// other income) − change in resident A/R + change in resident prepaid rent.
+// Two financial layouts are supported:
+//   • banyan_mtr (Orchards, South Mountain): the property's OWN 12-month P&L
+//     (MTR) — NOT the "Combined" workbook — for the income lines, reading the
+//     column whose header date is the billing month (never the trailing "Total"
+//     column); and the monthly Trial Balance for the A/R (1200) and prepaid-rent
+//     (1720) movements (Debits − Credits).
+//   • rp_codes (Skye Canyon): the RealPage merged export — single-period Income
+//     Statement "Period to Date" column for the income codes, and Balance Sheet
+//     "Net Change" column for the A/R (1200-000) and prepaid (2670-000) codes.
 async function computeCalc(cfg, b, period) {
   const XLSX = require('xlsx');
   const dir = b.fin_dir.replace('{YYYY}', String(period.y)).replace('{MONFOLDER}', '');
@@ -328,22 +350,35 @@ async function computeCalc(cfg, b, period) {
   const files = await spListChildren(cfg, monPath);
   const fnames = files.filter((f) => f.file).map((f) => f.name);
   const pick = (re) => fnames.find((n) => re.test(n.toLowerCase()));
+  const read = async (name) => XLSX.read(await spDownload(cfg, monPath + '/' + name), { type: 'buffer', cellDates: true });
 
   const inputs = {};
   if (b.calc.source === 'banyan_mtr') {
-    const t12f = pick(/profit and loss|12 month/);
-    const bsf = pick(/balance|trial balance|financial\.xlsx/);
-    if (!t12f) throw new Error('No T12 (Profit and Loss) file in ' + monPath);
-    const t12 = XLSX.read(await spDownload(cfg, monPath + '/' + t12f), { type: 'buffer' });
-    const g = labelValue(t12, b.calc.gross_label), l = labelValue(t12, b.calc.loss_label), o = labelValue(t12, b.calc.other_label);
-    inputs.gross = g; inputs.loss = l; inputs.other = o;
-    if (bsf) { const bs = XLSX.read(await spDownload(cfg, monPath + '/' + bsf), { type: 'buffer' }); inputs.ar = labelValue(bs, b.calc.ar_label); inputs.prepaid = labelValue(bs, b.calc.prepaid_label); }
+    // income: the property's own 12-month P&L, excluding the "Combined" workbook
+    const hint = (b.calc.t12_name || '').toLowerCase();
+    const t12f = fnames.find((n) => /12 month|profit and loss/i.test(n) && !/combined/i.test(n) && (!hint || n.toLowerCase().includes(hint)));
+    if (!t12f) throw new Error('No property 12-Month P&L (MTR) file in ' + monPath);
+    const t12 = await read(t12f);
+    const col = monthColIndex(t12, period.y, period.m);
+    if (col == null) throw new Error('No ' + period.label + ' month column in ' + t12f);
+    inputs.gross = valueAtCol(t12, b.calc.gross_label, col);
+    inputs.loss = valueAtCol(t12, b.calc.loss_label, col);
+    inputs.other = valueAtCol(t12, b.calc.other_label, col);
+    // A/R + prepaid: this month's movement (Debits − Credits) from the Trial Balance
+    const tbf = pick(/trial balance/);
+    if (!tbf) throw new Error('No Trial Balance file in ' + monPath);
+    const tb = await read(tbf);
+    inputs.ar = tbMovement(tb, b.calc.ar_code);                   // resident A/R increase → reduces collections
+    inputs.prepaid = -(tbMovement(tb, b.calc.prepaid_code) || 0); // prepaid-rent credit (collection) → adds
   } else if (b.calc.source === 'rp_codes') {
     const merged = pick(/mergedexcel|res\d+/);
     if (!merged) throw new Error('No merged financial export in ' + monPath);
-    const wb = XLSX.read(await spDownload(cfg, monPath + '/' + merged), { type: 'buffer' });
-    inputs.gross = codeValue(wb, b.calc.gross_code); inputs.loss = codeValue(wb, b.calc.loss_code); inputs.other = codeValue(wb, b.calc.other_code);
-    inputs.ar = codeValue(wb, b.calc.ar_code); inputs.prepaid = codeValue(wb, b.calc.prepaid_code);
+    const wb = await read(merged);
+    inputs.gross = rpIncome(wb, b.calc.gross_code);    // single-period Income Statement, Period to Date
+    inputs.loss = rpIncome(wb, b.calc.loss_code);
+    inputs.other = rpIncome(wb, b.calc.other_code);
+    inputs.ar = rpBalanceChange(wb, b.calc.ar_code);       // Balance Sheet, Net Change
+    inputs.prepaid = rpBalanceChange(wb, b.calc.prepaid_code);
   }
   const totalRev = r2((inputs.gross || 0) + (inputs.loss || 0) + (inputs.other || 0));
   const netColl = r2(totalRev - (inputs.ar || 0) + (inputs.prepaid || 0));
@@ -351,25 +386,87 @@ async function computeCalc(cfg, b, period) {
   const fee = Math.round(feeRaw);     // Carlyle invoices show whole dollars
   return { inputs, totalRev, netColl, rate: b.rate || 0.01, feeRaw: r2(feeRaw), fee, source_folder: monPath };
 }
-// find the current-month value on a row whose label matches; MTR files put the
-// month in the right-most numeric column of that row.
-function labelValue(wb, label) {
-  const want = String(label).toLowerCase().replace(/\s+/g, ' ').trim();
+// Column index for the billing month in a 12-month MTR P&L: find the header row
+// of month-end dates and return the index of the cell matching the period's
+// year+month (never the trailing "Total" column). Requires cellDates on read.
+function monthColIndex(wb, y, m) {
+  const XLSX = require('xlsx');
   for (const sn of wb.SheetNames) {
-    const rows = require('xlsx').utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true });
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true });
+    let best = null;
     for (const row of rows) {
-      const lab = (row.find((c) => typeof c === 'string' && c.toLowerCase().replace(/\s+/g, ' ').trim() === want));
-      if (lab !== undefined) { const nums = row.filter((c) => typeof c === 'number'); if (nums.length) return nums[nums.length - 1]; }
+      const dates = row.map((c, i) => [i, c]).filter((p) => p[1] instanceof Date);
+      if (dates.length >= 6 && (!best || dates.length > best.length)) best = dates;
+    }
+    if (best) {
+      const hit = best.find((p) => p[1].getFullYear() === y && (p[1].getMonth() + 1) === m);
+      if (hit) return hit[0];
     }
   }
   return null;
 }
-function codeValue(wb, code) {
+// Value at a specific column index on the row whose first text cell equals label.
+function valueAtCol(wb, label, col) {
+  const XLSX = require('xlsx');
+  const want = String(label).toLowerCase().replace(/\s+/g, ' ').trim();
+  for (const sn of wb.SheetNames) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true });
+    for (const row of rows) {
+      if (row.some((c) => typeof c === 'string' && c.toLowerCase().replace(/\s+/g, ' ').trim() === want)) {
+        const v = row[col];
+        return typeof v === 'number' ? v : null;
+      }
+    }
+  }
+  return null;
+}
+// Net debit movement (Debits − Credits) for a Trial Balance account number.
+// TB columns: Number, Name, Balance Forward, Debits, Credits, Ending Balance.
+function tbMovement(wb, code) {
+  const XLSX = require('xlsx');
+  const want = String(code).trim();
+  for (const sn of wb.SheetNames) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true });
+    for (const row of rows) {
+      if (row.length && String(row[0]).trim() === want) {
+        const d = typeof row[3] === 'number' ? row[3] : 0;
+        const c = typeof row[4] === 'number' ? row[4] : 0;
+        return r2(d - c);
+      }
+    }
+  }
+  return null;
+}
+// RealPage single-period Income Statement: "Period to Date" is the first numeric
+// cell on the account's row (skip the 12-month statement sheet).
+function rpIncome(wb, code) {
+  const XLSX = require('xlsx');
   const want = String(code).toLowerCase();
   for (const sn of wb.SheetNames) {
-    const rows = require('xlsx').utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true });
+    if (!/income statement/i.test(sn) || /12 month/i.test(sn)) continue;
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true });
     for (const row of rows) {
-      if (row.some((c) => typeof c === 'string' && c.toLowerCase().includes(want))) { const nums = row.filter((c) => typeof c === 'number'); if (nums.length) return nums[nums.length - 1]; }
+      if (row.some((c) => typeof c === 'string' && c.toLowerCase().includes(want))) {
+        const v = row.find((c) => typeof c === 'number');
+        return v == null ? null : v;
+      }
+    }
+  }
+  return null;
+}
+// RealPage Balance Sheet (with period change): "Net Change" is the last numeric
+// cell on the account's row.
+function rpBalanceChange(wb, code) {
+  const XLSX = require('xlsx');
+  const want = String(code).toLowerCase();
+  for (const sn of wb.SheetNames) {
+    if (!/balance sheet/i.test(sn)) continue;
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true });
+    for (const row of rows) {
+      if (row.some((c) => typeof c === 'string' && c.toLowerCase().includes(want))) {
+        const nums = row.filter((c) => typeof c === 'number');
+        return nums.length ? nums[nums.length - 1] : null;
+      }
     }
   }
   return null;
