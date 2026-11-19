@@ -3886,15 +3886,20 @@ async function renderStatementsPdf(s, outOffsets) {
       ? s.operations.opexGroups : null;
     if (groups) {
       for (const g of groups) {
-        // Keep each category together: reserve the height of its header row +
-        // all line rows + (if shown) the subtotal row, so a group like
-        // "Contracted Services" never splits with its subtotal on the next page.
+        // Reserve only a lead block (header + first few lines) so a tall category
+        // (Office Expense) is never pushed whole to a fresh page leaving a blank,
+        // and reprint "<category> (continued)" when it crosses a page — same rule
+        // as the balance-sheet sub-groups (Jimmy 2026-11). The sub-header stays
+        // with its first line; the subtotal stays with its last line.
         const nLines = g.lines.length;
         const hasSubtotal = nLines > 1;
-        const groupH = 12 /* header */ + nLines * 12 + (hasSubtotal ? 12 : 0) + 4 /* subtotal rule buffer */;
-        L.keepTogether(groupH);
-        L.row(g.title, [], { indent: 12, boldRow: true });
-        g.lines.forEach(r => L.row(r.name, [money(r.cur), money(r.pri), chg(r.cur, r.pri), money(r.ytd)], { indent: 26, dollarPrefix: spendDollar() }));
+        L.keepTogether(13 + Math.min(nLines, 3) * 13 + 4);
+        L.row(g.title, [], { indent: 12, boldRow: true, keepWithNext: 13 });
+        g.lines.forEach((r, li) => {
+          const kw = (hasSubtotal && li === nLines - 1) ? 13 : 0;
+          if (L.willBreak(13 + kw)) { L.breakPage(); L.row(g.title + ' (continued)', [], { indent: 12, boldRow: true }); }
+          L.row(r.name, [money(r.cur), money(r.pri), chg(r.cur, r.pri), money(r.ytd)], { indent: 26, dollarPrefix: spendDollar(), keepWithNext: kw });
+        });
         if (hasSubtotal) {
           L.row('Total ' + g.title, [money(g.subtotal.cur), money(g.subtotal.pri), chg(g.subtotal.cur, g.subtotal.pri), money(g.subtotal.ytd)], { indent: 20, ruleAbove: true });
         }
@@ -4587,9 +4592,8 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
       sectionHeader('Revenue');
       dollarFirst = true;
       for (const g of treeOf(rev, BANYANDEV_REVENUE_GROUP_ORDER)) {
-        subHeader(g.group);
         const rows = byCode(g.subs.reduce((s, su) => s.concat(su.rows), []));
-        rows.forEach(a => acctRowAt(a, 18));
+        emitGroup(g.group, rows, 18, true);
         subSubtotal('Total ' + g.group, i => sumCol(rows, i));
       }
       subtotal('Total Revenue', i => sumCol(rev, i));
@@ -4598,9 +4602,8 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
       // Operating Expenses — grouped by the face order, each group subtotalled.
       sectionHeader('Operating Expenses');
       for (const g of treeOf(opex, BANYANDEV_OPEX_GROUP_ORDER)) {
-        subHeader(g.group);
         const rows = byCode(g.subs.reduce((s, su) => s.concat(su.rows), []));
-        rows.forEach(a => acctRowAt(a, 18));
+        emitGroup(g.group, rows, 18, true);
         subSubtotal('Total ' + g.group, i => sumCol(rows, i));
       }
       subtotal('Total Operating Expenses', i => sumCol(opex, i));
@@ -4611,9 +4614,8 @@ async function renderConsolidatingSchedulesPdf(schedules, meta, offsets) {
       if (oi.length || oe.length) {
         sectionHeader('Other Income (Expense)');
         for (const g of treeOf(oi, BANYANDEV_OTHER_INCOME_GROUP_ORDER)) {
-          subHeader(g.group);
           const rows = byCode(g.subs.reduce((s, su) => s.concat(su.rows), []));
-          rows.forEach(a => acctRowAt(a, 18));
+          emitGroup(g.group, rows, 18, true);
           subSubtotal('Total ' + g.group, i => sumCol(rows, i));
         }
         for (const g of treeOf(oe)) {
