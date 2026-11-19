@@ -832,6 +832,39 @@ function registerAmFeeRoutes(app, ctx) {
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
 
+  // Re-file an already-issued invoice's PDF (and calc workbook) into the AM Fee
+  // Invoices folder, without re-emailing or re-posting — for invoices issued
+  // before folder-filing existed, or whose filing failed. Reproduces the exact
+  // invoice (stored number/amount) and calc (stored calc_json).
+  app.post('/api/admin/am-fee/:key/refile', auth, requireRole('Admin'), async (req, res) => {
+    try {
+      const b = getBilling(db, req.params.key); if (!b) return res.status(404).json({ error: 'No billing ' + req.params.key });
+      const period = resolvePeriod(b, req.body && req.body.period);
+      if (!period) return res.status(400).json({ error: 'A period is required to re-file' });
+      const row = db.prepare('SELECT * FROM amfee_issues WHERE billing_key = ? AND period_key = ?').get(b.key, period.key);
+      if (!row || row.status !== 'sent' || !row.invoice_no) return res.status(400).json({ error: 'No issued invoice for ' + b.property + ' ' + period.label });
+      if (!ctx.dataDir) return res.status(500).json({ error: 'data volume unavailable' });
+      const cents = (b.rounding === 'cent');
+      const pdfName = fill(b.pdf_name, b, period);
+      const pdf = await renderInvoicePdf({
+        invoice_no: row.invoice_no, issue_date: row.issue_date || period.issueDate, client_name: b.client_name, property: b.property,
+        line_desc: period.label + ' Asset Management Fee', amount: row.amount, cents, period_label: period.label,
+      });
+      const fold = b.property;
+      saveAdminDoc(db, ctx.dataDir, 'am_fee', pdf, pdfName, who(req), 'application/pdf', fold);
+      let calcFiled = false;
+      if (b.fee_type === 'calc' && row.calc_json) {
+        let calc = null; try { calc = JSON.parse(row.calc_json); } catch (e) { calc = null; }
+        if (calc && calc.inputs) {
+          const calcBuf = await buildCalcWorkbook(b, period, calc);
+          saveAdminDoc(db, ctx.dataDir, 'am_fee', calcBuf, fill(b.calc_name, b, period), who(req), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fold);
+          calcFiled = true;
+        }
+      }
+      res.json({ ok: true, invoice_no: row.invoice_no, folder: fold, pdf: pdfName, calc_filed: calcFiled });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+
   startScheduler(ctx);
 }
 
