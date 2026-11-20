@@ -12242,7 +12242,7 @@ function reconScopeData(scope, asOf) {
       due.push({
         entity: E.name, cp: nameOf[g.counterparty_entity_id] || g.counterparty_name || '(external)',
         our_acc: codes(g.our_legs), their_acc: codes(g.their_legs),
-        left: round2(g.our_net), right: round2(-g.their_net), diff: round2(g.difference),
+        left: round2(g.our_net), right: round2(g.their_net), diff: round2(g.difference),
         status: STAT[g.status] || g.status,
         detail: [
           ...(g.our_legs || []).map(l => ({ side: 'our', ref: l.account_code, desc: l.account_name, amt: round2(l.signed || 0) })),
