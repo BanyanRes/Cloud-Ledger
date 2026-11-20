@@ -9899,22 +9899,21 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
           </tr>;
           if(!isOpen) return [main];
           if(r.comp_entity){
-            const cg={display:'grid',gridTemplateColumns:'1fr 120px 100px 120px 130px',gap:10,padding:'7px 12px',alignItems:'center'};
+            const cg={display:'grid',gridTemplateColumns:'1fr 100px 85px 100px 110px 120px 115px',gap:8,padding:'7px 12px',alignItems:'center'};
             const dash='\u2014';
-            const crow=(nm,c,net)=><div key={nm} style={{...cg,borderBottom:'1px solid '+T.borderLight,fontSize:13}}>
+            const num=(v,neg)=>{const val=neg?-(v||0):(v||0);return <span style={{textAlign:'right',fontFamily:'monospace',color:val<0?T.red:T.textMuted}}>{Math.abs(v||0)>0.005?fmt(val):dash}</span>;};
+            const crow=(nm,c,net)=><div key={nm} style={{...cg,borderBottom:'1px solid '+T.borderLight,fontSize:12.5}}>
               <span style={{color:T.textBright}}>{nm}</span>
-              <span style={{textAlign:'right',fontFamily:'monospace',color:T.textMuted}}>{c.due?fmt(c.due):dash}</span>
-              <span style={{textAlign:'right',fontFamily:'monospace',color:T.textMuted}}>{c.ar?fmt(c.ar):dash}</span>
-              <span style={{textAlign:'right',fontFamily:'monospace',color:c.ap?T.red:T.textMuted}}>{c.ap?fmt(-c.ap):dash}</span>
+              {num(c.due,false)}{num(c.ar,false)}{num(c.ap,true)}{num(c.inv,false)}{num(c.cap,true)}
               <span style={{textAlign:'right',fontFamily:'monospace',fontWeight:600,color:net<0?T.red:T.textBright}}>{fmt(net)}</span></div>;
             const det=<tr key={key+'-d'}><td colSpan={7} style={{padding:0,borderBottom:'1px solid '+T.borderLight}}>
               <div style={{padding:'10px 14px 14px 36px',background:T.bgElevated}}>
                 <div style={{fontSize:11,color:T.textDim,fontWeight:650,textTransform:'uppercase',letterSpacing:'.04em',marginBottom:6}}>How each side booked it</div>
-                <div style={{border:'1px solid '+T.border,borderRadius:9,overflow:'hidden'}}>
-                  <div style={{...cg,fontSize:11,color:T.textDim,fontWeight:650,background:T.panel}}>
-                    <span>Entity</span><span style={{textAlign:'right'}}>Due from/(to)</span><span style={{textAlign:'right'}}>A/R</span><span style={{textAlign:'right'}}>(A/P)</span><span style={{textAlign:'right'}}>Net recorded</span></div>
+                <div style={{border:'1px solid '+T.border,borderRadius:9,overflow:'auto'}}>
+                  <div style={{...cg,fontSize:10.5,color:T.textDim,fontWeight:650,background:T.panel}}>
+                    <span>Entity</span><span style={{textAlign:'right'}}>Due from/(to)</span><span style={{textAlign:'right'}}>A/R</span><span style={{textAlign:'right'}}>(A/P)</span><span style={{textAlign:'right'}}>Investment</span><span style={{textAlign:'right'}}>(Contrib. cap.)</span><span style={{textAlign:'right'}}>Net recorded</span></div>
                   {crow(r.entity,r.comp_entity,r.left)}
-                  {crow(r.cp,r.comp_cp,r.right)}
+                  {r.entity!==r.cp&&crow(r.cp,r.comp_cp,r.right)}
                 </div></div></td></tr>;
             return [main,det];
           }
