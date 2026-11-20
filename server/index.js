@@ -12233,12 +12233,13 @@ function reconScopeData(scope, asOf) {
   const nameOf = {}; allEnt.forEach(e => { nameOf[e.id] = e.name; });
   const STAT = { matched: 'Matched', mismatch: 'Mismatch', one_sided: 'One-sided', settled: 'Settled', no_ledger: 'No ledger', self: 'Self-invest' };
   const codes = legs => (legs || []).map(l => l.account_code).join(', ');
-  const due = [], inv = [];
+  const due = [], inv = [], dueNet = new Map();
   for (const E of allEnt) {
     if (!inScope(E.id)) continue;
     let rec; try { rec = icMod.reconcileForEntity(db, E.id, { computeBalances, as_of: asOf }); } catch (e) { continue; }
     for (const g of (rec.due.rows || [])) {
       if (!inScope(g.counterparty_entity_id) || !involvesClrf(E.id, g.counterparty_entity_id)) continue;
+      dueNet.set(E.id + '>' + g.counterparty_entity_id, round2(g.our_net));
       due.push({
         entity: E.name, cp: nameOf[g.counterparty_entity_id] || g.counterparty_name || '(external)',
         our_acc: codes(g.our_legs), their_acc: codes(g.their_legs),
@@ -12303,7 +12304,37 @@ function reconScopeData(scope, asOf) {
   const arapF = arap.filter(hasAmt).map(trim);
   const sortD = a => a.sort((x, y) => Math.abs(y.diff) - Math.abs(x.diff) || String(x.entity).localeCompare(String(y.entity)));
   sortD(dueP); sortD(invP); sortD(arapF);
-  return { scope, as_of: asOf, due: dueP, inv: invP, arap: arapF, ar_by_customer, ap_by_vendor };
+  // Unified per-pair position: net Due-from/Due-to + A/R - A/P on each side (debit-
+  // positive), so a relationship booked as Due on one side and A/P on the other
+  // reconciles to one line instead of two offsetting breaks. Investment is
+  // structural and stays in its own detail tab.
+  const arToward = new Map(), apOwed = new Map();
+  for (const r of data.comp) {
+    if (!(inScope(r.creditor) && inScope(r.debtor)) || !involvesClrf(r.creditor, r.debtor)) continue;
+    if (Math.abs(r.ar) > 0.005) arToward.set(r.creditor + '>' + r.debtor, round2(r.ar));
+    if (Math.abs(r.ap) > 0.005) apOwed.set(r.debtor + '>' + r.creditor, round2(r.ap));
+  }
+  const dueAt = (x, y) => dueNet.get(x + '>' + y) || 0;
+  const arAt = (x, y) => arToward.get(x + '>' + y) || 0;
+  const apAt = (x, y) => apOwed.get(x + '>' + y) || 0;
+  const posOf = (x, y) => round2(dueAt(x, y) + arAt(x, y) - apAt(x, y));
+  const compOf = (x, y) => ({ due: round2(dueAt(x, y)), ar: round2(arAt(x, y)), ap: round2(apAt(x, y)) });
+  const pairKeys = new Set();
+  const addKey = (a, b) => { const lo = Math.min(Number(a), Number(b)), hi = Math.max(Number(a), Number(b)); pairKeys.add(lo + '|' + hi); };
+  for (const k of dueNet.keys()) { const parts = k.split('>'); addKey(parts[0], parts[1]); }
+  for (const k of arToward.keys()) { const parts = k.split('>'); addKey(parts[0], parts[1]); }
+  for (const k of apOwed.keys()) { const parts = k.split('>'); addKey(parts[0], parts[1]); }
+  const pairs = [];
+  for (const pk of pairKeys) {
+    const ab = pk.split('|').map(Number); const a = ab[0], b = ab[1];
+    const pa = posOf(a, b), pb = posOf(b, a);
+    if (Math.abs(pa) < 0.005 && Math.abs(pb) < 0.005) continue;
+    const hi = pa >= pb ? a : b, lo = pa >= pb ? b : a, ph = pa >= pb ? pa : pb, pl = pa >= pb ? pb : pa;
+    const diff = round2(ph + pl);
+    pairs.push({ entity: nameOf[hi] || ('#' + hi), cp: nameOf[lo] || ('#' + lo), left: ph, right: pl, diff, status: Math.abs(diff) < 0.005 ? 'Matched' : 'Mismatch', comp_entity: compOf(hi, lo), comp_cp: compOf(lo, hi) });
+  }
+  pairs.sort((x, y) => Math.abs(y.diff) - Math.abs(x.diff) || String(x.entity).localeCompare(String(y.entity)));
+  return { scope, as_of: asOf, pairs, due: dueP, inv: invP, arap: arapF, ar_by_customer, ap_by_vendor };
 }
 
 app.get('/api/intercompany/recon-view', auth, requireRole('Admin', 'Accountant'), (req, res) => {
@@ -12384,27 +12415,39 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
         ws.addRow({});
       }
     };
-    // Summary schedule first (lead schedule across all three categories).
+    // Summary = unified lead schedule: one position per counterparty pair, netting
+    // Due from/Due to + A/R - A/P on each side (debit-positive). A pair booked as Due
+    // on one side and A/P on the other nets to zero here instead of two breaks.
     const sum = wb.addWorksheet('Summary');
     sum.columns = [
-      { key: 'cat', width: 28 },
-      { key: 'e', width: 40 },
-      { key: 'cp', width: 40 },
-      { key: 'l', width: 20, style: { numFmt: MONEY } },
-      { key: 'r', width: 24, style: { numFmt: MONEY } },
-      { key: 'df', width: 20, style: { numFmt: MONEY } },
-      { key: 's', width: 14, style: CTR },
+      { key: 'a', width: 46 },
+      { key: 'due', width: 16, style: { numFmt: MONEY } },
+      { key: 'ar', width: 14, style: { numFmt: MONEY } },
+      { key: 'ap', width: 16, style: { numFmt: MONEY } },
+      { key: 'net', width: 18, style: { numFmt: MONEY } },
+      { key: 'oob', width: 16, style: { numFmt: MONEY } },
+      { key: 's', width: 13, style: CTR },
     ];
     sum.addRow(['Intercompany Reconciliation Summary for ' + label + ' Entities']);
     sum.mergeCells('A1:G1'); sum.getCell('A1').font = { bold: true, size: 14 };
     sum.addRow([asOfLabel]);
     sum.mergeCells('A2:G2'); sum.getCell('A2').font = { italic: true };
+    sum.addRow(['Position by counterparty pair \u2014 net of Due from/Due to, A/R and A/P (debit-positive)']);
+    sum.mergeCells('A3:G3'); sum.getCell('A3').font = { italic: true, size: 10, color: { argb: 'FF666666' } };
     sum.addRow([]);
-    const sumHdr = sum.addRow({ cat: 'Category', e: 'Entity', cp: 'Counterparty', l: 'Entity recorded', r: 'Counterparty recorded', df: 'Out of balance', s: 'Status' });
+    const sumHdr = sum.addRow({ a: 'Entity', due: 'Due from/(to)', ar: 'A/R', ap: '(A/P)', net: 'Net recorded', oob: 'Out of balance', s: 'Status' });
     sumHdr.font = { bold: true };
-    sum.views = [{ state: 'frozen', ySplit: 4 }];
-    const CATN = { due: 'Due from / Due to', inv: 'Investment / Contributed capital', arap: 'A/R vs A/P' };
-    for (const [ck, rr] of [['due', d.due], ['inv', d.inv], ['arap', d.arap]]) for (const r of rr) sum.addRow({ cat: CATN[ck], e: r.entity, cp: r.cp, l: r.left, r: r.right, df: r.diff, s: r.status });
+    sum.views = [{ state: 'frozen', ySplit: sumHdr.number }];
+    const nzS = v => (Math.abs(Number(v) || 0) > 0.005 ? round2(v) : null);
+    const sideLine = (name, c, net) => { sum.addRow({ a: '    ' + name, due: nzS(c.due), ar: nzS(c.ar), ap: nzS(-c.ap), net: round2(net) }); };
+    if (!d.pairs.length) sum.addRow({ a: 'No intercompany positions in this scope.' });
+    for (const p of d.pairs) {
+      const band = sum.addRow({ a: p.entity + '  \u2194  ' + p.cp, oob: p.diff, s: p.status });
+      band.font = { bold: true };
+      sideLine(p.entity, p.comp_entity, p.left);
+      sideLine(p.cp, p.comp_cp, p.right);
+      sum.addRow({});
+    }
     sheet('Due from - Due to detail', d.due);
     sheet('Investment - Contrib detail', d.inv);
     sheet('A-R vs A-P detail', d.arap);

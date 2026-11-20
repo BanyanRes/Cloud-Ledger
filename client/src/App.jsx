@@ -9832,7 +9832,7 @@ function IcUnmappedAccounts({entityId,entityName,entityOpts,companies,canEdit,re
 
 function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}){
   const[scope,setScope]=useState('all');
-  const[cat,setCat]=useState('arap');
+  const[cat,setCat]=useState('pairs');
   const[asOf,setAsOf]=useState(today());
   const[data,setData]=useState(null);
   const[loading,setLoading]=useState(false);
@@ -9843,8 +9843,8 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
   const load=useCallback(async()=>{setLoading(true);setErr('');setOpen({});try{setData(await api.getReconView(scope,asOf));}catch(e){setErr(e.message);setData(null);}finally{setLoading(false);}},[scope,asOf]);
   useEffect(()=>{load();},[load]);
   const SCOPES=[['all','All entities','every entity'],['cla','CLA package','CLA group'],['weaver','Weaver package','Weaver group'],['banyan','Banyan package','all except CLA & Weaver']];
-  const CATS=[['due','Due from / Due to'],['inv','Investment / Contributed capital'],['arap','A/R vs A/P']];
-  const rowsOf=c=>data?(c==='due'?data.due:c==='inv'?data.inv:data.arap):[];
+  const CATS=[['pairs','Summary (by pair)'],['due','Due from / Due to'],['inv','Investment / Contributed capital'],['arap','A/R vs A/P']];
+  const rowsOf=c=>data?(c==='pairs'?(data.pairs||[]):c==='due'?data.due:c==='inv'?data.inv:data.arap):[];
   const mmc=c=>rowsOf(c).filter(r=>Math.abs(r.diff)>=0.005).length;
   const nq=q.trim().toLowerCase();
   const rows=rowsOf(cat).filter(r=>!nq||[r.entity,r.cp,r.our_acc,r.their_acc,...(r.detail||[]).map(d=>(d.ref||'')+' '+(d.desc||''))].some(v=>String(v||'').toLowerCase().includes(nq)));
@@ -9898,6 +9898,26 @@ function IntercompanyReconciliation({entities,activeEntity,setPage,canEdit=true}
             <td style={{...S.td,textAlign:'center'}}><IcBadge kind={sKind(r.status)}>{r.status}</IcBadge></td>
           </tr>;
           if(!isOpen) return [main];
+          if(r.comp_entity){
+            const cg={display:'grid',gridTemplateColumns:'1fr 120px 100px 120px 130px',gap:10,padding:'7px 12px',alignItems:'center'};
+            const dash='\u2014';
+            const crow=(nm,c,net)=><div key={nm} style={{...cg,borderBottom:'1px solid '+T.borderLight,fontSize:13}}>
+              <span style={{color:T.textBright}}>{nm}</span>
+              <span style={{textAlign:'right',fontFamily:'monospace',color:T.textMuted}}>{c.due?fmt(c.due):dash}</span>
+              <span style={{textAlign:'right',fontFamily:'monospace',color:T.textMuted}}>{c.ar?fmt(c.ar):dash}</span>
+              <span style={{textAlign:'right',fontFamily:'monospace',color:c.ap?T.red:T.textMuted}}>{c.ap?fmt(-c.ap):dash}</span>
+              <span style={{textAlign:'right',fontFamily:'monospace',fontWeight:600,color:net<0?T.red:T.textBright}}>{fmt(net)}</span></div>;
+            const det=<tr key={key+'-d'}><td colSpan={7} style={{padding:0,borderBottom:'1px solid '+T.borderLight}}>
+              <div style={{padding:'10px 14px 14px 36px',background:T.bgElevated}}>
+                <div style={{fontSize:11,color:T.textDim,fontWeight:650,textTransform:'uppercase',letterSpacing:'.04em',marginBottom:6}}>How each side booked it</div>
+                <div style={{border:'1px solid '+T.border,borderRadius:9,overflow:'hidden'}}>
+                  <div style={{...cg,fontSize:11,color:T.textDim,fontWeight:650,background:T.panel}}>
+                    <span>Entity</span><span style={{textAlign:'right'}}>Due from/(to)</span><span style={{textAlign:'right'}}>A/R</span><span style={{textAlign:'right'}}>(A/P)</span><span style={{textAlign:'right'}}>Net recorded</span></div>
+                  {crow(r.entity,r.comp_entity,r.left)}
+                  {crow(r.cp,r.comp_cp,r.right)}
+                </div></div></td></tr>;
+            return [main,det];
+          }
           const sub=(r.detail||[]).reduce((a,d)=>a+d.amt,0);
           const grid={display:'grid',gridTemplateColumns:'70px 130px 1fr 150px',gap:10,padding:'7px 12px',alignItems:'center'};
           const det=<tr key={key+'-d'}><td colSpan={7} style={{padding:0,borderBottom:'1px solid '+T.borderLight}}>
