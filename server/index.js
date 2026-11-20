@@ -12448,6 +12448,20 @@ app.get('/api/intercompany/recon-package.xlsx', auth, requireRole('Admin', 'Acco
       sideLine(p.cp, p.comp_cp, p.right);
       sum.addRow({});
     }
+    // Investment / Contributed capital is structural (equity), not working-capital;
+    // it keeps its own section on the summary with its own matched convention.
+    if (d.inv && d.inv.length) {
+      sum.addRow({});
+      const invHdr = sum.addRow({ a: 'Investment / Contributed capital' });
+      invHdr.font = { bold: true, size: 12 };
+      for (const p of d.inv) {
+        const band = sum.addRow({ a: p.entity + '  \u2194  ' + p.cp, oob: p.diff, s: p.status });
+        band.font = { bold: true };
+        sum.addRow({ a: '    ' + p.entity, net: round2(p.left) });
+        sum.addRow({ a: '    ' + p.cp, net: round2(p.right) });
+        sum.addRow({});
+      }
+    }
     sheet('Due from - Due to detail', d.due);
     sheet('Investment - Contrib detail', d.inv);
     sheet('A-R vs A-P detail', d.arap);
