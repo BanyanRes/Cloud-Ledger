@@ -139,6 +139,8 @@ const DEFAULTS = {
   last_invoice_no: 76,         // highest client-facing number used so far (North Tempe Q4 = 0076)
   from_name: ISSUER.name,
   sp_drive_id: '',             // falls back to AMFEE_SP_DRIVE_ID / USC_SP_DRIVE_ID env
+  send_via: 'resend',          // 'resend' (banyanportal.com) or 'graph' (send from send_mailbox via Microsoft Graph Mail.Send)
+  send_mailbox: 'jyun@banyanres.com', // the Outlook mailbox invoices send from when send_via === 'graph'
 };
 
 // ── storage ───────────────────────────────────────────────────────────────────
@@ -598,24 +600,54 @@ async function renderInvoicePdf(inv) {
   return Buffer.from(await pdf.save());
 }
 
-// ── email (Resend) ────────────────────────────────────────────────────────────
+// ── email ─────────────────────────────────────────────────────────────────────
 function senderAddress(fromSetting, displayName) {
   const m = String(fromSetting || '').match(/<([^>]+)>/);
   const addr = m ? m[1] : String(fromSetting || '').trim();
   return displayName + ' <' + addr + '>';
 }
+// Send from a real Outlook mailbox via Microsoft Graph (app-only Mail.Send),
+// saving a copy to that mailbox's Sent Items. Scoped by an application access
+// policy to the invoicing mailbox. msg = { to[], cc[], subject, html, attachments[] }.
+async function graphSendMail(mailbox, msg) {
+  const token = await graphToken();
+  if (!token) return { ok: false, reason: 'Graph not configured (MS_TENANT_ID/MS_CLIENT_ID/MS_CLIENT_SECRET)' };
+  const url = 'https://graph.microsoft.com/v1.0/users/' + encodeURIComponent(mailbox) + '/sendMail';
+  const body = {
+    message: {
+      subject: msg.subject,
+      body: { contentType: 'HTML', content: msg.html },
+      toRecipients: (msg.to || []).map((a) => ({ emailAddress: { address: a } })),
+      ccRecipients: (msg.cc || []).map((a) => ({ emailAddress: { address: a } })),
+      attachments: (msg.attachments || []).map((a) => ({ '@odata.type': '#microsoft.graph.fileAttachment', name: a.name, contentType: a.contentType || 'application/octet-stream', contentBytes: a.contentBytes })),
+    },
+    saveToSentItems: true,
+  };
+  try {
+    const r = await fetch(url, { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    if (r.status >= 200 && r.status < 300) return { ok: true };
+    return { ok: false, reason: 'Graph sendMail ' + r.status + ': ' + (await r.text()).slice(0, 300) };
+  } catch (e) { return { ok: false, reason: e.message }; }
+}
 async function emailInvoice(ctx, cfg, inv, pdf) {
-  const apiKey = ctx.getResendKey && ctx.getResendKey();
-  if (!apiKey) return { ok: false, reason: 'RESEND_API_KEY not configured' };
   const to = [inv.recipients.to];
   const cc = (inv.recipients.cc || []).filter((e) => /@/.test(e));
+  const subject = inv.property + ' \u2014 ' + inv.period_label + ' Asset Management Fee \u2014 Invoice ' + inv.invoice_no;
+  const html = '<p>Please find attached the ' + inv.period_label + ' asset management fee invoice for <b>' + inv.property + '</b> (' + inv.client_name + ').</p>'
+    + '<p>Invoice ' + inv.invoice_no + '<br>Amount due: $' + Number(inv.amount).toLocaleString('en-US', { minimumFractionDigits: inv.cents ? 2 : 0 }) + '</p>'
+    + '<p>Thank you,<br>Banyan Residential, LLC</p>';
+  // Graph (send from the real banyanres.com mailbox) when configured; else Resend.
+  if ((cfg.send_via || 'resend') === 'graph') {
+    return graphSendMail(cfg.send_mailbox || 'jyun@banyanres.com', {
+      to, cc, subject, html,
+      attachments: [{ name: inv.pdf_filename, contentType: 'application/pdf', contentBytes: pdf.toString('base64') }],
+    });
+  }
+  const apiKey = ctx.getResendKey && ctx.getResendKey();
+  if (!apiKey) return { ok: false, reason: 'RESEND_API_KEY not configured' };
   const body = {
     from: senderAddress(ctx.getFromEmail && ctx.getFromEmail(), cfg.from_name || ISSUER.name),
-    to, cc,
-    subject: inv.property + ' \u2014 ' + inv.period_label + ' Asset Management Fee \u2014 Invoice ' + inv.invoice_no,
-    html: '<p>Please find attached the ' + inv.period_label + ' asset management fee invoice for <b>' + inv.property + '</b> (' + inv.client_name + ').</p>'
-      + '<p>Invoice ' + inv.invoice_no + '<br>Amount due: $' + Number(inv.amount).toLocaleString('en-US', { minimumFractionDigits: inv.cents ? 2 : 0 }) + '</p>'
-      + '<p>Thank you,<br>Banyan Residential, LLC</p>',
+    to, cc, subject, html,
     attachments: [{ filename: inv.pdf_filename, content: pdf.toString('base64') }],
   };
   try {
@@ -756,6 +788,12 @@ async function tick(ctx) {
         if (period.issueDate < addDays(now.date, -10)) continue; // don't backfill stale periods automatically
         const st = sent[b.key + '|' + period.key];
         if (st && st !== 'failed') continue;
+        // CALC billings auto-issue only once the month's financials are readable;
+        // until then, wait quietly (no 'failed' record) and retry next tick.
+        if (b.fee_type === 'calc') {
+          try { await computeCalc(cfg, b, period); }
+          catch (e) { console.log('[amfee] auto: ' + b.key + ' ' + period.key + ' waiting on financials \u2014 ' + e.message); continue; }
+        }
         await issueOne(ctx, b, period, 'auto', 'scheduler');
       }
     }
@@ -869,6 +907,24 @@ function registerAmFeeRoutes(app, ctx) {
         }
       }
       res.json({ ok: true, invoice_no: row.invoice_no, folder: fold, pdf: pdfName, calc_filed: calcFiled });
+    } catch (e) { res.status(400).json({ error: e.message }); }
+  });
+
+  // Send a test email via Microsoft Graph (Mail.Send) to confirm Outlook sending
+  // works (and the mailbox scoping) before switching live invoices over. Defaults
+  // to the sender mailbox itself, so it never reaches a client.
+  app.post('/api/admin/am-fee/test-send', auth, requireRole('Admin'), async (req, res) => {
+    try {
+      const cfg = getConfig(db);
+      const mailbox = cfg.send_mailbox || 'jyun@banyanres.com';
+      const to = (req.body && req.body.to) || mailbox;
+      const out = await graphSendMail(mailbox, {
+        to: [to], cc: [],
+        subject: 'CloudLedger AM Fee \u2014 Outlook test send',
+        html: '<p>This is a test from CloudLedger, sent via Microsoft Graph (Mail.Send) from <b>' + mailbox + '</b>. If you received it and it is in your Sent Items, Outlook sending is working.</p>',
+        attachments: [],
+      });
+      res.json(out.ok ? { ok: true, from: mailbox, to } : { ok: false, error: out.reason });
     } catch (e) { res.status(400).json({ error: e.message }); }
   });
 
