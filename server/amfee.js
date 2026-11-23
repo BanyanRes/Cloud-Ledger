@@ -738,10 +738,10 @@ async function issueOne(ctx, b, period, trigger, who) {
     // mark the A/R invoice as sent
     try { db.prepare("UPDATE ar_invoices SET status='sent', sent_at=datetime('now') WHERE id=?").run(invId); } catch (e) { /* non-fatal */ }
 
-    // 5) file the invoice PDF and, for CALC billings, the calc workbook in two
-    //    places. CloudLedger's own "AM Fee Invoices" folder (its data volume) is
-    //    the primary/authoritative copy; a SharePoint copy is mirrored on top.
-    //    Both are non-fatal — the invoice is already sent + booked.
+    // 5) file the invoice PDF and, for CALC billings, the calc workbook into
+    //    CloudLedger's own "AM Fee Invoices" folder (its data volume), in a
+    //    per-property subfolder. Non-fatal — the invoice is already sent + booked.
+    //    (SharePoint is read-only for this app, so it's the system of record here.)
     let fileWarn = null;
     try {
       if (!dataDir) throw new Error('data volume unavailable');
@@ -749,12 +749,6 @@ async function issueOne(ctx, b, period, trigger, who) {
       saveAdminDoc(db, dataDir, 'am_fee', pdf, pdfName, who, 'application/pdf', fold);
       if (calcBuf) saveAdminDoc(db, dataDir, 'am_fee', calcBuf, fill(b.calc_name, b, period), who, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', fold);
     } catch (e) { fileWarn = 'not filed to the AM Fee Invoices folder: ' + e.message; }
-    // SharePoint mirror — best-effort, logged only (no user-facing flag): it needs
-    // Graph Sites.ReadWrite.All and simply no-ops until that consent is in place.
-    try {
-      if (b.sp_pdf_dir) await spUpload(cfg, fill(b.sp_pdf_dir, b, period), pdfName, pdf, 'application/pdf');
-      if (calcBuf && b.sp_calc_dir) await spUpload(cfg, fill(b.sp_calc_dir, b, period), fill(b.calc_name, b, period), calcBuf, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    } catch (e) { console.warn('[amfee] SharePoint mirror skipped for ' + b.key + ' ' + period.key + ': ' + e.message); }
 
     upd({ status: 'sent', sent_to: [b.recipients.to].concat(b.recipients.cc || []).join('; '), error: fileWarn, sent_at: new Date().toISOString() });
     console.log('[amfee] ' + trigger + ' issued ' + b.key + ' ' + period.key + ' #' + invoiceNo + ' $' + amount + (fileWarn ? ' (file warning: ' + fileWarn + ')' : ''));
