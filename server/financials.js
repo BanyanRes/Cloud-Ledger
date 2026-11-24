@@ -2750,6 +2750,27 @@ async function buildStatements(getBalances, opts) {
   // Remove the directly-credited D&A (case (b) above) from long-term investing:
   // that asset decrease is non-cash and is already added back in operating.
   if (!isZero(directAmort)) cfBuckets.ltInvest = r2(cfBuckets.ltInvest - directAmort);
+  // Non-cash deferred development fee. The developer's deferred fee is booked as
+  // contributed capital (equity, no cash in) with the matching fee capitalized
+  // into project soft costs (long-term asset, no cash out). The single-pass
+  // classifier otherwise splits those two legs across financing (+) and investing
+  // (-), inflating both gross sections by the same non-cash amount even though the
+  // bottom line still ties. Remove it from both and disclose it as a supplemental
+  // non-cash item (mirrors cashflow.js's waived-dev-fee handling). Keyed on the
+  // contributed-capital-deferred-development-fee EQUITY account's period delta
+  // (Jimmy, 2026-11-24).
+  let nonCashDevFee = 0;
+  for (const code of cfCodes) {
+    const rc = curMap.get(code), ro = openMap.get(code);
+    const ref = rc || ro;
+    if (!ref || ref.type !== 'Equity') continue;
+    if (!/deferred develop/i.test(ref.name || '')) continue;
+    nonCashDevFee = r2(nonCashDevFee + ((rc ? bal(rc) : 0) - (ro ? bal(ro) : 0)));
+  }
+  if (!isZero(nonCashDevFee)) {
+    cfBuckets.equityContrib = r2(cfBuckets.equityContrib - nonCashDevFee);
+    cfBuckets.ltInvest = r2(cfBuckets.ltInvest + nonCashDevFee);
+  }
   Object.keys(cfBuckets).forEach(k => { cfBuckets[k] = r2(cfBuckets[k]); });
 
   const cashFlow = {
@@ -2764,6 +2785,7 @@ async function buildStatements(getBalances, opts) {
     ltInvest: cfBuckets.ltInvest,
     equityContrib: cfBuckets.equityContrib,
     debtChange: cfBuckets.debtChange,
+    nonCashDevFee: r2(nonCashDevFee),
     cashBeg: r2(cashBeg), cashEnd: r2(cashEnd),
   };
   cashFlow.netOperating = r2(cashFlow.netIncome + cashFlow.amortization + cashFlow.changeAR + cashFlow.changePrepaidOther + cashFlow.changeAP + cashFlow.changeAccrued + cashFlow.changeIntercompany);
@@ -3677,7 +3699,7 @@ async function renderStatementsPdf(s, outOffsets) {
       // Retained Earnings subsection with its own subtotal, then Net Income,
       // then the grand Total Members' Equity.
       const tce = s.balanceSheet.totalContribEquity;
-      L.row('Total ' + meEquity, bsCells(tce.cur, tce.pri), { indent: 20, ruleAbove: true, gapAfter: 4 });
+      L.row('Total Contributed Capital', bsCells(tce.cur, tce.pri), { indent: 20, ruleAbove: true, gapAfter: 4 });
       const rr = s.balanceSheet.retainedRows || [];
       const retTot = { cur: r2(rr.reduce((a, r) => a + r.cur, 0)), pri: r2(rr.reduce((a, r) => a + r.pri, 0)) };
       L.row('Retained Earnings', [], { indent: 6, boldRow: true });
@@ -4047,6 +4069,11 @@ async function renderStatementsPdf(s, outOffsets) {
     if (!isZero(cf.tieOut)) {
       L.space(6);
       L.row('Note: reconciled change differs from cash movement by ' + money(cf.tieOut) + ' (see notes).', [], { indent: 6 });
+    }
+    if (!isZero(cf.nonCashDevFee)) {
+      L.space(8);
+      L.row('Supplemental Disclosure of Non-Cash Activities', [], { indent: 6, boldRow: true });
+      L.row('Deferred development fee contributed and capitalized to project', [money(cf.nonCashDevFee)], { indent: 28 });
     }
     } // end generic cash-flow branch (turnkey renders its own line set above)
   }

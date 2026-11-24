@@ -606,6 +606,11 @@ function buildCashFlow(s) {
     sh.blank();
     sh.row('Note: reconciled change differs from cash movement (see notes).', [], { indent: 6 });
   }
+  if (!isZero(cf.nonCashDevFee)) {
+    sh.blank();
+    sh.row('Supplemental Disclosure of Non-Cash Activities', [], { indent: 6, bold: true });
+    sh.row('Deferred development fee contributed and capitalized to project', one(cf.nonCashDevFee), { indent: 28 });
+  }
   return sh._finish();
 }
 
