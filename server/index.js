@@ -706,6 +706,11 @@ if (!bcCfgCols.includes('sync_cutoff_date')) db.exec("ALTER TABLE billcom_config
 if (!bcCfgCols.includes('ap_aging_lines_json')) db.exec("ALTER TABLE billcom_config ADD COLUMN ap_aging_lines_json TEXT");
 if (!bcCfgCols.includes('ap_aging_as_of')) db.exec("ALTER TABLE billcom_config ADD COLUMN ap_aging_as_of TEXT");
 if (!bcCfgCols.includes('ap_aging_uploaded_at')) db.exec("ALTER TABLE billcom_config ADD COLUMN ap_aging_uploaded_at TEXT");
+// Vendor tax data (TIN last-4, 1099 flag, address) synced from Bill.com for 1099 reporting.
+db.exec(`CREATE TABLE IF NOT EXISTS vendor_tax (
+  entity_id INTEGER NOT NULL, name_key TEXT NOT NULL, vendor_name TEXT, bc_vendor_id TEXT,
+  tax_id_last4 TEXT, tax_id_type TEXT, track1099 INTEGER, address TEXT, email TEXT,
+  raw_json TEXT, synced_at TEXT, PRIMARY KEY (entity_id, name_key))`);
 // An A/P aging drives the Bill.com SYNC dedupe only when ap_aging_for_sync=1 —
 // i.e. it is the CUTOVER opening aging, set from the "Set sync cutoff from A/P
 // aging" flow. Reconciliation uploads (Bill.com A/P Detail for the AP Recon tab)
@@ -11550,6 +11555,41 @@ require('./compliancecerts').registerComplianceCertRoutes(app, { db, auth, requi
 // Accounting > General/2. Monthly Time Allocation/{YYYY}. See server/timeallocation.js.
 require('./timeallocation').registerTimeAllocationRoutes(app, { db, auth, requireRole });
 require('./taxforms1099').registerForm1099Routes(app, { db, auth, requireRole, requireEntityAccess });
+// Sync vendor tax data (TIN / 1099 flag / address) from Bill.com for 1099 reporting.
+app.post('/api/ap/form1099/:entity_id/sync-vendor-tax', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com is not configured for this entity.' });
+  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null && obj[k] !== '') return obj[k]; return null; };
+  let session, listArgs;
+  try {
+    const password = billcomDecrypt(cfg.password_enc); const devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+    listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+  } catch (e) { return res.status(502).json({ error: 'Bill.com login failed: ' + e.message }); }
+  let vlist;
+  try { vlist = await billcomListVendors({ ...listArgs, maxItems: 5000 }); }
+  catch (e) { return res.status(502).json({ error: 'Failed to fetch vendors: ' + e.message }); }
+  const upsert = db.prepare(`INSERT INTO vendor_tax (entity_id,name_key,vendor_name,bc_vendor_id,tax_id_last4,tax_id_type,track1099,address,email,raw_json,synced_at)
+    VALUES (@entity_id,@name_key,@vendor_name,@bc_vendor_id,@tax_id_last4,@tax_id_type,@track1099,@address,@email,@raw_json,@synced_at)
+    ON CONFLICT(entity_id,name_key) DO UPDATE SET vendor_name=excluded.vendor_name,bc_vendor_id=excluded.bc_vendor_id,tax_id_last4=excluded.tax_id_last4,
+    tax_id_type=excluded.tax_id_type,track1099=excluded.track1099,address=excluded.address,email=excluded.email,raw_json=excluded.raw_json,synced_at=excluded.synced_at`);
+  const now = new Date().toISOString(); const nk = (s2) => String(s2 == null ? '' : s2).toLowerCase().replace(/[^a-z0-9]/g, '');
+  let withTin = 0, withFlag = 0, saved = 0;
+  const tx = db.transaction((list) => { for (const v of list) {
+    const name = pick(v, 'name', 'vendorName', 'companyName'); if (!name) continue;
+    const taxIdRaw = pick(v, 'taxId', 'tax_id', 'taxIdNumber'); const taxDigits = taxIdRaw ? String(taxIdRaw).replace(/\D/g, '') : '';
+    const last4 = taxDigits ? taxDigits.slice(-4) : null;
+    const trackRaw = pick(v, 'track1099', 'track_1099');
+    const track1099 = trackRaw == null ? null : ((trackRaw === true || trackRaw === 1 || String(trackRaw).toLowerCase() === 'true' || String(trackRaw) === '1') ? 1 : 0);
+    const addr = [pick(v,'address1','addressLine1'), pick(v,'address2','addressLine2'), pick(v,'addressCity','city'), pick(v,'addressState','state'), pick(v,'addressZip','zip','postalCode')].filter(Boolean).join(', ') || null;
+    if (last4) withTin++; if (track1099 === 1) withFlag++;
+    upsert.run({ entity_id: entityId, name_key: nk(name), vendor_name: name, bc_vendor_id: String(pick(v,'id') || '') || null,
+      tax_id_last4: last4, tax_id_type: pick(v,'taxIdType','tax_id_type'), track1099, address: addr, email: pick(v,'email'), raw_json: JSON.stringify(v), synced_at: now }); saved++;
+  } }); try { tx(vlist); } catch (e) { return res.status(500).json({ error: 'Save failed: ' + e.message }); }
+  res.json({ ok: true, vendors_fetched: vlist.length, saved, with_tin: withTin, with_1099_flag: withFlag, synced_at: now });
+});
 
 // ═══ Administration: Backups (full data-volume archive + automatic daily backup) ═══
 // GET /api/admin/backup/full streams a gzip tarball of the whole data volume

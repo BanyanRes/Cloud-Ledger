@@ -1,48 +1,47 @@
-// ─── Accounts Payable: 1099 Reporting ────────────────────────────────────────
+// Accounts Payable: 1099 Reporting
 //
-// Per-entity, per-calendar-year 1099 workfile. Identifies vendors to whom the
-// entity booked payables during the year and the amount, so reportable payees
-// (>= the IRS threshold) can be furnished and filed in-house — the data that
-// previously justified CLA's per-entity 1099 prep fee now lives here.
+// Per-entity, per-calendar-year 1099 workfile. Identifies vendors paid during
+// the year and the amount, flags reportable payees, and (Phase 2) enriches each
+// vendor with the TIN / 1099 flag / address captured in Bill.com.
 //
-// Amount basis (MVP): GROSS bills booked to the A/P control account per vendor
-//   amount_billed(vendor) = SUM(journal_lines.credit) on A/P-control lines of
-//   journal entries dated in the year whose journal_entries.vendor = vendor.
-//   This is complete for AP-routed spend and is reversal / credit-memo aware
-//   (a reversing or credit-memo entry debits A/P, lowering the net column).
-//   Vendors paid straight from cash with no A/P bill do not appear — a known
-//   MVP limitation, surfaced in the UI.
+// Amounts come from the A/P control account (billcom_config.default_ap_account,
+// else 202000), grouped by journal_entries.vendor for entries dated in the year:
+//   paid   = SUM(debits)  on A/P lines  -> cash applied to the vendor (1099 basis)
+//   billed = SUM(credits) on A/P lines  -> bills booked to the vendor (accrual)
+//   net    = billed - paid              -> change in payable
+// Default basis is PAID (cash), the IRS 1099 basis. ?basis=billed thresholds on
+// bills instead. Vendors paid straight from cash with no A/P entry do not appear.
 //
-// Threshold: defaults to $2,000 (OBBBA, payments on/after 2026-01-01; prior
-//   years used $600). Caller may override via ?threshold=.
-//
-// Phase 2 (not here): enrich each vendor with taxId / track1099 / W-9 address
-//   pulled from the Bill.com vendor record, exclude card/third-party-network
-//   payments, and export in IRS e-file (IRIS) format.
+// Reportability uses the Bill.com track1099 flag once vendor tax data is synced
+// (POST /api/ap/form1099/:entity_id/sync-vendor-tax in index.js). REPORTABLE =
+// 1099-flagged in Bill.com AND at/above threshold; over-threshold with no TIN =
+// NEEDS W-9. Threshold defaults to $2,000 (OBBBA 2026+); override via ?threshold=.
 //
 // Route (Admin + Accountant, entity-scoped):
-//   GET /api/ap/form1099/:entity_id?year=YYYY&threshold=2000  -> JSON workfile
+//   GET /api/ap/form1099/:entity_id?year=YYYY&threshold=2000&basis=paid
 
 const DEFAULT_THRESHOLD = 2000;
+const normKey = (s) => String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]/g, '');
 
-function buildForm1099(db, entityId, year, threshold) {
+function buildForm1099(db, entityId, year, threshold, basis) {
   const ent = db.prepare('SELECT id, name FROM entities WHERE id = ?').get(entityId);
   if (!ent) return { error: 'entity_not_found' };
 
-  // A/P control account: per-entity Bill.com config override, else 202000.
   let apAccount = '202000';
   try {
     const cfg = db.prepare('SELECT default_ap_account FROM billcom_config WHERE entity_id = ?').get(entityId);
     if (cfg && cfg.default_ap_account) apAccount = String(cfg.default_ap_account);
-  } catch (e) { /* billcom_config may not exist for every entity */ }
+  } catch (e) { /* not every entity has billcom_config */ }
 
   const y = Number(year);
   const from = y + '-01-01';
   const to = y + '-12-31';
+  const useBasis = basis === 'billed' ? 'billed' : 'paid';
 
   const rows = db.prepare(
     `SELECT je.vendor AS vendor,
             SUM(jl.credit) AS billed,
+            SUM(jl.debit)  AS paid,
             SUM(jl.credit) - SUM(jl.debit) AS net,
             COUNT(DISTINCT je.id) AS txns
        FROM journal_entries je
@@ -52,31 +51,55 @@ function buildForm1099(db, entityId, year, threshold) {
         AND je.date >= ? AND je.date <= ?
         AND jl.account_code = ?
       GROUP BY je.vendor
-      HAVING SUM(jl.credit) <> 0
-      ORDER BY billed DESC`
+      HAVING SUM(jl.credit) <> 0 OR SUM(jl.debit) <> 0
+      ORDER BY paid DESC`
   ).all(entityId, from, to, apAccount);
+
+  const taxByKey = new Map();
+  let taxSyncedAt = null;
+  try {
+    for (const t of db.prepare('SELECT * FROM vendor_tax WHERE entity_id = ?').all(entityId)) {
+      taxByKey.set(t.name_key, t);
+      if (!taxSyncedAt || (t.synced_at && t.synced_at > taxSyncedAt)) taxSyncedAt = t.synced_at;
+    }
+  } catch (e) { /* vendor_tax may not exist yet */ }
 
   const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   const thr = Number(threshold) > 0 ? Number(threshold) : DEFAULT_THRESHOLD;
 
   const out = rows.map((r) => {
-    const billed = r2(r.billed);
-    return { vendor: r.vendor, billed, net: r2(r.net), txns: r.txns, over: billed >= thr };
+    const paid = r2(r.paid), billed = r2(r.billed);
+    const amt = useBasis === 'billed' ? billed : paid;
+    const t = taxByKey.get(normKey(r.vendor)) || null;
+    const track1099 = t && t.track1099 != null ? (t.track1099 ? 1 : 0) : null;
+    const w9 = !!(t && t.tax_id_last4);
+    const over = amt >= thr;
+    return {
+      vendor: r.vendor, paid, billed, net: r2(r.net), txns: r.txns, over,
+      tin_last4: t ? (t.tax_id_last4 || null) : null,
+      tin_type: t ? (t.tax_id_type || null) : null,
+      track1099,
+      w9_on_file: w9,
+      reportable: track1099 === 1 && over,
+      needs_w9: over && track1099 !== 0 && !w9,
+      address: t ? (t.address || null) : null,
+    };
   });
 
-  const reportable = out.filter((r) => r.over);
+  const reportable = out.filter((r) => r.reportable);
+  const amtOf = (r) => (useBasis === 'billed' ? r.billed : r.paid);
   return {
-    entity_id: ent.id,
-    entity_name: ent.name,
-    year: y,
-    threshold: thr,
-    ap_account: apAccount,
-    basis: 'Gross bills booked to A/P control account ' + apAccount + ' (accrual).',
+    entity_id: ent.id, entity_name: ent.name, year: y, threshold: thr,
+    ap_account: apAccount, basis: useBasis,
+    tax_synced: taxByKey.size > 0, tax_synced_at: taxSyncedAt, tax_vendor_count: taxByKey.size,
     rows: out,
     summary: {
       vendor_count: out.length,
+      over_count: out.filter((r) => r.over).length,
       reportable_count: reportable.length,
-      reportable_total: r2(reportable.reduce((s, r) => s + r.billed, 0)),
+      reportable_total: r2(reportable.reduce((s, r) => s + amtOf(r), 0)),
+      needs_w9_count: out.filter((r) => r.needs_w9).length,
+      unmatched_count: out.filter((r) => r.track1099 === null).length,
     },
   };
 }
@@ -87,7 +110,7 @@ function registerForm1099Routes(app, { db, auth, requireRole, requireEntityAcces
     const year = Number(req.query.year) || (new Date().getUTCFullYear());
     const threshold = req.query.threshold != null ? Number(req.query.threshold) : DEFAULT_THRESHOLD;
     try {
-      const result = buildForm1099(db, entityId, year, threshold);
+      const result = buildForm1099(db, entityId, year, threshold, req.query.basis);
       if (result.error) return res.status(404).json(result);
       res.json(result);
     } catch (e) {
