@@ -11571,6 +11571,7 @@ app.post('/api/ap/form1099/:entity_id/sync-vendor-tax', auth, requireEntityAcces
   let vlist;
   try { vlist = await billcomListVendors({ ...listArgs, maxItems: 5000 }); }
   catch (e) { return res.status(502).json({ error: 'Failed to fetch vendors: ' + e.message }); }
+  if (req.query.debug === 'keys') { const k = new Set(); const nested = {}; for (const v of vlist.slice(0, 80)) { for (const key of Object.keys(v || {})) { k.add(key); const val = v[key]; if (val && typeof val === 'object' && !Array.isArray(val)) { nested[key] = nested[key] || new Set(); for (const nk2 of Object.keys(val)) nested[key].add(nk2); } } } const nout = {}; for (const kk in nested) nout[kk] = [...nested[kk]]; return res.json({ count: vlist.length, keys: [...k].sort(), nested: nout }); }
   const upsert = db.prepare(`INSERT INTO vendor_tax (entity_id,name_key,vendor_name,bc_vendor_id,tax_id_last4,tax_id_type,track1099,address,email,raw_json,synced_at)
     VALUES (@entity_id,@name_key,@vendor_name,@bc_vendor_id,@tax_id_last4,@tax_id_type,@track1099,@address,@email,@raw_json,@synced_at)
     ON CONFLICT(entity_id,name_key) DO UPDATE SET vendor_name=excluded.vendor_name,bc_vendor_id=excluded.bc_vendor_id,tax_id_last4=excluded.tax_id_last4,
