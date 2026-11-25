@@ -535,6 +535,7 @@ export const api = {
   getApAging: (entityId, asOf) => request('/billcom/ap-aging/' + entityId + (asOf ? '?as_of=' + asOf : '')),
   getForm1099: (entityId, year, threshold) => request('/ap/form1099/' + entityId + '?year=' + (year||'') + (threshold!=null?('&threshold='+threshold):'')),
   syncVendorTax: (entityId) => request('/ap/form1099/' + entityId + '/sync-vendor-tax', { method: 'POST' }),
+  reconcilePayments: (entityId, year) => request('/ap/form1099/' + entityId + '/reconcile-payments?year=' + (year||''), { method: 'POST' }),
 
   // Requisition (development-project coding engine)
   seedRequisitionHistory: (eid, body) => request('/requisition/' + eid + '/seed-history', { method: 'POST', body }),

@@ -11593,6 +11593,70 @@ app.post('/api/ap/form1099/:entity_id/sync-vendor-tax', auth, requireEntityAcces
   res.json({ ok: true, vendors_fetched: vlist.length, saved, with_tin: withTin, with_1099_flag: withFlag, synced_at: now });
 });
 
+// Reconcile the GL A/P debits ('paid' basis on the 1099 report) to the actual
+// Bill.com payments for the year, per vendor, to surface non-cash A/P debits
+// (credit memos, reversals, reclasses) and payments made outside Bill.com.
+app.post('/api/ap/form1099/:entity_id/reconcile-payments', auth, requireEntityAccess('entity_id'), requireRole('Admin', 'Accountant'), async (req, res) => {
+  const entityId = parseInt(req.params.entity_id);
+  if (!entityId) return res.status(400).json({ error: 'Invalid entity_id' });
+  const year = Number(req.query.year) || (new Date().getUTCFullYear());
+  const from = year + '-01-01', to = year + '-12-31';
+  const cfg = db.prepare('SELECT * FROM billcom_config WHERE entity_id = ?').get(entityId);
+  if (!cfg) return res.status(400).json({ error: 'Bill.com is not configured for this entity.' });
+  const pick = (obj, ...keys) => { for (const k of keys) if (obj && obj[k] != null && obj[k] !== '') return obj[k]; return null; };
+  const nk = (x) => String(x == null ? '' : x).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+  const apAccount = cfg.default_ap_account ? String(cfg.default_ap_account) : '202000';
+  let session, listArgs;
+  try {
+    const password = billcomDecrypt(cfg.password_enc); const devKey = billcomDecrypt(cfg.dev_key_enc);
+    session = await billcomLogin({ username: cfg.username, password, orgId: cfg.org_id, devKey, baseUrl: cfg.api_base_url });
+    listArgs = { sessionId: session.sessionId, devKey, baseUrl: cfg.api_base_url };
+  } catch (e) { return res.status(502).json({ error: 'Bill.com login failed: ' + e.message }); }
+  let payments;
+  try { payments = await billcomListPaymentsWindowed({ ...listArgs, fromDate: from, toDate: to }); }
+  catch (e) { return res.status(502).json({ error: 'Failed to fetch payments: ' + e.message }); }
+  if (req.query.debug === 'keys') { const k = new Set(); const nested = {}; for (const v of payments.slice(0, 60)) { for (const key of Object.keys(v || {})) { k.add(key); const val = v[key]; if (val && typeof val === 'object' && !Array.isArray(val)) { nested[key] = nested[key] || new Set(); for (const nk2 of Object.keys(val)) nested[key].add(nk2); } } } const nout = {}; for (const kk in nested) nout[kk] = [...nested[kk]]; const ex = (payments[0] && Array.isArray(payments[0].billPayments)) ? Object.keys(payments[0].billPayments[0] || {}) : []; return res.json({ count: payments.length, keys: [...k].sort(), nested: nout, billPayments_keys: ex }); }
+  // Map Bill.com bill id -> vendor name (year bills, with a sync-log fallback for older bills).
+  const vendorById = new Map();
+  try { const vlist = await billcomListVendors({ ...listArgs, maxItems: 5000 }); for (const v of vlist) { const id = String(pick(v, 'id') || ''); const n = pick(v, 'name', 'vendorName', 'companyName'); if (id && n) vendorById.set(id, n); } } catch (e) {}
+  const billToVendor = new Map();
+  try { const bills = await billcomListBillsWindowed({ ...listArgs, fromDate: from, toDate: to }); for (const b of bills) { const bid = String(pick(b, 'id') || ''); const vid = String(pick(b, 'vendorId', 'vendor_id') || ''); const vn = vendorById.get(vid) || pick(pick(b, 'vendor') || {}, 'name', 'vendorName') || ''; if (bid) billToVendor.set(bid, vn); } } catch (e) {}
+  const billVendorStmt = db.prepare("SELECT je.vendor AS vendor FROM billcom_sync_log sl JOIN journal_entries je ON je.id = sl.cl_entry_id WHERE sl.entity_id = ? AND sl.sync_type = 'bill' AND sl.billcom_id = ? AND sl.status = 'success' LIMIT 1");
+  const vendorForBill = (bid) => { if (!bid) return ''; if (billToVendor.has(bid)) return billToVendor.get(bid); try { const row = billVendorStmt.get(entityId, String(bid)); const v = row && row.vendor ? String(row.vendor) : ''; billToVendor.set(bid, v); return v; } catch (e) { return ''; } };
+  const isDisbursed = (pay) => { if (String(pick(pay, 'status', 'paymentStatus') || '').toUpperCase() !== 'PAID') return false; const voids = pick(pay, 'voidInfo'); if (Array.isArray(voids) && voids.length > 0) return false; if (pick(pay, 'cancelRequestSubmitted') === true) return false; const pd = String(pick(pay, 'processDate', 'process_date', 'paymentDate') || ''); return !!pd && pd >= from && pd <= to; };
+  const bcByVendor = new Map(); let bcUnattributed = 0;
+  for (const pay of payments) {
+    if (!isDisbursed(pay)) continue;
+    const method = String(pick(pay, 'payByType', 'payBySubType', 'disbursementType', 'paymentType') || '');
+    const isCard = /card/i.test(method);
+    let allocs = Array.isArray(pick(pay, 'billPayments')) ? pick(pay, 'billPayments') : null;
+    if (!allocs) { const bid = pick(pay, 'billId'); const amt = Number(pick(pay, 'amount', 'paymentAmount') || 0); allocs = bid ? [{ billId: bid, amount: amt }] : []; }
+    for (const a of allocs) {
+      const amt = Number(pick(a, 'amount') || 0); if (!(amt > 0)) continue;
+      const vn = vendorForBill(String(pick(a, 'billId') || ''));
+      if (!vn) { bcUnattributed += amt; continue; }
+      const key = nk(vn); const cur = bcByVendor.get(key) || { name: vn, amt: 0, card: 0, count: 0 };
+      cur.amt += amt; if (isCard) cur.card += amt; cur.count++; bcByVendor.set(key, cur);
+    }
+  }
+  const glRows = db.prepare(`SELECT je.vendor AS vendor, SUM(jl.debit) AS gl_paid FROM journal_entries je JOIN journal_lines jl ON jl.entry_id = je.id WHERE je.entity_id = ? AND je.vendor IS NOT NULL AND TRIM(je.vendor) <> '' AND je.date >= ? AND je.date <= ? AND jl.account_code = ? GROUP BY je.vendor HAVING SUM(jl.debit) <> 0`).all(entityId, from, to, apAccount);
+  const glByKey = new Map(); for (const g of glRows) glByKey.set(nk(g.vendor), { name: g.vendor, gl_paid: r2(g.gl_paid) });
+  const keys = new Set([...glByKey.keys(), ...bcByVendor.keys()]);
+  const vendors = [];
+  for (const k of keys) {
+    const g = glByKey.get(k), b = bcByVendor.get(k);
+    const gl_paid = g ? g.gl_paid : 0; const bc_paid = b ? r2(b.amt) : 0; const bc_card = b ? r2(b.card) : 0;
+    const diff = r2(gl_paid - bc_paid);
+    const note = Math.abs(diff) < 0.01 ? 'match' : (diff > 0 ? 'GL exceeds Bill.com (paid outside Bill.com or non-cash A/P debit)' : 'Bill.com exceeds GL (payment not posted to GL)');
+    vendors.push({ vendor: (g && g.name) || (b && b.name) || k, gl_paid, bc_paid, bc_card, diff, note });
+  }
+  vendors.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+  const totGl = r2(vendors.reduce((s2, v) => s2 + v.gl_paid, 0));
+  const totBc = r2(vendors.reduce((s2, v) => s2 + v.bc_paid, 0));
+  res.json({ ok: true, year, entity_id: entityId, ap_account: apAccount, bc_payment_count: payments.length, bc_unattributed: r2(bcUnattributed), totals: { gl_paid: totGl, bc_paid: totBc, diff: r2(totGl - totBc) }, vendors });
+});
+
 // ═══ Administration: Backups (full data-volume archive + automatic daily backup) ═══
 // GET /api/admin/backup/full streams a gzip tarball of the whole data volume
 // (consistent DB snapshot + attachments/ + entity_files/); the daily 9am job on
