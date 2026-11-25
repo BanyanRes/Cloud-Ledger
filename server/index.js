@@ -11617,28 +11617,20 @@ app.post('/api/ap/form1099/:entity_id/reconcile-payments', auth, requireEntityAc
   try { payments = await billcomListPaymentsWindowed({ ...listArgs, fromDate: from, toDate: to }); }
   catch (e) { return res.status(502).json({ error: 'Failed to fetch payments: ' + e.message }); }
   if (req.query.debug === 'keys') { const k = new Set(); const nested = {}; for (const v of payments.slice(0, 60)) { for (const key of Object.keys(v || {})) { k.add(key); const val = v[key]; if (val && typeof val === 'object' && !Array.isArray(val)) { nested[key] = nested[key] || new Set(); for (const nk2 of Object.keys(val)) nested[key].add(nk2); } } } const nout = {}; for (const kk in nested) nout[kk] = [...nested[kk]]; const ex = (payments[0] && Array.isArray(payments[0].billPayments)) ? Object.keys(payments[0].billPayments[0] || {}) : []; return res.json({ count: payments.length, keys: [...k].sort(), nested: nout, billPayments_keys: ex }); }
-  // Map Bill.com bill id -> vendor name (year bills, with a sync-log fallback for older bills).
+  // Attribute each disbursed payment directly to its vendor (payments carry vendorName/vendorId).
   const vendorById = new Map();
   try { const vlist = await billcomListVendors({ ...listArgs, maxItems: 5000 }); for (const v of vlist) { const id = String(pick(v, 'id') || ''); const n = pick(v, 'name', 'vendorName', 'companyName'); if (id && n) vendorById.set(id, n); } } catch (e) {}
-  const billToVendor = new Map();
-  try { const bills = await billcomListBillsWindowed({ ...listArgs, fromDate: from, toDate: to }); for (const b of bills) { const bid = String(pick(b, 'id') || ''); const vid = String(pick(b, 'vendorId', 'vendor_id') || ''); const vn = vendorById.get(vid) || pick(pick(b, 'vendor') || {}, 'name', 'vendorName') || ''; if (bid) billToVendor.set(bid, vn); } } catch (e) {}
-  const billVendorStmt = db.prepare("SELECT je.vendor AS vendor FROM billcom_sync_log sl JOIN journal_entries je ON je.id = sl.cl_entry_id WHERE sl.entity_id = ? AND sl.sync_type = 'bill' AND sl.billcom_id = ? AND sl.status = 'success' LIMIT 1");
-  const vendorForBill = (bid) => { if (!bid) return ''; if (billToVendor.has(bid)) return billToVendor.get(bid); try { const row = billVendorStmt.get(entityId, String(bid)); const v = row && row.vendor ? String(row.vendor) : ''; billToVendor.set(bid, v); return v; } catch (e) { return ''; } };
   const isDisbursed = (pay) => { if (String(pick(pay, 'status', 'paymentStatus') || '').toUpperCase() !== 'PAID') return false; const voids = pick(pay, 'voidInfo'); if (Array.isArray(voids) && voids.length > 0) return false; if (pick(pay, 'cancelRequestSubmitted') === true) return false; const pd = String(pick(pay, 'processDate', 'process_date', 'paymentDate') || ''); return !!pd && pd >= from && pd <= to; };
   const bcByVendor = new Map(); let bcUnattributed = 0;
   for (const pay of payments) {
     if (!isDisbursed(pay)) continue;
-    const method = String(pick(pay, 'payByType', 'payBySubType', 'disbursementType', 'paymentType') || '');
-    const isCard = /card/i.test(method);
-    let allocs = Array.isArray(pick(pay, 'billPayments')) ? pick(pay, 'billPayments') : null;
-    if (!allocs) { const bid = pick(pay, 'billId'); const amt = Number(pick(pay, 'amount', 'paymentAmount') || 0); allocs = bid ? [{ billId: bid, amount: amt }] : []; }
-    for (const a of allocs) {
-      const amt = Number(pick(a, 'amount') || 0); if (!(amt > 0)) continue;
-      const vn = vendorForBill(String(pick(a, 'billId') || ''));
-      if (!vn) { bcUnattributed += amt; continue; }
-      const key = nk(vn); const cur = bcByVendor.get(key) || { name: vn, amt: 0, card: 0, count: 0 };
-      cur.amt += amt; if (isCard) cur.card += amt; cur.count++; bcByVendor.set(key, cur);
-    }
+    const amt = Number(pick(pay, 'amount', 'paymentAmount') || 0); if (!(amt > 0)) continue;
+    const vn = pick(pay, 'vendorName', 'vendor_name') || vendorById.get(String(pick(pay, 'vendorId', 'vendor_id') || '')) || '';
+    const di = pick(pay, 'disbursementInfo') || {};
+    const isCard = /card/i.test(String(pick(pay, 'disbursementType') || '')) || di.vcardDisbursement != null;
+    if (!vn) { bcUnattributed += amt; continue; }
+    const key = nk(vn); const cur = bcByVendor.get(key) || { name: vn, amt: 0, card: 0, count: 0 };
+    cur.amt += amt; if (isCard) cur.card += amt; cur.count++; bcByVendor.set(key, cur);
   }
   const glRows = db.prepare(`SELECT je.vendor AS vendor, SUM(jl.debit) AS gl_paid FROM journal_entries je JOIN journal_lines jl ON jl.entry_id = je.id WHERE je.entity_id = ? AND je.vendor IS NOT NULL AND TRIM(je.vendor) <> '' AND je.date >= ? AND je.date <= ? AND jl.account_code = ? GROUP BY je.vendor HAVING SUM(jl.debit) <> 0`).all(entityId, from, to, apAccount);
   const glByKey = new Map(); for (const g of glRows) glByKey.set(nk(g.vendor), { name: g.vendor, gl_paid: r2(g.gl_paid) });
