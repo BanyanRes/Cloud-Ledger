@@ -588,6 +588,7 @@ const MIDCO_NCI = [
 const MIDCO_IC_ACCOUNTS = [
   ['clip',    '18307', 'Due from CLR Silsbee Property Owner'],
   ['silsbee', '18378', 'Due from CLIP Property Owner'],
+  ['clip',    '23395', 'Due to Silsbee'],
   ['buna',    '18309', 'Due from SRN'],
   ['buna',    '18378', 'Due from CLIP Property Owner'],
   ['silsbee', '23375', 'Due to CLIP Property Owner'],
