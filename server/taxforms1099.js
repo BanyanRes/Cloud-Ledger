@@ -64,13 +64,28 @@ function buildForm1099(db, entityId, year, threshold, basis) {
     }
   } catch (e) { /* vendor_tax may not exist yet */ }
 
+  // Cross-entity fallback: a vendor's W-9 / 1099 flag may be on file under another
+  // entity's Bill.com org even if this entity has not been synced. Pick the best
+  // record per normalized name (has TIN > has flag > most recent).
+  const globalByKey = new Map();
+  try {
+    for (const t of db.prepare('SELECT name_key, tax_id_last4, tax_id_type, track1099, address, synced_at FROM vendor_tax').all()) {
+      const prev = globalByKey.get(t.name_key);
+      const score = (t.tax_id_last4 ? 2 : 0) + (t.track1099 != null ? 1 : 0);
+      if (!prev || score > prev._score || (score === prev._score && (t.synced_at || '') > (prev.synced_at || ''))) { t._score = score; globalByKey.set(t.name_key, t); }
+    }
+  } catch (e) { /* vendor_tax may not exist yet */ }
+
   const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
   const thr = Number(threshold) > 0 ? Number(threshold) : DEFAULT_THRESHOLD;
 
   const out = rows.map((r) => {
     const paid = r2(r.paid), billed = r2(r.billed);
     const amt = useBasis === 'billed' ? billed : paid;
-    const t = taxByKey.get(normKey(r.vendor)) || null;
+    const key = normKey(r.vendor);
+    const te = taxByKey.get(key) || null;
+    const t = te || globalByKey.get(key) || null;
+    const taxSource = te ? 'entity' : (t ? 'other_entity' : null);
     const track1099 = t && t.track1099 != null ? (t.track1099 ? 1 : 0) : null;
     const w9 = !!(t && t.tax_id_last4);
     const over = amt >= thr;
@@ -81,8 +96,9 @@ function buildForm1099(db, entityId, year, threshold, basis) {
       track1099,
       w9_on_file: w9,
       reportable: track1099 === 1 && over,
-      needs_w9: over && track1099 !== 0 && !w9,
+      needs_w9: over && track1099 === 1 && !w9,
       address: t ? (t.address || null) : null,
+      tax_source: taxSource,
     };
   });
 
