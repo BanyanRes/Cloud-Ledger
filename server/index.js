@@ -11571,7 +11571,6 @@ app.post('/api/ap/form1099/:entity_id/sync-vendor-tax', auth, requireEntityAcces
   let vlist;
   try { vlist = await billcomListVendors({ ...listArgs, maxItems: 5000 }); }
   catch (e) { return res.status(502).json({ error: 'Failed to fetch vendors: ' + e.message }); }
-  if (req.query.debug === 'keys') { const k = new Set(); const nested = {}; for (const v of vlist.slice(0, 80)) { for (const key of Object.keys(v || {})) { k.add(key); const val = v[key]; if (val && typeof val === 'object' && !Array.isArray(val)) { nested[key] = nested[key] || new Set(); for (const nk2 of Object.keys(val)) nested[key].add(nk2); } } } const nout = {}; for (const kk in nested) nout[kk] = [...nested[kk]]; return res.json({ count: vlist.length, keys: [...k].sort(), nested: nout }); }
   const upsert = db.prepare(`INSERT INTO vendor_tax (entity_id,name_key,vendor_name,bc_vendor_id,tax_id_last4,tax_id_type,track1099,address,email,raw_json,synced_at)
     VALUES (@entity_id,@name_key,@vendor_name,@bc_vendor_id,@tax_id_last4,@tax_id_type,@track1099,@address,@email,@raw_json,@synced_at)
     ON CONFLICT(entity_id,name_key) DO UPDATE SET vendor_name=excluded.vendor_name,bc_vendor_id=excluded.bc_vendor_id,tax_id_last4=excluded.tax_id_last4,
@@ -11580,14 +11579,16 @@ app.post('/api/ap/form1099/:entity_id/sync-vendor-tax', auth, requireEntityAcces
   let withTin = 0, withFlag = 0, saved = 0;
   const tx = db.transaction((list) => { for (const v of list) {
     const name = pick(v, 'name', 'vendorName', 'companyName'); if (!name) continue;
-    const taxIdRaw = pick(v, 'taxId', 'tax_id', 'taxIdNumber'); const taxDigits = taxIdRaw ? String(taxIdRaw).replace(/\D/g, '') : '';
+    const ai = v.additionalInfo || {}; const adr = v.address || {};
+    const taxIdRaw = pick(ai, 'taxId', 'tax_id'); const taxDigits = taxIdRaw ? String(taxIdRaw).replace(/\D/g, '') : '';
+    let taxType = pick(ai, 'taxIdType', 'tax_id_type'); if (!taxType && taxIdRaw) { const dd = String(taxIdRaw).trim(); if (/^\d{2}-?\d{7}$/.test(dd)) taxType = 'EIN'; else if (/^\d{3}-?\d{2}-?\d{4}$/.test(dd)) taxType = 'SSN'; }
     const last4 = taxDigits ? taxDigits.slice(-4) : null;
-    const trackRaw = pick(v, 'track1099', 'track_1099');
+    const trackRaw = pick(ai, 'track1099', 'track_1099');
     const track1099 = trackRaw == null ? null : ((trackRaw === true || trackRaw === 1 || String(trackRaw).toLowerCase() === 'true' || String(trackRaw) === '1') ? 1 : 0);
-    const addr = [pick(v,'address1','addressLine1'), pick(v,'address2','addressLine2'), pick(v,'addressCity','city'), pick(v,'addressState','state'), pick(v,'addressZip','zip','postalCode')].filter(Boolean).join(', ') || null;
+    const addr = [pick(adr,'line1'), pick(adr,'line2'), pick(adr,'city'), pick(adr,'stateOrProvince','state'), pick(adr,'zipOrPostalCode','zip')].filter(Boolean).join(', ') || null;
     if (last4) withTin++; if (track1099 === 1) withFlag++;
     upsert.run({ entity_id: entityId, name_key: nk(name), vendor_name: name, bc_vendor_id: String(pick(v,'id') || '') || null,
-      tax_id_last4: last4, tax_id_type: pick(v,'taxIdType','tax_id_type'), track1099, address: addr, email: pick(v,'email'), raw_json: JSON.stringify(v), synced_at: now }); saved++;
+      tax_id_last4: last4, tax_id_type: taxType, track1099, address: addr, email: pick(v,'email'), raw_json: JSON.stringify(v), synced_at: now }); saved++;
   } }); try { tx(vlist); } catch (e) { return res.status(500).json({ error: 'Save failed: ' + e.message }); }
   res.json({ ok: true, vendors_fetched: vlist.length, saved, with_tin: withTin, with_1099_flag: withFlag, synced_at: now });
 });
