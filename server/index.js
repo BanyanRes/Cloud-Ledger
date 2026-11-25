@@ -11549,6 +11549,7 @@ require('./compliancecerts').registerComplianceCertRoutes(app, { db, auth, requi
 // forward (date only) and re-renders the .pdf (Excel COM) into
 // Accounting > General/2. Monthly Time Allocation/{YYYY}. See server/timeallocation.js.
 require('./timeallocation').registerTimeAllocationRoutes(app, { db, auth, requireRole });
+require('./taxforms1099').registerForm1099Routes(app, { db, auth, requireRole, requireEntityAccess });
 
 // ═══ Administration: Backups (full data-volume archive + automatic daily backup) ═══
 // GET /api/admin/backup/full streams a gzip tarball of the whole data volume
